@@ -1,11 +1,23 @@
+# custom_components/googlefindmy/services.yaml
+# Purpose: Service descriptions aligned 1:1 with integration handlers in __init__.py
+# Notes:
+# - We keep a REQUIRED `device_id` field so handlers have a stable input.
+# - Target uses **entity filter only** (domain + integration) for HA 2025.5+.
+#   Do not add `target.device` or `target.area`; entity filters are applied across UI.
+# - Error strings are translated by handlers via ServiceValidationError.
+# - When adding services or fields, sync the README services table so schema + docs stay aligned.
+
 locate_device:
   name: Locate Device
-  description: "Get the current location of a Google Find My device"
-  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  description: "Get the current location of a Google Find My device."
+  target:
+    entity:
+      domain: device_tracker
+      integration: googlefindmy
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
       required: true
       selector:
         device:
@@ -13,12 +25,15 @@ locate_device:
 
 play_sound:
   name: Play Sound
-  description: "Play a sound on a Google Find My device"
-  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  description: "Play a sound on a Google Find My device."
+  target:
+    entity:
+      domain: device_tracker
+      integration: googlefindmy
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
       required: true
       selector:
         device:
@@ -26,31 +41,46 @@ play_sound:
 
 stop_sound:
   name: Stop Sound
-  description: "Stop the sound on a Google Find My device"
-  # Note: no 'target' block — we use an explicit 'device_id' field for compatibility with our resolver.
+  description: "Stop the sound on a Google Find My device."
+  target:
+    entity:
+      domain: device_tracker
+      integration: googlefindmy
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
       required: true
       selector:
         device:
           integration: googlefindmy
+    request_uuid:
+      name: Request UUID (optional)
+      description: >-
+        Pass the request UUID returned by the Play Sound service when the backend requires
+        the stop request to reference an existing sound session.
+      required: false
+      selector:
+        text:
 
-locate_device_external:
+locate_external:
   name: Locate Device (External)
-  description: "Get current location using an external GoogleFindMyTools helper (workaround for FCM issues)"
+  description: "Locate a device using the external helper; delegates to the normal locate operation."
+  target:
+    entity:
+      domain: device_tracker
+      integration: googlefindmy
   fields:
     device_id:
       name: Device
-      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)"
+      description: "Select a Google Find My device (or pass a canonical ID via Developer Tools)."
       required: true
       selector:
         device:
           integration: googlefindmy
     device_name:
-      name: Device Name
-      description: "Optional friendly name used only for logs"
+      name: Device Name (optional)
+      description: "An optional human-readable name for logging."
       example: "Keys Tracker"
       required: false
       selector:
@@ -58,16 +88,21 @@ locate_device_external:
 
 refresh_device_urls:
   name: Refresh Device URLs
-  description: "Recompute and update each device's configuration_url to point to the map view (use after base-URL or token policy changes)"
+  description: "Refresh the configuration URLs for Google Find My devices to point to the integrated map view."
+
+rebuild_device_registry:
+  name: Rebuild Device Registry
+  description: >-
+    Maintenance: rebuilds device registry links for Google Find My hubs and removes
+    tracker devices incorrectly tied to the parent entry.
 
 rebuild_registry:
   name: Rebuild / Migrate Registry
-  description: "Maintenance: run a soft data→options migration or rebuild entities/devices for this integration."
+  description: "Maintenance: Run targeted migrations (data→options, unique IDs, button relinking) or rebuild entities/devices for this integration."
   fields:
     mode:
       name: Mode
-      description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' only re-applies the soft data→options migration."
-      advanced: true
+      description: "Choose 'Rebuild' to remove entities/devices and reload; 'Migrate' reapplies data→options, unique ID, and button relinking migrations."
       required: false
       default: rebuild
       selector:
@@ -75,14 +110,25 @@ rebuild_registry:
           options:
             - label: Rebuild (remove + reload)
               value: rebuild
-            - label: Migrate (data→options only)
+            - label: Migrate (data→options + unique IDs + buttons)
               value: migrate
     device_ids:
       name: Devices (optional)
-      description: "Limit the operation to specific devices. Leave empty to target all Google Find My devices. (This selector passes HA device IDs.)"
-      advanced: true
+      description: "Limit the operation to specific devices. Leave empty to target all Google Find My devices."
       required: false
       selector:
         device:
           multiple: true
           integration: googlefindmy
+    entry_id:
+      name: Config Entry IDs (optional)
+      description: >-
+        Target specific config entries when reloading. Accepts either a single entry_id string
+        (`entry_id: "abc123def456"`) or a list of IDs (`entry_id: ["abc123def456", "ghi789jkl012"]`).
+      required: false
+      example:
+        - "abc123def456"
+        - "ghi789jkl012"
+      selector:
+        text:
+          multiline: false

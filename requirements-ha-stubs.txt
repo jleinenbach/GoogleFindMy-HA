@@ -1,0 +1,3 @@
+# Minimal Home Assistant pytest dependencies for integration stub tests.
+homeassistant
+pytest-homeassistant-custom-component

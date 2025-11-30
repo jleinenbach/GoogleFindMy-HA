@@ -1,0 +1,68 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "polling": {
+        "default": "mdi:refresh",
+        "state": {
+          "on": "mdi:sync",
+          "off": "mdi:sync-off"
+        }
+      },
+      "nova_auth_status": {
+        "default": "mdi:account-alert",
+        "state": {
+          "on": "mdi:account-alert",
+          "off": "mdi:account-check"
+        }
+      }
+    },
+    "button": {
+      "play_sound": {
+        "default": "mdi:volume-high"
+      },
+      "stop_sound": {
+        "default": "mdi:volume-off"
+      },
+      "locate_device": {
+        "default": "mdi:radar"
+      },
+      "reset_statistics": {
+        "default": "mdi:restart"
+      }
+    },
+    "sensor": {
+      "last_seen": {
+        "default": "mdi:clock-outline"
+      },
+      "stat_background_updates": {
+        "default": "mdi:cloud-download"
+      },
+      "stat_polled_updates": {
+        "default": "mdi:download-network"
+      },
+      "stat_crowd_sourced_updates": {
+        "default": "mdi:account-group"
+      },
+      "stat_history_fallback_used": {
+        "default": "mdi:history"
+      },
+      "stat_timeouts": {
+        "default": "mdi:timer-off"
+      },
+      "stat_invalid_coords": {
+        "default": "mdi:map-marker-alert"
+      },
+      "stat_low_quality_dropped": {
+        "default": "mdi:target"
+      },
+      "stat_non_significant_dropped": {
+        "default": "mdi:filter-variant-remove"
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "default": "mdi:cellphone"
+      }
+    }
+  }
+}

@@ -6,23 +6,21 @@
 """
 Nova API request helpers (async-first) for Google Find My Device.
 
-This module exposes:
-- `async_nova_request(...)`: the primary, non-blocking API for Home Assistant.
-- `nova_request(...)`: a guarded sync facade intended for CLI/testing only. It will
-  raise a RuntimeError if called from within a running event loop.
+This module exposes `async_nova_request(...)`, the non-blocking API consumed by
+the Home Assistant integration.
 
 Features
 --------
 - Optional reuse of the Home Assistant-managed aiohttp ClientSession to avoid
   per-call pools (`register_hass()` / `unregister_hass()`).
-- Token TTL learning policy (sync/async variants) to proactively refresh ADM tokens.
+- Token TTL learning policy to proactively refresh ADM tokens while preventing
+  thundering herds.
 - Robust retry logic (401 -> refresh & retry; 5xx/429 -> exponential backoff).
-- All auth/cache access in the async path uses the async token cache API.
-
-Notes
------
-- The sync path uses `httpx` and MUST NOT be called from within the event loop.
-- The async path is preferred throughout the integration code.
+- **Entry-scoped, multi-account ready**: when a `TokenCache` is supplied via
+  `async_nova_request(..., cache=...)`, *all* username lookups, token retrieval
+  (initial and refresh), and TTL metadata reads/writes are performed strictly
+  against that cache. Optionally, a `namespace` (e.g., entry_id) can be used to
+  prefix cache keys, preventing collisions when multiple entries share a cache.
 """
 
 from __future__ import annotations
@@ -30,41 +28,109 @@ from __future__ import annotations
 import asyncio
 import binascii
 import contextvars
+import logging
+import random
 import re
 import time
-import random
-import logging
-import threading
-from typing import Callable, Optional
-from datetime import datetime, timezone
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, cast
 
 import aiohttp
-import httpx
 
-from custom_components.googlefindmy.Auth.username_provider import get_username, async_get_username
-from custom_components.googlefindmy.Auth.adm_token_retrieval import get_adm_token, async_get_adm_token as async_get_adm_token_api
-from custom_components.googlefindmy.Auth.token_cache import (
-    get_cached_value,
-    set_cached_value,
-    async_get_cached_value,
-    async_set_cached_value,
+from custom_components.googlefindmy.Auth.adm_token_retrieval import (
+    async_get_adm_token as async_get_adm_token_api,
 )
-from ..const import NOVA_API_USER_AGENT
+from custom_components.googlefindmy.Auth.token_cache import (
+    TokenCache,  # NEW: for entry-scoped cache access in async path
+)
+from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
+from custom_components.googlefindmy.Auth.username_provider import (
+    async_get_username,
+    username_string,
+)
 
+from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
+
+if TYPE_CHECKING:
+    from bs4 import BeautifulSoup as _BeautifulSoupType
+    from homeassistant.core import HomeAssistant
+else:
+    _BeautifulSoupType = Any
+    HomeAssistant = Any
+
+_beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
+try:
+    from bs4 import BeautifulSoup as _bs_factory
+except ImportError:  # pragma: no cover - optional dependency, covered via fallback branch
+    _beautiful_soup_factory = None
+    _BS4_AVAILABLE = False
+else:
+    _beautiful_soup_factory = cast(
+        "Callable[[str, str], _BeautifulSoupType]", _bs_factory
+    )
+    _BS4_AVAILABLE = True
 
 _LOGGER = logging.getLogger(__name__)
 
+if not _BS4_AVAILABLE:
+    _LOGGER.debug(
+        "BeautifulSoup4 not installed, error response beautification disabled."
+    )
+
 # --- Retry constants ---
-NOVA_MAX_RETRIES = 3
-NOVA_INITIAL_BACKOFF_S = 1.0
+NOVA_MAX_RETRIES = 6
+NOVA_INITIAL_BACKOFF_S = 4.0
 NOVA_BACKOFF_FACTOR = 2.0
 NOVA_MAX_RETRY_AFTER_S = 60.0
+
+HTTP_OK = 200
+HTTP_UNAUTHORIZED = 401
+HTTP_TOO_MANY_REQUESTS = 429
+HTTP_SERVER_ERROR_MIN = 500
+HTTP_SERVER_ERROR_MAX = 600
+RECENT_REFRESH_WINDOW_S = 2.0
+
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
 
+# --- Retry helpers ---
+
+
+def _compute_delay(attempt: int, retry_after: str | None) -> float:
+    """Return a retry delay honoring Retry-After headers with jittered exponential backoff fallback."""
+
+    delay: float | None = None
+    if retry_after:
+        try:
+            delay = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                retry_dt = parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError):
+                retry_dt = None
+            if retry_dt is not None:
+                if retry_dt.tzinfo is None:
+                    retry_dt = retry_dt.replace(tzinfo=UTC)
+                now = datetime.now(UTC)
+                delay = max(0.0, (retry_dt - now).total_seconds())
+
+    if delay is None:
+        exponent = max(0, attempt - 1)
+        backoff = (NOVA_BACKOFF_FACTOR**exponent) * NOVA_INITIAL_BACKOFF_S
+        next_backoff = backoff * NOVA_BACKOFF_FACTOR
+        delay = random.uniform(backoff, next_backoff)
+
+    return min(delay, NOVA_MAX_RETRY_AFTER_S)
+
+
 # --- PII Redaction ---
+
 _RE_BEARER = re.compile(r"Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*", re.I)
 _RE_EMAIL = re.compile(r"([A-Za-z0-9._%+-])([A-Za-z0-9._%+-]*)(@[^,\s]+)")
 _RE_HEX16 = re.compile(r"\b[0-9a-fA-F]{16,}\b")
+
 
 def _redact(s: str) -> str:
     """Redact sensitive information from a string for safe logging."""
@@ -73,50 +139,90 @@ def _redact(s: str) -> str:
     s = _RE_HEX16.sub("<hex-redacted>", s)
     return s
 
+
+_ERROR_SNIPPET_MAX = 512
+
+
+def _beautify_text(resp_text: str) -> str:
+    """Return a human-readable snippet of a response body for logging purposes."""
+
+    if not resp_text:
+        return ""
+
+    if _BS4_AVAILABLE and _beautiful_soup_factory is not None:
+        try:
+            text = _beautiful_soup_factory(resp_text, "html.parser").get_text(
+                separator=" ", strip=True
+            )
+        except Exception as err:  # pragma: no cover - defensive logging path
+            _LOGGER.debug(
+                "Failed to parse error response body via BeautifulSoup: %s", err
+            )
+        else:
+            if text:
+                return text[:_ERROR_SNIPPET_MAX]
+
+    return resp_text[:_ERROR_SNIPPET_MAX]
+
+
 # --- Custom Exceptions ---
 class NovaError(Exception):
     """Base exception for Nova API errors."""
 
+
 class NovaAuthError(NovaError):
     """Raised on 4xx client errors after retries."""
-    def __init__(self, status: int, detail: Optional[str] = None):
+
+    def __init__(self, status: int, detail: str | None = None):
         super().__init__(f"HTTP Client Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
 
+
 class NovaRateLimitError(NovaError):
     """Raised on 429 rate-limiting errors after retries."""
-    def __init__(self, detail: Optional[str] = None):
+
+    def __init__(self, detail: str | None = None):
         super().__init__(f"Rate limited by upstream API: {detail or ''}".strip())
         self.detail = detail
 
+
 class NovaHTTPError(NovaError):
     """Raised for 5xx server errors after retries."""
-    def __init__(self, status: int, detail: Optional[str] = None):
+
+    def __init__(self, status: int, detail: str | None = None):
         super().__init__(f"HTTP Server Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
 
+
 # ------------------------ Optional Home Assistant hooks ------------------------
 # These hooks allow the integration to supply a shared aiohttp ClientSession.
-_HASS_REF = None
+_STATE: dict[str, Any] = {
+    "hass": None,
+    "async_refresh_lock": None,
+    "cache_provider": None,
+}
 
-def register_hass(hass) -> None:
+
+def register_hass(hass: HomeAssistant) -> None:
     """Register a Home Assistant instance to provide a shared ClientSession."""
-    global _HASS_REF
-    _HASS_REF = hass
+
+    _STATE["hass"] = hass
+
 
 def unregister_hass() -> None:
     """Unregister the Home Assistant instance reference."""
-    global _HASS_REF
-    _HASS_REF = None
+
+    _STATE["hass"] = None
+
 
 # Cache provider hook for multi-entry support using contextvars for async safety
-_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], any] | None] = contextvars.ContextVar(
-    '_cache_provider', default=None
+_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], Any] | None] = contextvars.ContextVar(
+    "_cache_provider", default=None
 )
 
-def register_cache_provider(provider: Callable[[], any]) -> None:
+def register_cache_provider(provider: Callable[[], Any]) -> None:
     """Register a callable that returns the entry-specific cache (context-local).
 
     Args:
@@ -126,39 +232,106 @@ def register_cache_provider(provider: Callable[[], any]) -> None:
     instead of relying on the global cache facade. Uses contextvars to ensure
     concurrent async requests don't interfere with each other.
     """
+    _STATE["cache_provider"] = provider
     _CACHE_PROVIDER.set(provider)
 
 def unregister_cache_provider() -> None:
     """Unregister the cache provider for the current context."""
+    _STATE["cache_provider"] = None
     _CACHE_PROVIDER.set(None)
 
-def _get_cache_provider():
+
+def resolve_cache_from_provider() -> TokenCache | None:
+    """Return the cache supplied by the registered provider, if any."""
+
+    provider: Callable[[], TokenCache | None] | None = _CACHE_PROVIDER.get()
+    if provider is None:
+        provider = cast(Callable[[], TokenCache | None] | None, _STATE.get("cache_provider"))
+    if provider is None:
+        return None
+    try:
+        cache = provider()
+        if cache is not None and getattr(cache, "_closed", False):
+            return None
+        return cache
+    except Exception as exc:  # pragma: no cover - defensive guard
+        _LOGGER.warning("Cache provider callable failed: %s", exc)
+        return None
+
+def _get_cache_provider() -> TokenCache | None:
     """Get the registered cache provider for the current context or None.
 
     Returns None if no provider is registered or if the provider's cache is closed.
     """
-    provider = _CACHE_PROVIDER.get()
-    if not provider:
-        return None
-    try:
-        cache = provider()
-        # Check if cache is closed (has _closed attribute that's True)
-        if cache and getattr(cache, '_closed', False):
-            return None
-        return cache
-    except Exception:  # noqa: BLE001
-        return None
+    return resolve_cache_from_provider()
 
 # --- Refresh Locks ---
-_sync_refresh_lock = threading.Lock()
 _async_refresh_lock: asyncio.Lock | None = None
+
 
 def _get_async_refresh_lock() -> asyncio.Lock:
     """Lazily initialize and return the async refresh lock."""
-    global _async_refresh_lock
-    if _async_refresh_lock is None:
-        _async_refresh_lock = asyncio.Lock()
-    return _async_refresh_lock
+
+    if _STATE["async_refresh_lock"] is None:
+        _STATE["async_refresh_lock"] = asyncio.Lock()
+    return cast(asyncio.Lock, _STATE["async_refresh_lock"])
+
+
+async def _get_initial_token_async(
+    username: str,
+    logger: logging.Logger,
+    *,
+    ns_prefix: str = "",
+    cache: TokenCache | None,
+) -> str:
+    """Return an ADM token for *username* from the entry-scoped cache or API."""
+
+    resolved_cache = cache or resolve_cache_from_provider()
+    if resolved_cache is None:
+        raise ValueError("TokenCache instance is required for Nova requests.")
+
+    normalized_user = (username or "").strip().lower()
+    if not normalized_user:
+        raise ValueError("Username is empty/invalid; cannot retrieve ADM token.")
+
+    prefix = (ns_prefix or "").strip()
+    if prefix and not prefix.endswith(":"):
+        prefix += ":"
+
+    cache_key = f"{prefix}adm_token_{normalized_user}"
+
+    cached = await resolved_cache.get(cache_key)
+    if isinstance(cached, str) and cached:
+        return cached
+
+    if prefix:
+        fallback_key = f"adm_token_{normalized_user}"
+        fallback = await resolved_cache.get(fallback_key)
+        if isinstance(fallback, str) and fallback:
+            try:
+                await resolved_cache.set(cache_key, fallback)
+            except Exception as err:  # pragma: no cover - defensive logging
+                logger.debug(
+                    "Failed to mirror ADM token to namespaced key",
+                    extra={"cache_key": cache_key},
+                    exc_info=err,
+                )
+            return fallback
+
+    token = await async_get_adm_token_api(normalized_user, cache=resolved_cache)
+
+    if prefix:
+        try:
+            await resolved_cache.set(cache_key, token)
+        except Exception as err:  # pragma: no cover - defensive logging
+            logger.debug(
+                "Failed to persist ADM token to namespaced key",
+                extra={"cache_key": cache_key},
+                exc_info=err,
+            )
+
+    return token
+
 
 # ------------------------ TTL policy (shared core) ------------------------
 class TTLPolicy:
@@ -167,18 +340,20 @@ class TTLPolicy:
     Encapsulates probe arming, jitter and proactive refresh. The policy records
     the best-known TTL and times token issuance, allowing pre-emptive refreshes.
     """
+
     TTL_MARGIN_SEC, JITTER_SEC = 120, 90
     PROBE_INTERVAL_SEC, PROBE_INTERVAL_JITTER_PCT = 6 * 3600, 0.1
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         username: str,
-        logger,
-        get_value: Callable[[str], Optional[float | int | str]],
+        logger: logging.Logger,
+        get_value: Callable[[str], float | int | str | None],
         set_value: Callable[[str, object | None], None],
-        refresh_fn: Callable[[], Optional[str]],
+        refresh_fn: Callable[[], str | None],
         set_auth_header_fn: Callable[[str], None],
-    ) -> None:
+        ns_prefix: str = "",
+    ) -> None:  # noqa: PLR0913
         """
         Args:
             username: Account name this policy applies to.
@@ -186,22 +361,46 @@ class TTLPolicy:
             get_value/set_value: Cache I/O functions (sync).
             refresh_fn: Returns a fresh token (string) or None.
             set_auth_header_fn: Receives the full 'Authorization' header value.
+            ns_prefix: Optional key namespace (e.g., config entry_id) to avoid collisions.
         """
         self.username = username
         self.log = logger
-        self._get, self._set, self._refresh, self._set_auth = get_value, set_value, refresh_fn, set_auth_header_fn
-    
-    # Cache keys for this username
+        self._get, self._set, self._refresh, self._set_auth = (
+            get_value,
+            set_value,
+            refresh_fn,
+            set_auth_header_fn,
+        )
+        self._ns = (ns_prefix or "").strip()
+        if self._ns and not self._ns.endswith(":"):
+            self._ns += ":"
+
+    # Cache keys for this username (optionally namespaced)
     @property
-    def k_issued(self):    return f"adm_token_issued_at_{self.username}"
+    def k_issued(self) -> str:
+        return f"{self._ns}adm_token_issued_at_{self.username}"
+
     @property
-    def k_bestttl(self):   return f"adm_best_ttl_sec_{self.username}"
+    def k_bestttl(self) -> str:
+        return f"{self._ns}adm_best_ttl_sec_{self.username}"
+
     @property
-    def k_startleft(self): return f"adm_probe_startup_left_{self.username}"
+    def k_startleft(self) -> str:
+        return f"{self._ns}adm_probe_startup_left_{self.username}"
+
     @property
-    def k_probenext(self): return f"adm_probe_next_at_{self.username}"
+    def k_probenext(self) -> str:
+        return f"{self._ns}adm_probe_next_at_{self.username}"
+
     @property
-    def k_armed(self):     return f"adm_probe_armed_{self.username}"
+    def k_armed(self) -> str:
+        return f"{self._ns}adm_probe_armed_{self.username}"
+
+    def _key_variants(self, base: str) -> set[str]:
+        """Return the set of cache key variants for a given base name."""
+        if self._ns:
+            return {f"{self._ns}{base}", base}
+        return {base}
 
     @staticmethod
     def _jitter_sec(base: float, jitter_abs: float) -> float:
@@ -232,30 +431,65 @@ class TTLPolicy:
         do_arm = False
         if startup_left and int(startup_left) > 0:
             do_arm = True
-        else:
-            if probenext is None:
-                self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct))
-            elif now >= float(probenext):
-                do_arm = True
-                self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct))
+        elif probenext is None:
+            self._set(
+                self.k_probenext,
+                now
+                + self._jitter_pct(
+                    self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
+                ),
+            )
+        elif now >= float(probenext):
+            do_arm = True
+            self._set(
+                self.k_probenext,
+                now
+                + self._jitter_pct(
+                    self.PROBE_INTERVAL_SEC, self.probe_interval_jitter_pct
+                ),
+            )
 
         if do_arm:
             self._set(self.k_armed, 1)
             return True
         return bool(self._get(self.k_armed))
 
-    def _do_refresh(self, now: float) -> Optional[str]:
+    def _do_refresh(self, now: float) -> str | None:
         """Refresh token, update header and issuance timestamp, bootstrap startup probes if missing."""
-        try:
-            self._set(f"adm_token_{self.username}", None)  # best-effort clear
-        except Exception:
-            pass
+        bases_to_clear = (
+            f"adm_token_{self.username}",
+            f"adm_token_issued_at_{self.username}",
+        )
+        for base in bases_to_clear:
+            for key in self._key_variants(base):
+                try:
+                    self._set(key, None)
+                except Exception:
+                    pass
         tok = self._refresh()
         if tok:
+            token_base = f"adm_token_{self.username}"
+            for key in self._key_variants(token_base):
+                try:
+                    self._set(key, tok)
+                except Exception:
+                    pass
+
             self._set_auth("Bearer " + tok)
-            self._set(self.k_issued, now)
-            if not self._get(self.k_startleft):
-                self._set(self.k_startleft, 3)  # bootstrap startup probes if missing
+            issued_base = f"adm_token_issued_at_{self.username}"
+            for key in self._key_variants(issued_base):
+                try:
+                    self._set(key, now)
+                except Exception:
+                    pass
+            if self._get(self.k_startleft) is None:
+                probe_base = f"adm_probe_startup_left_{self.username}"
+                for key in self._key_variants(probe_base):
+                    try:
+                        if self._get(key) is None:
+                            self._set(key, 3)
+                    except Exception:
+                        pass
         return tok
 
     def pre_request(self) -> None:
@@ -274,17 +508,26 @@ class TTLPolicy:
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info("ADM token reached measured threshold – proactively refreshing...")
+                    self.log.info(
+                        "ADM token reached measured threshold – proactively refreshing..."
+                    )
                     self._do_refresh(now)
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed: %s", e)
 
-    def on_401(self, adaptive_downshift: bool = True) -> Optional[str]:
+    async def async_pre_request(self) -> None:
+        """Async wrapper for compatibility with AsyncTTLPolicy."""
+
+        self.pre_request()
+
+    def on_401(self, adaptive_downshift: bool = True) -> str | None:
         """Handle 401: measure TTL, adapt quickly on unexpected short TTLs, then refresh."""
         now = time.time()
         issued = self._get(self.k_issued)
         if issued is None:
-            self.log.warning("Got 401 – issued timestamp missing; attempting token refresh.")
+            self.log.warning(
+                "Got 401 – issued timestamp missing; attempting token refresh."
+            )
             return self._do_refresh(now)
 
         age_sec = now - float(issued)
@@ -294,7 +537,7 @@ class TTLPolicy:
         if planned_probe:
             self.log.info("Got 401 (forced probe) – measured TTL: %.1f min.", age_min)
             self._set(self.k_bestttl, age_sec)  # always accept probe (up or down)
-            self._set(self.k_armed, 0)          # coalesce multiple 401 in same probe window
+            self._set(self.k_armed, 0)  # coalesce multiple 401 in same probe window
             left = self._get(self.k_startleft)
             if left and int(left) > 0:
                 try:
@@ -302,13 +545,17 @@ class TTLPolicy:
                 except (ValueError, TypeError):
                     self._set(self.k_startleft, 0)
         else:
-            self.log.warning("Got 401 – token expired after %.1f min (unplanned).", age_min)
+            self.log.warning(
+                "Got 401 – token expired after %.1f min (unplanned).", age_min
+            )
             if adaptive_downshift:
                 best = self._get(self.k_bestttl)
                 try:
                     # If clearly shorter than our current model (>10% shorter), recalibrate immediately.
                     if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
-                        self.log.warning("Unexpected short TTL – recalibrating best known TTL.")
+                        self.log.warning(
+                            "Unexpected short TTL – recalibrating best known TTL."
+                        )
                         self._set(self.k_bestttl, age_sec)
                 except (ValueError, TypeError) as e:
                     self.log.debug("Recalibration check failed: %s", e)
@@ -316,42 +563,120 @@ class TTLPolicy:
         # Always refresh after a 401 to resume normal operation.
         return self._do_refresh(now)
 
+    async def async_on_401(
+        self, adaptive_downshift: bool = True
+    ) -> str | None:  # noqa: PLR0915
+        """Async wrapper delegating to the synchronous policy."""
+
+        return self.on_401(adaptive_downshift=adaptive_downshift)
+
 
 class AsyncTTLPolicy(TTLPolicy):
     """Native async version of the TTL policy (no blocking calls)."""
 
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        username: str,
+        logger: logging.Logger,
+        get_value: Callable[[str], Awaitable[Any]],
+        set_value: Callable[[str, Any], Awaitable[None]],
+        refresh_fn: Callable[[], Awaitable[str | None]],
+        set_auth_header_fn: Callable[[str], None],
+        ns_prefix: str = "",
+    ) -> None:  # noqa: PLR0913
+        super().__init__(
+            username=username,
+            logger=logger,
+            get_value=lambda _: None,
+            set_value=lambda _key, _value: None,
+            refresh_fn=lambda: None,
+            set_auth_header_fn=set_auth_header_fn,
+            ns_prefix=ns_prefix,
+        )
+        self._aget: Callable[[str], Awaitable[Any]] = get_value
+        self._aset: Callable[[str, Any], Awaitable[None]] = set_value
+        self._arefresh: Callable[[], Awaitable[str | None]] = refresh_fn
+
     async def _arm_probe_if_due_async(self, now: float) -> bool:
-        startup_left = await self._get(self.k_startleft)
-        probenext = await self._get(self.k_probenext)
+        startup_left = await self._aget(self.k_startleft)
+        probenext = await self._aget(self.k_probenext)
         do_arm = bool(startup_left and int(startup_left) > 0)
         if not do_arm:
             if probenext is None:
-                await self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT))
+                await self._aset(
+                    self.k_probenext,
+                    now
+                    + self._jitter_pct(
+                        self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT
+                    ),
+                )
             elif now >= float(probenext):
                 do_arm = True
-                await self._set(self.k_probenext, now + self._jitter_pct(self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT))
+                await self._aset(
+                    self.k_probenext,
+                    now
+                    + self._jitter_pct(
+                        self.PROBE_INTERVAL_SEC, self.PROBE_INTERVAL_JITTER_PCT
+                    ),
+                )
         if do_arm:
-            await self._set(self.k_armed, 1)
+            await self._aset(self.k_armed, 1)
             return True
-        return bool(await self._get(self.k_armed))
+        return bool(await self._aget(self.k_armed))
 
-    async def _do_refresh_async(self, now: float) -> Optional[str]:
+    async def _do_refresh_async(self, now: float) -> str | None:  # noqa: PLR0912
+        bases_to_clear = (
+            f"adm_token_{self.username}",
+            f"adm_token_issued_at_{self.username}",
+        )
+        for base in bases_to_clear:
+            for key in self._key_variants(base):
+                try:
+                    await self._aset(key, None)
+                except Exception:
+                    pass
         try:
-            await self._set(f"adm_token_{self.username}", None)  # best-effort clear
-        except Exception:
-            pass
-        tok = await self._refresh()  # async callable
+            tok = await self._arefresh()  # async callable
+        except InvalidAasTokenError as err:
+            self.log.error(
+                "ADM token refresh failed because the cached AAS token was rejected; re-authentication is required."
+            )
+            for key in self._key_variants(DATA_AAS_TOKEN):
+                try:
+                    await self._aset(key, None)
+                except Exception:
+                    pass
+            raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
         if tok:
+            token_base = f"adm_token_{self.username}"
+            for key in self._key_variants(token_base):
+                try:
+                    await self._aset(key, tok)
+                except Exception:
+                    pass
+
             self._set_auth("Bearer " + tok)
-            await self._set(self.k_issued, now)
-            if not await self._get(self.k_startleft):
-                await self._set(self.k_startleft, 3)
+            issued_base = f"adm_token_issued_at_{self.username}"
+            for key in self._key_variants(issued_base):
+                try:
+                    await self._aset(key, now)
+                except Exception:
+                    pass
+            if await self._aget(self.k_startleft) is None:
+                probe_base = f"adm_probe_startup_left_{self.username}"
+                for key in self._key_variants(probe_base):
+                    try:
+                        if await self._aget(key) is None:
+                            await self._aset(key, 3)
+                    except Exception:
+                        pass
         return tok
 
-    async def pre_request(self) -> None:
+    async def async_pre_request(self) -> None:
         now = time.time()
-        issued_at = await self._get(self.k_issued)
-        best_ttl = await self._get(self.k_bestttl)
+        issued_at = await self._aget(self.k_issued)
+        best_ttl = await self._aget(self.k_bestttl)
         armed = await self._arm_probe_if_due_async(now)
         if (not armed) and issued_at and best_ttl:
             try:
@@ -359,314 +684,147 @@ class AsyncTTLPolicy(TTLPolicy):
                 threshold = max(0.0, float(best_ttl) - self.TTL_MARGIN_SEC)
                 threshold = self._jitter_sec(threshold, self.JITTER_SEC)
                 if age >= threshold:
-                    self.log.info("ADM token reached measured threshold – proactively refreshing (async)…")
+                    self.log.info(
+                        "ADM token reached measured threshold – proactively refreshing (async)…"
+                    )
                     await self._do_refresh_async(now)
             except (ValueError, TypeError) as e:
                 self.log.debug("Threshold check failed (async): %s", e)
 
-    async def on_401(self, adaptive_downshift: bool = True) -> Optional[str]:
+    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:  # noqa: PLR0912,PLR0915
         """Async 401 handling with stampede guard and async cache I/O."""
         lock = _get_async_refresh_lock()
         async with lock:
-            # Skip duplicate refresh if someone just refreshed recently.
-            current_issued = await self._get(self.k_issued)
-            if current_issued and time.time() - float(current_issued) < 2:
-                self.log.debug("Another task already refreshed the token; skipping duplicate refresh.")
-                return None
-
             now = time.time()
-            issued = await self._get(self.k_issued)
+
+            # Skip duplicate refresh if someone just refreshed recently.
+            issued_raw = await self._aget(self.k_issued)
+            issued: float | None
+            try:
+                issued = float(issued_raw) if issued_raw is not None else None
+            except (TypeError, ValueError):
+                self.log.debug(
+                    "Cached issued timestamp is invalid (value=%r); forcing refresh.",
+                    issued_raw,
+                )
+                issued = None
+
+            if issued is not None and (now - issued) < RECENT_REFRESH_WINDOW_S:
+                self.log.debug(
+                    "Another task already refreshed the token; skipping duplicate refresh."
+                )
+                token_value: str | None = None
+                token_base = f"adm_token_{self.username}"
+                for key in self._key_variants(token_base):
+                    try:
+                        candidate = await self._aget(key)
+                    except Exception as err:  # noqa: BLE001 - defensive cache read
+                        self.log.debug(
+                            "Failed to read cached token from key '%s': %s", key, err
+                        )
+                        continue
+                    if isinstance(candidate, bytes):
+                        candidate = candidate.decode()
+                    if isinstance(candidate, str) and candidate:
+                        token_value = candidate
+                        break
+
+                if token_value is not None:
+                    self._set_auth("Bearer " + token_value)
+                    return token_value
+
+                self.log.debug(
+                    "Recent refresh detected but no cached ADM token available; forcing refresh."
+                )
+                issued = None  # Ensure we fall through to refresh logic below.
+
             if issued is None:
-                self.log.info("Got 401 – issued timestamp missing; attempting token refresh (async).")
+                self.log.info(
+                    "Got 401 – issued timestamp missing; attempting token refresh (async)."
+                )
                 return await self._do_refresh_async(now)
 
             age_sec = now - float(issued)
             age_min = age_sec / 60.0
-            planned_probe = bool(await self._get(self.k_armed))
+            planned_probe = bool(await self._aget(self.k_armed))
 
             if planned_probe:
-                self.log.info("Got 401 (forced probe) – measured TTL: %.1f min.", age_min)
-                await self._set(self.k_bestttl, age_sec)
-                await self._set(self.k_armed, 0)
-                left = await self._get(self.k_startleft)
+                self.log.info(
+                    "Got 401 (forced probe) – measured TTL: %.1f min.", age_min
+                )
+                await self._aset(self.k_bestttl, age_sec)
+                await self._aset(self.k_armed, 0)
+                left = await self._aget(self.k_startleft)
                 if left and int(left) > 0:
                     try:
-                        await self._set(self.k_startleft, int(left) - 1)
+                        await self._aset(self.k_startleft, int(left) - 1)
                     except (ValueError, TypeError):
-                        await self._set(self.k_startleft, 0)
+                        await self._aset(self.k_startleft, 0)
             else:
-                self.log.info("Got 401 – token expired after %.1f min (unplanned).", age_min)
+                self.log.info(
+                    "Got 401 – token expired after %.1f min (unplanned).", age_min
+                )
                 if adaptive_downshift:
-                    best = await self._get(self.k_bestttl)
+                    best = await self._aget(self.k_bestttl)
                     try:
                         if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
-                            self.log.warning("Unexpected short TTL – recalibrating best known TTL (async).")
-                            await self._set(self.k_bestttl, age_sec)
+                            self.log.warning(
+                                "Unexpected short TTL – recalibrating best known TTL (async)."
+                            )
+                            await self._aset(self.k_bestttl, age_sec)
                     except (ValueError, TypeError) as e:
                         self.log.debug("Recalibration check failed (async): %s", e)
             return await self._do_refresh_async(now)
 
 
-def _get_initial_token_sync(username: str, _logger) -> str:
-    """Get or create the initial ADM token in sync path and ensure TTL metadata is recorded."""
-    # Safe cache access - handle multi-entry scenarios during validation
-    token = None
-    try:
-        token = get_cached_value(f"adm_token_{username}") or get_cached_value("adm_token")
-    except Exception:  # noqa: BLE001
-        # Cache not available during validation
-        pass
-
-    if not token:
-        _logger.info("Attempting to generate new ADM token...")
-        token = get_adm_token(username)
-        if token:
-            try:
-                set_cached_value(f"adm_token_issued_at_{username}", time.time())
-                probe_left = get_cached_value(f"adm_probe_startup_left_{username}")
-                if not probe_left:
-                    set_cached_value(f"adm_probe_startup_left_{username}", 3)
-            except Exception:  # noqa: BLE001
-                # Cache not available - skip TTL metadata
-                pass
-    if not token: raise ValueError("No ADM token available - please reconfigure authentication")
-    return token
-
-
-async def _get_initial_token_async(username: str, _logger, cache: Optional[any] = None) -> str:
-    """Get or create the initial ADM token in async path and ensure TTL metadata is recorded."""
-    # Use explicitly passed cache for multi-account isolation, or fall back to provider
-    if not cache:
-        cache = _get_cache_provider()
-
-    # Safe cache access - handle multi-entry scenarios during validation
-    token = None
-    try:
-        if cache:
-            # Use entry-specific cache with correct method names
-            token = await cache.async_get_cached_value(f"adm_token_{username}") or await cache.async_get_cached_value("adm_token")
-        else:
-            # Fall back to global facade
-            token = await async_get_cached_value(f"adm_token_{username}") or await async_get_cached_value("adm_token")
-    except Exception:  # noqa: BLE001
-        # Cache not available during validation
-        pass
-
-    if not token:
-        _logger.info("Attempting to generate new ADM token (async)...")
-        token = await async_get_adm_token_api(username, cache=cache)
-        if token:
-            try:
-                if cache:
-                    await cache.async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
-                    probe_left = await cache.async_get_cached_value(f"adm_probe_startup_left_{username}")
-                    if not probe_left:
-                        await cache.async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
-                else:
-                    await async_set_cached_value(f"adm_token_issued_at_{username}", time.time())
-                    probe_left = await async_get_cached_value(f"adm_probe_startup_left_{username}")
-                    if not probe_left:
-                        await async_set_cached_value(f"adm_probe_startup_left_{username}", 3)
-            except Exception:  # noqa: BLE001
-                # Cache not available - skip TTL metadata
-                pass
-    if not token: raise ValueError("No ADM token available - please reconfigure authentication")
-    return token
-
-def _beautify_text(resp_text: str) -> str:
-    """
-    Best-effort pretty-printing of an error response body.
-    Optional dependency: BeautifulSoup4.
-    """
-    try:
-        # local import only when needed
-        from bs4 import BeautifulSoup 
-        return BeautifulSoup(resp_text, "html.parser").get_text(strip=True)
-    except Exception:
-        return resp_text[:512]
-
-def _compute_delay(attempt: int, retry_after: Optional[str]) -> float:
-    """
-    Computes retry delay, respecting Retry-After (RFC 9110) or using exponential backoff with full jitter.
-    See: AWS Architecture Blog - Exponential Backoff And Jitter
-    """
-    delay = None
-    if retry_after:
-        try:
-            # seconds case
-            delay = float(retry_after)
-        except ValueError:
-            # HTTP-date case (RFC 7231 §7.1.3)
-            from email.utils import parsedate_to_datetime
-            try:
-                retry_dt = parsedate_to_datetime(retry_after)
-                delay = max(0.0, (retry_dt - datetime.now(timezone.utc)).total_seconds())
-            except Exception:
-                pass # Fallback to backoff if date parsing fails
-    
-    if delay is None:
-        # Exponential backoff with full jitter
-        backoff = (NOVA_BACKOFF_FACTOR ** (attempt - 1)) * NOVA_INITIAL_BACKOFF_S
-        delay = random.uniform(0.0, backoff)
-    
-    capped_delay = min(delay, NOVA_MAX_RETRY_AFTER_S)
-    if delay is not None and delay > capped_delay:
-        _LOGGER.info("Retry-After delay of %.2fs capped to %.2fs by client policy.", delay, capped_delay)
-    return capped_delay
-
-def nova_request(api_scope: str, hex_payload: str) -> str:
-    """
-    Synchronous Nova API request (CLI/testing only).
-
-    IMPORTANT:
-    This function is blocking and MUST NOT be called from within the Home Assistant
-    event loop. It will raise a RuntimeError if such usage is detected.
-    Use `async_nova_request` for all Home Assistant code.
-    
-    Args:
-        api_scope: Nova API scope suffix (appended to the base URL).
-        hex_payload: Hex string body.
-
-    Returns:
-        Hex-encoded response body.
-    Raises:
-        RuntimeError: if called from a running event loop.
-        ValueError: if the hex_payload is invalid.
-        NovaError (and subclasses): for API and network errors.
-    """
-    # Guard against misuse in the running event loop.
-    try:
-        if asyncio.get_running_loop().is_running():
-            raise RuntimeError("Sync nova_request() must not be called from the event loop.")
-    except RuntimeError:
-        pass
-
-    url = f"https://android.googleapis.com/nova/{api_scope}"
-
-    # Safe username retrieval - handle cache errors during multi-entry validation
-    try:
-        username = get_username()
-    except Exception:  # noqa: BLE001
-        # Cache not available during validation or multi-entry scenario
-        raise ValueError("Username is not available for nova_request.")
-
-    token = _get_initial_token_sync(username, _LOGGER)
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Authorization": f"Bearer {token}", "Accept-Language": "en-US",
-        "User-Agent": NOVA_API_USER_AGENT,
-    }
-    try:
-        payload = binascii.unhexlify(hex_payload)
-        if len(payload) > MAX_PAYLOAD_BYTES: raise ValueError(f"Nova payload too large: {len(payload)} bytes")
-    except (binascii.Error, ValueError) as e:
-        raise ValueError("Invalid hex payload for Nova request") from e
-
-    # Wrap cache functions to handle multi-entry scenarios gracefully during config flow validation
-    def safe_get_cached_value(key: str):
-        try:
-            return get_cached_value(key)
-        except Exception:  # noqa: BLE001
-            # Cache unavailable (multi-entry validation) - return None to skip TTL logic
-            return None
-
-    def safe_set_cached_value(key: str, value):
-        try:
-            set_cached_value(key, value)
-        except Exception:  # noqa: BLE001
-            # Cache unavailable (multi-entry validation) - skip caching
-            pass
-
-    policy = TTLPolicy(
-        username=username, logger=_LOGGER,
-        get_value=safe_get_cached_value, set_value=safe_set_cached_value,
-        refresh_fn=lambda: get_adm_token(username),
-        set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
-    )
-    policy.pre_request()
-
-    refreshed_once = False
-    retries_used = 0
-    while True:
-        attempt = retries_used + 1
-        try:
-            timeout = httpx.Timeout(30.0, connect=10.0, read=30.0, write=30.0, pool=30.0)
-            response = httpx.post(url, headers=headers, content=payload, timeout=timeout, follow_redirects=False)
-            _LOGGER.debug("Nova API sync request to %s: status=%d", api_scope, response.status_code)
-
-            if response.status_code == 200:
-                return response.content.hex()
-            
-            text_snippet = _redact(_beautify_text(response.text))
-
-            if response.status_code == 401:
-                lvl = logging.INFO if not refreshed_once else logging.WARNING
-                _LOGGER.log(lvl, "Nova API sync request to %s: 401 Unauthorized. Refreshing token.", api_scope)
-                with _sync_refresh_lock:
-                    current_issued = get_cached_value(policy.k_issued)
-                    if current_issued and time.time() - float(current_issued) < 2:
-                        _LOGGER.debug("Another task already refreshed the token; re-evaluating.")
-                    else:
-                        policy.on_401()
-
-                if not refreshed_once:
-                    refreshed_once = True
-                    continue # Free retry, do not increment retries_used
-
-                raise NovaAuthError(response.status_code, "Unauthorized after token refresh")
-
-            if response.status_code in (408, 429, 500, 502, 503, 504):
-                if retries_used < NOVA_MAX_RETRIES:
-                    delay = _compute_delay(attempt, response.headers.get("Retry-After"))
-                    _LOGGER.info("Nova API sync request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                 api_scope, response.status_code, delay, retries_used + 1, NOVA_MAX_RETRIES)
-                    retries_used += 1
-                    time.sleep(delay)
-                    continue
-                else:
-                    _LOGGER.error("Nova API sync request to %s failed after %d attempts with status %d.", api_scope, retries_used + 1, response.status_code)
-                    if response.status_code == 429:
-                        raise NovaRateLimitError(f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts.")
-                    raise NovaHTTPError(response.status_code, f"Nova API failed after {NOVA_MAX_RETRIES} attempts.")
-            
-            raise NovaAuthError(response.status_code, text_snippet)
-
-        except (httpx.TimeoutException, httpx.ConnectError) as e:
-            if retries_used < NOVA_MAX_RETRIES:
-                delay = _compute_delay(attempt, None)
-                _LOGGER.info("Nova API sync request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                             api_scope, type(e).__name__, delay, retries_used + 1, NOVA_MAX_RETRIES)
-                retries_used += 1
-                time.sleep(delay)
-                continue
-            else:
-                 _LOGGER.error("Nova API sync request to %s failed after %d attempts with %s.", api_scope, retries_used + 1, type(e).__name__)
-                 raise NovaError(f"Nova API request failed after retries: {e}") from e
-
-async def async_nova_request(
+async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     api_scope: str,
     hex_payload: str,
-    username: Optional[str] = None,
-    session: Optional[aiohttp.ClientSession] = None,
-    cache: Optional[any] = None,
+    *,
+    username: str | None = None,
+    session: aiohttp.ClientSession | None = None,
+    # Optional: initial token for config-flow isolation (bypass cache lookups)
+    token: str | None = None,
+    # Optional overrides for flow-local validation (avoid global cache conflicts)
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+    # Optional: entry-specific namespace for cache keys (e.g., entry_id)
+    namespace: str | None = None,
+    # Entry-scoped TokenCache for strict multi-account separation
+    cache: TokenCache | None = None,
 ) -> str:
     """
-    Asynchronous Nova API request for Home Assistant.
+    Asynchronous Nova API request for Home Assistant (entry-scoped capable).
 
     This is the preferred method for all communication with the Nova API from
     within Home Assistant, as it is non-blocking and integrates with HA's
     shared aiohttp session.
 
+    Entry-scope & cache behavior:
+        - All username lookups, token retrieval, and TTL metadata reads/writes use
+          the provided entry-scoped cache exclusively.
+        - `namespace` (e.g., config entry_id) is appended as a prefix to cache keys
+          to avoid collisions when multiple entries share a backing store.
+        - If flow-local `cache_get`/`cache_set` are provided, they override the
+          default helpers but are expected to operate on the same entry scope.
+
     Args:
         api_scope: Nova API scope suffix (appended to the base URL).
         hex_payload: Hex string body.
-        username: Optional username. If omitted, read from async cache.
+        username: Optional username. If omitted, resolved from the entry-scoped cache.
         session: Optional aiohttp session to reuse.
-        cache: Optional TokenCache instance for multi-account isolation. If provided,
-               this cache will be used directly instead of the global cache resolution.
+        token: Optional, direct ADM token to bypass cache lookups (for config flow).
+        cache_get/cache_set: Optional async functions for TTL metadata (flow-local overrides).
+        refresh_override: Optional async function returning a fresh token. Use
+            this to perform a *real* AAS→ADM refresh isolated from globals
+            (e.g. via `async_get_adm_token_isolated(...)`).
+        namespace: Optional key namespace (e.g., config entry_id) to avoid cache collisions.
+        cache: Optional entry-scoped TokenCache for strict multi-account separation.
 
     Returns:
         Hex-encoded response body.
+
     Raises:
         ValueError: if the hex_payload is invalid or username is unavailable.
         NovaAuthError: on 4xx client errors.
@@ -676,28 +834,58 @@ async def async_nova_request(
     """
     url = f"https://android.googleapis.com/nova/{api_scope}"
 
-    # Safe username retrieval - handle cache errors during multi-entry validation
-    if username:
-        user = username
-    else:
-        try:
-            if cache:
-                # Use explicitly passed cache for multi-account isolation
-                user = await cache.async_get_cached_value("username")
-                user = str(user) if isinstance(user, str) else None
-            else:
-                user = await async_get_username()
-        except Exception:  # noqa: BLE001
-            # Cache not available during validation or multi-entry scenario
-            user = None
+    ns_raw = (namespace or "").strip()
+    ns_prefix = f"{ns_raw}:" if ns_raw and not ns_raw.endswith(":") else ns_raw
 
-    if not user:
+    resolved_cache = cache or resolve_cache_from_provider()
+    if resolved_cache is None:
+        raise ValueError("TokenCache instance is required for Nova requests.")
+
+    async def _cache_get(key: str) -> Any:
+        if cache_get is not None:
+            return await cache_get(key)
+        return await resolved_cache.get(key)
+
+    async def _cache_set(key: str, value: Any) -> None:
+        if cache_set is not None:
+            await cache_set(key, value)
+            return
+        await resolved_cache.set(key, value)
+
+    user: str | None
+    if isinstance(username, str) and username.strip():
+        user = username.strip()
+    else:
+        val = await resolved_cache.get(username_string)
+        user = str(val).strip() if isinstance(val, str) and val else None
+        if not user:
+            fetched = await async_get_username(cache=resolved_cache)
+            user = fetched.strip() if isinstance(fetched, str) and fetched else None
+    if user is None:
         raise ValueError("Username is not available for async_nova_request.")
 
-    token = await _get_initial_token_async(user, _LOGGER, cache=cache)
+    if (
+        isinstance(token, str)
+        and token
+        and isinstance(username, str)
+        and username.strip()
+    ):
+        try:
+            await resolved_cache.set(DATA_AAS_TOKEN, token)
+            if ns_prefix:
+                await resolved_cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
+        except Exception as err:  # noqa: BLE001 - defensive caching
+            _LOGGER.debug(
+                "Failed to seed provided flow token into cache", exc_info=err
+            )
+
+    initial_token = await _get_initial_token_async(
+        user, _LOGGER, ns_prefix=(namespace or ""), cache=resolved_cache
+    )
+
     headers = {
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Authorization": f"Bearer {token}",
+        "Authorization": f"Bearer {initial_token}",
         "Accept-Language": "en-US",
         "User-Agent": NOVA_API_USER_AGENT,
     }
@@ -708,44 +896,38 @@ async def async_nova_request(
     except (binascii.Error, ValueError) as e:
         raise ValueError("Invalid hex payload for Nova request") from e
 
-    # Wrap cache functions to handle multi-entry scenarios gracefully during config flow validation
-    async def safe_get_cached_value(key: str):
-        try:
-            if cache:
-                return await cache.async_get_cached_value(key)
-            else:
-                return await async_get_cached_value(key)
-        except Exception:  # noqa: BLE001
-            # Cache unavailable (multi-entry validation) - return None to skip TTL logic
-            return None
-
-    async def safe_set_cached_value(key: str, value):
-        try:
-            if cache:
-                await cache.async_set_cached_value(key, value)
-            else:
-                await async_set_cached_value(key, value)
-        except Exception:  # noqa: BLE001
-            # Cache unavailable (multi-entry validation) - skip caching
-            pass
+    # Select cache/refresh providers (entry-scoped TokenCache)
+    if refresh_override is not None:
+        rf_fn: Callable[[], Awaitable[str | None]] = refresh_override
+    else:
+        rf_fn = lambda: async_get_adm_token_api(user, cache=resolved_cache)  # noqa: E731
 
     policy = AsyncTTLPolicy(
-        username=user, logger=_LOGGER,
-        get_value=safe_get_cached_value, set_value=safe_set_cached_value,
-        refresh_fn=lambda: async_get_adm_token_api(user, cache=cache),
+        username=user,
+        logger=_LOGGER,
+        get_value=_cache_get,
+        set_value=_cache_set,
+        refresh_fn=rf_fn,
         set_auth_header_fn=lambda bearer: headers.update({"Authorization": bearer}),
+        ns_prefix=(namespace or ""),
     )
-    await policy.pre_request()
+    await policy.async_pre_request()
 
     ephemeral_session = False
     if session is None:
-        if _HASS_REF:
+        hass_ref = _STATE.get("hass")
+        if hass_ref:
             # Use the HA-managed shared session for best performance and resource management.
-            from homeassistant.helpers.aiohttp_client import async_get_clientsession
-            session = async_get_clientsession(_HASS_REF)
+            async_get_clientsession = import_module(
+                "homeassistant.helpers.aiohttp_client"
+            ).async_get_clientsession
+
+            session = async_get_clientsession(hass_ref)
         else:
             # Fallback for environments without a shared session (e.g., standalone scripts).
-            session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True))
+            session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
+            )
             ephemeral_session = True
 
     try:
@@ -755,59 +937,106 @@ async def async_nova_request(
             attempt = retries_used + 1
             try:
                 timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
-                async with session.post(url, headers=headers, data=payload, timeout=timeout, allow_redirects=False) as response:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    data=payload,
+                    timeout=timeout,
+                    allow_redirects=False,
+                ) as response:
                     content = await response.read()
                     status = response.status
-                    _LOGGER.debug("Nova API async request to %s: status=%d", api_scope, status)
+                    _LOGGER.debug(
+                        "Nova API async request to %s: status=%d", api_scope, status
+                    )
 
-                    if status == 200:
+                    if status == HTTP_OK:
                         return content.hex()
-                    
-                    text_snippet = _redact(_beautify_text(content.decode(errors='ignore')))
-                    
-                    if status == 401:
+
+                    text_snippet = _redact(
+                        _beautify_text(content.decode(errors="ignore"))
+                    )
+
+                    if status == HTTP_UNAUTHORIZED:
                         lvl = logging.INFO if not refreshed_once else logging.WARNING
-                        _LOGGER.log(lvl, "Nova API async request to %s: 401 Unauthorized. Refreshing token.", api_scope)
-                        await policy.on_401()
+                        _LOGGER.log(
+                            lvl,
+                            "Nova API async request to %s: 401 Unauthorized. Refreshing token.",
+                            api_scope,
+                        )
+                        await policy.async_on_401()
                         if not refreshed_once:
                             refreshed_once = True
-                            continue # Free retry
+                            # Allow time for the refreshed token to propagate across Google backends
+                            # before retrying the request.
+                            await asyncio.sleep(3.0)
+                            continue  # Free retry
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")
 
-                    if status in (408, 429) or 500 <= status < 600:
+                    if status in (408, HTTP_TOO_MANY_REQUESTS) or (
+                        HTTP_SERVER_ERROR_MIN <= status < HTTP_SERVER_ERROR_MAX
+                    ):
                         if retries_used < NOVA_MAX_RETRIES:
-                            delay = _compute_delay(attempt, response.headers.get("Retry-After"))
+                            delay = _compute_delay(
+                                attempt, response.headers.get("Retry-After")
+                            )
                             _LOGGER.info(
                                 "Nova API async request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                api_scope, status, delay, retries_used + 1, NOVA_MAX_RETRIES
+                                api_scope,
+                                status,
+                                delay,
+                                retries_used + 1,
+                                NOVA_MAX_RETRIES,
                             )
                             retries_used += 1
                             await asyncio.sleep(delay)
                             continue
                         else:
-                            _LOGGER.error("Nova API async request to %s failed after %d attempts with status %d.", api_scope, retries_used + 1, status)
-                            if status == 429:
-                                raise NovaRateLimitError(f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts.")
-                            raise NovaHTTPError(status, f"Nova API failed after {NOVA_MAX_RETRIES} attempts.")
-                    
-                    raise NovaAuthError(status, text_snippet)
+                            _LOGGER.error(
+                                "Nova API async request to %s failed after %d attempts with status %d.",
+                                api_scope,
+                                retries_used + 1,
+                                status,
+                            )
+                    if status == HTTP_TOO_MANY_REQUESTS:
+                        raise NovaRateLimitError(
+                            f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
+                        )
+                    raise NovaHTTPError(
+                        status,
+                        f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
+                    )
+
+                raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
                 raise
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            except (TimeoutError, aiohttp.ClientError) as e:
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
-                    _LOGGER.info("Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                                 api_scope, type(e).__name__, delay, retries_used + 1, NOVA_MAX_RETRIES)
+                    _LOGGER.info(
+                        "Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
+                        api_scope,
+                        type(e).__name__,
+                        delay,
+                        retries_used + 1,
+                        NOVA_MAX_RETRIES,
+                    )
                     retries_used += 1
                     await asyncio.sleep(delay)
                     continue
                 else:
-                    _LOGGER.error("Nova API async request to %s failed after %d attempts with %s.", api_scope, retries_used + 1, type(e).__name__)
-                    raise NovaError(f"Nova API request failed after retries: {e}") from e
+                    _LOGGER.error(
+                        "Nova API async request to %s failed after %d attempts with %s.",
+                        api_scope,
+                        retries_used + 1,
+                        type(e).__name__,
+                    )
+                    raise NovaError(
+                        f"Nova API request failed after retries: {e}"
+                    ) from e
 
     finally:
         if ephemeral_session and session:
             await session.close()
-

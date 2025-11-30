@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/FMDNCrypto/sha.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -5,6 +6,7 @@
 
 import hashlib
 import hmac
+
 
 def calculate_truncated_sha256(identity_key: bytes, operation: int) -> bytes:
     identity_key_bytes = identity_key
@@ -16,6 +18,8 @@ def calculate_truncated_sha256(identity_key: bytes, operation: int) -> bytes:
     return truncated_hash
 
 
-def calculate_hmac_sha256(key, message):
+def calculate_hmac_sha256(
+    key: bytes | bytearray, message: bytes | bytearray
+) -> str:
     hmac_obj = hmac.new(key, message, hashlib.sha256)
     return hmac_obj.hexdigest()

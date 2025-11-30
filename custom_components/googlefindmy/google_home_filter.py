@@ -23,7 +23,7 @@ Public API (stable)
 - `get_home_zone_attributes() -> dict[str, float] | None`   # latitude/longitude[/radius]
 - `is_device_at_home(device_id) -> bool`
 - `reset_spam_tracking(device_id) -> None`
-- `should_filter_detection(device_id, location_name) -> tuple[bool, dict | None]`
+- `should_filter_detection(device_id, location_name) -> tuple[bool, dict[str, float] | None]`
 
 Behavioral note
 ---------------
@@ -38,14 +38,16 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Mapping, Callable
+from collections.abc import Callable, Mapping
+from collections.abc import Callable as TypingCallable
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE
-from homeassistant.core import HomeAssistant, State, callback
+from homeassistant.core import Event, HomeAssistant, State
+from homeassistant.core import callback as ha_callback
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
@@ -56,6 +58,43 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from homeassistant.helpers.entity_registry import EntityRegistry
+    from homeassistant.helpers.event import (
+        CALLBACK_TYPE as _CallbackType,
+    )
+    from homeassistant.helpers.event import (
+        async_track_state_change_event as _AsyncTrackStateChangeEvent,
+    )
+else:
+    _CallbackType = Callable[[], None]
+
+
+def _async_track_state_change_event(*args: Any, **kwargs: Any) -> _CallbackType:
+    """Proxy ``async_track_state_change_event`` with lazy import semantics.
+
+    Tests stub the helper by pre-populating ``homeassistant.helpers.event`` with a
+    lightweight module. Importing inside this function ensures those stubs remain
+    effective and avoids importing Home Assistant's HTTP stack during cold starts.
+    """
+
+    from homeassistant.helpers import event as ha_event
+
+    helper = cast("_AsyncTrackStateChangeEvent", ha_event.async_track_state_change_event)
+    return cast("_CallbackType", helper(*args, **kwargs))
+
+
+def callback(
+    func: TypingCallable[[GoogleHomeFilter, Event | None], None],
+) -> TypingCallable[[GoogleHomeFilter, Event | None], None]:
+    """Typed wrapper around Home Assistant's callback decorator."""
+
+    return cast(
+        TypingCallable[["GoogleHomeFilter", Event | None], None],
+        ha_callback(func),
+    )
+
 
 # Keep local names for zone attributes to avoid fragile imports.
 ZONE_ATTR_RADIUS = "radius"
@@ -91,7 +130,9 @@ class GoogleHomeFilter:
         "_unsub_zone_listener",
     )
 
-    def __init__(self, hass: HomeAssistant, config_like: Mapping[str, Any] | ConfigEntry) -> None:
+    def __init__(
+        self, hass: HomeAssistant, config_like: Mapping[str, Any] | ConfigEntry
+    ) -> None:
         """Initialize the Google Home filter.
 
         Args:
@@ -115,7 +156,7 @@ class GoogleHomeFilter:
         self._refresh_home_zone()
 
         # Listen specifically for changes to zone.home to refresh cache cheaply.
-        self._unsub_zone_listener = async_track_state_change_event(
+        self._unsub_zone_listener = _async_track_state_change_event(
             self.hass, ["zone.home"], self._on_home_zone_changed
         )
 
@@ -123,7 +164,9 @@ class GoogleHomeFilter:
     # Configuration helpers
     # ---------------------------------------------------------------------
 
-    def _apply_from_mapping_or_entry(self, source: Mapping[str, Any] | ConfigEntry) -> None:
+    def _apply_from_mapping_or_entry(
+        self, source: Mapping[str, Any] | ConfigEntry
+    ) -> None:
         """Load settings from ConfigEntry (options-first) or from a plain mapping.
 
         Accepted keyword formats:
@@ -143,16 +186,24 @@ class GoogleHomeFilter:
             )
             keywords_raw = source.options.get(
                 OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-                source.data.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS),
+                source.data.get(
+                    OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+                ),
             )
         else:
             enabled = bool(source.get(OPT_GOOGLE_HOME_FILTER_ENABLED, True))
-            keywords_raw = source.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS)
+            keywords_raw = source.get(
+                OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+            )
 
         self._enabled = bool(enabled)
         self._keywords = self._normalize_keywords(keywords_raw)
 
-        _LOGGER.debug("GoogleHomeFilter loaded (enabled=%s, keywords=%s)", self._enabled, self._keywords)
+        _LOGGER.debug(
+            "GoogleHomeFilter loaded (enabled=%s, keywords=%s)",
+            self._enabled,
+            self._keywords,
+        )
 
     def apply_from_entry(self, entry: ConfigEntry) -> None:
         """(Re)load settings from a ConfigEntry."""
@@ -161,7 +212,11 @@ class GoogleHomeFilter:
     def update_config(self, config_or_entry: Mapping[str, Any] | ConfigEntry) -> None:
         """Update filter configuration (accepts dict or ConfigEntry)."""
         self._apply_from_mapping_or_entry(config_or_entry)
-        _LOGGER.info("Updated Google Home filter config: enabled=%s, keywords=%s", self._enabled, self._keywords)
+        _LOGGER.info(
+            "Updated Google Home filter config: enabled=%s, keywords=%s",
+            self._enabled,
+            self._keywords,
+        )
 
     # ---------------------------------------------------------------------
     # Normalization / parsing
@@ -209,7 +264,7 @@ class GoogleHomeFilter:
     # ---------------------------------------------------------------------
 
     @callback
-    def _on_home_zone_changed(self, _event) -> None:
+    def _on_home_zone_changed(self, _event: Event | None) -> None:
         """Refresh cached Home-zone attributes when `zone.home` changes."""
         self._refresh_home_zone()
 
@@ -237,10 +292,12 @@ class GoogleHomeFilter:
             # 'radius' is optional; keep as float if present and valid
             if ZONE_ATTR_RADIUS in attrs and attrs[ZONE_ATTR_RADIUS] is not None:
                 try:
-                    self._home_zone_attrs["radius"] = float(attrs[ZONE_ATTR_RADIUS])  # type: ignore[index]
+                    radius = float(attrs[ZONE_ATTR_RADIUS])
                 except (TypeError, ValueError):
                     # Ignore malformed radius
                     pass
+                else:
+                    self._home_zone_attrs["radius"] = radius
         else:
             self._home_zone_attrs = None
 
@@ -266,14 +323,16 @@ class GoogleHomeFilter:
             # Prefer zone.home
             st = self.hass.states.get("zone.home")
             if st:
-                return st.attributes.get("friendly_name", "Home")
+                friendly_name = st.attributes.get("friendly_name", "Home")
+                return str(friendly_name)
 
             # Fallback: scan all zone.* states
             zone_states: list[State] = self.hass.states.async_all(ZONE_DOMAIN)
             for zst in zone_states:
                 fn = str(zst.attributes.get("friendly_name", "")).lower()
                 if "home" in zst.entity_id.lower() or "home" in fn:
-                    return zst.attributes.get("friendly_name", "Home")
+                    friendly_name = zst.attributes.get("friendly_name", "Home")
+                    return str(friendly_name)
             return "Home"
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed to resolve Home zone name: %s", err)
@@ -296,10 +355,12 @@ class GoogleHomeFilter:
         Uses the unique_id shape: f"{DOMAIN}_{device_id}" via registry shortcut.
         """
         try:
-            reg = er.async_get(self.hass)
+            reg: EntityRegistry = er.async_get(self.hass)
             unique_id = f"{DOMAIN}_{device_id}"
-            entity_id = reg.async_get_entity_id("device_tracker", DOMAIN, unique_id)
-            if entity_id:
+            entity_id: str | None = reg.async_get_entity_id(
+                "device_tracker", DOMAIN, unique_id
+            )
+            if entity_id is not None:
                 return entity_id
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Entity registry lookup failed for %s: %s", device_id, err)
@@ -355,7 +416,9 @@ class GoogleHomeFilter:
     # Filter decision
     # ---------------------------------------------------------------------
 
-    def should_filter_detection(self, device_id: str, location_name: str | None) -> tuple[bool, dict | None]:
+    def should_filter_detection(
+        self, device_id: str, location_name: str | None
+    ) -> tuple[bool, dict[str, float] | None]:
         """Return (should_filter, replacement_attributes).
 
         Semantics:
@@ -380,7 +443,11 @@ class GoogleHomeFilter:
             home_name_cf = str(self.get_home_zone_name() or "Home").strip().casefold()
             if loc_cf in {"home", home_name_cf}:
                 if self._should_prevent_spam(device_id):
-                    _LOGGER.debug("Filtering 'home' spam for %s (location_name=%r)", device_id, location_name)
+                    _LOGGER.debug(
+                        "Filtering 'home' spam for %s (location_name=%r)",
+                        device_id,
+                        location_name,
+                    )
                     return True, None
                 self._update_spam_tracking(device_id)
                 return False, None
@@ -392,7 +459,9 @@ class GoogleHomeFilter:
         # Already home → debounce-only
         if self.is_device_at_home(device_id):
             if self._should_prevent_spam(device_id):
-                _LOGGER.debug("Filtering Google Home spam for %s at %s", device_id, location_name)
+                _LOGGER.debug(
+                    "Filtering Google Home spam for %s at %s", device_id, location_name
+                )
                 return True, None
             self._update_spam_tracking(device_id)
             return False, None

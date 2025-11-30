@@ -1,4 +1,4 @@
-# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> 
+# Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 >[!CAUTION]
 > ## **V1.6 Semi-Breaking Change**
@@ -19,10 +19,94 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 [Google FindMy Discord Server](https://discord.gg/U3MkcbGzhc)
 
 ---
-<img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
+<img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
+
+>[!CAUTION]
+>**Home Assistant Core 2025.10 or newer is required.** The integration relies on Core-managed config subentry scheduling and device-registry hooks introduced alongside the 2025.10 cycle. Older builds lack the platform-loading behavior and registry keywords exercised by the tracker/service subentries and are **not supported**.
+
+### Continuous integration checks
+
+Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
+
+For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification) (they call out `make test-stubs`, which typically finishes in about five minutes in hosted environments).
+
+#### Quickstart checks
+
+- **Clean caches**: Run `make clean` (or the equivalent `find … '__pycache__' -prune` command from [AGENTS.md](AGENTS.md#environment-verification)) after test runs to avoid stale bytecode interfering with CI results.
+- **Connectivity probe**: Capture a quick HTTP/HTTPS check (for example, `python -m pip install --dry-run --no-deps pip`) before longer installs so summaries document network status.
+- **Home Assistant stubs**: Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` right before `pytest -q` when you want the fastest path to a green suite without the full toolchain (allow roughly five minutes for downloads/builds in hosted environments).
+
+#### Local verification commands
+
+- `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
+- `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
+- `make wheelhouse` — pre-download the Home Assistant development dependencies into `.wheelhouse/` so subsequent virtual environment rebuilds reuse cached wheels instead of re-fetching from PyPI.
+- `make clean-wheelhouse` — delete `.wheelhouse/` (and any manifests or sentinels inside) when you want to prune cached wheels after a bootstrap run or before refreshing dependencies from scratch.
+- `make install-ha-stubs` — install the packages listed in `requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
+- `make test-unload` — activate the managed virtual environment and run the focused parent-unload rollback regression (`tests/test_unload_subentry_cleanup.py`) so you can confirm the recovery guardrails without executing the entire suite.
+- `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
+- `python script/list_wheelhouse.py` — print a grouped index of cached wheels (optionally against `--manifest script/ssot_wheel_manifest.txt`) before running lengthy installs so you can confirm the cache satisfies the manifest without scrolling through pip logs. Pass `--allow-missing` to preview the formatter when `.wheelhouse/ssot` has not been generated yet.
+- `make test-ha` — provision the `.venv` environment (installing `homeassistant` and `pytest-homeassistant-custom-component` when missing), execute the targeted regression smoke tests, and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` (or `term-summary`, `term-skip-covered`, etc.) for slimmer CI logs, and reuse an existing wheel cache without redownloading by passing `make test-ha SKIP_WHEELHOUSE_REFRESH=1`.
+
+### Installing Home Assistant test dependencies on demand
+
+The repository already ships a lightweight bootstrap for the real Home Assistant
+test stack. Run `make install-ha-stubs` from the project root to install
+`homeassistant` and `pytest-homeassistant-custom-component` into your current
+Python environment without creating the `.venv` managed by other helpers. This
+is the quickest way to unblock `pytest` after cloning the repository or when a
+CI run reports missing Home Assistant packages.
+
+If you prefer an isolated environment, `make test-ha` provisions `.venv/` using
+the cached wheels under `.wheelhouse/`, installs the same stub dependencies, and
+then executes the regression suite. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse an
+existing cache or adjust `PYTEST_ARGS`/`PYTEST_COV_FLAGS` to narrow the test
+selection while still benefiting from the automated dependency install.
+
+#### Wheelhouse cache management
+
+`make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
+
+##### Sharing cached wheels between environments
+
+The `make wheelhouse` target pulls down the heavy `homeassistant` and
+`pytest-homeassistant-custom-component` wheels into `.wheelhouse/`. Package the
+cache once and reuse it on future containers or machines instead of redownloading
+hundreds of megabytes every regression run:
+
+```bash
+tar -czf wheelhouse-ha-cache.tgz -C .wheelhouse .
+```
+
+Copy `wheelhouse-ha-cache.tgz` to the new environment, extract it at the project
+root, and the next `make wheelhouse`/`make test-ha` invocation will reuse the
+cached wheels immediately:
+
+```bash
+tar -xzf wheelhouse-ha-cache.tgz -C .
+```
+
+When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
+`make wheelhouse` to regenerate the cache before producing a fresh snapshot.
+
+#### Running Home Assistant integration tests locally
+
+1. Create a virtual environment for development: `python -m venv .venv`
+2. Activate it for the current shell: `. .venv/bin/activate`
+3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`):
+   - Full toolchain (linting, typing, tests): `pip install -r requirements-dev.txt`
+   - Minimal options-flow test stack (`homeassistant`, pytest helpers, and `bcrypt` only): `./script/install_options_flow_test_deps.sh`
+4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py tests/test_homeassistant_callback_stub_helper.py` or simply `make test-ha` (override pytest flags with `make test-ha PYTEST_ARGS="--maxfail=1 -k callback"` as needed)
+5. When finished, leave the environment with `deactivate`
+
+### Available Make targets
+
+- `make lint`: Run `ruff check .` across the entire repository to ensure lint compliance before sending a pull request.
+- `make clean`: Remove Python bytecode caches via `script/clean_pycache.py` to keep local environments tidy during development.
+- `make test-unload`: Execute the targeted unload regression suite (`tests/test_unload_subentry_cleanup.py`) inside the managed virtual environment to verify the parent-unload rollback path.
 
 ---
-## Features 
+## Features
 
 - 🗺️ **Real-time Device Tracking**: Track Google FindMy devices with location data, sourced from the FindMy network
 - ⏱️ **Configurable Polling**: Flexible polling intervals with rate limit protection
@@ -32,7 +116,9 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - #️⃣ **Multi-Account Support**: Add multiple Find Hub Google accounts that show up separately
 - ❣️ **More to come!**
-  
+
+The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.7.0 metadata.
+
 >[!NOTE]
 >**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
 >
@@ -64,7 +150,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 3. Copy the entire contents of the secrets.json file.
     - Specifically, open the file in a text editor, select all, and copy.
 
-### <ins>Authentication Part 2 (Home Assistant Steps)</ins> 
+### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
 4. Add the integration to your Home Assistant install.
 5. In Home Assistant, paste the copied text from secrets.json when prompted.
 6. After completing authentication and adding devices, RESTART Home Assistant!
@@ -73,21 +159,92 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 >[!NOTE]
 >Recently, some have had issues with the script from the repository above.  If you follow all the steps in Leon's repository and are unable to get through the main.py sequence due to errors, please try using my modification of the script [BACKUP:GoogleFindMyTools](https://github.com/BSkando/GoogleFindMyTools)
 
+### Automatic discovery & credential updates
+
+- **Auth/secrets.json watcher:** Home Assistant now monitors the integration's `Auth/secrets.json` file. Dropping a new bundle into `custom_components/googlefindmy/Auth/` immediately opens the config flow with the email and tokens pre-filled, so you can confirm the entry without pasting anything manually.
+- **Update flows for existing entries:** When the watcher detects refreshed credentials for an account that is already configured, the integration pushes a `discovery_update` flow. Accepting it reauthenticates the existing entry and keeps all devices and options intact.
+- **Cloud discovery channel:** Cloud-triggered discovery continues to operate in parallel, using the same deduplication logic as the secrets watcher. Regardless of source, duplicate flows are suppressed using Home Assistant's `DiscoveryKey` mechanism.
+
+### Multi-account behavior and duplicate protection
+
+- Home Assistant supports connecting multiple Google accounts, but **only one config entry per email address stays active**. When duplicate entries share the same Google account, the integration automatically disables and unloads the non-authoritative entries to prevent device duplication and token conflicts.
+- The disabled entries remain visible in **Settings → Devices & Services** with an integration-managed disabled state so you can review or remove them manually. Reactivating a disabled duplicate requires removing the authoritative entry first or supplying credentials for a different Google account.
+
 ## Configuration Options
 
 Accessible via the ⚙️ cogwheel button on the main Google Find My Device Integration page.
 
+> [!TIP]
+> The options table is a mirror of `OPTION_KEYS` and `DEFAULT_*` in `custom_components/googlefindmy/const.py`, which is the single source of truth for option order and defaults.
+
 | **Option** | **Default** | **Units** | **Description** |
 | :---: | :---: | :---: | --- |
-| tracked_devices | - | - | Select which devices from your account are tracked with the integration. |
-| location_poll_interval | 300 | seconds | How often the integration runs a poll cycle for all devices |
-| device_poll_delay | 5 | seconds | How much time to wait between polling devices during a poll cycle |
-| min_accuract_threshold | 100 | meters | Distance beyond which location data will be rejected from writing to logbook/recorder |
-| movement_threshold | 50 | meters | Distance a device must travel to show an update in device location |
-| google_home_filter_enabled | true | toggle | Enables/disables Google Home device location update filtering |
-| google_home_filter_keywords | various | text input | Keywords, separated by commas, that are used in filtering out location data from Google Home devices |
-| enable_stats_entities | true | toggle | Enables/disables "Google Find My Integration" statistics entity, which displays various useful statistics, including when polling is active |
-| map_vew_token_expiration | false | toggle | Enables/disables expiration of generated API token for accessing recorder history, used in Map View location data queries |
+| `ignored_devices` | none | - | Devices hidden from tracking. Use **Manage ignored devices** to restore them. |
+| `location_poll_interval` | 300 | seconds | How often the integration runs a poll cycle for all devices. |
+| `device_poll_delay` | 5 | seconds | How much time to wait between polling devices during a poll cycle. |
+| `min_poll_interval` | 60 | seconds | Hard lower bound between poll cycles and the manual locate cooldown. |
+| `min_accuracy_threshold` | 100 | meters | Distance beyond which location data is rejected for recorder/logbook writes. |
+| `movement_threshold` | 50 | meters | Minimum distance change required before emitting a location update. |
+| `allow_history_fallback` | false | toggle | Falls back to Recorder history when no live device tracker state is available. |
+| `enable_stats_entities` | true | toggle | Exposes the "Google Find My Integration" statistics entity (polling status, counters, etc.). |
+| `google_home_filter_enabled` | true | toggle | Enables or disables Google Home device location filtering. |
+| `google_home_filter_keywords` | nest,google,home,mini,hub,display,chromecast,speaker | text input | Comma-separated keywords used to filter out location data from Google Home devices. |
+| `map_view_token_expiration` | false | toggle | Enables expiration of generated API tokens used in Map View history queries. |
+| `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
+| `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
+
+### Google Home filter behavior
+
+The Google Home filter helps prevent noisy location updates from speakers and displays that frequently report "Home":
+
+* **Defaults**: The filter starts enabled with keywords `nest`, `google`, `home`, `mini`, `hub`, `display`, `chromecast`, and `speaker`.
+* **Detection**: Any detection whose semantic name contains one of these keywords is treated as a Google/Nest/Chromecast device.
+* **Substitution**: When a Google Home detection is away from Home, the integration substitutes the `zone.home` latitude/longitude (and radius when available) so Home Assistant resolves the tracker to `home` instead of the semantic label.
+* **Debounce window**: Consecutive "home" or Google Home detections for the same device within 15 minutes are suppressed to reduce spam.
+* **Tuning**: Adjust `google_home_filter_enabled` and `google_home_filter_keywords` from the integration's options flow to refine matching or disable substitution. The keywords field accepts comma-separated values or a list; changes update both the detection logic and the config flow copy.
+
+## Subentries and feature groups
+
+Home Assistant's config-entry **subentries** let the integration organize devices and helper entities into feature groups. The coordinator deterministically provisions two subentries—`SERVICE_SUBENTRY_KEY` and `TRACKER_SUBENTRY_KEY`—and recreates them after reloads or restarts so entity grouping stays stable across updates. Both subentries persist alongside the config entry, storing options, `visible_device_ids`, and diagnostics based on their constant identifiers.
+
+Home Assistant 2025.11+ handles subentry platform scheduling automatically. The parent `async_setup_entry` forwards the platform list **once** (no `config_subentry_id` allowed). Each platform then iterates the subentry coordinators on `entry.runtime_data` and calls `async_add_entities(..., config_subentry_id=<subentry_id>)` so devices and entities attach to the correct child entry. This pattern prevents orphaned tracker devices and avoids the silent failure caused by manual per-subentry forwarding.
+
+- **Parent–child enforcement:** Each child is a `ConfigEntry` whose `parent_entry_id` links it to the owning parent. Device Registry entries attach to the parent or a specific child—never both—and subentry `unique_id` values only need to be unique within the parent scope.
+- **Lifecycle guardrail:** Leave `async_setup(hass, config)` for domain-level helpers only. Instance work lives in `async_setup_entry`, which receives the populated entry and iterates `entry.subentries` so the parent and every child load without triggering `homeassistant.config_entries.UnknownEntry` during startup or reloads.
+
+### Service hub subentry
+
+The service hub subentry, identified by `SERVICE_SUBENTRY_KEY`, represents the account-level hub device for the integration.
+
+- Home Assistant localizes the hub device name in the UI using `SERVICE_DEVICE_TRANSLATION_KEY` instead of a hard-coded string, so translations stay synchronized with the codebase.
+- The hub publishes only integration-scope diagnostics (polling status, authentication health, statistics counters) and intentionally surfaces **zero tracker devices** via `visible_device_ids`. It is the logical parent for trackers, not a list of them.
+- All diagnostic entities exposed here point to a shared service device in Home Assistant's device registry. Each entity still exports a stable unique ID and provides `DeviceInfo`, which Home Assistant uses to group the diagnostics under the service hub in the UI.[1]
+- This shared hub device is what users see as the central integration device in the UI, reflecting Home Assistant's hub-style integration guidance.[1]
+
+### Tracker subentry
+
+The tracker subentry, keyed by `TRACKER_SUBENTRY_KEY`, represents the phones, tablets, and tags imported from Google Find My Device.
+
+- Each tracker entry backs per-device entities such as `device_tracker`, “last seen” timestamp sensors, and control buttons for actions like ring / play sound / locate.
+- Trackers register as individual device entries in the Home Assistant device registry with their own unique IDs and `DeviceInfo`. They remain standalone devices—Home Assistant automatically associates them with the correct config-entry subentry without manual `via_device` or `via_device_id` pointers.[1]
+- Trackers never appear in the service hub’s `visible_device_ids` list and are never assigned to the service hub subentry; they stay within the tracker subentry so repairs and options target the correct devices.
+
+### Subentry flow abort reasons
+
+Config flows communicate state transitions through **abort reasons**, which power the toast notifications and translation strings surfaced in Home Assistant dialogs. Subentry-related flows use the following reason keys:
+
+| Reason key | Where it appears | Meaning |
+| --- | --- | --- |
+| `invalid_subentry` | Reconfigure handlers, options steps, and repairs forms | The requested feature group could not be resolved or was removed during the flow. |
+| `repairs_no_subentries` | Repairs entry point and move action | No feature groups exist, so the repairs workflow cannot continue. |
+| `repair_no_devices` | Repairs → Move devices | A move operation was attempted without selecting any devices. |
+| `subentry_move_success` | Repairs → Move devices | The selected devices were re-assigned successfully; the flow exits with a success toast. |
+| `subentry_delete_invalid` | Repairs → Delete subentry | There are too few removable feature groups to continue. |
+| `subentry_remove_failed` | Repairs → Delete subentry | Removing the requested feature group failed unexpectedly. |
+| `subentry_delete_success` | Repairs → Delete subentry | A feature group was deleted (after optional device reassignment). |
+| `reconfigure_successful` | Credentials refresh flow | The integration applied new credentials and refreshed the chosen feature group. |
+
+The `strings.json` and translation files under `custom_components/googlefindmy/translations/` provide localized messages for each key so UI notifications remain consistent.
 
 ## Services (Actions)
 
@@ -95,9 +252,47 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 | Action | Attribute | Description |
 | :---: | :---: | --- |
-| googlefindmy.locate_device | Device ID | Request fresh location data for a specific device. |
-| googlefindmy.play_sound | Device ID | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
+| googlefindmy.locate_device | Device ID (required) | Request fresh location data for a specific device. |
+| googlefindmy.play_sound | Device ID (required) | Play a sound on a specific device for location assistance.  Devices must be capable of playing a sound.  Most devices should be compatible. |
+| googlefindmy.stop_sound | Device ID (required) | Stop the active sound on the selected device. |
+| googlefindmy.locate_external | Device ID (required), Device Name (optional) | Trigger the locate flow via the external helper while optionally labeling logs with a human-readable device name. |
 | googlefindmy.refresh_device_urls | - | Refreshes all device Map View URLs.  Useful if you are having problems with accessing Map View pages. |
+| googlefindmy.rebuild_device_registry | - | Maintenance: rebuilds device registry links for Google Find My hubs and removes tracker devices incorrectly tied to the parent entry. |
+| googlefindmy.rebuild_registry | Config Entry ID(s) (optional) | Reload integration config entries; without a payload the first configured entry reloads, or target specific IDs by passing one or many `entry_id` values. |
+
+## Supported devices and functions
+
+- **Device coverage:** Phones, tablets, Wear OS devices, earbuds, and compatible Bluetooth trackers surfaced in the Google Find My Device network.  Any device that appears in the official Google Find My interface is eligible to be imported.
+- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, and optional helper entities (statistics, sound trigger button) depending on device capabilities.
+- **Action support:** Sound playback is available on hardware that exposes the native "Play sound" action within Google's ecosystem.  The integration hides the button on devices that do not advertise support, aligning with [Home Assistant action documentation](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/).
+
+## Data updates and background behavior
+
+- **Coordinator-driven updates:** Location and metadata are refreshed through Home Assistant's [`DataUpdateCoordinator`](https://developers.home-assistant.io/docs/integration_fetching_data/) with a default 300-second polling interval.  Staggered per-device delays keep API calls within Google's rate limits.
+- **Manual refresh:** Call the `googlefindmy.locate_device` action to request fresh data outside the scheduled polling cycle.  The integration debounces requests to avoid repeated queries that would exceed the appropriate polling guidance.
+- **Repair flows:** When authentication expires or Google invalidates API tokens, the integration raises a [Home Assistant repair issue](https://developers.home-assistant.io/docs/core/platform/repairs/) that guides you through reauthentication without removing the config entry.
+
+## Known limitations
+
+- **Historical data availability:** Map View history is generated locally and depends on the Recorder integration retaining statistics; pruning recorder data will remove historical traces.
+- **Offline devices:** Google only reports the last known location for powered-off or offline hardware.  Devices may appear as `unavailable` until they reconnect to the Find My network.
+- **Authentication tooling:** Generating `Auth/secrets.json` currently relies on the external GoogleFindMyTools scripts.  Future upstream changes to Google's login flow may require updated tooling before the integration can connect again.
+- **Multiple households:** Home Assistant imports all trackers from the authenticated Google account.  Fine-grained sharing to limit visibility per household member is not yet available and should be handled via entity permissions.
+
+## Uninstallation / Removal
+
+1. Disable or delete related automations, dashboards, and notification flows that reference `googlefindmy` entities to prevent "entity not found" errors after removal.
+2. Open **Settings → Devices & Services → Integrations → Google Find My Device**.
+3. Use the **⋮ menu → Delete** action to remove the config entry.  Home Assistant will unload entities and purge the stored token cache.
+4. If you installed through HACS, remove the integration from HACS to stop future updates.  For manual installs, delete `custom_components/googlefindmy/` from your Home Assistant configuration directory.
+5. Restart Home Assistant to clear any cached services.  If you encounter lingering repairs, resolve them through the [Home Assistant Repairs dashboard](https://www.home-assistant.io/integrations/repairs/).
+
+## Concrete use cases
+
+- Trigger a sound alert on misplaced earbuds via the `googlefindmy.play_sound` action when a BLE beacon indicates they are nearby.
+- Build an automation that notifies you when a tracker enters or leaves a geofenced zone based on the `device_tracker` entity state.
+- Monitor integration health by surfacing the statistics entity in dashboards to verify polling intervals and API latency.
+- Combine the Map View history with [companion dashboards](https://github.com/BSkando/GoogleFindMy-Card) to visualize multi-day movement patterns for shared family devices.
 
 ## Troubleshooting
 
@@ -115,7 +310,75 @@ The integration respects Google's rate limits by:
 - Sequential device polling (one device at a time)
 - Configurable delays between requests
 - Minimum poll interval enforcement
+
+### "Invalid handler specified" when adding the integration
+- Home Assistant shows this error when the config flow fails to register. Double-check that `custom_components/googlefindmy/manifest.json` sets `"domain": "googlefindmy"` and `"config_flow": true`.
+- Inspect `custom_components/googlefindmy/config_flow.py` to ensure the `ConfigFlow` class inherits from `config_entries.ConfigFlow` and declares the domain via `class ConfigFlow(..., domain=DOMAIN)` (or `domain = DOMAIN`).
+- Enable targeted debug logging while reproducing the issue to confirm the handler lifecycle:
+  ```yaml
+  logger:
+    default: info
+    logs:
+      homeassistant.config_entries: debug
+      homeassistant.data_entry_flow: debug
+      homeassistant.loader: debug
+      homeassistant.setup: debug
+      custom_components.googlefindmy: debug
+  ```
+  You can apply the same levels temporarily via **Settings → System → Logs → Configure** or by calling the `logger.set_level` service.
+- Review the Home Assistant logs for the integration's import-time entry (`ConfigFlow import OK; class=ConfigFlow, class.domain=googlefindmy, const.DOMAIN=googlefindmy, class_id=...`) followed by the registry verification messages to ensure the handler is present in `HANDLERS`.
+- Run `pytest tests/test_config_flow_basic.py -q` to exercise the smoke tests that validate the handler registration and user-step initialization before retrying the flow.
 - Automatic retry with exponential backoff
+
+### Running pip-audit behind TLS inspection
+
+Corporate proxies that intercept HTTPS often replace the default certificate
+authority chain, which breaks tools such as `pip-audit`. Use
+`python script/bootstrap_truststore.py` to merge your organization's CA bundle
+with the upstream [``certifi``](https://pypi.org/project/certifi/) trust store
+and (optionally) generate a `pip.conf` that points at an internal PyPI mirror.
+
+1. Collect your proxy or internal PKI certificate in PEM format and save it as
+   `company-ca.pem` in the repository root.
+2. Run
+   `python script/bootstrap_truststore.py --ca-file company-ca.pem --emit-exports`.
+   The helper creates `.truststore/ca-bundle.pem` and prints the environment
+   overrides required by both `pip` and `pip-audit`.
+3. Export the recommended variables in the shell that will run security checks:
+   ```bash
+   export REQUESTS_CA_BUNDLE="$(pwd)/.truststore/ca-bundle.pem"
+   export PIP_CERT="$(pwd)/.truststore/ca-bundle.pem"
+   ```
+4. (Optional) Provide an internal package index while generating the trust
+   store, for example:
+   ```bash
+   python script/bootstrap_truststore.py \
+       --ca-file company-ca.pem \
+       --pip-config .truststore/pip.conf \
+       --index-url https://pypi.internal.example/simple \
+       --emit-exports
+   export PIP_CONFIG_FILE="$(pwd)/.truststore/pip.conf"
+   ```
+5. Invoke `pip-audit` using the normal repository instructions. The tool now
+   trusts the injected certificates and can reach either the public index or
+   your internal mirror without disabling TLS verification.
+
+The generated artifacts remain in `.truststore/` so developers can refresh
+them whenever certificates rotate without committing secrets to version
+control. The helper always creates this directory in the repository root, and
+the `.gitignore` entry ensures the resulting bundle, optional `pip.conf`, and
+any exported environment snippets never land in commits. It is safe to delete
+the folder between runs; a subsequent invocation of
+`script/bootstrap_truststore.py` recreates it with the latest certificates and
+configuration.
+
+### 401 Unauthorized responses
+- When Google's Nova endpoint returns 401, the integration now clears both the
+  entry-scoped and global ADM token cache entries before refreshing. This
+  ensures a brand-new token is minted and stored automatically, without
+  requiring you to restart Home Assistant or re-run the configuration flow.
+- The regeneration also refreshes the associated metadata so subsequent
+  requests resume with the updated token immediately.
 
 ## Privacy and Security
 
@@ -126,19 +389,66 @@ The integration respects Google's rate limits by:
 
 ## Contributing
 
-Contributions are welcome and encouraged! 
+Contributions are welcome and encouraged!
 
-To contrubuted, please:
+To contribute, please:
 1. Fork the repository
 2. Create a feature branch
-3. Test thoroughly with your Find My devices
-4. Submit a pull request with detailed description
+3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
+4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes. If the CLI entry points are unavailable, use the `python -m` fallbacks from the [module invocation primer](AGENTS.md#module-invocation-primer) to run the same commands reliably.
+5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
+6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
+7. Test thoroughly with your Find My devices
+8. Submit a pull request with detailed description
+
+For quick sanity checks during development, run the lint and type checks after bootstrapping the Home Assistant stubs:
+
+```bash
+make test-stubs
+python -m ruff check
+python -m mypy --strict
+```
+
+### Release process
+
+- Update the version in both `custom_components/googlefindmy/manifest.json` and `custom_components/googlefindmy/const.py` (`INTEGRATION_VERSION`) at the same time so the manifest metadata and runtime constants remain in sync.
+- Run the full verification suite (`ruff format --check`, targeted pytest modules, and `pytest -q`) before tagging a release to confirm the version bump did not introduce regressions.
+
+### Development Scripts
+
+Manifest validation (`hassfest`) now runs exclusively through the
+[`hassfest-auto-fix`](.github/workflows/hassfest-auto-fix.yml) workflow. Every
+push to `main` and every pull request automatically executes the
+[`home-assistant/actions/hassfest`](https://github.com/home-assistant/actions/tree/master/hassfest#readme)
+GitHub Action, which rewrites manifests when needed and re-runs the validator to
+confirm the fixes.
+
+When you need to inspect or download the results locally:
+
+1. Open the relevant workflow run from the PR or commit.
+2. Expand the **Run hassfest (may rewrite manifest)** step to review the console
+   output, or download the generated artifact directly from the workflow UI.
+3. If you need a fresh validation pass, trigger the workflow manually from the
+   **Run workflow** button in the Actions tab or by re-running the job on the PR.
+
+## Legacy CLI helpers & token cache selection
+
+Several modules still expose lightweight CLI entry points (for example the device
+listing helper and the standalone "Play/Stop Sound" examples). These scripts now
+require you to target a specific Home Assistant config entry whenever more than
+one token cache is available. Set the environment variable
+`GOOGLEFINDMY_ENTRY_ID` to the desired config entry ID before running the CLI, or
+pass a `cache=` override when instantiating the legacy `FcmReceiver` shim. If you
+omit the entry ID while multiple caches are active the CLI will abort with a
+message listing the available IDs so you can pick the right account.
 
 ## Credits
 
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
 - Firebase Cloud Messaging integration. https://github.com/home-assistant/mobile-apps-fcm-push
 - @txitxo0 for his amazing work on the MQTT based tool that I used to help kickstart this project!
+
+[1]: https://developers.home-assistant.io/blog/2019/10/05/simple-mode/?utm_source=chatgpt.com "Simple Mode in Home Assistant 1.0"
 
 ## Special thanks to some amazing contributors!
 

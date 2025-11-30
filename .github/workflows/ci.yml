@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  hassfest:
+    name: Hassfest validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Detect hassfest auto-fix check
+        id: hassfest_autofix
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+
+          repository = os.environ["GITHUB_REPOSITORY"]
+          target_sha = os.environ["TARGET_SHA"]
+          token = os.environ.get("GITHUB_TOKEN")
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{repository}/commits/{target_sha}/check-runs"
+          )
+          request.add_header("Accept", "application/vnd.github+json")
+          if token:
+              request.add_header("Authorization", f"Bearer {token}")
+
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.load(response)
+          except urllib.error.HTTPError as exc:  # pragma: no cover - network error surface
+              print(f"Warning: unable to query check runs (status={exc.code}). Assuming none present.")
+              payload = {"check_runs": []}
+          except urllib.error.URLError as exc:  # pragma: no cover - network error surface
+              print(f"Warning: unable to reach GitHub API ({exc}). Assuming no matching checks.")
+              payload = {"check_runs": []}
+
+          pattern = re.compile(r"(?i)^hassfest( \(auto-fix\)( / hassfest.*)?)?$")
+          has_match = any(
+              pattern.search(run.get("name", ""))
+              for run in payload.get("check_runs", [])
+          )
+
+          output_path = os.environ["GITHUB_OUTPUT"]
+          with open(output_path, "a", encoding="utf-8") as handle:
+              handle.write(f"found={'true' if has_match else 'false'}\n")
+
+          print(
+              "Detected hassfest (auto-fix) check: {}".format(
+                  "yes" if has_match else "no"
+              )
+          )
+          PY
+
+      - name: Wait for hassfest auto-fix workflow to finish
+        if: steps.hassfest_autofix.outputs.found == 'true'
+        uses: lewagon/wait-on-check-action@v1.3.3
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          check-regexp: '^[Hh]assfest( \(auto-fix\)( / hassfest.*)?)?$'
+          allowed-conclusions: 'success,failure,neutral'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          wait-interval: 10
+
+      - name: Run hassfest
+        uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    needs: hassfest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Probe brands endpoint
+        id: brands_probe
+        run: |
+          set -u
+          if curl -sSfL https://brands.home-assistant.io/domains.json >/dev/null; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning ::brands.home-assistant.io unavailable; skipping HACS validation to avoid false negatives."
+          fi
+
+      - name: Run HACS validation
+        if: steps.brands_probe.outputs.available == 'true'
+        uses: hacs/action@main
+        with:
+          category: integration
+          ignore: topics issues
+
+  quality:
+    name: Lint and tests
+    runs-on: ubuntu-latest
+    needs:
+      - hassfest
+      - hacs
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-dev.txt', 'custom_components/googlefindmy/requirements.txt', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: ${{ runner.os }}-pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pre-commit-
+
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run Ruff
+        run: ruff check .
+
+      - name: Run mypy (strict)
+        run: |
+          mypy --install-types --non-interactive --strict -p custom_components.googlefindmy
+          mypy --install-types --non-interactive --strict -p tests
+
+      - name: Run pytest with coverage
+        run: |
+          set -o pipefail
+          pytest -q --cov 2>&1 | tee pytest_output.log
+
+      - name: Write short summary to GitHub Step Summary
+        if: always()
+        run: |
+          {
+            echo "## Pytest summary"
+            echo
+            echo '```'
+            tail -n 200 pytest_output.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

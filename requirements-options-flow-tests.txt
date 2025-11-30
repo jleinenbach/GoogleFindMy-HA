@@ -1,0 +1,8 @@
+# Minimal dependency set for running the Home Assistant options flow regression tests.
+# Includes Home Assistant itself, pytest helpers, and bcrypt so frame-helper shims
+# match the runtime environment when exercising the options-flow suite locally.
+homeassistant>=2025.7.0
+pytest>=8.3
+pytest-asyncio>=0.23
+pytest-homeassistant-custom-component>=0.13
+bcrypt>=4.1.3

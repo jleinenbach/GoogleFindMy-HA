@@ -1,16 +1,20 @@
+# custom_components/googlefindmy/SpotApi/grpc_parser.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
-import struct
 import gzip
 import io
+import struct
+
+_GRPC_HEADER_LEN = 5
+
 
 class GrpcParser:
     @staticmethod
     def extract_grpc_payload(grpc: bytes) -> bytes:
         # Defensive guards for gRPC length-prefixed frame: 1 byte flag + 4 bytes length
-        if not grpc or len(grpc) < 5:
+        if not grpc or len(grpc) < _GRPC_HEADER_LEN:
             raise ValueError("Invalid GRPC payload (too short for frame header)")
 
         flag = grpc[0]  # 0 = uncompressed, 1 = compressed (gzip by default)
@@ -18,11 +22,13 @@ class GrpcParser:
             raise ValueError(f"Invalid GRPC payload (bad compressed-flag {flag})")
 
         length = struct.unpack(">I", grpc[1:5])[0]
-        if len(grpc) < 5 + length:
-            raise ValueError(f"Invalid GRPC payload length (expected {length}, got {len(grpc) - 5})")
+        if len(grpc) < _GRPC_HEADER_LEN + length:
+            raise ValueError(
+                f"Invalid GRPC payload length (expected {length}, got {len(grpc) - _GRPC_HEADER_LEN})"
+            )
 
         # Extract exactly one message frame (unary RPC)
-        msg = grpc[5:5 + length]
+        msg = grpc[_GRPC_HEADER_LEN : _GRPC_HEADER_LEN + length]
 
         if flag == 1:
             # Compressed frame (gzip) → decompress

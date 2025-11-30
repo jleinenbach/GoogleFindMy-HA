@@ -1,0 +1,152 @@
+name: pip-audit
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, Tue 03:23 UTC (~Europe/Berlin early morning)
+    - cron: '23 3 * * 2'
+
+concurrency:
+  group: pip-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  REQ_FILES: "requirements-dev.txt custom_components/googlefindmy/requirements.txt"
+
+jobs:
+  # 1) On PRs: report-only (green) + warnings; no code changes.
+  audit-pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pip-audit tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Audit requirements (report-only; keep CI green)
+        run: |
+          set -euo pipefail
+          summary_tmp="$(mktemp)"
+          echo "### pip-audit (report-only)" > "$summary_tmp"
+          for f in $REQ_FILES; do
+            [ -f "$f" ] || continue
+            set +e
+            pip-audit -r "$f" -f json -o audit.json
+            status=$?
+            set -e
+            if [ "$status" -gt 1 ]; then
+              echo "pip-audit failed for $f with exit code $status" >&2
+              exit "$status"
+            fi
+            fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
+            unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
+            printf " - %s: fixable=%s, unfixable=%s\n" "$f" "$fixable" "$unfixable" >> "$summary_tmp"
+            if [ "$unfixable" -gt 0 ]; then
+              echo "::warning title=pip-audit (no fix available)::$f: ${unfixable} vulnerability/vulnerabilities without a fix."
+            fi
+            if [ "$fixable" -gt 0 ]; then
+              echo "::notice title=pip-audit (fix available)::$f: ${fixable} vulnerability/vulnerabilities have fixes. They will be auto-fixed by the scheduled job."
+            fi
+          done
+          cat "$summary_tmp" >> "$GITHUB_STEP_SUMMARY"
+          rm "$summary_tmp"
+
+  # 2) On schedule or manual runs: autofix and open a PR with the changes.
+  autofix:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # use GITHUB_TOKEN via the PR action
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Audit and fix (where possible)
+        id: fixrun
+        run: |
+          set -euo pipefail
+          changed=0
+          echo "### pip-audit auto-fix report" > "$GITHUB_STEP_SUMMARY"
+          for f in $REQ_FILES; do
+            [ -f "$f" ] || continue
+            # Preview what can be fixed (full audit so JSON contains vulnerability data)
+            set +e
+            pip-audit -r "$f" -f json -o audit.json
+            status=$?
+            set -e
+            if [ "$status" -gt 1 ]; then
+              echo "pip-audit failed for $f with exit code $status" >&2
+              exit "$status"
+            fi
+            fixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)>0)] | length' audit.json)
+            unfixable=$(jq '[.dependencies[].vulns[] | select((.fix_versions|length)==0)] | length' audit.json)
+
+            if [ "$fixable" -gt 0 ]; then
+              echo "Fixing $f (${fixable} fixable vulns)..."
+              echo "Previewing fixes (no changes)"
+              set +e
+              pip-audit -r "$f" --fix --dry-run
+              preview_status=$?
+              set -e
+              if [ "$preview_status" -gt 1 ]; then
+                echo "pip-audit --fix --dry-run failed for $f with exit code $preview_status" >&2
+                exit "$preview_status"
+              fi
+              set +e
+              pip-audit -r "$f" --fix
+              fix_status=$?
+              set -e
+              if [ "$fix_status" -gt 1 ]; then
+                echo "pip-audit --fix failed for $f with exit code $fix_status" >&2
+                exit "$fix_status"
+              fi
+              if ! git diff --quiet -- "$f"; then
+                changed=1
+              fi
+            fi
+
+            {
+              echo "- ${f}: fixable=${fixable}, unfixable=${unfixable}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request with fixes
+        if: steps.fixrun.outputs.changed == '1'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: security/pip-audit-autofix
+          delete-branch: true
+          commit-message: "pip-audit: apply available security updates"
+          title: "pip-audit: automatic security updates"
+          body: |
+            This PR was created automatically by `pip-audit --fix`. It upgrades vulnerable dependencies where fixes exist. Vulnerabilities with no available fix remain and are reported in the job summary.
+          labels: security, dependencies, automated-pr

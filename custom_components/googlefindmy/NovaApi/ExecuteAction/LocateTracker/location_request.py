@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/LocateTracker/location_request.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -5,29 +6,63 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import logging
+import time
 import traceback
-from typing import Optional, Callable, Protocol, runtime_checkable
+from collections.abc import Awaitable, Callable
+from importlib import import_module
+from types import ModuleType
+from typing import Any, Protocol, cast, runtime_checkable
 
 import aiohttp
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
+from custom_components.googlefindmy.const import (
+    CACHE_KEY_CONTRIBUTOR_MODE,
+    CACHE_KEY_LAST_MODE_SWITCH,
+    CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+    CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    DEFAULT_CONTRIBUTOR_MODE,
+    LOCATION_REQUEST_TIMEOUT_S,
+)
+from custom_components.googlefindmy.example_data_provider import get_example_data
+from custom_components.googlefindmy.exceptions import (
+    MissingNamespaceError,
+    MissingTokenCacheError,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
-    async_nova_request,
     NovaAuthError,
-    NovaRateLimitError,
     NovaHTTPError,
+    NovaRateLimitError,
+    async_nova_request,
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.example_data_provider import get_example_data
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class _DecryptLocationsCallable(Protocol):
+    async def __call__(self, device_update: Any, *, cache: TokenCache) -> list[dict[str, Any]]:
+        """Decrypt and normalize location updates."""
+
+
+def _normalize_contributor_mode(mode: str | None) -> str:
+    """Return a sanitized contributor mode string."""
+
+    if isinstance(mode, str):
+        normalized = mode.strip().lower()
+        if normalized in (
+            CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+            CONTRIBUTOR_MODE_IN_ALL_AREAS,
+        ):
+            return normalized
+    return DEFAULT_CONTRIBUTOR_MODE
 
 
 # -----------------------------------------------------------------------------
@@ -36,13 +71,37 @@ _LOGGER = logging.getLogger(__name__)
 @runtime_checkable
 class FcmReceiverProtocol(Protocol):
     """Defines the interface for the FCM receiver."""
+
     async def async_register_for_location_updates(
         self, device_id: str, callback: Callable[[str, str], None]
     ) -> str | None: ...
     async def async_unregister_for_location_updates(self, device_id: str) -> None: ...
 
 
-_FCM_ReceiverGetter: Optional[Callable[[], FcmReceiverProtocol]] = None
+def _import_deviceupdate_pb2() -> ModuleType:
+    return import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2")
+
+
+def _import_decoder_module() -> ModuleType:
+    return import_module("custom_components.googlefindmy.ProtoDecoders.decoder")
+
+
+def _import_decrypt_locations_module() -> ModuleType:
+    return import_module(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations"
+    )
+
+
+def _import_eid_info_module() -> ModuleType:
+    return import_module(
+        "custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request"
+    )
+
+
+_fcm_receiver_state: dict[str, Callable[[], FcmReceiverProtocol] | None] = {
+    "getter": None
+}
+_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
 
 
 def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
@@ -55,17 +114,22 @@ def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) ->
     Args:
         getter: A callable that returns the singleton FCM receiver instance.
     """
-    global _FCM_ReceiverGetter
-    _FCM_ReceiverGetter = getter
+    _fcm_receiver_state["getter"] = getter
 
 
 def unregister_fcm_receiver_provider() -> None:
     """Unregister the FCM receiver provider (called on integration unload)."""
-    global _FCM_ReceiverGetter
-    _FCM_ReceiverGetter = None
+    _fcm_receiver_state["getter"] = None
 
 
-def create_location_request(canonic_device_id: str, fcm_registration_id: str, request_uuid: str) -> str:
+def create_location_request(
+    canonic_device_id: str,
+    fcm_registration_id: str,
+    request_uuid: str,
+    *,
+    contributor_mode: str = DEFAULT_CONTRIBUTOR_MODE,
+    last_mode_switch: int | None = None,
+) -> str:
     """Build and serialize a LocateTracker action request.
 
     DeviceUpdate_pb2 is imported lazily here to avoid protobuf side effects
@@ -75,20 +139,33 @@ def create_location_request(canonic_device_id: str, fcm_registration_id: str, re
         canonic_device_id: The canonical ID of the target device.
         fcm_registration_id: The FCM token for push notifications.
         request_uuid: A unique identifier for this request.
+        contributor_mode: Contributor preference ("high_traffic" or "in_all_areas").
+        last_mode_switch: Epoch timestamp when the contributor mode last changed.
 
     Returns:
         A hex-encoded string representing the serialized protobuf message.
     """
-    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2  # lazy import
+    device_update_pb2 = _import_deviceupdate_pb2()
+
+    normalized_mode = _normalize_contributor_mode(contributor_mode)
+    if last_mode_switch is None or last_mode_switch <= 0:
+        last_mode_switch = int(time.time())
 
     action_request = create_action_request(
         canonic_device_id, fcm_registration_id, request_uuid=request_uuid
     )
 
-    # Use a current timestamp; server treats this as an arbitrary marker.
-    action_request.action.locateTracker.lastHighTrafficEnablingTime.seconds = int(time.time())
-    action_request.action.locateTracker.contributorType = (
-        DeviceUpdate_pb2.SpotContributorType.FMDN_ALL_LOCATIONS
+    action_request.action.locateTracker.lastHighTrafficEnablingTime.seconds = int(
+        last_mode_switch
+    )
+
+    proto_mode_map = {
+        CONTRIBUTOR_MODE_HIGH_TRAFFIC: device_update_pb2.SpotContributorType.FMDN_HIGH_TRAFFIC,
+        CONTRIBUTOR_MODE_IN_ALL_AREAS: device_update_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
+    }
+    action_request.action.locateTracker.contributorType = proto_mode_map.get(
+        normalized_mode,
+        device_update_pb2.SpotContributorType.FMDN_ALL_LOCATIONS,
     )
 
     # Convert to hex string
@@ -110,21 +187,25 @@ class _CallbackContext:
         event: An asyncio.Event to signal that data has been received.
         data: The data payload received from the callback.
     """
+
     __slots__ = ("event", "data")
+    event: asyncio.Event
+    data: list[dict[str, Any]] | None
 
     def __init__(self) -> None:
         """Initialize the callback context."""
         self.event: asyncio.Event = asyncio.Event()
-        self.data: list | None = None
+        self.data: list[dict[str, Any]] | None = None
 
 
-def _make_location_callback(
+def _make_location_callback(  # noqa: PLR0915, PLR0913
     *,
     name: str,
     canonic_device_id: str,
     ctx: _CallbackContext,
     loop: asyncio.AbstractEventLoop,
-    cache_provider: any = None,
+    cache: TokenCache,
+    cache_provider: Callable[[], TokenCache] | None = None,
 ) -> Callable[[str, str], None]:
     """Factory that creates an FCM callback bound to a context object.
 
@@ -148,7 +229,9 @@ def _make_location_callback(
         A callback function suitable for the FCM receiver.
     """
 
-    def location_callback(response_canonic_id: str, hex_response: str) -> None:
+    def location_callback(  # noqa: PLR0915
+        response_canonic_id: str, hex_response: str
+    ) -> None:
         """Processes the location update received via FCM."""
         try:
             _LOGGER.info("FCM callback triggered for %s, processing response...", name)
@@ -156,18 +239,48 @@ def _make_location_callback(
 
             # Lazy imports inside callback (avoid protobuf import side effects during HA startup)
             try:
-                from custom_components.googlefindmy.ProtoDecoders.decoder import parse_device_update_protobuf
-                from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-                    async_decrypt_location_response_locations,
-                    DecryptionError,
-                    StaleOwnerKeyError,
-                )
-                from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
-                    SpotApiEmptyResponseError,
-                )
+                decoder_module = _import_decoder_module()
+                decrypt_module = _import_decrypt_locations_module()
+                eid_info_module = _import_eid_info_module()
             except ImportError as import_error:
-                _LOGGER.error("Failed to import decoder/decrypt functions in callback for %s: %s", name, import_error)
-                ctx.data = []
+                _LOGGER.error(
+                    "Failed to import decoder/decrypt functions in callback for %s: %s",
+                    name,
+                    import_error,
+                )
+                ctx.data = cast(list[dict[str, Any]], [])
+                ctx.event.set()
+                return
+
+            try:
+                parse_device_update_protobuf = cast(
+                    Callable[[str], Any],
+                    getattr(decoder_module, "parse_device_update_protobuf"),
+                )
+                async_decrypt_location_response_locations = cast(
+                    _DecryptLocationsCallable,
+                    getattr(
+                        decrypt_module,
+                        "async_decrypt_location_response_locations",
+                    ),
+                )
+                DecryptionError = cast(
+                    type[Exception], getattr(decrypt_module, "DecryptionError")
+                )
+                StaleOwnerKeyError = cast(
+                    type[Exception], getattr(decrypt_module, "StaleOwnerKeyError")
+                )
+                SpotApiEmptyResponseError = cast(
+                    type[Exception],
+                    getattr(eid_info_module, "SpotApiEmptyResponseError"),
+                )
+            except AttributeError as import_error:
+                _LOGGER.error(
+                    "Failed to load decoder/decrypt attributes in callback for %s: %s",
+                    name,
+                    import_error,
+                )
+                ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
                 return
 
@@ -175,8 +288,10 @@ def _make_location_callback(
             try:
                 device_update = parse_device_update_protobuf(hex_response)
             except Exception as parse_exc:
-                _LOGGER.error("Failed to parse device update for %s: %s", name, parse_exc)
-                ctx.data = []
+                _LOGGER.error(
+                    "Failed to parse device update for %s: %s", name, parse_exc
+                )
+                ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
                 return
 
@@ -189,44 +304,86 @@ def _make_location_callback(
                 )
                 return
 
-            async def _decrypt_and_store():
+            async def _decrypt_and_store() -> None:
                 """Asynchronous part of the callback to decrypt and store data."""
-                # Restore cache provider context for multi-account support
-                if cache_provider:
-                    from custom_components.googlefindmy.NovaApi import nova_request
-                    nova_request.register_cache_provider(cache_provider)
-
+                unregister_cache_provider: Callable[[], None] | None = None
+                if cache_provider is not None:
+                    try:
+                        nova_request_module = import_module(
+                            "custom_components.googlefindmy.NovaApi.nova_request"
+                        )
+                        register_cache_provider = cast(
+                            Callable[[Callable[[], TokenCache | None]], None],
+                            getattr(nova_request_module, "register_cache_provider"),
+                        )
+                        unregister_cache_provider = cast(
+                            Callable[[], None],
+                            getattr(nova_request_module, "unregister_cache_provider"),
+                        )
+                        register_cache_provider(cache_provider)
+                    except Exception as err:  # pragma: no cover - defensive
+                        _LOGGER.debug(
+                            "Failed to register cache provider for %s: %s", name, err
+                        )
                 try:
-                    location_data = await async_decrypt_location_response_locations(device_update)
-                except (StaleOwnerKeyError, DecryptionError, SpotApiEmptyResponseError) as err:
-                    _LOGGER.error("Failed to process location data for %s: %s", name, err)
-                    ctx.data = []
+                    location_data: list[dict[str, Any]] = await async_decrypt_location_response_locations(
+                        device_update, cache=cache
+                    )
+                except (
+                    StaleOwnerKeyError,
+                    DecryptionError,
+                    SpotApiEmptyResponseError,
+                ) as err:
+                    _LOGGER.error(
+                        "Failed to process location data for %s: %s", name, err
+                    )
+                    ctx.data = cast(list[dict[str, Any]], [])
                     ctx.event.set()
                     return
                 except Exception as err:
-                    _LOGGER.error("Unexpected error during async decryption for %s: %s", name, err)
+                    _LOGGER.error(
+                        "Unexpected error during async decryption for %s: %s", name, err
+                    )
                     _LOGGER.debug("Traceback: %s", traceback.format_exc())
-                    ctx.data = []
+                    ctx.data = cast(list[dict[str, Any]], [])
                     ctx.event.set()
                     return
+                finally:
+                    if unregister_cache_provider is not None:
+                        try:
+                            unregister_cache_provider()
+                        except Exception as err:  # pragma: no cover - defensive
+                            _LOGGER.debug(
+                                "Failed to unregister cache provider for %s: %s",
+                                name,
+                                err,
+                            )
 
                 if location_data:
-                    _LOGGER.info("Successfully decrypted %d location record(s) for %s", len(location_data), name)
+                    _LOGGER.info(
+                        "Successfully decrypted %d location record(s) for %s",
+                        len(location_data),
+                        name,
+                    )
                     # Attach canonic_id for validation after wait
                     location_data[0]["canonic_id"] = response_canonic_id
                     ctx.data = location_data
                 else:
-                    _LOGGER.debug("No location data found after decryption for %s", name)
-                    ctx.data = []
+                    _LOGGER.warning(
+                        "No location data found after decryption for %s", name
+                    )
+                    ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
 
             # Hand off to the HA event loop; do not block this worker thread.
             asyncio.run_coroutine_threadsafe(_decrypt_and_store(), loop)
 
         except Exception as callback_error:
-            _LOGGER.error("Error processing FCM callback for %s: %s", name, callback_error)
+            _LOGGER.error(
+                "Error processing FCM callback for %s: %s", name, callback_error
+            )
             _LOGGER.debug("FCM callback traceback: %s", traceback.format_exc())
-            ctx.data = []
+            ctx.data = cast(list[dict[str, Any]], [])
             ctx.event.set()
 
     return location_callback
@@ -235,31 +392,49 @@ def _make_location_callback(
 # -----------------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------------
-async def get_location_data_for_device(
+async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915
     canonic_device_id: str,
     name: str,
-    session: Optional[aiohttp.ClientSession] = None,
+    session: aiohttp.ClientSession | None = None,
     *,
-    username: Optional[str] = None,
-    cache: Optional[any] = None,
-) -> list:
+    username: str | None = None,
+    # Entry-scope extensions (all optional / backward compatible):
+    token: str | None = None,
+    cache_get: Callable[[str], Awaitable[Any]] | None = None,
+    cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
+    refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+    namespace: str | None = None,
+    cache: TokenCache | None = None,
+    contributor_mode: str | None = None,
+    last_mode_switch: int | None = None,
+) -> list[dict[str, Any]]:
     """Get location data for a device (async, HA-compatible).
 
-    This function orchestrates the entire process of requesting a device's location.
-    It registers a temporary callback with the FCM receiver, sends the location
-    request, and waits for the asynchronous response to arrive via the callback.
+    Orchestrates:
+    - Register a temporary callback with the FCM receiver,
+    - Send the locate request via Nova,
+    - Await the FCM-delivered response and decrypt it.
 
-    Notes
-    -----
-    - The long-lived FCM receiver is provided by integration setup via a provider.
-      This function only registers/unregisters callbacks; it does not start/stop the receiver.
-    - If a Home Assistant aiohttp.ClientSession is provided, it will be reused for the Nova call.
+    Multi-entry safety
+    ------------------
+    - When `namespace` is provided (e.g., entry_id), **TTL metadata** is namespaced.
+    - When `cache` is provided, `async_nova_request` will prefer that entry-local
+      TokenCache for **username**, **token content**, and (if no `cache_get/set`
+      overrides are provided) **TTL metadata** as well.
 
     Args:
         canonic_device_id: The canonical ID of the device to locate.
         name: The human-readable name of the device for logging purposes.
-        session: (Deprecated) An optional aiohttp.ClientSession. No longer used directly.
+        session: An optional aiohttp.ClientSession to reuse for the Nova call.
         username: The username for the request.
+        token: Optional, direct ADM token for flow-local validation.
+        cache_get: Optional async getter for TTL/aux metadata.
+        cache_set: Optional async setter for TTL/aux metadata.
+        refresh_override: Optional async function to refresh a token in isolation.
+        namespace: Optional entry-scoped namespace (e.g., config_entry.entry_id).
+        cache: TokenCache providing entry-scoped username/token/metadata storage.
+        contributor_mode: Contributor preference ("high_traffic" or "in_all_areas").
+        last_mode_switch: Epoch timestamp when the contributor mode last changed.
 
     Returns:
         A list of dictionaries containing location data, or an empty list on failure.
@@ -267,9 +442,11 @@ async def get_location_data_for_device(
     _LOGGER.info("Requesting location data for %s...", name)
 
     # Fail hard on missing/misconfigured provider: this is a programming/config error.
-    if _FCM_ReceiverGetter is None:
+    fcm_getter = _FCM_ReceiverGetter or _fcm_receiver_state["getter"]
+
+    if fcm_getter is None:
         raise RuntimeError("FCM receiver provider has not been registered.")
-    fcm_receiver = _FCM_ReceiverGetter()
+    fcm_receiver = fcm_getter()
     if fcm_receiver is None:
         raise RuntimeError("FCM receiver provider returned None.")
 
@@ -277,31 +454,128 @@ async def get_location_data_for_device(
     ctx = _CallbackContext()
     loop = asyncio.get_running_loop()
 
+    if cache is None:
+        raise MissingTokenCacheError()
+
+    cache_ref = cache
+    cache_provider: Callable[[], TokenCache] | None = None
+    if cache_ref is not None:
+
+        def _cache_provider() -> TokenCache:
+            return cache_ref
+
+        cache_provider = _cache_provider
+
+    resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
+    if not resolved_namespace:
+        raise MissingNamespaceError()
+
+    async def _cache_get_raw(key: str) -> Any:
+        getter = getattr(cache_ref, "async_get_cached_value", None)
+        if callable(getter):
+            return await getter(key)
+        fallback = getattr(cache_ref, "get", None)
+        if callable(fallback):
+            result = fallback(key)
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
+        return None
+
+    async def _cache_set_raw(key: str, value: Any) -> None:
+        setter = getattr(cache_ref, "async_set_cached_value", None)
+        if callable(setter):
+            await setter(key, value)
+            return
+        fallback = getattr(cache_ref, "set", None)
+        if callable(fallback):
+            result = fallback(key, value)
+            if asyncio.iscoroutine(result):
+                await result
+
+    # Build cache accessors, preferring entry-local namespacing when provided.
+    ns_get: Callable[[str], Awaitable[Any]] | None = cache_get
+    ns_set: Callable[[str, Any], Awaitable[None]] | None = cache_set
+
+    if resolved_namespace and (cache_get is None or cache_set is None):
+        ns_prefix = f"{resolved_namespace}:"
+
+        if ns_get is None:
+
+            async def _ns_get(key: str) -> Any:
+                return await _cache_get_raw(f"{ns_prefix}{key}")
+
+            ns_get = _ns_get
+
+        if ns_set is None:
+
+            async def _ns_set(key: str, value: Any) -> None:
+                await _cache_set_raw(f"{ns_prefix}{key}", value)
+
+            ns_set = _ns_set
+    else:
+        if ns_get is None:
+            ns_get = _cache_get_raw
+        if ns_set is None:
+            ns_set = _cache_set_raw
+
+    if ns_get is None or ns_set is None:
+        raise RuntimeError("Cache accessors could not be initialized.")
+
+    mode = _normalize_contributor_mode(contributor_mode)
+    resolved_last_mode_switch: int | None = (
+        int(last_mode_switch)
+        if isinstance(last_mode_switch, (int, float)) and last_mode_switch > 0
+        else None
+    )
+
+    try:
+        cached_mode = await ns_get(CACHE_KEY_CONTRIBUTOR_MODE)
+    except Exception as err:  # pragma: no cover - defensive logging
+        _LOGGER.debug("Failed to load contributor mode from cache: %s", err)
+        cached_mode = None
+
+    if contributor_mode is None and isinstance(cached_mode, str):
+        mode = _normalize_contributor_mode(cached_mode)
+    elif contributor_mode is not None:
+        try:
+            await ns_set(CACHE_KEY_CONTRIBUTOR_MODE, mode)
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug("Failed to persist contributor mode override: %s", err)
+
+    if resolved_last_mode_switch is None:
+        try:
+            cached_switch = await ns_get(CACHE_KEY_LAST_MODE_SWITCH)
+        except Exception as err:  # pragma: no cover - defensive logging
+            _LOGGER.debug("Failed to load contributor mode timestamp: %s", err)
+        else:
+            if isinstance(cached_switch, (int, float)) and cached_switch > 0:
+                resolved_last_mode_switch = int(cached_switch)
+
+    if resolved_last_mode_switch is None:
+        resolved_last_mode_switch = int(time.time())
+
+    try:
+        await ns_set(
+            CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch
+        )
+    except Exception as err:  # pragma: no cover - defensive logging
+        _LOGGER.debug("Failed to persist contributor mode timestamp: %s", err)
+
     try:
         # Generate request UUID
         request_uuid = generate_random_uuid()
-
-        # Capture the current cache provider context for multi-account support
-        cache_provider = None
-        if cache:
-            # Use explicitly passed cache (preferred for multi-account isolation)
-            cache_provider = lambda: cache
-        else:
-            # Fallback to ContextVar for backward compatibility
-            try:
-                from custom_components.googlefindmy.NovaApi import nova_request
-                cache_obj = nova_request._get_cache_provider()
-                if cache_obj:
-                    cache_provider = lambda: cache_obj
-            except Exception:
-                pass
 
         # Register the callback with the shared receiver
         try:
             _LOGGER.debug("Registering FCM location updates for %s...", name)
             callback = _make_location_callback(
-                name=name, canonic_device_id=canonic_device_id, ctx=ctx, loop=loop,
-                cache_provider=cache_provider
+                name=name,
+                canonic_device_id=canonic_device_id,
+                ctx=ctx,
+                loop=loop,
+                cache=cache_ref,
+                cache_provider=cache_provider,
             )
             fcm_token = await fcm_receiver.async_register_for_location_updates(
                 canonic_device_id, callback
@@ -317,27 +591,53 @@ async def get_location_data_for_device(
             return []
 
         # Create location request payload
-        hex_payload = create_location_request(canonic_device_id, fcm_token, request_uuid)
+        hex_payload = create_location_request(
+            canonic_device_id,
+            fcm_token,
+            request_uuid,
+            contributor_mode=mode,
+            last_mode_switch=resolved_last_mode_switch,
+        )
 
         # Send location request to Google API (async; HA session preferred if provided)
         _LOGGER.info("Sending location request to Google API for %s...", name)
         try:
             _ = await async_nova_request(
-                NOVA_ACTION_API_SCOPE, hex_payload, username=username, cache=cache
+                NOVA_ACTION_API_SCOPE,
+                hex_payload,
+                username=username,
+                session=session,
+                token=token,
+                cache_get=ns_get,
+                cache_set=ns_set,
+                refresh_override=refresh_override,
+                namespace=resolved_namespace,
+                cache=cache_ref,  # pass entry-scoped TokenCache through
             )
         except asyncio.CancelledError:
             raise
         except NovaRateLimitError as e:
-            _LOGGER.warning("Rate limited while requesting location for %s: %s", name, e)
+            _LOGGER.warning(
+                "Rate limited while requesting location for %s: %s", name, e
+            )
             return []
         except NovaHTTPError as e:
-            _LOGGER.warning("Server error (%s) while requesting location for %s: %s", e.status, name, e)
+            _LOGGER.warning(
+                "Server error (%s) while requesting location for %s: %s",
+                e.status,
+                name,
+                e,
+            )
             return []
         except NovaAuthError as e:
-            _LOGGER.error("Authentication error while requesting location for %s: %s", name, e)
+            _LOGGER.warning(
+                "Authentication error while requesting location for %s: %s", name, e
+            )
             return []
         except aiohttp.ClientError as e:
-            _LOGGER.warning("Network/client error while requesting location for %s: %s", name, e)
+            _LOGGER.warning(
+                "Network/client error while requesting location for %s: %s", name, e
+            )
             return []
         except Exception as e:
             _LOGGER.error("Nova API request failed for %s: %s", name, e)
@@ -347,12 +647,14 @@ async def get_location_data_for_device(
         _LOGGER.info("Location request accepted for %s; awaiting FCM data...", name)
 
         # Wait efficiently for FCM callback to signal completion
-        timeout = 60  # seconds
+        timeout = LOCATION_REQUEST_TIMEOUT_S
         _LOGGER.info("Waiting for location response for %s...", name)
         try:
             await asyncio.wait_for(ctx.event.wait(), timeout=timeout)
-        except asyncio.TimeoutError:
-            _LOGGER.warning("No location response received for %s (timeout: %ss)", name, timeout)
+        except TimeoutError:
+            _LOGGER.warning(
+                "No location response received for %s (timeout: %ss)", name, timeout
+            )
             return []
 
         data = ctx.data or []
@@ -362,7 +664,10 @@ async def get_location_data_for_device(
         if not data:
             _LOGGER.debug("No location data found for %s after decryption", name)
         else:
-            _LOGGER.warning("Received location data for unexpected device in %s flow; ignoring.", name)
+            _LOGGER.warning(
+                "Received location data for unexpected device in %s flow; ignoring.",
+                name,
+            )
         return []
 
     except asyncio.CancelledError:
@@ -376,13 +681,35 @@ async def get_location_data_for_device(
         # Clean up - unregister callback only (receiver lifecycle is owned by integration)
         try:
             if registered:
-                await fcm_receiver.async_unregister_for_location_updates(canonic_device_id)
+                await fcm_receiver.async_unregister_for_location_updates(
+                    canonic_device_id
+                )
         except Exception as cleanup_error:
-            _LOGGER.warning("Error during FCM unregister for %s: %s", name, cleanup_error)
+            _LOGGER.warning(
+                "Error during FCM unregister for %s: %s", name, cleanup_error
+            )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # CLI invocation will fail unless an external provider is registered; kept for parity.
+
+    class _CliTokenCache:
+        """Minimal in-memory TokenCache shim for CLI experiments."""
+
+        def __init__(self) -> None:
+            self.entry_id = "cli"
+            self._values: dict[str, Any] = {}
+
+        async def async_get_cached_value(self, key: str) -> Any:
+            return self._values.get(key)
+
+        async def async_set_cached_value(self, key: str, value: Any) -> None:
+            self._values[key] = value
+
     asyncio.run(
-        get_location_data_for_device(get_example_data("sample_canonic_device_id"), "Test")
+        get_location_data_for_device(
+            get_example_data("sample_canonic_device_id"),
+            "Test",
+            cache=cast(TokenCache, _CliTokenCache()),
+        )
     )

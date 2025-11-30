@@ -1,18 +1,23 @@
+# custom_components/googlefindmy/KeyBackup/lskf_hasher.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+from __future__ import annotations
+
 import hashlib
+import time
 from binascii import unhexlify
 from concurrent.futures import ProcessPoolExecutor
-import time
-import pyscrypt
 
+import pyscrypt
 from custom_components.googlefindmy.example_data_provider import get_example_data
 
 
-def ascii_to_bytes(string):
-    return string.encode('ascii')
+def ascii_to_bytes(string: str) -> bytes:
+    """Return the ASCII-encoded representation of ``string``."""
+
+    return string.encode("ascii")
 
 
 def get_lskf_hash(pin: str, salt: bytes) -> bytes:
@@ -31,22 +36,30 @@ def get_lskf_hash(pin: str, salt: bytes) -> bytes:
         N=log_n_cost,
         r=block_size,
         p=parallelization,
-        dkLen=key_length
+        dkLen=key_length,
     )
 
     return hashed
 
-def hash_pin(pin):
+
+def hash_pin(pin: str) -> tuple[str, str]:
+    """Return the original ``pin`` together with its LSKF SHA-256 hash."""
+
     sample_pin_salt = unhexlify(get_example_data("sample_pin_salt"))
 
-    hash_object = hashlib.sha256(get_lskf_hash(pin, sample_pin_salt))
+    hash_input = get_lskf_hash(pin, sample_pin_salt)
+    if not isinstance(hash_input, bytes):  # Safety net for unexpected library changes.
+        msg = "get_lskf_hash must return bytes"
+        raise TypeError(msg)
+
+    hash_object = hashlib.sha256(hash_input)
     hash_hex = hash_object.hexdigest()
 
     print(f"PIN: {pin}, Hash: {hash_hex}")
     return pin, hash_hex
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     start_time = time.time()
     pins = [f"{i:04d}" for i in range(10000)]
 

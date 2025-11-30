@@ -1,0 +1,41 @@
+ci:
+  autofix_prs: true
+  autoupdate_schedule: monthly
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.1
+    hooks:
+      - id: ruff
+        args:
+          - --fix
+      - id: ruff-format
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: doctoc
+        name: doctoc
+        entry: python script/precommit_hooks/update_doctoc.py
+        language: python
+        files: ^AGENTS\.md$
+      - id: translations-sync-check
+        name: Ensure translations are up to date
+        entry: python script/sync_translations.py --check
+        language: python
+        pass_filenames: false
+        always_run: true
+      - id: clean-pycache
+        name: Remove Python cache artifacts
+        entry: python script/clean_pycache.py
+        args:
+          - --quiet
+        language: python
+        pass_filenames: false
+        always_run: true

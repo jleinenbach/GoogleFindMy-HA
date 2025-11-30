@@ -2,9 +2,8 @@
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
-#
-"""
-Async, in-memory cache with an HA-native Store backend, scoped per config entry.
+
+"""Async, in-memory cache with an HA-native Store backend, scoped per config entry.
 
 This module provides a TokenCache class that encapsulates all state (Store, data, locks)
 and offers a purely asynchronous API for safe use within the Home Assistant event loop.
@@ -19,13 +18,16 @@ Key properties:
 - Merge migration from legacy Auth/secrets.json (best-effort, once per process).
 - Flush on HA STOP and on config entry unload; `close()` prevents further writes.
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
 import os
-from typing import Any, Awaitable, Callable, Optional, TypedDict
+import threading
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, TypedDict, TypeVar, cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
@@ -35,14 +37,24 @@ from ..const import STORAGE_KEY, STORAGE_VERSION
 _LOGGER = logging.getLogger(__name__)
 
 
+CacheState = dict[str, Any]
+_ValueT = TypeVar("_ValueT")
+
+
+class _GlobalState(TypedDict):
+    legacy_migration_done: bool
+    default_entry_id: str | None
+
+
 class CacheData(TypedDict, total=False):
     """Type-safe, JSON-serializable structure for data persisted in the Store.
 
     `total=False` allows sparse dictionaries where some keys may not be present.
     """
+
     oauth_token: str
     username: str
-    fcm_credentials: dict | str | None
+    fcm_credentials: dict[str, Any] | str | None
     # Other keys historically stored in secrets.json are implicitly allowed.
 
 
@@ -60,11 +72,27 @@ class TokenCache:
             hass: The Home Assistant instance.
             entry_id: The unique ID of the ConfigEntry.
         """
+        if not isinstance(entry_id, str):
+            raise TypeError("TokenCache requires entry_id to be a string.")
+
+        normalized_entry_id = entry_id.strip()
+        if not normalized_entry_id:
+            raise ValueError("TokenCache requires a non-empty entry_id.")
+
         self._hass = hass
-        self._entry_id = entry_id
+        loop = getattr(hass, "loop", None)
+        if loop is None:
+            raise RuntimeError(
+                "TokenCache could not determine the Home Assistant event loop (hass.loop is None)"
+            )
+
+        self._loop = loop
+        self.entry_id = normalized_entry_id
         # Each entry gets its own storage file: f"{STORAGE_KEY}_{entry_id}"
-        self._store: Store[CacheData] = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}_{entry_id}")
-        self._data: CacheData = {}
+        self._store: Store[CacheData] = Store(
+            hass, STORAGE_VERSION, f"{STORAGE_KEY}_{normalized_entry_id}"
+        )
+        self._data: CacheState = {}
         self._write_lock = asyncio.Lock()
         self._per_key_locks: dict[str, asyncio.Lock] = {}
         self._closed = False
@@ -72,7 +100,9 @@ class TokenCache:
     # ------------------------------- Factory ---------------------------------
 
     @classmethod
-    async def create(cls, hass: HomeAssistant, entry_id: str, legacy_path: str | None = None) -> "TokenCache":
+    async def create(
+        cls, hass: HomeAssistant, entry_id: str, legacy_path: str | None = None
+    ) -> TokenCache:
         """Create a TokenCache, load Store data, and (optionally) migrate legacy file.
 
         Args:
@@ -83,14 +113,31 @@ class TokenCache:
         Returns:
             An initialized TokenCache instance.
         """
+        if getattr(hass, "loop", None) is None:
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError as err:
+                raise RuntimeError(
+                    "TokenCache requires Home Assistant to expose hass.loop"
+                ) from err
+
+            if threading.current_thread() is threading.main_thread():
+                setattr(hass, "loop", running_loop)
+            else:
+                raise RuntimeError(
+                    "TokenCache.create must be invoked from the Home Assistant event loop"
+                )
+
         instance = cls(hass, entry_id)
 
         data = await instance._store.async_load()
         if isinstance(data, dict):
-            instance._data = data
-            if "fcm_credentials" in instance._data:
-                instance._data["fcm_credentials"] = instance._normalize_fcm(instance._data["fcm_credentials"])
-            _LOGGER.debug("googlefindmy: Cache loaded from Store for entry '%s' (%d keys).", entry_id, len(instance._data))
+            instance._data = instance._coerce_cache_state(data)
+            _LOGGER.debug(
+                "googlefindmy: Cache loaded from Store for entry '%s' (%d keys).",
+                instance.entry_id,
+                len(instance._data),
+            )
 
         if legacy_path:
             await instance._migrate_legacy_file(legacy_path)
@@ -101,43 +148,53 @@ class TokenCache:
 
     async def _migrate_legacy_file(self, legacy_path: str) -> None:
         """Migrate an old JSON file to the Store (merge) and remove it once, process-wide."""
-        global _LEGACY_MIGRATION_DONE
-        if _LEGACY_MIGRATION_DONE:
+        if _STATE["legacy_migration_done"] != _LEGACY_MIGRATION_DONE:
+            _set_legacy_migration_flag(_LEGACY_MIGRATION_DONE)
+        if _legacy_migration_done():
             return
-        _LEGACY_MIGRATION_DONE = True
+        _set_legacy_migration_flag(True)
 
-        def _read_legacy() -> CacheData | None:
+        def _read_legacy() -> Mapping[str, Any] | None:
             if not os.path.exists(legacy_path):
                 return None
             try:
-                with open(legacy_path, "r", encoding="utf-8") as f:
+                with open(legacy_path, encoding="utf-8") as f:
                     data = json.load(f)
-                return data if isinstance(data, dict) else None
+                if isinstance(data, dict):
+                    return cast(Mapping[str, Any], data)
+                return None
             except Exception:
                 _LOGGER.exception("Failed to read legacy cache file at %s", legacy_path)
                 return None
 
         legacy_data = await self._hass.async_add_executor_job(_read_legacy)
-        if not isinstance(legacy_data, dict):
+        if legacy_data is None:
             return
+
+        normalized_legacy = self._coerce_cache_state(legacy_data)
 
         async with self._write_lock:
             # Merge strategy: keys already in Store override legacy keys.
-            merged = {**legacy_data, **self._data}
+            merged: CacheState = {**normalized_legacy, **self._data}
             if "fcm_credentials" in merged:
-                merged["fcm_credentials"] = self._normalize_fcm(merged["fcm_credentials"])
+                merged["fcm_credentials"] = self._normalize_fcm(
+                    merged["fcm_credentials"]
+                )
 
             if merged != self._data:
                 self._data = merged
                 if self._is_valid_snapshot():
-                    self._store.async_delay_save(lambda: dict(self._data), 1.0)
+                    self._store.async_delay_save(self._snapshot, 1.0)
                 _LOGGER.info("googlefindmy: Merged legacy cache into the Store.")
 
         def _remove_legacy() -> None:
             try:
                 os.remove(legacy_path)
             except OSError:
-                _LOGGER.warning("Failed to remove legacy cache file after migration: %s", legacy_path)
+                _LOGGER.warning(
+                    "Failed to remove legacy cache file after migration: %s",
+                    legacy_path,
+                )
 
         await self._hass.async_add_executor_job(_remove_legacy)
 
@@ -147,7 +204,7 @@ class TokenCache:
         """Return a value from the in-memory cache (non-blocking)."""
         return self._data.get(name)
 
-    async def set(self, name: str, value: Optional[Any]) -> None:
+    async def set(self, name: str, value: Any | None) -> None:
         """Set a value, normalize it, validate snapshot, and schedule a deferred save.
 
         Raises:
@@ -168,36 +225,44 @@ class TokenCache:
                     self._per_key_locks.pop(name, None)
             else:
                 if not self._is_jsonable(normalized):
-                    _LOGGER.error("Value for key '%s' is not JSON-serializable; skipping save.", name)
+                    _LOGGER.error(
+                        "Value for key '%s' is not JSON-serializable; skipping save.",
+                        name,
+                    )
                     return
                 self._data[name] = normalized
 
         # Only schedule a save if the snapshot is valid JSON.
         if self._is_valid_snapshot():
-            self._store.async_delay_save(lambda: dict(self._data), 1.2)
+            self._store.async_delay_save(self._snapshot, 1.2)
         else:
-            _LOGGER.error("Aborting deferred save due to non-JSON-serializable snapshot.")
+            _LOGGER.error(
+                "Aborting deferred save due to non-JSON-serializable snapshot."
+            )
 
-    async def get_or_set(self, name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
+    async def get_or_set(
+        self, name: str, generator: Callable[[], Awaitable[_ValueT] | _ValueT]
+    ) -> _ValueT:
         """Return existing value or compute/store it, avoiding thundering herds via per-key lock."""
         if (existing := self._data.get(name)) is not None:
-            return existing
+            return cast(_ValueT, existing)
 
         lock = self._per_key_locks.setdefault(name, asyncio.Lock())
         async with lock:
             if (existing := self._data.get(name)) is not None:
-                return existing
+                return cast(_ValueT, existing)
 
-            new_value = generator()
-            if asyncio.iscoroutine(new_value):
-                new_value = await new_value
+            candidate = generator()
+            if asyncio.iscoroutine(candidate):
+                candidate = await candidate
 
-            await self.set(name, new_value)
-            return new_value
+            result = cast(_ValueT, candidate)
+            await self.set(name, result)
+            return result
 
     async def all(self) -> CacheData:
         """Return a shallow copy of the entire cache snapshot."""
-        return dict(self._data)
+        return self._snapshot()
 
     # ---------- Coordinator/API compatibility aliases (Protocol-friendly) ----------
 
@@ -205,11 +270,13 @@ class TokenCache:
         """Alias for compatibility with CacheProtocol used by coordinator/api."""
         return await self.get(name)
 
-    async def async_set_cached_value(self, name: str, value: Optional[Any]) -> None:
+    async def async_set_cached_value(self, name: str, value: Any | None) -> None:
         """Alias for compatibility with CacheProtocol used by coordinator/api."""
         await self.set(name, value)
 
-    async def async_get_cached_value_or_set(self, name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
+    async def async_get_cached_value_or_set(
+        self, name: str, generator: Callable[[], Awaitable[Any] | Any]
+    ) -> Any:
         """Alias for compatibility with potential CacheProtocol callers."""
         return await self.get_or_set(name, generator)
 
@@ -218,7 +285,7 @@ class TokenCache:
     async def flush(self) -> None:
         """Force an immediate save of any pending changes to disk."""
         if not self._closed and self._is_valid_snapshot():
-            await self._store.async_save(dict(self._data))
+            await self._store.async_save(self._snapshot())
 
     async def close(self) -> None:
         """Mark the cache as closed and perform a final flush; block further writes."""
@@ -227,14 +294,13 @@ class TokenCache:
         self._closed = True
         await self.flush()
 
-    async def delete(self) -> None:
-        """Delete the storage file for this cache (used when removing integration entry)."""
-        if self._store:
-            try:
-                await self._store.async_remove()
-                _LOGGER.debug("Deleted cache storage file for entry '%s'", self._entry_id)
-            except Exception as err:
-                _LOGGER.warning("Failed to delete cache storage file: %s", err)
+    async def async_remove_store(self) -> None:
+        """Remove the underlying Store file and clear in-memory state."""
+
+        await self._store.async_remove()
+        self._data.clear()
+        self._per_key_locks.clear()
+        self._closed = True
 
     # ------------------------------ Utilities --------------------------------
 
@@ -249,7 +315,9 @@ class TokenCache:
     def _is_valid_snapshot(self) -> bool:
         for key, val in self._data.items():
             if not self._is_jsonable(val):
-                _LOGGER.error("Snapshot contains non-JSON-serializable value for key '%s'", key)
+                _LOGGER.error(
+                    "Snapshot contains non-JSON-serializable value for key '%s'", key
+                )
                 return False
         return True
 
@@ -260,76 +328,158 @@ class TokenCache:
         return value
 
     @staticmethod
-    def _normalize_fcm(value: Any) -> Any:
+    def _normalize_fcm(value: Any) -> dict[str, Any] | str | None:
+        if value is None:
+            return None
+
         if isinstance(value, str):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except (json.JSONDecodeError, TypeError):
                 return value
-        return value
+            if isinstance(parsed, dict):
+                return cast(dict[str, Any], parsed)
+            return value
+
+        if isinstance(value, dict):
+            return cast(dict[str, Any], value)
+
+        return cast(dict[str, Any] | str | None, value)
+
+    def _snapshot(self) -> CacheData:
+        """Return a serializable snapshot of the cache for Store persistence."""
+
+        return cast(CacheData, dict(self._data))
+
+    @staticmethod
+    def _coerce_cache_state(raw: Mapping[Any, Any]) -> CacheState:
+        """Coerce raw mappings from disk or legacy sources into CacheState."""
+
+        coerced: CacheState = {}
+        for key, value in raw.items():
+            if not isinstance(key, str):
+                _LOGGER.debug("Skipping non-string cache key from persisted data: %r", key)
+                continue
+            coerced[key] = value
+
+        if "fcm_credentials" in coerced:
+            coerced["fcm_credentials"] = TokenCache._normalize_fcm(
+                coerced["fcm_credentials"]
+            )
+
+        return coerced
+
 
 
 # -------------------------- Global registry & facade --------------------------
 
 _INSTANCES: dict[str, TokenCache] = {}
-_DEFAULT_ENTRY_ID: str | None = None
+_STATE: _GlobalState = {"legacy_migration_done": False, "default_entry_id": None}
+# Legacy migration sentinel retained for backward compatibility with older tests.
 _LEGACY_MIGRATION_DONE: bool = False
+
+
+def _legacy_migration_done() -> bool:
+    """Return the in-memory flag indicating whether migration has run once."""
+
+    return bool(_STATE["legacy_migration_done"] or _LEGACY_MIGRATION_DONE)
+
+
+def _set_legacy_migration_flag(done: bool) -> None:
+    """Synchronize the legacy migration sentinel and shared state flag."""
+
+    _STATE["legacy_migration_done"] = done
+    globals()["_LEGACY_MIGRATION_DONE"] = done
 
 
 def _register_instance(entry_id: str, instance: TokenCache) -> None:
     """Register a TokenCache instance for a config entry ID (internal)."""
+    cache_entry_id = getattr(instance, "entry_id", None)
+    if isinstance(cache_entry_id, str):
+        normalized = cache_entry_id.strip()
+        if normalized and normalized != entry_id:
+            _LOGGER.warning(
+                "TokenCache entry_id mismatch detected; using registry key for cache registration.",
+                extra={
+                    "registry_entry_id_present": bool(entry_id),
+                    "instance_entry_id_present": bool(normalized),
+                },
+            )
+            try:
+                setattr(instance, "entry_id", entry_id)
+            except Exception as err:  # noqa: BLE001 - defensive logging only
+                _LOGGER.debug(
+                    "Failed to correct TokenCache entry_id to registry key",
+                    exc_info=err,
+                )
+        elif not normalized:
+            try:
+                setattr(instance, "entry_id", entry_id)
+            except Exception as err:  # noqa: BLE001 - defensive logging only
+                _LOGGER.debug(
+                    "Failed to assign registry entry_id to TokenCache instance",
+                    exc_info=err,
+                )
+    else:
+        try:
+            setattr(instance, "entry_id", entry_id)
+        except Exception as err:  # noqa: BLE001 - defensive logging only
+            _LOGGER.debug(
+                "Failed to assign registry entry_id to TokenCache instance",
+                exc_info=err,
+            )
     _INSTANCES[entry_id] = instance
 
 
-def _unregister_instance(entry_id: str) -> Optional[TokenCache]:
+def _unregister_instance(entry_id: str) -> TokenCache | None:
     """Unregister and return the TokenCache instance for a config entry ID (internal)."""
-    global _DEFAULT_ENTRY_ID
-    if _DEFAULT_ENTRY_ID == entry_id:
-        _DEFAULT_ENTRY_ID = None
+    if _STATE["default_entry_id"] == entry_id:
+        _STATE["default_entry_id"] = None
     return _INSTANCES.pop(entry_id, None)
 
 
-def _set_default_entry_id(entry_id: str, force: bool = False) -> None:
-    """Set the default entry for facade calls (only for single-entry scenarios).
-
-    Args:
-        entry_id: The entry ID to set as default.
-        force: If True, bypass the multi-entry check (used during validation).
-    """
-    global _DEFAULT_ENTRY_ID
+def _set_default_entry_id(entry_id: str, *, force: bool = False) -> None:
+    """Set the default entry for facade calls (only for single-entry scenarios)."""
     if force:
-        # Validation mode - force set even with multiple entries
-        _DEFAULT_ENTRY_ID = entry_id
-    elif len(_INSTANCES) > 1 and _DEFAULT_ENTRY_ID != entry_id:
+        _STATE["default_entry_id"] = entry_id
+        return
+
+    if len(_INSTANCES) > 1 and _STATE["default_entry_id"] != entry_id:
         # Immediately disallow ambiguous facade usage in multi-entry setups.
-        _DEFAULT_ENTRY_ID = None
-        _LOGGER.debug("Multiple config entries detected. Entry-specific cache instances will be used (expected behavior).")
+        _STATE["default_entry_id"] = None
+        _LOGGER.warning(
+            "Multiple config entries are active. Global cache calls are ambiguous and will fail."
+        )
     else:
-        _DEFAULT_ENTRY_ID = entry_id
+        _STATE["default_entry_id"] = entry_id
 
 
 def _get_default_cache() -> TokenCache:
-    """Return the default cache instance or raise if ambiguous.
-
-    Priority order for multi-entry support:
-    1. Registered cache provider (from nova_request during API calls)
-    2. Default entry ID (single entry or explicitly set)
-    3. Single instance (only one entry exists)
-    4. Error (multiple entries, ambiguous)
-    """
-    # Check for registered cache provider first (multi-entry support)
+    """Return the default cache instance or raise if ambiguous/missing."""
+    cache_from_provider: TokenCache | None = None
     try:
-        from ..NovaApi import nova_request
-        provider_cache = nova_request._get_cache_provider()
-        if provider_cache:
-            return provider_cache
-    except Exception:  # noqa: BLE001
-        # Nova request not available or no provider registered
+        from ..NovaApi import nova_request  # noqa: PLC0415
+    except Exception:  # pragma: no cover - defensive import guard
         pass
+    else:
+        provider = getattr(nova_request, "resolve_cache_from_provider", None)
+        if callable(provider):
+            try:
+                cache_from_provider = provider()
+            except Exception:  # pragma: no cover - defensive provider guard
+                cache_from_provider = None
 
-    # Fall back to default entry ID logic
-    if _DEFAULT_ENTRY_ID and (cache := _INSTANCES.get(_DEFAULT_ENTRY_ID)):
+    if cache_from_provider is not None:
+        return cache_from_provider
+
+    default_entry_id = _STATE["default_entry_id"]
+    if default_entry_id and (cache := _INSTANCES.get(default_entry_id)):
         return cache
+    if not _INSTANCES:
+        raise RuntimeError(
+            "No TokenCache registered. Provide the entry-scoped TokenCache (for example, "
+            "entry.runtime_data.token_cache)."
+        )
     if len(_INSTANCES) == 1:
         return next(iter(_INSTANCES.values()))
     raise RuntimeError(
@@ -337,7 +487,22 @@ def _get_default_cache() -> TokenCache:
     )
 
 
+def get_cache_for_entry(entry_id: str) -> TokenCache:
+    """Return the registered TokenCache for a config entry ID."""
+
+    if entry_id in _INSTANCES:
+        return _INSTANCES[entry_id]
+    raise KeyError(f"No TokenCache registered for entry_id '{entry_id}'.")
+
+
+def get_registered_entry_ids() -> list[str]:
+    """Return a list of registered entry IDs (for diagnostics/CLI helpers)."""
+
+    return list(_INSTANCES)
+
+
 # ------------------------------- Public facade --------------------------------
+
 
 async def async_get_cached_value(name: str) -> Any:
     """Facade: return a value from the default cache."""
@@ -345,13 +510,15 @@ async def async_get_cached_value(name: str) -> Any:
     return await cache.get(name)
 
 
-async def async_set_cached_value(name: str, value: Optional[Any]) -> None:
+async def async_set_cached_value(name: str, value: Any | None) -> None:
     """Facade: set a value in the default cache."""
     cache = _get_default_cache()
     await cache.set(name, value)
 
 
-async def async_get_cached_value_or_set(name: str, generator: Callable[[], Awaitable[Any] | Any]) -> Any:
+async def async_get_cached_value_or_set(
+    name: str, generator: Callable[[], Awaitable[Any] | Any]
+) -> Any:
     """Facade: return a value or generate/store it."""
     cache = _get_default_cache()
     return await cache.get_or_set(name, generator)
@@ -383,7 +550,7 @@ def get_cached_value(name: str) -> Any:
         )
 
 
-def set_cached_value(name: str, value: Optional[Any]) -> None:
+def set_cached_value(name: str, value: Any | None) -> None:
     """Legacy sync facade. Must not be called from the event loop.
 
     Raises:
@@ -436,7 +603,9 @@ def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
         pass
 
     if not _INSTANCES:
-        _LOGGER.warning("Cache not initialized; computing '%s' without storing persistently", name)
+        _LOGGER.warning(
+            "Cache not initialized; computing '%s' without storing persistently", name
+        )
         return generator()
 
     cache = _get_default_cache()

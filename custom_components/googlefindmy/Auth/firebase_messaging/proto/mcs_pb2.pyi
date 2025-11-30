@@ -13,10 +13,11 @@ import builtins
 import collections.abc
 import google.protobuf.descriptor
 import google.protobuf.internal.containers
-import google.protobuf.internal.enum_type_wrapper
-import google.protobuf.message
 import sys
 import typing
+
+from custom_components.googlefindmy.protobuf_typing import EnumTypeWrapperMeta as _EnumTypeWrapperMeta
+from custom_components.googlefindmy.protobuf_typing import MessageProto as _MessageProto
 
 if sys.version_info >= (3, 10):
     import typing as typing_extensions
@@ -26,7 +27,7 @@ else:
 DESCRIPTOR: google.protobuf.descriptor.FileDescriptor
 
 @typing_extensions.final
-class HeartbeatPing(google.protobuf.message.Message):
+class HeartbeatPing(_MessageProto):
     """
     Common fields/comments:
 
@@ -80,7 +81,7 @@ class HeartbeatPing(google.protobuf.message.Message):
 global___HeartbeatPing = HeartbeatPing
 
 @typing_extensions.final
-class HeartbeatAck(google.protobuf.message.Message):
+class HeartbeatAck(_MessageProto):
     """*
     TAG: 1
     """
@@ -126,7 +127,7 @@ class HeartbeatAck(google.protobuf.message.Message):
 global___HeartbeatAck = HeartbeatAck
 
 @typing_extensions.final
-class ErrorInfo(google.protobuf.message.Message):
+class ErrorInfo(_MessageProto):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     CODE_FIELD_NUMBER: builtins.int
@@ -176,7 +177,7 @@ class ErrorInfo(google.protobuf.message.Message):
 global___ErrorInfo = ErrorInfo
 
 @typing_extensions.final
-class Setting(google.protobuf.message.Message):
+class Setting(_MessageProto):
     """MobileSettings class.
     "u:f", "u:b", "u:s" - multi user devices reporting foreground, background
     and stopped users.
@@ -206,7 +207,7 @@ class Setting(google.protobuf.message.Message):
 global___Setting = Setting
 
 @typing_extensions.final
-class HeartbeatStat(google.protobuf.message.Message):
+class HeartbeatStat(_MessageProto):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     IP_FIELD_NUMBER: builtins.int
@@ -238,7 +239,7 @@ class HeartbeatStat(google.protobuf.message.Message):
 global___HeartbeatStat = HeartbeatStat
 
 @typing_extensions.final
-class HeartbeatConfig(google.protobuf.message.Message):
+class HeartbeatConfig(_MessageProto):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     UPLOAD_STAT_FIELD_NUMBER: builtins.int
@@ -270,7 +271,7 @@ class HeartbeatConfig(google.protobuf.message.Message):
 global___HeartbeatConfig = HeartbeatConfig
 
 @typing_extensions.final
-class ClientEvent(google.protobuf.message.Message):
+class ClientEvent(_MessageProto):
     """ClientEvents are used to inform the server of failed and successful
     connections.
     """
@@ -282,9 +283,7 @@ class ClientEvent(google.protobuf.message.Message):
         V: typing_extensions.TypeAlias = ValueType
 
     class _TypeEnumTypeWrapper(
-        google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
-            ClientEvent._Type.ValueType
-        ],
+        _EnumTypeWrapperMeta[ClientEvent._Type.ValueType],
         builtins.type,
     ):
         DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
@@ -387,7 +386,7 @@ class ClientEvent(google.protobuf.message.Message):
 global___ClientEvent = ClientEvent
 
 @typing_extensions.final
-class LoginRequest(google.protobuf.message.Message):
+class LoginRequest(_MessageProto):
     """*
     TAG: 2
     """
@@ -399,9 +398,7 @@ class LoginRequest(google.protobuf.message.Message):
         V: typing_extensions.TypeAlias = ValueType
 
     class _AuthServiceEnumTypeWrapper(
-        google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
-            LoginRequest._AuthService.ValueType
-        ],
+        _EnumTypeWrapperMeta[LoginRequest._AuthService.ValueType],
         builtins.type,
     ):
         DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
@@ -572,7 +569,7 @@ class LoginRequest(google.protobuf.message.Message):
 global___LoginRequest = LoginRequest
 
 @typing_extensions.final
-class LoginResponse(google.protobuf.message.Message):
+class LoginResponse(_MessageProto):
     """*
     TAG: 3
     """
@@ -662,7 +659,7 @@ class LoginResponse(google.protobuf.message.Message):
 global___LoginResponse = LoginResponse
 
 @typing_extensions.final
-class StreamErrorStanza(google.protobuf.message.Message):
+class StreamErrorStanza(_MessageProto):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     TYPE_FIELD_NUMBER: builtins.int
@@ -685,7 +682,7 @@ class StreamErrorStanza(google.protobuf.message.Message):
 global___StreamErrorStanza = StreamErrorStanza
 
 @typing_extensions.final
-class Close(google.protobuf.message.Message):
+class Close(_MessageProto):
     """*
     TAG: 4
     """
@@ -699,7 +696,7 @@ class Close(google.protobuf.message.Message):
 global___Close = Close
 
 @typing_extensions.final
-class Extension(google.protobuf.message.Message):
+class Extension(_MessageProto):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     ID_FIELD_NUMBER: builtins.int
@@ -725,7 +722,7 @@ class Extension(google.protobuf.message.Message):
 global___Extension = Extension
 
 @typing_extensions.final
-class IqStanza(google.protobuf.message.Message):
+class IqStanza(_MessageProto):
     """*
     TAG: 7
     IqRequest must contain a single extension.  IqResponse may contain 0 or 1
@@ -739,9 +736,7 @@ class IqStanza(google.protobuf.message.Message):
         V: typing_extensions.TypeAlias = ValueType
 
     class _IqTypeEnumTypeWrapper(
-        google.protobuf.internal.enum_type_wrapper._EnumTypeWrapper[
-            IqStanza._IqType.ValueType
-        ],
+        _EnumTypeWrapperMeta[IqStanza._IqType.ValueType],
         builtins.type,
     ):
         DESCRIPTOR: google.protobuf.descriptor.EnumDescriptor
@@ -859,7 +854,7 @@ class IqStanza(google.protobuf.message.Message):
 global___IqStanza = IqStanza
 
 @typing_extensions.final
-class AppData(google.protobuf.message.Message):
+class AppData(_MessageProto):
     DESCRIPTOR: google.protobuf.descriptor.Descriptor
 
     KEY_FIELD_NUMBER: builtins.int
@@ -882,7 +877,7 @@ class AppData(google.protobuf.message.Message):
 global___AppData = AppData
 
 @typing_extensions.final
-class DataMessageStanza(google.protobuf.message.Message):
+class DataMessageStanza(_MessageProto):
     """*
     TAG: 8
     Not used.
@@ -1075,7 +1070,7 @@ class DataMessageStanza(google.protobuf.message.Message):
 global___DataMessageStanza = DataMessageStanza
 
 @typing_extensions.final
-class StreamAck(google.protobuf.message.Message):
+class StreamAck(_MessageProto):
     """*
     Included in IQ with ID 13, sent from client or server after 10 unconfirmed
     messages.
@@ -1092,7 +1087,7 @@ class StreamAck(google.protobuf.message.Message):
 global___StreamAck = StreamAck
 
 @typing_extensions.final
-class SelectiveAck(google.protobuf.message.Message):
+class SelectiveAck(_MessageProto):
     """*
     Included in IQ sent after LoginResponse from server with ID 12.
     """

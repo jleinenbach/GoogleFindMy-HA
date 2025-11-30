@@ -1,0 +1,377 @@
+"""Reconfigure flow integration tests."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Callable
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from homeassistant import config_entries
+
+from custom_components.googlefindmy import _async_setup_new_subentries, config_flow
+from custom_components.googlefindmy.const import (
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_AUTH_METHOD,
+    DEFAULT_ENABLE_STATS_ENTITIES,
+    DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_ENABLE_STATS_ENTITIES,
+    OPT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_MAP_VIEW_TOKEN_EXPIRATION,
+)
+from tests.helpers.config_flow import (
+    ConfigEntriesDomainUniqueIdLookupMixin,
+    attach_config_entries_flow_manager,
+    set_config_flow_unique_id,
+)
+from tests.test_config_flow_subentry_sync import _ConfigEntriesManagerStub, _EntryStub
+
+
+def _build_reconfigure_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace()
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return [entry]
+
+        def async_get_entry(self, entry_id: str) -> _EntryStub | None:
+            if entry_id == entry.entry_id:
+                return entry
+            return None
+
+    hass.config_entries = _ConfigEntries()
+    hass.tasks: list[asyncio.Task[Any]] = []
+
+    def _async_create_task(coro: Any) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        hass.tasks.append(task)
+        return task
+
+    hass.async_create_task = _async_create_task
+
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {
+        "source": getattr(config_entries, "SOURCE_RECONFIGURE", "reconfigure"),
+        "entry_id": entry.entry_id,
+    }
+    set_config_flow_unique_id(flow, None)
+    flow._auth_data = {
+        CONF_GOOGLE_EMAIL: entry.data[CONF_GOOGLE_EMAIL],
+        CONF_OAUTH_TOKEN: "token",
+        DATA_AUTH_METHOD: config_flow._AUTH_METHOD_INDIVIDUAL,
+    }
+    return flow
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_flow_skips_already_configured_abort() -> None:
+    """Reconfigure source should route to async_step_reconfigure without aborting."""
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+    entry.unique_id = entry.data[CONF_GOOGLE_EMAIL]
+
+    flow = _build_reconfigure_flow(entry)
+
+    async def _fake_reconfigure(
+        self: config_flow.ConfigFlow, user_input: dict[str, Any] | None = None
+    ) -> dict[str, str]:
+        return {"type": "form", "step_id": "reconfigure"}
+
+    flow.async_step_reconfigure = _fake_reconfigure.__get__(flow, config_flow.ConfigFlow)  # type: ignore[assignment]
+
+    result = await flow.async_step_user()
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "reconfigure"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_recreates_subentries_and_platforms() -> None:
+    """Reload after reconfigure should recreate subentries with stable IDs."""
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace()
+    hass.config_entries = _ConfigEntriesManagerStub(entry)
+    hass.config_entries.forward_setup_calls: list[tuple[_EntryStub, tuple[str, ...]]] = []
+    hass.config_entries.setup_calls = []
+    hass.verify_event_loop_thread = lambda *_args, **_kwargs: None
+
+    async def _forward_setups(entry_to_forward: _EntryStub, platforms: tuple[str, ...]) -> None:
+        hass.config_entries.forward_setup_calls.append(
+            (entry_to_forward, tuple(platforms))
+        )
+
+    hass.config_entries.async_forward_entry_setups = _forward_setups  # type: ignore[attr-defined]
+    hass.data = {config_flow.DOMAIN: {"entries": {entry.entry_id: entry}}}
+    hass.async_create_task = asyncio.create_task
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"entry_id": entry.entry_id}
+    flow._auth_data = {
+        DATA_AUTH_METHOD: "manual",
+        CONF_OAUTH_TOKEN: "token",
+        CONF_GOOGLE_EMAIL: entry.data[CONF_GOOGLE_EMAIL],
+    }
+    flow._available_devices = [("Device", "dev-1")]
+    set_config_flow_unique_id(flow, None)
+    context_map = flow._ensure_subentry_context()
+
+    await flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
+        entry,
+        options_payload={
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: False,
+            OPT_ENABLE_STATS_ENTITIES: True,
+        },
+        defaults={
+            OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
+        },
+        context_map=context_map,
+    )
+
+    await _async_setup_new_subentries(flow.hass, entry, entry.subentries.values())
+
+    created_ids = [payload["config_subentry_id"] for payload in hass.config_entries.created]
+    setup_calls_first = list(hass.config_entries.setup_calls)
+    assert setup_calls_first, "Subentry setup should record config_subentry_id"
+    assert setup_calls_first == created_ids
+
+    expected_platforms = ("binary_sensor", "button", "device_tracker", "sensor")
+    assert hass.config_entries.forward_setup_calls == [(entry, expected_platforms)]
+
+    hass.config_entries.forward_setup_calls.clear()
+
+    entry.subentries.clear()
+    hass.config_entries.created.clear()
+    hass.config_entries.setup_calls.clear()
+
+    await flow._async_sync_feature_subentries(  # type: ignore[attr-defined]
+        entry,
+        options_payload={
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: True,
+            OPT_ENABLE_STATS_ENTITIES: True,
+        },
+        defaults={
+            OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+            OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
+        },
+        context_map=context_map,
+    )
+
+    recreated_ids = [payload["config_subentry_id"] for payload in hass.config_entries.created]
+
+    await _async_setup_new_subentries(flow.hass, entry, entry.subentries.values())
+
+    setup_calls_second = list(hass.config_entries.setup_calls)
+    assert setup_calls_second == recreated_ids
+    assert hass.config_entries.forward_setup_calls == [(entry, expected_platforms)]
+
+    assert recreated_ids == created_ids
+    assert setup_calls_first == created_ids
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -> None:
+    """Warn when a synchronous reload returns False after reconfigure."""
+
+    caplog.set_level(logging.WARNING)
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+
+    scheduled: list[str] = []
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> bool:
+            assert entry_id == entry.entry_id
+            return False
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            scheduled.append(entry_id)
+
+    hass = SimpleNamespace(config_entries=_ConfigEntries())
+    flow.hass = hass  # type: ignore[assignment]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any(
+        "returned False" in record.message and "deferred" not in record.message
+        for record in caplog.records
+    )
+    assert scheduled == [entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_forces_device_list_refresh() -> None:
+    """Mark forced device list refresh on reconfigure and call coordinator hook."""
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    refresh_calls: list[tuple[str | None, bool]] = []
+    marked: list[float | None] = []
+
+    def _request_device_list_refresh(
+        *, reason: str | None = None, schedule_refresh: bool = True
+    ) -> None:
+        refresh_calls.append((reason, schedule_refresh))
+
+    def _mark_recent_reconfigure(marker: float | None = None) -> None:
+        marked.append(marker)
+
+    coordinator = SimpleNamespace(
+        request_device_list_refresh=_request_device_list_refresh,
+        mark_recent_reconfigure=_mark_recent_reconfigure,
+    )
+    runtime = SimpleNamespace(coordinator=coordinator)
+
+    class _ConfigEntries:
+        def async_reload(self, entry_id: str) -> bool:
+            assert entry_id == entry.entry_id
+            return True
+
+    hass = SimpleNamespace(
+        data={config_flow.DOMAIN: {"entries": {entry.entry_id: runtime}}},
+        config_entries=_ConfigEntries(),
+        async_create_task=asyncio.create_task,
+    )
+
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {"entry_id": entry.entry_id}
+    flow._auth_data = {
+        DATA_AUTH_METHOD: "manual",
+        CONF_OAUTH_TOKEN: "token",
+        CONF_GOOGLE_EMAIL: entry.data[CONF_GOOGLE_EMAIL],
+    }
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert refresh_calls == [("reconfigure", True)]
+    assert marked and marked[0] is not None
+
+    pending_refresh = hass.data[config_flow.DOMAIN][
+        "pending_reconfigure_device_list_refresh"
+    ]
+    assert isinstance(pending_refresh, set)
+    assert entry.entry_id in pending_refresh
+
+    markers = hass.data[config_flow.DOMAIN]["recent_reconfigure_markers"]
+    assert isinstance(markers, dict)
+    assert entry.entry_id in markers
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_logs_deferred_failures(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Warn when a deferred reload resolves to False."""
+
+    caplog.set_level(logging.WARNING)
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace(tasks=[])
+    scheduled: list[str] = []
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            assert entry_id == entry.entry_id
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _retry() -> bool:
+                return False
+
+            return _retry()
+
+        def async_schedule_reload(self, entry_id: str) -> None:
+            scheduled.append(entry_id)
+
+    hass.config_entries = _ConfigEntries()
+
+    def _async_create_task(coro: Any) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro)
+        hass.tasks.append(task)
+        return task
+
+    hass.async_create_task = _async_create_task
+
+    def _immediate_call_later(_hass: Any, _delay: Any, callback: Callable[[Any], None]):
+        callback(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    flow.hass = hass  # type: ignore[assignment]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+    await asyncio.gather(*hass.tasks)
+
+    assert any(
+        "returned False" in record.message and "deferred" in record.message
+        for record in caplog.records
+    )
+    assert scheduled == [entry.entry_id, entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_reload_logs_when_scheduler_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Emit an error when a deferred reload cannot be scheduled."""
+
+    caplog.set_level(logging.ERROR)
+
+    entry = _EntryStub()
+    entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
+
+    flow = config_flow.ConfigFlow()
+    hass = SimpleNamespace()
+
+    class _ConfigEntries:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def async_reload(self, entry_id: str) -> Any:
+            self.calls += 1
+            assert entry_id == entry.entry_id
+            if self.calls == 1:
+                raise config_flow.OperationNotAllowed()
+
+            async def _retry() -> bool:
+                return True
+
+            return _retry()
+
+    hass.config_entries = _ConfigEntries()
+
+    def _immediate_call_later(_hass: Any, _delay: Any, callback: Callable[[Any], None]):
+        callback(None)
+
+    monkeypatch.setattr(config_flow, "async_call_later", _immediate_call_later)
+
+    flow.hass = hass  # type: ignore[assignment]
+
+    await flow._async_reload_entry_after_reconfigure(entry)  # type: ignore[attr-defined]
+
+    assert any("could not be scheduled" in record.message for record in caplog.records)

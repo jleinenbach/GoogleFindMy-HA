@@ -31,23 +31,31 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import ssl
 import struct
 import time
 import traceback
-import random
 from base64 import urlsafe_b64decode
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientSession
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
-from google.protobuf.json_format import MessageToJson
-from google.protobuf.message import Message
-from http_ece import decrypt as http_decrypt  # type: ignore[import-untyped]
 
+import http_ece
+from google.protobuf.json_format import MessageToJson
+from google.protobuf.message import Message as RuntimeMessage
+
+from ._typing import (
+    CredentialsUpdatedCallable,
+    JSONDict,
+    MutableJSONMapping,
+    OnNotificationCallable,
+)
 from .const import (
     MCS_HOST,
     MCS_PORT,
@@ -67,10 +75,16 @@ from .proto.mcs_pb2 import (  # pylint: disable=no-name-in-module
     StreamErrorStanza,
 )
 
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.protobuf_typing import MessageProto
+else:
+    MessageProto = RuntimeMessage
+
+http_decrypt: Callable[..., bytes] = http_ece.decrypt
+
 _logger = logging.getLogger(__name__)
 
-OnNotificationCallable = Callable[[dict[str, Any], str, Any], None]
-CredentialsUpdatedCallable = Callable[[dict[str, Any]], None]
+_LEGACY_MCS_PROTOCOL_VERSION = 38
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -145,34 +159,43 @@ class FcmPushClientConfig:  # pylint:disable=too-many-instance-attributes
     writer_close_timeout: float = 2.0
 
 
-class FcmPushClient:  # pylint:disable=too-many-instance-attributes
+class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-attributes
     """Worker-only FCM client.
-       - Establishes a single connection with initial retry.
-       - Listens for messages until an error occurs or stop() is called.
-       - No internal reset/monitor loops; outer supervisor restarts the client.
+    - Establishes a single connection with initial retry.
+    - Listens for messages until an error occurs or stop() is called.
+    - No internal reset/monitor loops; outer supervisor restarts the client.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
-        callback: Callable[[dict, str, Any | None], None],
+        callback: OnNotificationCallable[JSONDict, NotificationContextT],
         fcm_config: FcmRegisterConfig,
-        credentials: dict | None = None,
-        credentials_updated_callback: CredentialsUpdatedCallable | None = None,
+        credentials: MutableJSONMapping | None = None,
+        credentials_updated_callback: (
+            CredentialsUpdatedCallable[MutableJSONMapping] | None
+        ) = None,
         *,
-        callback_context: object | None = None,
+        callback_context: NotificationContextT | None = None,
         received_persistent_ids: list[str] | None = None,
         config: FcmPushClientConfig | None = None,
         http_client_session: ClientSession | None = None,
     ):
         """Initializes the receiver."""
-        self.callback = callback
-        self.callback_context = callback_context
+        self.callback: OnNotificationCallable[JSONDict, NotificationContextT] = callback
+        self.callback_context: NotificationContextT | None = callback_context
         self.fcm_config = fcm_config
-        self.credentials = credentials
-        self.credentials_updated_callback = credentials_updated_callback
-        self.persistent_ids = received_persistent_ids if received_persistent_ids else []
+        self.credentials: MutableJSONMapping | None = credentials
+        self.credentials_updated_callback: (
+            CredentialsUpdatedCallable[MutableJSONMapping] | None
+        ) = credentials_updated_callback
+        self.persistent_ids: list[str] = (
+            list(received_persistent_ids)
+            if received_persistent_ids is not None
+            else []
+        )
         self.config = config if config else FcmPushClientConfig()
-        self._http_client_session = http_client_session
+        self._http_client_session: ClientSession | None = http_client_session
+        self.register: FcmRegister | None = None
 
         # Instance-specific logger to avoid global side effects; honors log_debug_verbose.
         self.logger = logging.getLogger(f"{__name__}.FcmPushClient.{id(self)}")
@@ -194,16 +217,17 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         self.last_message_time: float = 0.0
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
-        self.tasks: list[asyncio.Task] = []
+        self.tasks: list[asyncio.Task[None]] = []
 
         # Locks
         self.stopping_lock: asyncio.Lock = asyncio.Lock()
 
     # ---- Logging helpers ----
 
-    def _msg_str(self, msg: Message) -> str:
+    def _msg_str(self, msg: MessageProto) -> str:
         if self.config.log_debug_verbose:
-            return type(msg).__name__ + "\n" + MessageToJson(msg, indent=4)
+            pretty_json = MessageToJson(cast(RuntimeMessage, msg), indent=4)
+            return f"{type(msg).__name__}\n{pretty_json}"
         return type(msg).__name__
 
     def _log_verbose(self, msg: str, *args: object) -> None:
@@ -239,7 +263,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 await asyncio.wait_for(
                     writer.wait_closed(), timeout=self.config.writer_close_timeout
                 )
-            except (asyncio.TimeoutError, TimeoutError):
+            except TimeoutError:
                 # TLS shutdown timed out: hard-close
                 self.logger.debug("SSL shutdown timed out; aborting transport")
                 transport = writer.transport if hasattr(writer, "transport") else None
@@ -275,9 +299,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         shift = 0
         while True:
             r = await reader.readexactly(1)
-            (b,) = struct.unpack("B", r)
-            res |= (b & 0x7F) << shift
-            if (b & 0x80) == 0:
+            byte_value = int(struct.unpack("B", r)[0])
+            res |= (byte_value & 0x7F) << shift
+            if (byte_value & 0x80) == 0:
                 break
             shift += 7
         return res
@@ -297,14 +321,14 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         return bytes(res)
 
     @staticmethod
-    def _make_packet(msg: Message, include_version: bool) -> bytes:
+    def _make_packet(msg: MessageProto, include_version: bool) -> bytes:
         tag = MCS_MESSAGE_TAG[type(msg)]
         header = bytearray([MCS_VERSION, tag]) if include_version else bytearray([tag])
         payload = msg.SerializeToString()
         buf = bytes(header) + FcmPushClient._encode_varint32(len(payload)) + payload
         return buf
 
-    async def _send_msg(self, msg: Message) -> None:
+    async def _send_msg(self, msg: MessageProto) -> None:
         self._log_verbose("Sending packet to server: %s", self._msg_str(msg))
         buf = FcmPushClient._make_packet(msg, self.first_message)
         writer = self.writer
@@ -312,14 +336,14 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         writer.write(buf)
         await writer.drain()
 
-    async def _receive_msg(self) -> Message | None:
+    async def _receive_msg(self) -> MessageProto | None:
         reader = self.reader
         assert reader is not None, "StreamReader is not initialized"
 
         if self.first_message:
             r = await reader.readexactly(2)
             version, tag = struct.unpack("BB", r)
-            if version < MCS_VERSION and version != 38:
+            if version < MCS_VERSION and version != _LEGACY_MCS_PROTOCOL_VERSION:
                 raise RuntimeError(f"protocol version {version} unsupported")
             self.first_message = False
         else:
@@ -343,7 +367,8 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self._log_warn_with_limit("Unconfigured message class %s", msg_class)
             return None
 
-        payload = msg_class()  # type: ignore[operator]
+        msg_type = cast(type[MessageProto], msg_class)
+        payload = msg_type()
         payload.ParseFromString(buf)
         self._log_verbose("Received payload: %s", self._msg_str(payload))
 
@@ -370,7 +395,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             android_id = gcm_data.get("android_id")
             security_token = gcm_data.get("security_token")
             if not android_id or not security_token:
-                raise ValueError("android_id or security_token is missing from credentials")
+                raise ValueError(
+                    "android_id or security_token is missing from credentials"
+                )
 
             req = LoginRequest()
             req.adaptive_heartbeat = False
@@ -405,17 +432,25 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     @staticmethod
     def _decrypt_raw_data(
-        credentials: dict[str, dict[str, str]],
+        credentials: Mapping[str, object],
         crypto_key_str: str,
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
         crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii"))
         salt = urlsafe_b64decode(salt_str.encode("ascii"))
-        der_data_str = credentials["keys"]["private"]
-        der_data = urlsafe_b64decode(der_data_str.encode("ascii") + b"========")
-        secret_str = credentials["keys"]["secret"]
-        secret = urlsafe_b64decode(secret_str.encode("ascii") + b"========")
+
+        keys_section = credentials.get("keys")
+        if not isinstance(keys_section, Mapping):
+            raise ValueError("Credentials missing FCM key material")
+
+        private_value = keys_section.get("private")
+        secret_value = keys_section.get("secret")
+        if not (isinstance(private_value, str) and isinstance(secret_value, str)):
+            raise ValueError("Invalid key values in credential payload")
+
+        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"========")
+        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"========")
         privkey = load_der_private_key(
             der_data, password=None, backend=default_backend()
         )
@@ -491,7 +526,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
                 decrypted_json = None
 
         if isinstance(decrypted_json, dict):
-            ret_val: dict[str, Any] = decrypted_json
+            ret_val = cast(JSONDict, decrypted_json)
         elif decrypted_json is not None:
             self._log_warn_with_limit(
                 "FCM payload JSON is not an object (%s); wrapping",
@@ -500,7 +535,11 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             ret_val = {"_raw_json": decrypted_json}
         else:
             # Not JSON → provide a stable mapping for consumers
-            ret_val = {"_raw_text": text} if text is not None else {"_raw_bytes": decrypted.hex()}
+            ret_val = (
+                {"_raw_text": text}
+                if text is not None
+                else {"_raw_bytes": decrypted.hex()}
+            )
 
         self._log_verbose(
             "Decrypted data for message %s is: %s", msg.persistent_id, ret_val
@@ -509,7 +548,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.callback(ret_val, msg.persistent_id, self.callback_context)
             self._reset_error_count(ErrorType.NOTIFY)
         except Exception:
-            self.logger.exception("Unexpected exception calling notification callback\n")
+            self.logger.exception(
+                "Unexpected exception calling notification callback\n"
+            )
             self._try_increment_error_count(ErrorType.NOTIFY)
 
     def _new_input_stream_id_available(self) -> bool:
@@ -572,7 +613,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
         if error_type not in self.sequential_error_counters:
             self.sequential_error_counters[error_type] = 0
 
-    # NOTE: returns True to keep going, False when we've decided to stop
+        # NOTE: returns True to keep going, False when we've decided to stop
         self.sequential_error_counters[error_type] += 1
 
         if (
@@ -589,7 +630,7 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             return False
         return True
 
-    async def _handle_message(self, msg: Message) -> None:
+    async def _handle_message(self, msg: MessageProto) -> None:
         self.last_message_time = time.time()
         self.input_stream_id += 1
 
@@ -656,9 +697,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
 
     def _exp_backoff_with_jitter(self, trycount: int) -> float:
         """Exponential backoff: 0.5,1,2,4,... capped at 60s, plus 10–20% jitter."""
-        base = min(0.5 * (2 ** (trycount - 1)), 60.0)
-        jitter = base * random.uniform(0.10, 0.20)
-        return base + jitter
+        base: float = min(0.5 * (2 ** (trycount - 1)), 60.0)
+        jitter = base * float(random.uniform(0.10, 0.20))
+        return float(base + jitter)
 
     async def _connect_with_retry(self) -> bool:
         self.run_state = FcmPushClientRunState.STARTING_CONNECTION
@@ -750,10 +791,29 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.credentials_updated_callback,
             http_client_session=self._http_client_session,
         )
-        self.credentials = await self.register.checkin_or_register()
-        # await self.register.fcm_refresh_install()
-        await self.register.close()
-        return self.credentials["fcm"]["registration"]["token"]
+
+        try:
+            credentials = await self.register.checkin_or_register()
+            self.credentials = credentials
+
+            fcm_section = credentials.get("fcm")
+            registration_token: str | None = None
+            if isinstance(fcm_section, Mapping):
+                registration_section = fcm_section.get("registration")
+                if isinstance(registration_section, Mapping):
+                    token_candidate = registration_section.get("token")
+                    if isinstance(token_candidate, str):
+                        registration_token = token_candidate
+
+            if registration_token is None:
+                raise RuntimeError("FCM registration token missing from credentials.")
+
+            return registration_token
+        finally:
+            register = self.register
+            if register is not None:
+                await register.close()
+                self.register = None
 
     async def _start_heartbeat_sender(self) -> None:
         """Send client heartbeats at a fixed interval while started."""
@@ -792,7 +852,9 @@ class FcmPushClient:  # pylint:disable=too-many-instance-attributes
             self.last_message_time = time.time()
             self.tasks = [
                 asyncio.create_task(self._listen(), name="googlefindmy.fcm_listen"),
-                asyncio.create_task(self._start_heartbeat_sender(), name="googlefindmy.fcm_heartbeat"),
+                asyncio.create_task(
+                    self._start_heartbeat_sender(), name="googlefindmy.fcm_heartbeat"
+                ),
             ]
         except Exception as ex:
             self.logger.error("Unexpected error running FcmPushClient: %s", ex)

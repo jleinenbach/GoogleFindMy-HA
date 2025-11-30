@@ -1,32 +1,55 @@
+# custom_components/googlefindmy/KeyBackup/shared_key_flow.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 
-from selenium.webdriver.support.ui import WebDriverWait
+from __future__ import annotations
+
+import json
+import logging
+from typing import TYPE_CHECKING
+
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as ec
+from selenium.webdriver.support.ui import WebDriverWait
 
-from custom_components.googlefindmy.KeyBackup.response_parser import get_fmdn_shared_key
-from custom_components.googlefindmy.KeyBackup.shared_key_request import get_security_domain_request_url
 from custom_components.googlefindmy.chrome_driver import create_driver
+from custom_components.googlefindmy.KeyBackup.response_parser import (
+    get_fmdn_shared_key,
+)
+from custom_components.googlefindmy.KeyBackup.shared_key_request import (
+    get_security_domain_request_url,
+)
 
-def request_shared_key_flow():
-    driver = create_driver()
+if TYPE_CHECKING:
+    from selenium.webdriver.remote.webdriver import WebDriver
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def request_shared_key_flow() -> str | None:
+    """Execute the manual shared key retrieval flow via Selenium."""
+
+    driver: WebDriver | None = None
     try:
-        # Open Google accounts sign-in page
+        driver = create_driver()
+    except Exception:  # pragma: no cover - relies on runtime Selenium setup
+        LOGGER.exception("Failed to initialize ChromeDriver for shared key flow")
+        return None
+
+    try:
         driver.get("https://accounts.google.com/")
 
-        # Wait for user to sign in and redirect to https://myaccount.google.com
         WebDriverWait(driver, 300).until(
             ec.url_contains("https://myaccount.google.com")
         )
-        print("[SharedKeyFlow] Signed in successfully.")
+        LOGGER.info("Signed in successfully during shared key flow")
 
-        # Open the security domain request URL
         security_url = get_security_domain_request_url()
         driver.get(security_url)
 
-        # Inject JavaScript interface
         script = """
         window.mm = {
             setVaultSharedKeys: function(str, vaultKeys) {
@@ -42,35 +65,46 @@ def request_shared_key_flow():
         driver.execute_script(script)
 
         while True:
-            # Check for alerts indicating JavaScript calls
             try:
                 WebDriverWait(driver, 0.5).until(ec.alert_is_present())
-                alert = driver.switch_to.alert
-                message = alert.text
-                alert.accept()
+            except TimeoutException:
+                continue
 
-                # Parse the alert message
-                import json
+            alert = driver.switch_to.alert
+            message: str = alert.text
+            alert.accept()
+
+            try:
                 data = json.loads(message)
+            except json.JSONDecodeError:
+                LOGGER.warning("Discarding malformed alert payload: %s", message)
+                continue
 
-                if data['method'] == 'setVaultSharedKeys':
-                    shared_key = get_fmdn_shared_key(data['vaultKeys'])
-                    print("[SharedKeyFlow] Received Shared Key.")
-                    driver.quit()
-                    return shared_key.hex()
-                elif data['method'] == 'closeView':
-                    print("[SharedKeyFlow] closeView() called. Closing browser.")
-                    driver.quit()
-                    break
+            method = data.get("method")
+            if method == "setVaultSharedKeys":
+                vault_keys = data.get("vaultKeys")
+                if not isinstance(vault_keys, str):
+                    LOGGER.error("Missing or invalid vaultKeys payload: %s", data)
+                    continue
 
-            except Exception:
-                pass
+                shared_key = get_fmdn_shared_key(vault_keys)
+                shared_key_hex: str = shared_key.hex()
+                LOGGER.info("Received shared key from authentication flow")
+                return shared_key_hex
 
-    except Exception as e:
-        print(f"An error occurred: {e}")
+            if method == "closeView":
+                LOGGER.info("closeView invoked; terminating browser session")
+                return None
+
+            LOGGER.debug("Unhandled alert payload: %s", data)
+
+    except Exception:  # pragma: no cover - runtime Selenium failures
+        LOGGER.exception("Shared key flow terminated unexpectedly")
+        return None
     finally:
-        driver.quit()
+        if driver is not None:
+            driver.quit()
 
 
 if __name__ == "__main__":
-   request_shared_key_flow()
+    request_shared_key_flow()

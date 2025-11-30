@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/NovaApi/ExecuteAction/PlaySound/sound_request.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
@@ -5,19 +6,44 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from collections.abc import Callable
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, cast
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
 )
 
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
+        ExecuteActionRequest,
+    )
+
+
+def _load_proto_module() -> Any:
+    """Return the protobuf module without import-time side effects."""
+
+    return import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2")
+
+
+def _load_uuid_factory() -> Callable[[], str]:
+    """Return the UUID generator helper lazily."""
+
+    return cast(
+        Callable[[], str],
+        getattr(
+            import_module("custom_components.googlefindmy.NovaApi.util"),
+            "generate_random_uuid",
+        ),
+    )
+
 
 def create_sound_request(
     should_start: bool,
     canonic_device_id: str,
     gcm_registration_id: str,
-    request_uuid: Optional[str] = None,
+    request_uuid: str | None = None,
 ) -> str:
     """Build the hex-encoded Nova payload for a Play/Stop Sound action (pure builder).
 
@@ -42,15 +68,14 @@ def create_sound_request(
     if not isinstance(gcm_registration_id, str) or not gcm_registration_id.strip():
         raise ValueError("gcm_registration_id must be a non-empty string")
 
-    # Lazy import of protobuf module to avoid heavy import work at integration startup.
-    from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
-    from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
+    proto_module = _load_proto_module()
+    generate_random_uuid = _load_uuid_factory()
 
     if request_uuid is None:
         request_uuid = generate_random_uuid()
 
     # Create a base action request envelope
-    action_request = create_action_request(
+    action_request: ExecuteActionRequest = create_action_request(
         canonic_device_id,
         gcm_registration_id,
         request_uuid=request_uuid,
@@ -60,11 +85,11 @@ def create_sound_request(
     # for whole-device sound requests.
     if should_start:
         action_request.action.startSound.component = (
-            DeviceUpdate_pb2.DeviceComponent.DEVICE_COMPONENT_UNSPECIFIED
+            proto_module.DeviceComponent.DEVICE_COMPONENT_UNSPECIFIED
         )
     else:
         action_request.action.stopSound.component = (
-            DeviceUpdate_pb2.DeviceComponent.DEVICE_COMPONENT_UNSPECIFIED
+            proto_module.DeviceComponent.DEVICE_COMPONENT_UNSPECIFIED
         )
 
     # Serialize to hex for Nova transport

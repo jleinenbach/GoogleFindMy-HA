@@ -1,21 +1,30 @@
+# custom_components/googlefindmy/Auth/auth_flow.py
 #
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
 
+from __future__ import annotations
+
+import sys
+from typing import TYPE_CHECKING, Any, cast
+
 from selenium.webdriver.support.ui import WebDriverWait
+
 from custom_components.googlefindmy.chrome_driver import create_driver
 
-def request_oauth_account_token_flow(headless=False):
+if TYPE_CHECKING:
+    from selenium.webdriver.remote.webdriver import WebDriver
 
+
+def request_oauth_account_token_flow(headless: bool = False) -> str:
     # In Home Assistant context, skip the interactive prompts
-    import sys
-    is_home_assistant = 'homeassistant' in sys.modules
-    
+    is_home_assistant = "homeassistant" in sys.modules
+
     if not headless and not is_home_assistant:
         print("""[AuthFlow] This script will now open Google Chrome on your device to login to your Google account.
 > Please make sure that Chrome is installed on your system.
-> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted. 
+> For macOS users only: Make that you allow Python (or PyCharm) to control Chrome if prompted.
         """)
 
         # Press enter to continue
@@ -25,7 +34,7 @@ def request_oauth_account_token_flow(headless=False):
     if not is_home_assistant:
         print("[AuthFlow] Installing ChromeDriver...")
 
-    driver = create_driver(headless=headless)
+    driver: WebDriver = create_driver(headless=headless)
 
     try:
         # Open the browser and navigate to the URL
@@ -39,8 +48,16 @@ def request_oauth_account_token_flow(headless=False):
         )
 
         # Get the value of the "oauth_token" cookie
-        oauth_token_cookie = driver.get_cookie("oauth_token")
-        oauth_token_value = oauth_token_cookie['value']
+        cookie = driver.get_cookie("oauth_token")
+        if cookie is None:
+            msg = "OAuth token cookie missing despite wait completion"
+            raise RuntimeError(msg)
+
+        oauth_token_cookie: dict[str, Any] = cast(dict[str, Any], cookie)
+        oauth_token_value = oauth_token_cookie.get("value")
+        if not isinstance(oauth_token_value, str):
+            msg = "OAuth token cookie value is missing or not a string"
+            raise RuntimeError(msg)
 
         # Print the value of the "oauth_token" cookie
         if not is_home_assistant:
@@ -52,5 +69,6 @@ def request_oauth_account_token_flow(headless=False):
         # Close the browser
         driver.quit()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     request_oauth_account_token_flow()

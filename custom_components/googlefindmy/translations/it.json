@@ -1,5 +1,10 @@
 {
   "title": "Google Find My Device",
+  "device": {
+    "google_find_hub_service": {
+      "name": "Servizio hub Google Find"
+    }
+  },
   "config": {
     "step": {
       "user": {
@@ -25,8 +30,8 @@
         }
       },
       "device_selection": {
-        "title": "Selezione dispositivi e polling",
-        "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)",
+        "title": "Impostazioni di interrogazione",
+        "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)\n\nFiltro Google Home: attivo per impostazione predefinita con le parole chiave nest/google/home/mini/hub/display/chromecast/speaker. Sostituisce le coordinate della zona Home per i rilevamenti Google/Nest/Chromecast e ignora le segnalazioni ripetute di \"home\" per 15 minuti. Regola qui le parole chiave se i tuoi dispositivi usano altri nomi.",
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
@@ -38,25 +43,117 @@
           "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
         }
       },
+      "select_hub_for_visibility": {
+        "title": "Seleziona hub",
+        "description": "Scegli quale hub Google Find My gestire prima di aprire il dialogo sulla visibilità dei dispositivi.",
+        "data": {
+          "hub": "Hub"
+        }
+      },
+      "reconfigure": {
+        "title": "Riconfigurare Google Find My Device",
+        "description": "Controlla la configurazione attuale per **{email}**. Continua per aggiornare le credenziali o modificare le opzioni di polling."
+      },
       "reauth_confirm": {
         "title": "Riautenticazione",
-        "description": "Le tue credenziali sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email."
+        "description": "Le credenziali di **{email}** sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email.",
+        "data": {
+          "secrets_json": "Nuovo secrets.json (contenuto completo)",
+          "new_oauth_token": "Nuovo token OAuth"
+        }
+      },
+      "migrate_complete": {
+        "title": "Migrazione completata",
+        "description": "Google Find My Device per **{email}** è stato migrato alla nuova struttura dei gruppi di funzionalità. Controlla i tuoi dispositivi e ricarica l'integrazione se alcune entità risultano offline."
       }
     },
     "error": {
       "auth_failed": "Autenticazione non riuscita. Riprova.",
+      "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "invalid_token": "Credenziali non valide (token/e-mail) o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
-      "choose_one": "Fornisci esattamente un metodo di credenziali.",
+      "dependency_not_ready": "Mancano le dipendenze dell'integrazione. Installa i requisiti di Google Find My Device e riavvia Home Assistant.",
+      "import_failed": "Impossibile importare l'helper di autenticazione. Installa i requisiti di Google Find My Device (Selenium e driver Chrome) e riprova.",
+      "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
-      "unknown": "Errore imprevisto."
+      "unknown": "Errore imprevisto.",
+      "email_mismatch": "Le credenziali fornite appartengono a un altro account Google. Per aggiungere quell’account, crea una nuova integrazione; la riautenticazione non può cambiare l’account di questa voce."
     },
     "abort": {
       "already_configured": "Google Find My Device è già configurato.",
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
-      "reauth_successful": "Riautenticazione riuscita."
+      "dependency_not_ready": "Le dipendenze di Google Find My Device non sono installate. Installa i requisiti e riprova.",
+      "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
+      "reauth_successful": "Riautenticazione riuscita.",
+      "migration_successful": "Migrazione completata.",
+      "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo.",
+      "reconfigure_successful": "Riconfigurazione riuscita.",
+      "no_hubs_configured": "Non ci sono ancora hub Google Find My configurati."
+    },
+    "progress": {
+      "discovery_secrets_new": "Auth/secrets.json rilevato per {email}",
+      "discovery_secrets_update": "Nuove credenziali rilevate per {email}"
+    }
+  },
+  "config_subentries": {
+    "hub": {
+      "title": "Google Find My Device Hub",
+      "entry_type": "Hub feature group",
+      "initiate_flow": {
+        "user": "Add hub feature group"
+      },
+      "step": {
+        "user": {
+          "title": "Aggiungi gruppo di funzionalità hub",
+          "description": "Crea o aggiorna il gruppo di funzionalità dell'hub per consentire a Home Assistant di esporre i servizi condivisi di questa integrazione."
+        },
+        "reconfigure": {
+          "title": "Aggiorna gruppo di funzionalità hub",
+          "description": "Aggiorna il gruppo di funzionalità dell'hub per rendere disponibili le funzionalità più recenti."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "service": {
+      "title": "Servizio Google Find Hub",
+      "entry_type": "Service feature group",
+      "initiate_flow": {
+        "user": "Add service feature group"
+      },
+      "step": {
+        "user": {
+          "title": "Aggiungi gruppo di funzionalità del servizio",
+          "description": "Prepara il gruppo di funzionalità del servizio così Home Assistant può esporre diagnostica e servizi di supporto per questo account."
+        },
+        "reconfigure": {
+          "title": "Aggiorna gruppo di funzionalità del servizio",
+          "description": "Aggiorna il gruppo di funzionalità del servizio per sincronizzare diagnostica e servizi di supporto con la configurazione più recente."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "core_tracking": {
+      "title": "Dispositivi Google Find My",
+      "entry_type": "Device feature group",
+      "initiate_flow": {
+        "user": "Add device feature group"
+      },
+      "step": {
+        "user": {
+          "title": "Aggiungi gruppo di funzionalità dei dispositivi",
+          "description": "Crea il gruppo di funzionalità dei dispositivi per gestire i tracker Google Find My rilevati per questo account."
+        },
+        "reconfigure": {
+          "title": "Aggiorna gruppo di funzionalità dei dispositivi",
+          "description": "Aggiorna il gruppo di funzionalità dei dispositivi per rinnovare visibilità e metadati dei tracker."
+        }
+      },
+      "abort": {},
+      "error": {}
     }
   },
   "options": {
@@ -67,7 +164,8 @@
         "menu_options": {
           "credentials": "Aggiorna credenziali",
           "settings": "Modifica impostazioni",
-          "visibility": "Visibilità dei dispositivi"
+          "visibility": "Visibilità dei dispositivi",
+          "repairs": "Riparazioni dei gruppi di funzionalità"
         }
       },
       "credentials": {
@@ -79,7 +177,11 @@
           "google_email": "Email Google",
           "new_secrets_json": "Nuovo secrets.json (contenuto completo)",
           "new_oauth_token": "Nuovo token OAuth",
-          "new_google_email": "Email Google"
+          "new_google_email": "Email Google",
+          "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "Applica gli aggiornamenti delle credenziali al gruppo di funzionalità selezionato. Consulta la sezione [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per conoscere i flussi disponibili."
         }
       },
       "settings": {
@@ -93,31 +195,75 @@
           "google_home_filter_enabled": "Filtra dispositivi Google Home",
           "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
           "enable_stats_entities": "Crea entità statistiche",
-          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa"
+          "delete_caches_on_remove": "Elimina cache alla rimozione dell’elemento",
+          "map_view_token_expiration": "Abilita scadenza dei token della vista mappa",
+          "contributor_mode": "Modalità di contributo posizione",
+          "subentry": "Feature group"
         },
         "data_description": {
-          "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono."
+          "delete_caches_on_remove": "Elimina i token memorizzati in cache e i metadati dei dispositivi quando questa voce viene rimossa.",
+          "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono.",
+          "contributor_mode": "Scegli come il dispositivo contribuisce alla rete di Google (per impostazione predefinita Aree ad alto traffico oppure Tutte le aree per un contributo collaborativo).",
+          "subentry": "Salva queste opzioni nel gruppo di funzionalità selezionato. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per esempi pratici."
         }
       },
       "visibility": {
         "title": "Visibilità dei dispositivi",
         "description": "Ripristina i dispositivi precedentemente ignorati per renderli di nuovo visibili. Seleziona uno o più dispositivi e salva.",
         "data": {
-          "unignore_devices": "Ripristina dispositivi"
+          "unignore_devices": "Ripristina dispositivi",
+          "subentry": "Feature group"
+        },
+        "data_description": {
+          "subentry": "I dispositivi ripristinati vengono assegnati al gruppo di funzionalità scelto. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per ulteriori indicazioni."
+        }
+      },
+      "repairs": {
+        "title": "Riparazioni dei gruppi di funzionalità",
+        "description": "Scegli un'azione di riparazione per i tuoi gruppi di funzionalità.",
+        "menu_options": {
+          "repairs_move": "Sposta dispositivi",
+          "repairs_delete": "Elimina gruppo di funzionalità"
+        }
+      },
+      "repairs_move": {
+        "title": "Sposta i dispositivi tra i gruppi di funzionalità",
+        "description": "Sposta i dispositivi nel gruppo di funzionalità selezionato. I dispositivi rimossi da altri gruppi continueranno a comparire sotto il gruppo scelto.",
+        "data": {
+          "target_subentry": "Gruppo di funzionalità di destinazione",
+          "device_ids": "Dispositivi da assegnare"
+        }
+      },
+      "repairs_delete": {
+        "title": "Elimina un gruppo di funzionalità",
+        "description": "Elimina un gruppo di funzionalità e sposta i suoi dispositivi in un altro gruppo.",
+        "data": {
+          "delete_subentry": "Gruppo di funzionalità da eliminare",
+          "fallback_subentry": "Gruppo di funzionalità di fallback"
         }
       }
     },
     "error": {
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
       "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
+      "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "cannot_connect": "Impossibile connettersi all’API di Google.",
-      "choose_one": "Fornisci esattamente un metodo di credenziali.",
+      "dependency_not_ready": "Mancano le dipendenze dell'integrazione. Installa i requisiti di Google Find My Device e riavvia Home Assistant.",
+      "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
-      "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto."
+      "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto.",
+      "unknown": "Errore imprevisto.",
+      "invalid_subentry": "Scegli un gruppo di funzionalità valido."
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
-      "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare."
+      "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare.",
+      "repairs_no_subentries": "Non ci sono gruppi di funzionalità da riparare.",
+      "repair_no_devices": "Seleziona almeno un dispositivo da spostare.",
+      "subentry_move_success": "Dispositivi assegnati a **{subentry}** ({count} aggiornati).",
+      "subentry_delete_success": "**{subentry}** eliminato e {count} dispositivi spostati in **{fallback}**.",
+      "subentry_delete_invalid": "È necessario un secondo gruppo di funzionalità prima di eliminarne uno.",
+      "subentry_remove_failed": "Eliminazione del gruppo di funzionalità selezionato non riuscita. Riprova."
     }
   },
   "services": {
@@ -156,7 +302,12 @@
       "description": "Aggiorna gli URL di configurazione dei dispositivi Google Find My per puntare alla vista mappa integrata.",
       "fields": {}
     },
-    "locate_device_external": {
+    "rebuild_device_registry": {
+      "name": "Ricostruisci registro dispositivi",
+      "description": "Manutenzione: ricostruisce i collegamenti del registro dispositivi per gli hub Google Find My e rimuove i tracker associati in modo errato all’elemento padre.",
+      "fields": {}
+    },
+    "locate_external": {
       "name": "Localizza dispositivo (esterno)",
       "description": "Localizza un dispositivo utilizzando l’assistente esterno; delega alla localizzazione normale.",
       "fields": {
@@ -195,16 +346,135 @@
       },
       "locate_device": {
         "name": "Localizza ora"
+      },
+      "reset_statistics": {
+        "name": "Reimposta statistiche"
       }
     },
     "binary_sensor": {
       "polling": {
         "name": "Interrogazione"
+      },
+      "nova_auth_status": {
+        "name": "Stato dell’autenticazione API Nova",
+        "state_attributes": {
+          "nova_api_status": {
+            "name": "Stato dell’API Nova"
+          },
+          "nova_api_status_reason": {
+            "name": "Motivo dello stato dell’API Nova"
+          },
+          "nova_api_status_changed_at": {
+            "name": "Ora di modifica dello stato dell’API Nova"
+          },
+          "nova_fcm_status": {
+            "name": "Stato Nova FCM"
+          },
+          "nova_fcm_status_reason": {
+            "name": "Motivo dello stato Nova FCM"
+          },
+          "nova_fcm_status_changed_at": {
+            "name": "Ora di modifica dello stato Nova FCM"
+          }
+        }
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "name": "Dispositivo",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nome del dispositivo"
+          },
+          "device_id": {
+            "name": "ID dispositivo"
+          },
+          "status": {
+            "name": "Stato"
+          },
+          "semantic_name": {
+            "name": "Etichetta semantica"
+          },
+          "battery_level": {
+            "name": "Livello batteria"
+          },
+          "last_seen": {
+            "name": "Ultima volta visto (segnalato)"
+          },
+          "last_seen_utc": {
+            "name": "Ultima volta visto (UTC)"
+          },
+          "source_label": {
+            "name": "Etichetta sorgente"
+          },
+          "source_rank": {
+            "name": "Priorità sorgente"
+          },
+          "is_own_report": {
+            "name": "Segnalazione del proprio dispositivo"
+          },
+          "latitude": {
+            "name": "Latitudine"
+          },
+          "longitude": {
+            "name": "Longitudine"
+          },
+          "accuracy_m": {
+            "name": "Precisione (m)"
+          },
+          "altitude_m": {
+            "name": "Altitudine (m)"
+          }
+        }
       }
     },
     "sensor": {
       "last_seen": {
-        "name": "Ultima volta visto"
+        "name": "Ultima volta visto",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nome del dispositivo"
+          },
+          "device_id": {
+            "name": "ID dispositivo"
+          },
+          "status": {
+            "name": "Stato"
+          },
+          "semantic_name": {
+            "name": "Etichetta semantica"
+          },
+          "battery_level": {
+            "name": "Livello batteria"
+          },
+          "last_seen": {
+            "name": "Ultima volta visto (segnalato)"
+          },
+          "last_seen_utc": {
+            "name": "Ultima volta visto (UTC)"
+          },
+          "source_label": {
+            "name": "Etichetta sorgente"
+          },
+          "source_rank": {
+            "name": "Priorità sorgente"
+          },
+          "is_own_report": {
+            "name": "Segnalazione del proprio dispositivo"
+          },
+          "latitude": {
+            "name": "Latitudine"
+          },
+          "longitude": {
+            "name": "Longitudine"
+          },
+          "accuracy_m": {
+            "name": "Precisione (m)"
+          },
+          "altitude_m": {
+            "name": "Altitudine (m)"
+          }
+        }
       },
       "stat_background_updates": {
         "name": "Aggiornamenti in background"
@@ -230,6 +500,60 @@
       "stat_non_significant_dropped": {
         "name": "Aggiornamenti non significativi scartati"
       }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "È necessaria una nuova autenticazione",
+      "description": "L’autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell’integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento."
+    },
+    "multiple_config_entries": {
+      "title": "Rilevate più voci di configurazione",
+      "description": "Google Find My Device ora supporta più voci di configurazione, una per ogni account Google. Se ogni voce utilizza un account diverso, non è necessaria alcuna azione. Quando lo stesso account viene aggiunto due volte, Home Assistant crea una riparazione **Voci di account duplicate** per la nuova voce così da poter rimuovere o riattivare quella corretta."
+    },
+    "unique_id_collision": {
+      "title": "Rilevato conflitto di ID univoco dell’entità",
+      "description": "Alcune entità di **{entry}** utilizzano già il nuovo formato di ID univoco e sono in conflitto con la migrazione.\n\n**Conteggio:** {count}\n**Esempi:** {entities}\n\nPer risolvere:\n1) Apri **Impostazioni → Dispositivi e servizi → Entità** e cerca le entità elencate.\n2) Rimuovi o rinomina le entità in conflitto, oppure elimina le voci non più utilizzate di altre integrazioni.\n3) Ricarica l’integrazione (o riavvia Home Assistant). La migrazione verrà ripetuta automaticamente."
+    },
+    "duplicate_account": {
+      "title": "Account Google Find My duplicato",
+      "description": "Home Assistant ha rilevato più voci Google Find My per lo stesso account ({email}). Può rimanere attiva una sola voce. Rimuovi o disattiva la voce duplicata \"{entry_title}\" oppure riautentica l’account corretto. Causa: {cause}."
+    },
+    "duplicate_account_entries": {
+      "title": "Rilevate voci di account duplicate",
+      "description": "Questo account Google (**{email}**) è già configurato in un'altra voce:\n\n{entries}\n\nDisattiva o rimuovi le voci duplicate in modo che rimanga attiva una sola voce per account, quindi ricarica l'integrazione (o riavvia Home Assistant)."
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "Il dispositivo {device_id} non è stato trovato o non fa parte di questa integrazione."
+    },
+    "no_active_entry": {
+      "message": "Nessuna voce attiva di Google Find My Device è disponibile. Voci attive: {active_count}/{total_count}. Attiva una delle voci configurate ({entries}) oppure aggiungi un nuovo account e riprova."
+    },
+    "locate_failed": {
+      "message": "Impossibile localizzare il dispositivo {device_id}: {error}"
+    },
+    "play_sound_failed": {
+      "message": "Impossibile riprodurre il suono su {device_id}: {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Impossibile interrompere il suono su {device_id}: {error}"
+    },
+    "missing_token_cache": {
+      "message": "Cache del token mancante. Fornisci il TokenCache specifico della voce (ad esempio entry.runtime_data.token_cache)."
+    },
+    "missing_namespace": {
+      "message": "Namespace mancante. Passa il namespace specifico della voce o l’ID della ConfigEntry per mantenere isolati i metadati memorizzati nella cache."
+    }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": "Versione dell'integrazione",
+      "loaded_entries": "Voci caricate",
+      "entries": "Voci di configurazione",
+      "fcm": "Ricevitore FCM",
+      "fcm_lock_contention_count": "Conteggio conflitti di lock FCM"
     }
   }
 }
