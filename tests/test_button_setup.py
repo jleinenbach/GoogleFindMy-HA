@@ -351,3 +351,53 @@ def test_locate_button_available_when_push_unready() -> None:
 
     assert locate_button.available is True
     assert locate_button.subentry_key == button_module.TRACKER_SUBENTRY_KEY
+
+
+def test_locate_button_unavailable_on_gate_error() -> None:
+    """Locate button marks itself unavailable when gating fails unexpectedly."""
+
+    _ensure_button_dependencies()
+    button_module = importlib.import_module("custom_components.googlefindmy.button")
+
+    class _CoordinatorStub:
+        def __init__(self) -> None:
+            self.hass = SimpleNamespace()
+            self.config_entry = SimpleNamespace(entry_id="entry-id")
+            self.data = [{"id": "device-1", "name": "Tracker"}]
+            self._listeners: list[Any] = []
+            self._is_polling = False
+            self._locate_inflight: set[str] = set()
+            self._locate_cooldown_until: dict[str, float] = {}
+            self._device_poll_cooldown_until: dict[str, float] = {}
+
+        def async_add_listener(self, listener):  # type: ignore[override]
+            self._listeners.append(listener)
+            return lambda: None
+
+        def is_ignored(self, device_id: str) -> bool:
+            return False
+
+        def _api_push_ready(self) -> bool:
+            return True
+
+        def is_device_visible_in_subentry(
+            self, subentry_key: str, device_id: str
+        ) -> bool:
+            return True
+
+        def is_device_present(self, device_id: str) -> bool:
+            return True
+
+        def can_request_location(self, device_id: str) -> bool:  # type: ignore[override]
+            raise RuntimeError("gate failed")
+
+    coordinator = _CoordinatorStub()
+    device = coordinator.data[0]
+    locate_button = button_module.GoogleFindMyLocateButton(
+        coordinator,
+        device,
+        device.get("name"),
+        subentry_key=button_module.TRACKER_SUBENTRY_KEY,
+        subentry_identifier=f"{button_module.TRACKER_SUBENTRY_KEY}-identifier",
+    )
+    assert locate_button.available is False

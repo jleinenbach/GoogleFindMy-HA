@@ -1123,14 +1123,14 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
                 return False
             # Locate gating
             return bool(self.coordinator.can_request_location(dev_id))
-        except (AttributeError, TypeError) as err:
+        except Exception as err:
             _LOGGER.debug(
-                "Locate availability check for %s (%s) raised %s; defaulting to True",
+                "Locate availability check for %s (%s) failed: %s; defaulting to False",
                 device_label,
                 dev_id,
                 err,
             )
-            return True  # Optimistic fallback
+            return False
 
     async def async_press(self) -> None:
         """Invoke the `googlefindmy.locate_device` service for this device.
