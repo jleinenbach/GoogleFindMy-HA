@@ -581,15 +581,23 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         suffix = "redirect_map" if redirect else "map"
         return f"/api/googlefindmy/{suffix}/{device_id}?token={token}"
 
-    def device_configuration_url(self, *, redirect: bool = False) -> str | None:
+    def device_configuration_url(
+        self, *, redirect: bool = False, absolute: bool = False
+    ) -> str | None:
         """Return a stable configuration URL for the device if resolvable."""
+
+        token = self._get_map_token()
+        path = self._build_map_path(self.device_id, token, redirect=redirect)
+
+        if not absolute:
+            # Relative URLs let the browser supply the scheme/host/port so NAT
+            # loopback or proxy rewrites do not break the link target.
+            return path
 
         base_url = self._resolve_absolute_base_url()
         if base_url is None:
             return None
 
-        token = self._get_map_token()
-        path = self._build_map_path(self.device_id, token, redirect=redirect)
         return f"{base_url}{path}"
 
     def _device_identifiers(self) -> set[tuple[str, str]]:
