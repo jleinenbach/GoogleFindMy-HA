@@ -185,16 +185,32 @@ def test_device_info_configuration_url_relative(
     stub_coordinator_factory: Callable[..., type[Any]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """DeviceInfo should expose a relative configuration URL by default."""
+    """DeviceInfo should expose an absolute configuration URL when available."""
 
     entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    monkeypatch.setattr(
+        entity, "_resolve_absolute_base_url", lambda: "https://external.domain"
+    )
 
     configuration_url = entity.device_info.configuration_url
 
-    assert isinstance(configuration_url, str)
-    assert configuration_url.startswith("/")
-    assert configuration_url.endswith("token=secure-token")
-    assert "/api/googlefindmy/map/" in configuration_url
+    assert (
+        configuration_url
+        == "https://external.domain/api/googlefindmy/map/device-1?token=secure-token"
+    )
+
+
+def test_device_info_configuration_url_absent_without_base_url(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeviceInfo should omit the URL when Home Assistant cannot provide one."""
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    monkeypatch.setattr(entity, "_resolve_absolute_base_url", lambda: None)
+
+    assert entity.device_info.configuration_url is None
 
 
 @pytest.mark.asyncio
