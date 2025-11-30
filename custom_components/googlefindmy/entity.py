@@ -530,7 +530,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         """Return the Home Assistant external base URL when available."""
 
         try:
-            return cast(
+            base_url = cast(
                 str,
                 get_url(
                     self.hass,
@@ -547,6 +547,17 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
                 )
                 self._base_url_warning_emitted = True
             return None
+
+        if not base_url or "://" not in base_url:
+            if not self._base_url_warning_emitted:
+                _LOGGER.warning(
+                    "Unable to resolve external URL; set the External URL in Home Assistant settings: %s",
+                    base_url,
+                )
+                self._base_url_warning_emitted = True
+            return None
+
+        return base_url.rstrip("/")
 
     def _get_map_token(self) -> str:
         """Generate a hardened map token (entry-scoped and optionally time-bound)."""
@@ -595,10 +606,10 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             return path
 
         base_url = self._resolve_absolute_base_url()
-        if base_url is None:
+        if not base_url or "://" not in base_url:
             return None
 
-        return f"{base_url}{path}"
+        return f"{base_url.rstrip('/')}{path}"
 
     def _device_identifiers(self) -> set[tuple[str, str]]:
         """Return the entry-scoped identifiers for this device."""
@@ -623,6 +634,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
 
         label = self.device_label()
         name = label if label and label != self._DEFAULT_DEVICE_LABEL else None
+        configuration_url = self.device_configuration_url(absolute=True)
         # Tracker devices intentionally omit ``via_device`` so Home Assistant
         # can attach them to the correct parent device automatically.
 
@@ -631,7 +643,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             manufacturer="Google",
             model="Find My Device",
             serial_number=self.device_id,
-            configuration_url=self.device_configuration_url(),
+            configuration_url=configuration_url,
             name=name,
         )
 
