@@ -7197,11 +7197,14 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
     """Refresh configuration URLs for all Google Find My devices."""
 
     try:
-        base_url = get_url(
-            hass,
-            prefer_external=True,
-            allow_cloud=True,
-            allow_internal=False,
+        base_url = cast(
+            str,
+            get_url(
+                hass,
+                prefer_external=True,
+                allow_cloud=True,
+                allow_internal=False,
+            ),
         )
     except (HomeAssistantError, NoURLAvailableError) as err:
         _LOGGER.warning(
@@ -7210,11 +7213,13 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
         )
         return
 
-    if not base_url:
+    if not base_url or "://" not in base_url:
         _LOGGER.warning(
             "Skipping configuration URL refresh; external URL unavailable",
         )
         return
+
+    base_url = base_url.rstrip("/")
 
     ha_uuid = str(hass.data.get("core.uuid", "ha"))
     domain_entries = {
@@ -7260,9 +7265,8 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
             secret = map_token_secret_seed(ha_uuid, entry_id, bool(token_exp))
             auth_token = map_token_hex_digest(secret)
 
-            new_config_url = (
-                f"{base_url}/api/googlefindmy/map/{dev_id}?token={auth_token}"
-            )
+            map_path = f"/api/googlefindmy/map/{dev_id}?token={auth_token}"
+            new_config_url = f"{base_url}{map_path}"
             dev_reg.async_update_device(
                 device_id=device.id, configuration_url=new_config_url
             )

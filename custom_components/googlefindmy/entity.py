@@ -530,7 +530,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         """Return the Home Assistant external base URL when available."""
 
         try:
-            return cast(
+            base_url = cast(
                 str,
                 get_url(
                     self.hass,
@@ -547,6 +547,17 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
                 )
                 self._base_url_warning_emitted = True
             return None
+
+        if not base_url or "://" not in base_url:
+            if not self._base_url_warning_emitted:
+                _LOGGER.warning(
+                    "Unable to resolve external URL; set the External URL in Home Assistant settings: %s",
+                    base_url,
+                )
+                self._base_url_warning_emitted = True
+            return None
+
+        return base_url.rstrip("/")
 
     def _get_map_token(self) -> str:
         """Generate a hardened map token (entry-scoped and optionally time-bound)."""
@@ -595,10 +606,10 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             return path
 
         base_url = self._resolve_absolute_base_url()
-        if base_url is None:
+        if not base_url or "://" not in base_url:
             return None
 
-        return f"{base_url}{path}"
+        return f"{base_url.rstrip('/')}{path}"
 
     def _device_identifiers(self) -> set[tuple[str, str]]:
         """Return the entry-scoped identifiers for this device."""

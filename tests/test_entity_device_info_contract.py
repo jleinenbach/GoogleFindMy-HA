@@ -180,6 +180,21 @@ def test_device_configuration_url_absolute_failure(
     assert entity.device_configuration_url(absolute=True) is None
 
 
+def test_device_configuration_url_absolute_rejects_invalid_base_url(
+    hass: HomeAssistant,
+    stub_coordinator_factory: Callable[..., type[Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Absolute URLs should be omitted when the base lacks a scheme."""
+
+    entity = _build_device_entity(hass, stub_coordinator_factory, monkeypatch)
+    monkeypatch.setattr(
+        entity, "_resolve_absolute_base_url", lambda: "example.local/home"
+    )
+
+    assert entity.device_configuration_url(absolute=True) is None
+
+
 def test_device_info_configuration_url_relative(
     hass: HomeAssistant,
     stub_coordinator_factory: Callable[..., type[Any]],
