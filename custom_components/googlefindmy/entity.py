@@ -623,6 +623,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
 
         label = self.device_label()
         name = label if label and label != self._DEFAULT_DEVICE_LABEL else None
+        configuration_url = self.device_configuration_url(absolute=True)
         # Tracker devices intentionally omit ``via_device`` so Home Assistant
         # can attach them to the correct parent device automatically.
 
@@ -631,7 +632,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
             manufacturer="Google",
             model="Find My Device",
             serial_number=self.device_id,
-            configuration_url=self.device_configuration_url(),
+            configuration_url=configuration_url,
             name=name,
         )
 
