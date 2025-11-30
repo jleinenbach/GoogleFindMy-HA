@@ -1,9 +1,9 @@
 # Google FindMy Device (Find Hub) - Home Assistant Integration <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> 
 
 >[!CAUTION]
-> ## **V1.6 Semi-Breaking Change**
+> ## **V1.7 Semi-Breaking Change**
 >
-> After installing this update, you must delete your existing configuration and re-add the integration.  This is due to major changes for the multi-account feature.  Location history should not be affected.
+> After installing this update, you must delete your existing configuration and re-add the integration.  This is due to major architectural hanges.  Location history should not be affected.
 
 ---
 
