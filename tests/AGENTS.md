@@ -72,6 +72,13 @@ should consult that cached instance before calling
 `entity_registry.async_get(...)` so recovery logic inspects the same
 registry object as the fixture.
 
+When patching Home Assistant network helpers, patch the module-level
+`get_url` import used by the integration (for example,
+`custom_components.googlefindmy.__init__.get_url`) rather than the
+function exported from `homeassistant.helpers.network` directly. Aligning
+stubs with the integration's import pattern prevents drift when
+resolving absolute URLs in tests.
+
 ### Tracker discovery gating expectations
 
 Refer to the canonical tracker registry guidance in

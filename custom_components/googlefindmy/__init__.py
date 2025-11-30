@@ -110,6 +110,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -7196,17 +7197,23 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
     """Refresh configuration URLs for all Google Find My devices."""
 
     try:
-        from homeassistant.helpers.network import get_url
-
         base_url = get_url(
             hass,
             prefer_external=True,
             allow_cloud=True,
-            allow_external=True,
-            allow_internal=True,
+            allow_internal=False,
         )
-    except Exception as err:  # pragma: no cover - network helper availability
-        _LOGGER.debug("Could not determine base URL for device refresh: %s", err)
+    except (HomeAssistantError, NoURLAvailableError) as err:
+        _LOGGER.warning(
+            "Skipping configuration URL refresh; external URL unavailable: %s",
+            err,
+        )
+        return
+
+    if not base_url:
+        _LOGGER.warning(
+            "Skipping configuration URL refresh; external URL unavailable",
+        )
         return
 
     ha_uuid = str(hass.data.get("core.uuid", "ha"))

@@ -16,7 +16,10 @@ from typing import Any, cast
 
 import pytest
 
-from tests.helpers import install_homeassistant_core_callback_stub
+from tests.helpers import (
+    install_homeassistant_core_callback_stub,
+    install_homeassistant_network_stub,
+)
 from tests.helpers.config_entries_stub import install_config_entries_stubs
 from tests.helpers.constants import load_googlefindmy_const_module
 
@@ -161,6 +164,39 @@ def credentialed_config_entry_data() -> Callable[..., dict[str, Any]]:
         return entry_data
 
     return _factory
+
+
+@pytest.fixture
+def stub_homeassistant_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[..., ModuleType]:
+    """Provide a configurable stub for Home Assistant network helpers."""
+
+    def _install(
+        *,
+        url: str | None = "https://example.local",
+        error: Exception | type[Exception] | None = None,
+    ) -> ModuleType:
+        network_module = install_homeassistant_network_stub(
+            monkeypatch,
+            get_url_result=url,
+            get_url_error=error,
+        )
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.entity.get_url",
+            network_module.get_url,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.entity.NoURLAvailableError",
+            network_module.NoURLAvailableError,
+            raising=False,
+        )
+
+        return network_module
+
+    return _install
 
 
 @pytest.fixture
@@ -1344,9 +1380,9 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.helpers.event"] = event_module
     setattr(helpers_pkg, "event", event_module)
 
-    network_module = ModuleType("homeassistant.helpers.network")
-    network_module.get_url = lambda *args, **kwargs: "https://example.local"
-    sys.modules["homeassistant.helpers.network"] = network_module
+    network_module = install_homeassistant_network_stub(
+        get_url_result="https://example.local",
+    )
     setattr(helpers_pkg, "network", network_module)
 
     entity_registry_module = sys.modules["homeassistant.helpers.entity_registry"]
