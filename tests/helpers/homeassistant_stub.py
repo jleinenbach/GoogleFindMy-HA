@@ -11,7 +11,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
     from pytest import MonkeyPatch
 
-__all__ = ["install_homeassistant_core_callback_stub"]
+__all__ = [
+    "install_homeassistant_core_callback_stub",
+    "install_homeassistant_network_stub",
+]
 
 _CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
 
@@ -71,5 +74,48 @@ def install_homeassistant_core_callback_stub(
             )
         else:
             setattr(resolved_module, "callback", _identity_callback)
+
+    return resolved_module
+
+
+def install_homeassistant_network_stub(
+    monkeypatch: MonkeyPatch | None = None,
+    *,
+    get_url_result: str | None = "https://example.local",
+    get_url_error: Exception | type[Exception] | None = None,
+) -> ModuleType:
+    """Install a stubbed ``homeassistant.helpers.network`` module.
+
+    The helper exposes ``get_url`` with controllable behaviour and installs a
+    fallback ``NoURLAvailableError`` when Home Assistant's network helpers are
+    unavailable. Use it in tests that need to exercise URL resolution without
+    pulling in Home Assistant's full HTTP stack.
+    """
+
+    module_name = "homeassistant.helpers.network"
+    resolved_module = sys.modules.get(module_name)
+    if resolved_module is None:
+        resolved_module = ModuleType(module_name)
+
+    if not hasattr(resolved_module, "NoURLAvailableError"):
+        resolved_module.NoURLAvailableError = type(  # type: ignore[attr-defined]
+            "NoURLAvailableError",
+            (Exception,),
+            {},
+        )
+
+    def _get_url(*_args: Any, **_kwargs: Any) -> str | None:
+        if get_url_error is not None:
+            if isinstance(get_url_error, Exception):
+                raise get_url_error
+            raise get_url_error()
+        return get_url_result
+
+    if monkeypatch is not None:
+        monkeypatch.setitem(sys.modules, module_name, resolved_module)
+        monkeypatch.setattr(resolved_module, "get_url", _get_url, raising=False)
+    else:  # pragma: no cover - convenience fallback
+        sys.modules[module_name] = resolved_module
+        setattr(resolved_module, "get_url", _get_url)
 
     return resolved_module

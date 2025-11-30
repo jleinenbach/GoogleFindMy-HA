@@ -26,7 +26,7 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.network import get_url
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 try:  # Home Assistant 2025.5+: attribute constant exposed
     from homeassistant.const import ATTR_ENTRY_ID
@@ -1007,20 +1007,24 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             The token is a short-lived (weekly) or static gate derived from the HA UUID.
             All tokens are redacted in logs; the view must validate tokens server-side.
         """
-        from homeassistant.exceptions import (
-            HomeAssistantError,
-        )  # local import to avoid top-level dependency
-
         try:
             base_url = get_url(
                 hass,
                 prefer_external=True,
                 allow_cloud=True,
-                allow_external=True,
-                allow_internal=True,
+                allow_internal=False,
             )
-        except HomeAssistantError as err:
-            _LOGGER.error("Could not determine base URL for device refresh: %s", err)
+        except (HomeAssistantError, NoURLAvailableError) as err:
+            _LOGGER.warning(
+                "Skipping configuration URL refresh; external URL unavailable: %s",
+                err,
+            )
+            return
+
+        if not base_url:
+            _LOGGER.warning(
+                "Skipping configuration URL refresh; external URL unavailable",
+            )
             return
 
         entries = hass.config_entries.async_entries(DOMAIN)

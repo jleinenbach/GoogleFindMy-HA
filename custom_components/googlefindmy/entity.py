@@ -45,7 +45,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.network import get_url
+from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
@@ -302,6 +302,7 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
         super().__init__(coordinator)
         self._subentry_key = subentry_key
         self._subentry_identifier = subentry_identifier
+        self._base_url_warning_emitted = False
 
     async def async_added_to_hass(self) -> None:
         """Register coordinator listener and publish the initial state."""
@@ -525,8 +526,8 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
 
         return self._DEFAULT_DEVICE_LABEL
 
-    def _base_url(self) -> str:
-        """Return the Home Assistant base URL (fallbacks to a safe default)."""
+    def _resolve_absolute_base_url(self) -> str | None:
+        """Return the Home Assistant external base URL when available."""
 
         try:
             return cast(
@@ -535,13 +536,17 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
                     self.hass,
                     prefer_external=True,
                     allow_cloud=True,
-                    allow_external=True,
-                    allow_internal=True,
+                    allow_internal=False,
                 ),
             )
-        except HomeAssistantError as err:  # pragma: no cover - fallback
-            _LOGGER.debug("Falling back to default base URL: %s", err)
-            return "http://homeassistant.local:8123"
+        except (HomeAssistantError, NoURLAvailableError) as err:
+            if not self._base_url_warning_emitted:
+                _LOGGER.warning(
+                    "Unable to resolve external URL; set the External URL in Home Assistant settings: %s",
+                    err,
+                )
+                self._base_url_warning_emitted = True
+            return None
 
     def _get_map_token(self) -> str:
         """Generate a hardened map token (entry-scoped and optionally time-bound)."""
@@ -576,12 +581,16 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         suffix = "redirect_map" if redirect else "map"
         return f"/api/googlefindmy/{suffix}/{device_id}?token={token}"
 
-    def device_configuration_url(self, *, redirect: bool = False) -> str:
-        """Return a stable configuration URL for the device."""
+    def device_configuration_url(self, *, redirect: bool = False) -> str | None:
+        """Return a stable configuration URL for the device if resolvable."""
+
+        base_url = self._resolve_absolute_base_url()
+        if base_url is None:
+            return None
 
         token = self._get_map_token()
         path = self._build_map_path(self.device_id, token, redirect=redirect)
-        return f"{self._base_url()}{path}"
+        return f"{base_url}{path}"
 
     def _device_identifiers(self) -> set[tuple[str, str]]:
         """Return the entry-scoped identifiers for this device."""

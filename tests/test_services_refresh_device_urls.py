@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from homeassistant.core import ServiceCall
+from homeassistant.helpers.network import NoURLAvailableError
 
 from custom_components.googlefindmy import const, services
 
@@ -159,3 +160,121 @@ def test_refresh_device_urls_uses_entry_scoped_tokens(
         "ha-dev-2": f"{base_url}/api/googlefindmy/map/beta-serial?token={expected_entry_two_token}",
     }
     assert "ha-service" not in device_registry.updated
+
+
+def test_refresh_device_urls_skips_when_base_url_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not rewrite configuration URLs when no external URL is available."""
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        options={},
+        data={},
+    )
+    entry.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
+    config_entries = _StubConfigEntries([entry])
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = config_entries
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries={"entry-1"},
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url="https://existing.test",
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+
+    def _raise_url_error(*_: Any, **__: Any) -> str:
+        raise NoURLAvailableError()
+
+    monkeypatch.setattr(services, "get_url", _raise_url_error)
+
+    async def _run_refresh() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[(const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)]
+        await handler(ServiceCall({}))
+
+    asyncio.run(_run_refresh())
+
+    assert device_registry.updated == {}
+    assert devices["ha-dev-1"].configuration_url == "https://existing.test"
+
+
+def test_refresh_device_urls_skips_when_base_url_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not rewrite configuration URLs when get_url returns ``None``."""
+
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        options={},
+        data={},
+    )
+    entry.runtime_data = SimpleNamespace(coordinator=SimpleNamespace())
+    config_entries = _StubConfigEntries([entry])
+
+    hass = SimpleNamespace()
+    hass.data = {"core.uuid": "ha-uuid", const.DOMAIN: {"entries": {}}}
+    hass.services = _StubServices()
+    hass.config_entries = config_entries
+
+    ctx = {
+        "domain": const.DOMAIN,
+        "resolve_canonical": lambda hass, device_id: (device_id, device_id),
+        "is_active_entry": lambda entry: True,
+        "primary_active_entry": lambda entries: entries[0] if entries else None,
+        "opt": lambda entry, key, default: entry.options.get(key, default),
+        "default_map_view_token_expiration": const.DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+        "opt_map_view_token_expiration_key": const.OPT_MAP_VIEW_TOKEN_EXPIRATION,
+        "redact_url_token": lambda url: url,
+        "soft_migrate_entry": lambda hass, entry: None,
+    }
+
+    devices = {
+        "ha-dev-1": SimpleNamespace(
+            id="ha-dev-1",
+            identifiers={(const.DOMAIN, "entry-1:device-alpha")},
+            config_entries={"entry-1"},
+            serial_number=None,
+            name="Alpha",
+            name_by_user=None,
+            configuration_url="https://existing.test",
+        ),
+    }
+    device_registry = _StubDeviceRegistry(devices)
+
+    monkeypatch.setattr(services.dr, "async_get", lambda hass: device_registry)
+    monkeypatch.setattr(services, "get_url", lambda *_, **__: None)
+
+    async def _run_refresh() -> None:
+        await services.async_register_services(hass, ctx)
+        handler = hass.services.registered[(const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)]
+        await handler(ServiceCall({}))
+
+    asyncio.run(_run_refresh())
+
+    assert device_registry.updated == {}
+    assert devices["ha-dev-1"].configuration_url == "https://existing.test"

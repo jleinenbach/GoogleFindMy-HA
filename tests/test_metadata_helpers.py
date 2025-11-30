@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import sys
-from types import ModuleType, SimpleNamespace
+import logging
+from types import SimpleNamespace
 
 import pytest
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.network import NoURLAvailableError
 
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import (
@@ -13,6 +14,7 @@ from custom_components.googlefindmy.const import (
     map_token_hex_digest,
     map_token_secret_seed,
 )
+from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 
 
 @pytest.mark.asyncio
@@ -62,9 +64,7 @@ async def test_async_refresh_device_urls_updates_registry(monkeypatch: pytest.Mo
     hass.data = {"core.uuid": "ha-uuid"}
     hass.config_entries = SimpleNamespace(async_entries=lambda domain: [entry])
 
-    network_module = ModuleType("homeassistant.helpers.network")
-    network_module.get_url = lambda _hass, **kwargs: base_url
-    monkeypatch.setitem(sys.modules, "homeassistant.helpers.network", network_module)
+    monkeypatch.setattr(integration, "get_url", lambda _hass, **kwargs: base_url)
     monkeypatch.setattr(integration.time, "time", lambda: fake_now)
 
     registry = dr.async_get(hass)
@@ -89,3 +89,31 @@ async def test_async_refresh_device_urls_updates_registry(monkeypatch: pytest.Mo
     assert update["configuration_url"] == device.configuration_url
     assert update["translation_placeholders"] in ({}, None)
     assert update["new_identifiers"] is None
+
+
+def test_device_configuration_url_warns_when_external_url_missing(
+    caplog: pytest.LogCaptureFixture,
+    stub_homeassistant_network,
+) -> None:
+    """Absolute URL resolution warns once and returns ``None`` when unavailable."""
+
+    stub_homeassistant_network(error=NoURLAvailableError("no external URL"))
+
+    hass = SimpleNamespace(data={"core.uuid": "ha-uuid"})
+    entity = SimpleNamespace(hass=hass, _base_url_warning_emitted=False)
+
+    caplog.set_level(logging.WARNING)
+
+    first_result = GoogleFindMyDeviceEntity._resolve_absolute_base_url(entity)
+    second_result = GoogleFindMyDeviceEntity._resolve_absolute_base_url(entity)
+
+    assert first_result is None
+    assert second_result is None
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "Unable to resolve external URL" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert entity._base_url_warning_emitted is True
