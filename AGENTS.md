@@ -320,7 +320,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – If Home Assistant stubs are missing, run `make install-ha-stubs` before rerunning pytest (see [README — Installing Home Assistant test dependencies on demand](README.md#installing-home-assistant-test-dependencies-on-demand)).
 >
 > **Online mode (in addition to the offline steps):**
-> – pip install -r requirements-dev.txt *(install or update missing dependencies)*
+> – pip install -r custom_components/googlefindmy/requirements-dev.txt *(install or update missing dependencies)*
 > – pre-commit install *(make sure hooks are installed)*
 > – pre-commit run --all-files *(run again if new hooks were installed)*
 > – ruff format --check *(reconfirm that formatting is correct)*
@@ -328,8 +328,8 @@ Prefer the executable name when it is available; fall back to the module form wh
 > – pytest -q *(reconfirm that the tests pass)*
 > – mypy --strict --explicit-package-bases custom_components/googlefindmy tests *(full run across the entire codebase and tests)*
 > – ruff check --fix --exit-non-zero-on-fix && ruff check *(optional helper when additional linting fixes are necessary; still conclude with the standalone `ruff check .` command above)*
-> – pip-compile requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when the corresponding `*.in` inputs exist; otherwise, record that no compile targets are present and skip without creating ad-hoc `requirements.txt` files)*
-> – pip-audit -r requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)* — prefer `python -m pip_audit` so the tool resolves even when the entry point directory is absent from `$PATH`
+> – pip-compile custom_components/googlefindmy/requirements-dev.in && pip-compile custom_components/googlefindmy/requirements.in *(when the corresponding `*.in` inputs exist; otherwise, record that no compile targets are present and skip without creating ad-hoc `requirements.txt` files)*
+> – pip-audit -r custom_components/googlefindmy/requirements-dev.txt -r custom_components/googlefindmy/requirements.txt *(security scan; exit code 1 is acceptable but must be noted)* — prefer `python -m pip_audit` so the tool resolves even when the entry point directory is absent from `$PATH`
 > – review package/version updates and synchronize lock files/manifests as needed (see the "Home Assistant version & dependencies" section)
 > – rerun the relevant tests/linters after dependency updates
 >
@@ -341,7 +341,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 ## Home Assistant version & dependencies
 
 * **Compatibility target:** Keep the integration working with the latest Home Assistant stable release. When older releases become incompatible, document the oldest supported version in the README or release notes.
-* **Synchronization points:** Keep `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml`, and `requirements-dev.txt` aligned. When bumping versions, check whether other files (for example, `hacs.json` or helpers under `script/`) must change as well.
+* **Synchronization points:** Keep `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml`, and `custom_components/googlefindmy/requirements-dev.txt` aligned. When bumping versions, check whether other files (for example, `hacs.json` or helpers under `script/`) must change as well.
 * **Upgrade workflow:** With internet access, perform dependency maintenance via `pip install`, `pip-compile`, `pip-audit`, `poetry update` (if relevant), and `python -m pip list --outdated`. Afterwards rerun tests/linters and document the outcomes.
 * **Change notes:** Record adjusted minimum versions or dropped legacy releases in the PR description and, when needed, in `CHANGELOG.md` or `README.md`.
 * **Manifest compatibility (Jan 2025):** The shared CI still ships a `script.hassfest` build that rejects the `homeassistant` manifest key. Until upstream relaxes the schema for custom integrations, do **not** add `"homeassistant": "<version>"` to `custom_components/googlefindmy/manifest.json` or `hacs.json`. Track the minimum supported Home Assistant core release in documentation/tests instead.
@@ -838,7 +838,7 @@ Before proposing a change Codex must:
 
 #### Home Assistant regression helper
 
-* Use `make test-ha` to provision the `.venv` environment, install `requirements-dev.txt` (including `homeassistant` and `pytest-homeassistant-custom-component`), and execute the regression suite in one step.
+* Use `make test-ha` to provision the `.venv` environment, install `custom_components/googlefindmy/requirements-dev.txt` (including `homeassistant` and `pytest-homeassistant-custom-component`), and execute the regression suite in one step.
 * Append custom pytest flags with `make test-ha PYTEST_ARGS="…"` when you need markers, selection filters, or verbosity tweaks without editing the recipe.
 * The `README.md` section ["Running Home Assistant integration tests locally"](#running-home-assistant-integration-tests-locally) mirrors this workflow so external contributors can follow the same command.
 
@@ -950,8 +950,8 @@ tooling environment this consistently includes:
 * `types-setuptools` (pulled in by `types-cffi`)
 
 Contributors working offline can preinstall these packages (alongside
-`types-requests` from `requirements-dev.txt`) to avoid repeated network
-downloads during strict mypy runs.
+`types-requests` from `custom_components/googlefindmy/requirements-dev.txt`) to
+avoid repeated network downloads during strict mypy runs.
 
 The first invocation of `mypy --strict` after creating a fresh environment may
 display an interactive prompt asking to install the missing type stubs listed

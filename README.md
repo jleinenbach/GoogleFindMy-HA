@@ -65,7 +65,7 @@ selection while still benefiting from the automated dependency install.
 
 #### Wheelhouse cache management
 
-`make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
+`make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `custom_components/googlefindmy/requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
 
 ##### Sharing cached wheels between environments
 
@@ -94,7 +94,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 1. Create a virtual environment for development: `python -m venv .venv`
 2. Activate it for the current shell: `. .venv/bin/activate`
 3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`):
-   - Full toolchain (linting, typing, tests): `pip install -r requirements-dev.txt`
+   - Full toolchain (linting, typing, tests): `pip install -r custom_components/googlefindmy/requirements-dev.txt`
    - Minimal options-flow test stack (`homeassistant`, pytest helpers, and `bcrypt` only): `./script/install_options_flow_test_deps.sh`
 4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py tests/test_homeassistant_callback_stub_helper.py` or simply `make test-ha` (override pytest flags with `make test-ha PYTEST_ARGS="--maxfail=1 -k callback"` as needed)
 5. When finished, leave the environment with `deactivate`
@@ -394,7 +394,7 @@ Contributions are welcome and encouraged!
 To contribute, please:
 1. Fork the repository
 2. Create a feature branch
-3. Install the development dependencies with `python -m pip install -r requirements-dev.txt`
+3. Install the development dependencies with `python -m pip install -r custom_components/googlefindmy/requirements-dev.txt`
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes. If the CLI entry points are unavailable, use the `python -m` fallbacks from the [module invocation primer](AGENTS.md#module-invocation-primer) to run the same commands reliably.
 5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
 6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.

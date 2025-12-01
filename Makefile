@@ -3,6 +3,7 @@
 VENV ?= .venv
 PYTHON ?= python3
 NPM ?= npm
+DEV_REQUIREMENTS ?= custom_components/googlefindmy/requirements-dev.txt
 PYTEST_ARGS ?=
 PYTEST_COV_FLAGS ?= --cov-report=term-missing
 SKIP_WHEELHOUSE_REFRESH ?= 0
@@ -74,20 +75,20 @@ $(BOOTSTRAP_SENTINEL):
 	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
 	@touch $(BOOTSTRAP_SENTINEL)
 
-$(WHEELHOUSE_SENTINEL): requirements-dev.txt
+$(WHEELHOUSE_SENTINEL): $(DEV_REQUIREMENTS)
 	@mkdir -p $(WHEELHOUSE)
 	@if [ "$(SKIP_WHEELHOUSE_REFRESH)" = "1" ] && find "$(WHEELHOUSE)" -mindepth 1 -maxdepth 1 -type f >/dev/null 2>&1; then \
-		echo "[make wheelhouse] Reusing existing wheel cache in $(WHEELHOUSE)"; \
+	echo "[make wheelhouse] Reusing existing wheel cache in $(WHEELHOUSE)"; \
 	else \
-		echo "[make wheelhouse] Downloading development wheels into $(WHEELHOUSE)"; \
-		echo "[make wheelhouse] Hint: set SKIP_WHEELHOUSE_REFRESH=1 to reuse the cache on future make test-ha runs"; \
-		$(PYTHON) -m pip download --requirement requirements-dev.txt --dest $(WHEELHOUSE) --exists-action=i; \
+	echo "[make wheelhouse] Downloading development wheels into $(WHEELHOUSE)"; \
+	echo "[make wheelhouse] Hint: set SKIP_WHEELHOUSE_REFRESH=1 to reuse the cache on future make test-ha runs"; \
+	$(PYTHON) -m pip download --requirement $(DEV_REQUIREMENTS) --dest $(WHEELHOUSE) --exists-action=i; \
 	fi
 	@touch $(WHEELHOUSE_SENTINEL)
 
-$(VENV)/bin/activate: requirements-dev.txt $(WHEELHOUSE_SENTINEL) $(BOOTSTRAP_SENTINEL)
+$(VENV)/bin/activate: $(DEV_REQUIREMENTS) $(WHEELHOUSE_SENTINEL) $(BOOTSTRAP_SENTINEL)
 	@$(PYTHON) -m venv $(VENV)
-	@$(VENV)/bin/pip install --find-links=$(WHEELHOUSE) -r requirements-dev.txt
+	@$(VENV)/bin/pip install --find-links=$(WHEELHOUSE) -r $(DEV_REQUIREMENTS)
 	@touch $(VENV)/bin/activate
 
 test-ha: $(VENV)/bin/activate
