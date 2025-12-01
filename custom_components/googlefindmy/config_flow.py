@@ -1388,7 +1388,7 @@ def _log_token_validation_failure(
     """Log a sanitized token validation failure with candidate metadata."""
 
     _LOGGER.warning(
-        "Token validation failed; no working tokens among candidates.",
+        "Token validation failed; no working tokens among candidates. Please re-enter your credentials to refresh expired tokens.",
         extra={
             "email": _mask_email_for_logs(email),
             "candidate_sources": _cand_labels(candidates),

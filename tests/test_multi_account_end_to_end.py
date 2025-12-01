@@ -389,7 +389,13 @@ def test_multi_account_end_to_end(
 
         stub_fcm = _StubFcm()
 
-        async def _acquire_shared_fcm(_hass: Any) -> _StubFcm:
+        async def _acquire_shared_fcm(
+            _hass: Any,
+            *,
+            entry: Any | None = None,
+            cache: Any | None = None,
+            entry_resolver: Callable[[], str | None] | None = None,
+        ) -> _StubFcm:
             return stub_fcm
 
         monkeypatch.setattr(
