@@ -55,7 +55,7 @@ pytest event loop instead of creating ad-hoc loops so teardown waits do
 not conflict with pending tasks.
 
 Whenever the local environment installs the real `homeassistant`
-package (for example via `pip install -r requirements-dev.txt`), also
+package (for example via `pip install -r custom_components/googlefindmy/requirements-dev.txt`), also
 install `pytest-homeassistant-custom-component` and run `pytest -q`.
 The plugin ships the canonical Home Assistant stubs that our contract
 tests depend on; skipping this pairing risks exercising stale or
