@@ -4728,6 +4728,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             google_home_filter = self._get_google_home_filter()
 
+            last_exception: Exception | None = None
             try:
                 cycle_failed = False
                 for idx, dev in enumerate(devices):
@@ -4938,6 +4939,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self._consecutive_timeouts += 1
                         cycle_failed = True
                         self.note_error(terr, where="poll_timeout", device=dev_name)
+                        if last_exception is None:
+                            last_exception = UpdateFailed(
+                                f"Location request timed out for {dev_name}"
+                            )
+                            last_exception.__cause__ = terr
                     except SpotApiEmptyResponseError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -4950,7 +4956,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         cycle_failed = True
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
-                        raise ConfigEntryAuthFailed("Google session invalid")
+                        auth_exc = ConfigEntryAuthFailed(
+                            "Google session invalid; re-authentication required"
+                        )
+                        last_exception = auth_exc
+                        raise auth_exc
                     except ConfigEntryAuthFailed as auth_exc:
                         # Mark auth failures to HA; abort remaining devices by re-raising.
                         self._set_auth_state(
@@ -4960,6 +4970,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         cycle_failed = True
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
+                        last_exception = auth_exc
                         raise
                     except Exception as err:
                         _LOGGER.error(
@@ -4968,6 +4979,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         cycle_failed = True
                         self._consecutive_timeouts = 0
                         self.note_error(err, where="poll_exception", device=dev_name)
+                        if last_exception is None:
+                            last_exception = err
 
                     # Inter-device delay (except after the last one)
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
@@ -4983,7 +4996,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     self._last_poll_result = "failed"
                 elif self._last_poll_result is None:
                     self._last_poll_result = "success"
-                # Publish a full, visible snapshot (not just polled devices)
+                # Always publish the full snapshot so cached devices remain visible
                 ignored = self._get_ignored_set()
                 # Use the latest remembered full list; filter ignored
                 visible_devices = [
@@ -4995,6 +5008,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     visible_devices, wall_now=time.time()
                 )
                 self.async_set_updated_data(end_snapshot)
+                if last_exception:
+                    self.async_set_update_error(last_exception)
 
     # ---------------------------- Snapshot helpers --------------------------
     def _build_base_snapshot_entry(self, device_dict: dict[str, Any]) -> dict[str, Any]:
