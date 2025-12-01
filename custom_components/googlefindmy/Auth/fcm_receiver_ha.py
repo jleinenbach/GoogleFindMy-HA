@@ -392,7 +392,40 @@ class FcmReceiverHA:
 
     # -------------------- Lifecycle --------------------
 
-    async def async_initialize(self) -> bool:
+    async def _prime_cache_state(self, entry_id: str, cache: TokenCache) -> None:
+        """Load entry-scoped credentials and routing tokens before startup."""
+
+        try:
+            creds_val = await cache.get("fcm_credentials")
+            if isinstance(creds_val, str):
+                creds_val = json.loads(creds_val)
+            if isinstance(creds_val, MutableMapping):
+                self.creds[entry_id] = creds_val
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "[entry=%s] Failed to load cached FCM credentials: %s", entry_id, err
+            )
+
+        try:
+            tokens_val = await cache.get("fcm_routing_tokens")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "[entry=%s] Failed to load cached routing tokens: %s", entry_id, err
+            )
+            return
+
+        if isinstance(tokens_val, (list, tuple, set)):
+            tokens = {t for t in tokens_val if isinstance(t, str) and t}
+            if tokens:
+                entry_tokens = self._entry_to_tokens.setdefault(entry_id, set())
+                entry_tokens.update(tokens)
+                for token in tokens:
+                    mapped_entries = self._token_to_entries.setdefault(token, set())
+                    mapped_entries.add(entry_id)
+
+    async def async_initialize(
+        self, *, entry_id: str | None = None, cache: TokenCache | None = None
+    ) -> bool:
         """Initialize receiver (idempotent). Defers client creation to coordinator registration."""
         # Prepare shared client config once
         if self._client_cfg is None and HAVE_FCM_PUSH_CLIENT:
@@ -404,6 +437,19 @@ class FcmReceiverHA:
                 monitor_interval=float(FCM_MONITOR_INTERVAL_S),
                 abort_on_sequential_error_count=int(FCM_ABORT_ON_SEQ_ERROR_COUNT),
             )
+
+        if entry_id and cache is None:
+            try:
+                from . import token_cache as token_cache_module  # noqa: PLC0415
+
+                cache = token_cache_module.get_cache_for_entry(entry_id)
+            except Exception:  # pragma: no cover - best-effort fallback
+                cache = None
+
+        if entry_id and cache is not None:
+            self._ensure_cache_entry_id(cache, entry_id)
+            self._entry_caches[entry_id] = cache
+            await self._prime_cache_state(entry_id, cache)
 
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
         return True

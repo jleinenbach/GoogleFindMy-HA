@@ -77,7 +77,7 @@ def _no_fcm_release(monkeypatch: pytest.MonkeyPatch) -> list[None]:
 
     calls: list[None] = []
 
-    async def _fake_release(hass: Any) -> None:  # noqa: ANN401 - test stub
+    async def _fake_release(hass: Any, entry: Any | None = None) -> None:  # noqa: ANN401 - test stub
         calls.append(None)
 
     monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release)
