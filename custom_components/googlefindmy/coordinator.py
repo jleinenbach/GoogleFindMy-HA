@@ -4863,16 +4863,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             and isinstance(acc, (int, float))
                             and acc > self._min_accuracy_threshold
                         ):
-                            _LOGGER.debug(
-                                "Dropping low-quality fix for %s (accuracy=%sm > %sm)",
-                                dev_name,
-                                acc,
-                                self._min_accuracy_threshold,
-                            )
-                            self.increment_stat("low_quality_dropped")
-                            # Strip any internal hint before dropping to avoid accidental exposure
-                            location.pop("_report_hint", None)
-                            continue
+                            prev_location = self._device_location_data.get(dev_id)
+                            if isinstance(prev_location, dict):
+                                prev_lat = prev_location.get("latitude")
+                                prev_lon = prev_location.get("longitude")
+                                prev_acc = prev_location.get("accuracy")
+                            else:
+                                prev_lat = None
+                                prev_lon = None
+                                prev_acc = None
+
+                            if prev_lat is not None and prev_lon is not None:
+                                location = dict(location)
+                                _LOGGER.debug(
+                                    "Low accuracy (%sm); preserving previous coordinates for %s but updating timestamp.",
+                                    acc,
+                                    dev_name,
+                                )
+                                location["latitude"] = prev_lat
+                                location["longitude"] = prev_lon
+                                if prev_acc is not None:
+                                    location["accuracy"] = prev_acc
+                            else:
+                                _LOGGER.debug(
+                                    "Dropping low-quality fix for %s (accuracy=%sm > %sm)",
+                                    dev_name,
+                                    acc,
+                                    self._min_accuracy_threshold,
+                                )
+                                self.increment_stat("low_quality_dropped")
+                                # Strip any internal hint before dropping to avoid accidental exposure
+                                location.pop("_report_hint", None)
+                                continue
 
                         # Sanitize invariants + enrich fields (label, utc-string)
                         location = _sanitize_decoder_row(location)
@@ -4919,6 +4941,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         # Apply type-aware cooldowns based on internal hint (if any).
                         report_hint = location.get("_report_hint")
                         self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        # Drop internal hint before caching to avoid exposure
+                        location.pop("_report_hint", None)
 
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
