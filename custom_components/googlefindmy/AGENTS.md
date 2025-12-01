@@ -43,6 +43,14 @@ running decryption in an executor without the surrounding context will cause mul
 Handle `StaleOwnerKeyError` from the decryptor by logging and skipping the update instead of crashing the pipeline so key
 rotation can proceed without interrupting other accounts.
 
+### Hybrid Low-Accuracy Polling
+
+When a poll response fails the accuracy threshold, `coordinator.py` preserves the previous coordinates and accuracy but still
+updates the new `last_seen` timestamp. This keeps map pins stable (no "jumping" to poor fixes) while reflecting that the device
+recently reported. The cold-start drop path (no cached coordinates available) strips `_report_hint` before returning; mirror that
+hint-stripping step in any new helpers that short-circuit low-quality updates so internal metadata never leaks into entity
+state.
+
 ### Authentication failure propagation
 
 When a location decrypt/FCM callback encounters `SpotApiEmptyResponseError`, store the exception on the callback context and
