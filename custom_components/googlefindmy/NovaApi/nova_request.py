@@ -151,9 +151,10 @@ def _beautify_text(resp_text: str) -> str:
 
     if _BS4_AVAILABLE and _beautiful_soup_factory is not None:
         try:
-            text = _beautiful_soup_factory(resp_text, "html.parser").get_text(
+            text_raw = _beautiful_soup_factory(resp_text, "html.parser").get_text(
                 separator=" ", strip=True
             )
+            text = str(text_raw)
         except Exception as err:  # pragma: no cover - defensive logging path
             _LOGGER.debug(
                 "Failed to parse error response body via BeautifulSoup: %s", err

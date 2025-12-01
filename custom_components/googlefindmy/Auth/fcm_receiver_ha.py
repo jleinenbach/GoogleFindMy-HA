@@ -228,6 +228,7 @@ class FcmReceiverHA:
         self._entry_caches: dict[str, TokenCache] = {}
         self._pending_creds: dict[str, MutableJSONMapping | None] = {}
         self._pending_routing_tokens: dict[str, set[str]] = {}
+        self._default_entry_id: str | None = None
 
         # Debounce state (push path): keyed by (entry_id, device_id)
         self._pending: dict[tuple[str, str], JSONDict] = {}
@@ -255,6 +256,8 @@ class FcmReceiverHA:
         # Per-entry runtime health
         self._entry_last_activity_monotonic: dict[str, float] = {}
         self._activity_stale_after_s: float = float(FCM_IDLE_RESET_AFTER_S)
+        self._entry_health: dict[str, bool] = {}
+        self._entry_last_connected_wall: dict[str, float] = {}
 
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
@@ -380,6 +383,35 @@ class FcmReceiverHA:
 
         return snapshots
 
+    def _update_entry_health(self, entry_id: str, healthy: bool) -> None:
+        """Track entry health transitions and notify coordinators."""
+
+        previous = self._entry_health.get(entry_id)
+        if previous is healthy:
+            return
+
+        self._entry_health[entry_id] = healthy
+        if healthy:
+            self._entry_last_connected_wall[entry_id] = time.time()
+
+        for coordinator in list(self.coordinators):
+            entry = getattr(coordinator, "config_entry", None)
+            if getattr(entry, "entry_id", None) != entry_id:
+                continue
+
+            try:
+                update_listeners = getattr(
+                    coordinator, "async_update_listeners", None
+                )
+                if callable(update_listeners):
+                    update_listeners()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug(
+                    "[entry=%s] Coordinator listener notification failed: %s",
+                    entry_id,
+                    err,
+                )
+
     # -------------------- Basic readiness (aggregate) --------------------
 
     @property
@@ -390,9 +422,52 @@ class FcmReceiverHA:
 
     ready = is_ready  # alias used by callers
 
+    def get_last_connected_wall_time(self, entry_id: str | None) -> float | None:
+        """Return the last wall-clock timestamp when the entry marked healthy."""
+
+        entry_key = entry_id or self._default_entry_id
+        if entry_key is None:
+            return None
+
+        ts = self._entry_last_connected_wall.get(entry_key)
+        return float(ts) if ts is not None else None
+
     # -------------------- Lifecycle --------------------
 
-    async def async_initialize(self) -> bool:
+    async def _prime_cache_state(self, entry_id: str, cache: TokenCache) -> None:
+        """Load entry-scoped credentials and routing tokens before startup."""
+
+        try:
+            creds_val = await cache.get("fcm_credentials")
+            if isinstance(creds_val, str):
+                creds_val = json.loads(creds_val)
+            if isinstance(creds_val, MutableMapping):
+                self.creds[entry_id] = creds_val
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "[entry=%s] Failed to load cached FCM credentials: %s", entry_id, err
+            )
+
+        try:
+            tokens_val = await cache.get("fcm_routing_tokens")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "[entry=%s] Failed to load cached routing tokens: %s", entry_id, err
+            )
+            return
+
+        if isinstance(tokens_val, (list, tuple, set)):
+            tokens = {t for t in tokens_val if isinstance(t, str) and t}
+            if tokens:
+                entry_tokens = self._entry_to_tokens.setdefault(entry_id, set())
+                entry_tokens.update(tokens)
+                for token in tokens:
+                    mapped_entries = self._token_to_entries.setdefault(token, set())
+                    mapped_entries.add(entry_id)
+
+    async def async_initialize(
+        self, *, entry_id: str | None = None, cache: TokenCache | None = None
+    ) -> bool:
         """Initialize receiver (idempotent). Defers client creation to coordinator registration."""
         # Prepare shared client config once
         if self._client_cfg is None and HAVE_FCM_PUSH_CLIENT:
@@ -404,6 +479,22 @@ class FcmReceiverHA:
                 monitor_interval=float(FCM_MONITOR_INTERVAL_S),
                 abort_on_sequential_error_count=int(FCM_ABORT_ON_SEQ_ERROR_COUNT),
             )
+
+        if entry_id and cache is None:
+            try:
+                from . import token_cache as token_cache_module  # noqa: PLC0415
+
+                cache = token_cache_module.get_cache_for_entry(entry_id)
+            except Exception:  # pragma: no cover - best-effort fallback
+                cache = None
+
+        if entry_id and cache is not None:
+            self._ensure_cache_entry_id(cache, entry_id)
+            self._entry_caches[entry_id] = cache
+            await self._prime_cache_state(entry_id, cache)
+
+        if entry_id and self._default_entry_id is None:
+            self._default_entry_id = entry_id
 
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
         return True
@@ -554,6 +645,22 @@ class FcmReceiverHA:
                             entry_id, pc, monotonic_now
                         )
                         stale_after = max(self._activity_stale_after_s, 0.0)
+                        healthy = (
+                            (
+                                FcmPushClientRunState is None
+                                or state == FcmPushClientRunState.STARTED
+                            )
+                            and do_listen
+                            and last_activity is not None
+                            and (
+                                stale_after == 0.0
+                                or (
+                                    monotonic_now - last_activity
+                                    <= stale_after
+                                )
+                            )
+                        )
+                        self._update_entry_health(entry_id, healthy)
                         if state is None:
                             _LOGGER.info(
                                 "[entry=%s] FCM client state unknown; scheduling restart",
@@ -597,6 +704,7 @@ class FcmReceiverHA:
                     finally:
                         async with self._lock:
                             self.pcs.pop(entry_id, None)
+                        self._update_entry_health(entry_id, False)
 
                     if not stop_evt.is_set():
                         delay = backoff + random.uniform(0.1, 0.3) * backoff
@@ -612,6 +720,7 @@ class FcmReceiverHA:
                 _LOGGER.error("[entry=%s] FCM supervisor crashed: %s", entry_id, err)
             finally:
                 _LOGGER.info("[entry=%s] FCM supervisor stopped", entry_id)
+                self._update_entry_health(entry_id, False)
 
         task = asyncio.create_task(
             _supervisor(), name=f"{DOMAIN}.fcm_supervisor[{entry_id}]"
@@ -1430,16 +1539,19 @@ class FcmReceiverHA:
         """Return current FCM token (best-effort).
 
         If `entry_id` is provided, returns the token for that entry's client when available.
-        Otherwise returns the first available token across clients (legacy behavior).
+        Otherwise returns the token for the receiver's default entry when set,
+        falling back to the first available token across clients.
         """
-        if entry_id:
-            creds = self.creds.get(entry_id)
+        target_entry = entry_id or self._default_entry_id
+
+        if target_entry:
+            creds = self.creds.get(target_entry)
             if isinstance(creds, dict):
                 tok = (creds.get("fcm") or {}).get("registration", {}).get("token")
                 if isinstance(tok, str) and tok:
                     return tok
             # Also try the current client's live creds if present
-            pc = self.pcs.get(entry_id)
+            pc = self.pcs.get(target_entry)
             if pc:
                 try:
                     c = getattr(pc, "credentials", None)
@@ -1456,6 +1568,14 @@ class FcmReceiverHA:
                 if isinstance(tok, str) and tok:
                     return tok
         return None
+
+    def set_default_entry_id(self, entry_id: str | None) -> None:
+        """Record the preferred entry_id for legacy token lookups."""
+
+        if entry_id and isinstance(entry_id, str):
+            self._default_entry_id = entry_id
+            return
+        self._default_entry_id = None
 
     # -------------------- Manual locate registration --------------------
 

@@ -2312,7 +2312,11 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     entries: dict[str, RuntimeData]
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
+    fcm_receivers: dict[str, FcmReceiverHAType]
+    fcm_provider_resolvers: dict[str, Callable[[], str | None]]
     fcm_refcount: int
+    fcm_refcounts: dict[str, int]
+    default_fcm_entry_id: str
     fcm_lock_contention_count: int
     initial_setup_complete: bool
     nova_refcount: int
@@ -2811,6 +2815,28 @@ def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     return lock
 
 
+def _sync_legacy_fcm_receiver_alias(bucket: GoogleFindMyDomainData) -> None:
+    """Keep the legacy ``fcm_receiver`` key aligned with the active receivers."""
+
+    receiver_cls = _resolve_fcm_receiver_class()
+    receivers_obj = bucket.get("fcm_receivers")
+    if isinstance(receivers_obj, dict) and receivers_obj:
+        default_entry_id = bucket.get("default_fcm_entry_id")
+        preferred = (
+            receivers_obj.get(default_entry_id)
+            if isinstance(default_entry_id, str)
+            else None
+        )
+        receiver = preferred or next(iter(receivers_obj.values()))
+        if isinstance(receiver, receiver_cls):
+            bucket["fcm_receiver"] = receiver
+            return
+
+    legacy_receiver = bucket.get("fcm_receiver")
+    if legacy_receiver is not None and not isinstance(legacy_receiver, receiver_cls):
+        bucket.pop("fcm_receiver", None)
+
+
 def _ensure_services_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     """Return the integration services lock, creating it if missing."""
 
@@ -2905,57 +2931,103 @@ def _mark_missing_subentry_forward_helper_logged(
         logged.add(entry_id)
 
 
-def _get_fcm_receiver(
+def _get_fcm_receivers(
     bucket: GoogleFindMyDomainData,
-) -> FcmReceiverHAType | None:
-    """Return the cached shared FCM receiver if present."""
+) -> dict[str, FcmReceiverHAType]:
+    """Return the cached entry-scoped FCM receivers."""
 
-    receiver: object | None = bucket.get("fcm_receiver")
+    receivers_obj = bucket.get("fcm_receivers")
     receiver_cls = _resolve_fcm_receiver_class()
-    if isinstance(receiver, receiver_cls):
-        return receiver
-    return None
+
+    if isinstance(receivers_obj, dict):
+        valid: dict[str, FcmReceiverHAType] = {}
+        for entry_id, receiver in receivers_obj.items():
+            if isinstance(entry_id, str) and isinstance(receiver, receiver_cls):
+                valid[entry_id] = receiver
+        bucket["fcm_receivers"] = valid
+        _sync_legacy_fcm_receiver_alias(bucket)
+        return valid
+
+    legacy_receiver: object | None = bucket.get("fcm_receiver")
+    if isinstance(legacy_receiver, receiver_cls):
+        bucket["fcm_receivers"] = {"default": legacy_receiver}
+        _sync_legacy_fcm_receiver_alias(bucket)
+        return bucket["fcm_receivers"]
+
+    bucket["fcm_receivers"] = {}
+    return bucket["fcm_receivers"]
 
 
 def _set_fcm_receiver(
-    bucket: GoogleFindMyDomainData, receiver: FcmReceiverHAType
+    bucket: GoogleFindMyDomainData, entry_id: str, receiver: FcmReceiverHAType
 ) -> None:
-    """Store the shared FCM receiver."""
+    """Store the entry-scoped FCM receiver."""
 
-    bucket["fcm_receiver"] = receiver
+    receivers = bucket.setdefault("fcm_receivers", {})
+    receivers[entry_id] = receiver
+    bucket.setdefault("fcm_refcounts", {})
+    _sync_legacy_fcm_receiver_alias(bucket)
 
 
 def _pop_fcm_receiver(
-    bucket: GoogleFindMyDomainData,
+    bucket: GoogleFindMyDomainData, entry_id: str
 ) -> FcmReceiverHAType | None:
-    """Remove and return the cached shared FCM receiver."""
+    """Remove and return the cached FCM receiver for an entry."""
 
-    receiver: object | None = bucket.pop("fcm_receiver", None)
+    receivers = _get_fcm_receivers(bucket)
+    receiver = receivers.pop(entry_id, None)
+    bucket["fcm_receivers"] = receivers
     receiver_cls = _resolve_fcm_receiver_class()
+    _sync_legacy_fcm_receiver_alias(bucket)
     if isinstance(receiver, receiver_cls):
         return receiver
     return None
 
 
 def _pop_any_fcm_receiver(bucket: GoogleFindMyDomainData) -> object | None:
-    """Remove and return the cached shared FCM receiver regardless of type."""
+    """Remove and return any cached FCM receiver regardless of type."""
 
-    return bucket.pop("fcm_receiver", None)
+    receivers = _get_fcm_receivers(bucket)
+    if receivers:
+        entry_id, receiver = receivers.popitem()
+        bucket["fcm_receivers"] = receivers
+        bucket.setdefault("fcm_refcounts", {}).pop(entry_id, None)
+        _sync_legacy_fcm_receiver_alias(bucket)
+        return receiver
+    stale = bucket.pop("fcm_receiver", None)
+    _sync_legacy_fcm_receiver_alias(bucket)
+    return stale
 
 
-def _get_fcm_refcount(bucket: GoogleFindMyDomainData) -> int:
-    """Return the current shared FCM refcount."""
+def _get_fcm_refcounts(bucket: GoogleFindMyDomainData) -> dict[str, int]:
+    """Return the per-entry FCM refcounts."""
 
-    value = bucket.get("fcm_refcount")
-    if isinstance(value, int):
-        return value
-    return 0
+    refcounts = bucket.get("fcm_refcounts")
+    if isinstance(refcounts, dict):
+        valid: dict[str, int] = {}
+        for entry_id, value in refcounts.items():
+            if isinstance(entry_id, str) and isinstance(value, int):
+                valid[entry_id] = value
+        bucket["fcm_refcounts"] = valid
+        return valid
+    bucket["fcm_refcounts"] = {}
+    return bucket["fcm_refcounts"]
 
 
-def _set_fcm_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
-    """Persist the shared FCM refcount."""
+def _get_fcm_refcount(bucket: GoogleFindMyDomainData, entry_id: str) -> int:
+    """Return the current refcount for an entry-scoped FCM receiver."""
 
-    bucket["fcm_refcount"] = value
+    return _get_fcm_refcounts(bucket).get(entry_id, 0)
+
+
+def _set_fcm_refcount(bucket: GoogleFindMyDomainData, entry_id: str, value: int) -> None:
+    """Persist the refcount for an entry-scoped FCM receiver."""
+
+    refcounts = bucket.setdefault("fcm_refcounts", {})
+    refcounts[entry_id] = value
+    bucket["fcm_refcounts"] = refcounts
+    if entry_id == "default":
+        bucket["fcm_refcount"] = value
 
 
 def _get_nova_refcount(bucket: GoogleFindMyDomainData) -> int:
@@ -2973,14 +3045,82 @@ def _set_nova_refcount(bucket: GoogleFindMyDomainData, value: int) -> None:
     bucket["nova_refcount"] = value
 
 
-def _domain_fcm_provider(hass: HomeAssistant) -> FcmReceiverHAType:
-    """Return the shared FCM receiver for provider callbacks."""
+def _sync_receiver_default_entry(receiver: object, entry_id: str | None) -> None:
+    """Propagate the chosen entry_id to receivers that track a default entry."""
+
+    if entry_id is None:
+        return
+
+    try:
+        setter = getattr(receiver, "set_default_entry_id", None)
+        if callable(setter):
+            setter(entry_id)
+            return
+    except Exception as err:  # noqa: BLE001 - defensive sync guard
+        _LOGGER.debug("Default entry sync skipped: %s", err)
+
+    try:
+        setattr(receiver, "default_entry_id", entry_id)
+    except Exception:
+        _LOGGER.debug("Default entry sync attribute assignment failed", exc_info=True)
+
+
+def _domain_fcm_provider(
+    hass: HomeAssistant, entry_id: str | None = None
+) -> FcmReceiverHAType:
+    """Return the entry-scoped FCM receiver for provider callbacks."""
 
     bucket = _domain_data(hass)
-    receiver = _get_fcm_receiver(bucket)
-    if receiver is None:  # pragma: no cover - defensive guard
-        raise RuntimeError("Shared FCM receiver unavailable")
-    return receiver
+    receivers = _get_fcm_receivers(bucket)
+    if entry_id and entry_id in receivers:
+        receiver = receivers[entry_id]
+        _sync_receiver_default_entry(receiver, entry_id)
+        return receiver
+
+    candidates: list[tuple[str, FcmReceiverHAType]] = []
+
+    resolver_map = bucket.get("fcm_provider_resolvers")
+    if isinstance(resolver_map, dict):
+        for resolver in resolver_map.values():
+            if not callable(resolver):
+                continue
+            try:
+                resolved_entry_id = resolver()
+            except Exception as err:  # noqa: BLE001 - defensive resolver guard
+                _LOGGER.debug("FCM resolver raised: %s", err)
+                continue
+            if isinstance(resolved_entry_id, str) and resolved_entry_id in receivers:
+                candidates.append((resolved_entry_id, receivers[resolved_entry_id]))
+
+    default_entry_id = bucket.get("default_fcm_entry_id")
+    if (
+        isinstance(default_entry_id, str)
+        and default_entry_id in receivers
+        and default_entry_id not in {entry for entry, _ in candidates}
+    ):
+        candidates.append((default_entry_id, receivers[default_entry_id]))
+
+    if not candidates:
+        candidates.extend(receivers.items())
+
+    for candidate_entry_id, receiver in candidates:
+        if getattr(receiver, "is_ready", False):
+            bucket["default_fcm_entry_id"] = candidate_entry_id
+            _sync_receiver_default_entry(receiver, candidate_entry_id)
+            return receiver
+
+    if candidates:
+        candidate_entry_id, receiver = candidates[0]
+        bucket["default_fcm_entry_id"] = candidate_entry_id
+        _sync_receiver_default_entry(receiver, candidate_entry_id)
+        return receiver
+
+    if receivers:
+        fallback_entry_id, receiver = next(iter(receivers.items()))
+        _sync_receiver_default_entry(receiver, fallback_entry_id)
+        return receiver
+
+    raise RuntimeError("Shared FCM receiver unavailable")
 
 
 async def _async_stop_receiver_if_possible(receiver: object | None) -> None:
@@ -5109,13 +5249,19 @@ async def _async_migrate_device_identifiers_to_entry_scope(
 # --------------------------- Shared FCM provider ---------------------------
 
 
-async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
-    """Get or create the shared FCM receiver for this HA instance.
+async def _async_acquire_shared_fcm(
+    hass: HomeAssistant,
+    *,
+    entry: ConfigEntry | None = None,
+    cache: TokenCache | None = None,
+    entry_resolver: Callable[[], str | None] | None = None,
+) -> FcmReceiverHAType:
+    """Get or create the entry-scoped FCM receiver for this HA instance.
 
     Behavior:
-        - Creates and initializes the singleton if missing.
+        - Creates and initializes the per-entry receiver if missing.
         - Registers provider callbacks for API and LocateTracker once.
-        - Maintains a reference counter to support multiple entries.
+        - Maintains a reference counter per entry to support multiple bindings.
         - NEW: attaches HA context to enable owner-index fallback routing.
     """
     _ensure_runtime_imports()
@@ -5129,15 +5275,16 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
             contention = 0
         bucket["fcm_lock_contention_count"] = contention + 1
     async with fcm_lock:
-        refcount = _get_fcm_refcount(bucket)
+        entry_id = getattr(entry, "entry_id", None)
+        refcount = _get_fcm_refcount(bucket, entry_id or "default")
         providers_registered = bucket.get("providers_registered", False)
-        raw_receiver: object | None = bucket.get("fcm_receiver")
+        receivers = _get_fcm_receivers(bucket)
         receiver_cls = _resolve_fcm_receiver_class()
-        fcm: FcmReceiverHAType | None
-        if isinstance(raw_receiver, receiver_cls):
-            fcm = raw_receiver
-        else:
-            fcm = None
+        fcm: FcmReceiverHAType | None = None
+        if entry_id is not None:
+            fcm = receivers.get(entry_id)
+        elif len(receivers) == 1:
+            fcm = next(iter(receivers.values()))
 
         def _method_is_coroutine(receiver: object, name: str) -> bool:
             """Return True if receiver.name is an async callable."""
@@ -5160,15 +5307,19 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
                 return inspect.iscoroutinefunction(cls_candidate)
             return False
 
+        raw_receiver = bucket.get("fcm_receiver")
         if raw_receiver is not None and not isinstance(raw_receiver, receiver_cls):
             _LOGGER.warning(
                 "Discarding cached FCM receiver with unexpected type: %s",
                 type(raw_receiver).__name__,
             )
-            stale = _pop_any_fcm_receiver(bucket)
-            await _async_stop_receiver_if_possible(stale)
-            fcm = None
-        elif fcm is not None and (
+            bucket.pop("fcm_receiver", None)
+            await _async_stop_receiver_if_possible(raw_receiver)
+        elif isinstance(raw_receiver, receiver_cls) and fcm is None:
+            if entry_id is None or not receivers:
+                fcm = raw_receiver
+
+        if fcm is not None and (
             not _method_is_coroutine(fcm, "async_register_for_location_updates")
             or not _method_is_coroutine(fcm, "async_unregister_for_location_updates")
         ):
@@ -5182,7 +5333,7 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
         if fcm is None:
             fcm = receiver_cls()
             _LOGGER.debug("Initializing shared FCM receiver...")
-            ok = await fcm.async_initialize()
+            ok = await fcm.async_initialize(entry_id=entry_id, cache=cache)
             if not ok:
                 raise ConfigEntryNotReady("Failed to initialize FCM receiver")
 
@@ -5197,8 +5348,14 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
             except Exception as err:
                 _LOGGER.debug("FCM attach_hass skipped: %s", err)
 
-            _set_fcm_receiver(bucket, fcm)
+            _set_fcm_receiver(bucket, entry_id or "default", fcm)
+            if entry_id:
+                bucket.setdefault("default_fcm_entry_id", entry_id)
             _LOGGER.info("Shared FCM receiver initialized")
+
+            if callable(entry_resolver) and entry_id:
+                resolvers = bucket.setdefault("fcm_provider_resolvers", {})
+                resolvers[entry_id] = entry_resolver
 
             # Register provider for both consumer modules (exactly once on first acquire)
             # Re-registering ensures downstream modules resolve the refreshed instance.
@@ -5218,38 +5375,47 @@ async def _async_acquire_shared_fcm(hass: HomeAssistant) -> FcmReceiverHAType:
                 bucket["providers_registered"] = True
 
         new_refcount = refcount + 1
-        _set_fcm_refcount(bucket, new_refcount)
-        _LOGGER.debug("FCM refcount -> %s", new_refcount)
+        _set_fcm_refcount(bucket, entry_id or "default", new_refcount)
+        _LOGGER.debug("FCM refcount[%s] -> %s", entry_id or "default", new_refcount)
         return fcm
 
 
-async def _async_release_shared_fcm(hass: HomeAssistant) -> None:
+async def _async_release_shared_fcm(
+    hass: HomeAssistant, entry: ConfigEntry | None = None
+) -> None:
     """Decrease refcount; stop and unregister provider when it reaches zero."""
     _ensure_runtime_imports()
     bucket = _domain_data(hass)
     fcm_lock: asyncio.Lock = _ensure_fcm_lock(bucket)
     async with fcm_lock:
-        refcount = _get_fcm_refcount(bucket) - 1
+        entry_id = getattr(entry, "entry_id", None) or "default"
+        refcount = _get_fcm_refcount(bucket, entry_id) - 1
         refcount = max(refcount, 0)
-        _set_fcm_refcount(bucket, refcount)
-        _LOGGER.debug("FCM refcount -> %s", refcount)
+        _set_fcm_refcount(bucket, entry_id, refcount)
+        _LOGGER.debug("FCM refcount[%s] -> %s", entry_id, refcount)
 
         if refcount != 0:
             return
 
-        fcm = _pop_fcm_receiver(bucket)
+        fcm = _pop_fcm_receiver(bucket, entry_id)
+        if entry_id == bucket.get("default_fcm_entry_id"):
+            bucket.pop("default_fcm_entry_id", None)
+        resolvers = bucket.get("fcm_provider_resolvers")
+        if isinstance(resolvers, dict):
+            resolvers.pop(entry_id, None)
 
         # Unregister providers first (consumers will see provider=None immediately)
-        try:
-            loc_unregister_fcm_provider()
-        except Exception:
-            pass
-        try:
-            api_unregister_fcm_provider()
-        except Exception:
-            pass
+        if not _get_fcm_receivers(bucket):
+            try:
+                loc_unregister_fcm_provider()
+            except Exception:
+                pass
+            try:
+                api_unregister_fcm_provider()
+            except Exception:
+                pass
 
-        bucket["providers_registered"] = False
+            bucket["providers_registered"] = False
 
         if fcm is not None:
             try:
@@ -6699,7 +6865,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     # Acquire shared FCM and create a startup barrier for the first poll cycle.
     fcm_ready_event = asyncio.Event()
-    fcm = await _async_acquire_shared_fcm(hass)
+    fcm = await _async_acquire_shared_fcm(
+        hass,
+        entry=entry,
+        cache=cache,
+        entry_resolver=lambda: getattr(entry, "entry_id", None),
+    )
     pm_fcm_acquired = time.monotonic()
     fcm_ready_event.set()
 
@@ -7782,7 +7953,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                         await fallback_cache.close()
 
         try:
-            await _async_release_shared_fcm(hass)
+            await _async_release_shared_fcm(hass, entry)
         except Exception as err:
             _LOGGER.debug("FCM release during parent unload raised: %s", err)
 
@@ -7888,7 +8059,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 )
 
     try:
-        await _async_release_shared_fcm(hass)
+        await _async_release_shared_fcm(hass, entry)
     except Exception as err:
         _LOGGER.debug("FCM release during async_remove_entry raised: %s", err)
 

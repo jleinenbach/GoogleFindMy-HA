@@ -8,6 +8,13 @@
           "off": "mdi:sync-off"
         }
       },
+      "connectivity": {
+        "default": "mdi:wifi",
+        "state": {
+          "on": "mdi:wifi",
+          "off": "mdi:wifi-off"
+        }
+      },
       "nova_auth_status": {
         "default": "mdi:account-alert",
         "state": {
