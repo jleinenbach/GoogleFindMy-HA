@@ -1,4 +1,4 @@
-.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse
+.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -23,6 +23,9 @@ clean:
 		echo "[make clean] Removing DocToc bootstrap sentinel"; \
 		rm -f "$(DOCTOC_SENTINEL)"; \
 	fi
+
+clean-node-modules:
+	@python script/clean_node_modules.py
 
 lint:
 	@ruff check . --fix
