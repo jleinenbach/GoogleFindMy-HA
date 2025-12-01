@@ -1,0 +1,252 @@
+# quality_scale.yaml – Tracking the Integration Quality Scale rules (for hassfest & review)
+# The rule IDs below match the official Developer Docs:
+# https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/
+# Evidence entries use the format "path.py:symbol" (or "tests/test_module.py:test_case")
+# so future updates can jump straight to the implementation or regression test.
+
+tier: platinum
+
+# Replace with the upstream maintainer handle from which your fork originated.
+owner: "@BSkando"
+
+rules:
+  bronze:
+    - id: action-setup
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/__init__.py:async_setup_entry"
+    - id: appropriate-polling
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator.__init__"
+        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator._async_update_data"
+    - id: brands
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/icon.png"
+        - "custom_components/googlefindmy/icons.json"
+    - id: common-modules
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/__init__.py:async_setup_entry"
+        - "custom_components/googlefindmy/__init__.py:async_unload_entry"
+    - id: config-flow-test-coverage
+      status: done
+      evidence:
+        - "tests/test_config_flow_initial_auth.py:test_manual_config_flow_with_master_token"
+        - "tests/test_config_flow_discovery.py:test_async_step_discovery_new_entry"
+    - id: config-flow
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_secrets_json"
+        - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_discovery"
+    - id: dependency-transparency
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/manifest.json:requirements"
+    - id: docs-actions
+      status: done
+      evidence:
+        - "README.md#services-actions"
+    - id: docs-high-level-description
+      status: done
+      evidence:
+        - "README.md#google-findmy-device-find-hub---home-assistant-integration"
+    - id: docs-installation-instructions
+      status: done
+      evidence:
+        - "README.md#installation"
+    - id: docs-removal-instructions
+      status: done
+      evidence:
+        - "README.md#uninstallation--removal"
+    - id: entity-event-setup
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/device_tracker.py:async_setup_entry"
+    - id: entity-unique-id
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/entity.py:GoogleFindMyEntity.build_unique_id"
+    - id: has-entity-name
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/entity.py:GoogleFindMyEntity._attr_has_entity_name"
+    - id: runtime-data
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/__init__.py:RuntimeData"
+    - id: test-before-configure
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_secrets_json"
+        - "tests/test_config_flow_initial_auth.py:test_manual_config_flow_with_master_token"
+    - id: test-before-setup
+      status: done
+      evidence:
+        - "tests/test_multi_account_end_to_end.py:test_multi_account_end_to_end"
+    - id: unique-config-entry
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_secrets_json"
+        - "tests/test_config_flow_discovery.py:test_async_step_discovery_existing_entry_updates"
+
+  silver:
+    - id: action-exceptions
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/services.py:_resolve_runtime_for_device_id"
+        - "tests/test_hass_data_layout.py:test_service_no_active_entry_placeholders"
+    - id: config-entry-unloading
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/__init__.py:async_unload_entry"
+        - "tests/test_unload_subentry_cleanup.py:test_async_unload_entry_removes_subentries_and_registries"
+    - id: docs-configuration-parameters
+      status: done
+      evidence:
+        - "README.md#configuration-options"
+        - "README.md#subentries-and-feature-groups"
+    - id: docs-installation-parameters
+      status: done
+      evidence:
+        - "README.md#configuration-options"
+        - "README.md#subentries-and-feature-groups"
+    - id: entity-unavailable
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/device_tracker.py:GoogleFindMyDeviceTracker.available"
+    - id: integration-owner
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/manifest.json:codeowners"
+    - id: log-when-unavailable
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator._note_fcm_deferral"
+    - id: parallel-updates
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/entity.py:GoogleFindMyEntity._attr_should_poll"
+    - id: reauthentication-flow
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_reauth_confirm"
+        - "tests/test_reauth_manual_token.py:test_manual_reauth_clears_cached_aas_and_mints_new_token"
+    - id: test-coverage
+      status: done
+      evidence:
+        - "pyproject.toml:[tool.coverage.run]"
+        - "tests/test_platinum_compliance.py:test_quality_scale_declares_platinum_status"
+
+  gold:
+    - id: devices
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/entity.py:GoogleFindMyDeviceEntity.service_device_info"
+    - id: diagnostics
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/diagnostics.py:async_get_config_entry_diagnostics"
+        - "tests/test_diagnostics_buffer_summary.py:test_as_dict_limits_items"
+    - id: discovery-update-info
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:async_step_discovery_update_info"
+        - "tests/test_config_flow_discovery.py:test_async_step_discovery_update_info_existing_entry"
+    - id: discovery
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:async_step_discovery"
+        - "custom_components/googlefindmy/discovery.py:_trigger_cloud_discovery"
+        - "tests/test_config_flow_discovery.py:test_async_step_discovery_new_entry"
+        - "tests/test_cloud_discovery_trigger.py:test_trigger_cloud_discovery_uses_helper"
+    - id: docs-data-update
+      status: done
+      evidence:
+        - "README.md#data-updates-and-background-behavior"
+    - id: docs-examples
+      status: done
+      evidence:
+        - "README.md#concrete-use-cases"
+    - id: docs-known-limitations
+      status: done
+      evidence:
+        - "README.md#known-limitations"
+    - id: docs-supported-devices
+      status: done
+      evidence:
+        - "README.md#supported-devices-and-functions"
+    - id: docs-supported-functions
+      status: done
+      evidence:
+        - "README.md#supported-devices-and-functions"
+    - id: docs-troubleshooting
+      status: done
+      evidence:
+        - "README.md#troubleshooting"
+    - id: docs-use-cases
+      status: done
+      evidence:
+        - "README.md#concrete-use-cases"
+    - id: dynamic-devices
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/device_tracker.py:_sync_entities_from_coordinator"
+    - id: entity-category
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/binary_sensor.py:GoogleFindMyPollingSensor._attr_entity_category"
+    - id: entity-device-class
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/binary_sensor.py:AUTH_STATUS_DESC.device_class"
+    - id: entity-disabled-by-default
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/button.py:GoogleFindMyButtonEntity._attr_entity_registry_enabled_default"
+    - id: entity-translations
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/translations/en.json:entity"
+    - id: exception-translations
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/translations/en.json:exceptions"
+    - id: icon-translations
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/icons.json"
+        - "tests/test_icons_translation_map.py:test_icons_file_covers_entity_translation_keys"
+    - id: reconfiguration-flow
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:OptionsFlowHandler.async_step_init"
+        - "tests/test_options_flow_subentries.py:test_repairs_move_assigns_devices_to_selected_subentry"
+    - id: repair-issues
+      status: done
+      evidence:
+        - "README.md#subentries-and-feature-groups"
+        - "tests/test_options_flow_subentries.py::test_repairs_move_assigns_devices_to_selected_subentry"
+        - "tests/test_options_flow_subentries.py::test_repairs_delete_moves_devices_and_removes_subentry"
+    - id: stale-devices
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/__init__.py:async_remove_config_entry_device"
+
+  platinum:
+    - id: async-dependency
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator.__init__"
+    - id: inject-websession
+      status: done
+      evidence:
+        - "custom_components/googlefindmy/config_flow.py:ConfigFlow._async_build_api_from_entry"
+    - id: strict-typing
+      status: done
+      evidence:
+        - "pyproject.toml:[tool.mypy]"
+
+# Optional: documented exemptions (only if truly necessary)
+exemptions: []

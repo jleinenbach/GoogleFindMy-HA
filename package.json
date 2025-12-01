@@ -1,0 +1,12 @@
+{
+  "name": "googlefindmy-ha",
+  "version": "0.0.0",
+  "description": "Developer tooling for the Google Find My Home Assistant integration",
+  "private": true,
+  "devDependencies": {
+    "doctoc": "2.2.1"
+  },
+  "scripts": {
+    "doctoc": "doctoc"
+  }
+}

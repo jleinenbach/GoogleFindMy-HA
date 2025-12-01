@@ -1,0 +1,221 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "googlefindmy-ha"
+version = "1.7.0"
+description = "Home Assistant integration for Google's Find My Device network."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "BSkando" }]
+dependencies = [
+    "aiohttp>=3.11.8",
+    "beautifulsoup4>=4.12.3",
+    "cryptography>=43.0.3",
+    "ecdsa>=0.19.1",
+    "gpsoauth>=2.0.0",
+    "h2>=4.1.0",
+    "http-ece>=1.2.1",
+    "httpx[http2]>=0.28.0",
+    "protobuf>=6.32.0",
+    "pycryptodomex>=3.23.0",
+    "pyscrypt>=1.6.2",
+    "selenium>=4.37.0",
+    "undetected_chromedriver>=3.5.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "pre-commit>=3.7",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-homeassistant-custom-component>=0.13",
+    "ruff>=0.14.1",
+    "types-requests>=2.32.0.20240712",
+]
+
+[project.urls]
+homepage = "https://github.com/BSkando/GoogleFindMy-HA"
+documentation = "https://github.com/BSkando/GoogleFindMy-HA"
+repository = "https://github.com/BSkando/GoogleFindMy-HA"
+issue-tracker = "https://github.com/BSkando/GoogleFindMy-HA/issues"
+
+[tool.ruff]
+target-version = "py313"
+extend-exclude = [
+    "custom_components/googlefindmy/ProtoDecoders",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",
+    "E",
+    "W",
+    "I",
+    "UP",
+    "PL",
+]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+    "PLC0415",
+    "E402",
+    "UP022",
+]
+"custom_components/googlefindmy/config_flow.py" = [
+    "PLR0912",
+    "PLR0915",
+    "UP040",
+    "PLR0911",
+    "PLC0415",
+    "UP047",
+    "PLR0913",
+    "PLW0603",
+    "PLR2004",
+]
+"custom_components/googlefindmy/const.py" = ["PLR0912"]
+"custom_components/googlefindmy/coordinator.py" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+    "PLR0911",
+]
+"custom_components/googlefindmy/__init__.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLR2004",
+    "PLW0603",
+    "PLC0415",
+    "UP031",
+]
+"custom_components/googlefindmy/services.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/sensor.py" = ["PLR0912", "PLR0915"]
+"custom_components/googlefindmy/map_view.py" = [
+    "PLW0603",
+    "PLC0415",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+]
+"custom_components/googlefindmy/protobuf_typing.pyi" = ["UP046"]
+"custom_components/googlefindmy/SpotApi/spot_request.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/entity.py" = ["PLR0913"]
+"custom_components/googlefindmy/get_oauth_token.py" = ["PLC0415"]
+"custom_components/googlefindmy/google_home_filter.py" = ["PLC0415", "PLR0911"]
+"custom_components/googlefindmy/ha_typing.py" = ["UP047", "UP046"]
+"custom_components/googlefindmy/location_recorder.py" = ["PLR0911", "PLR2004"]
+"custom_components/googlefindmy/api.py" = [
+    "PLW0603",
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLR2004",
+]
+"custom_components/googlefindmy/discovery.py" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/device_tracker.py" = ["PLR0912", "PLR0915"]
+"custom_components/googlefindmy/diagnostics.py" = ["PLR0912", "PLR0915", "UP047"]
+"custom_components/googlefindmy/system_health.py" = ["UP047", "PLR2004"]
+"custom_components/googlefindmy/typing_utils.py" = ["UP047"]
+"google/protobuf/internal/containers.pyi" = ["UP046"]
+"script/list_wheelhouse.py" = ["PLR2004"]
+"script/sync_translations.py" = ["PLR0912"]
+"tests/conftest.py" = ["PLW0603"]
+"tests/helpers/config_flow.py" = ["UP047"]
+"tests/helpers/homeassistant.py" = ["PLR0911"]
+"tests/helpers/homeassistant_stub.py" = ["UP047"]
+"custom_components/googlefindmy/button.py" = ["PLR0912", "PLR0915"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+addopts = ["-q", "--cov-report=term"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = [
+    "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
+]
+
+[tool.mypy]
+python_version = "3.13"
+warn_unused_ignores = true
+show_error_codes = true
+mypy_path = ["."]
+explicit_package_bases = true
+strict = true
+local_partial_types = true
+warn_return_any = true
+files = [
+    "custom_components/googlefindmy",
+]
+exclude = "(^custom_components/googlefindmy/ProtoDecoders/|^custom_components/googlefindmy/Auth/firebase_messaging/proto/)"
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["homeassistant.*"]
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["tests.test_fcm_receiver_guard"]
+ignore_errors = false
+
+[tool.coverage.run]
+branch = true
+source = [
+    "custom_components/googlefindmy",
+    "tests",
+]
+omit = [
+    "custom_components/googlefindmy/ProtoDecoders/*",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto/*",
+]
+
+[tool.coverage.report]
+show_missing = false
+skip_covered = true
+exclude_lines = [
+    "if __name__ == \"__main__\":",
+    "pragma: no cover",
+]
+
+[tool.coverage.paths]
+source = [
+    "custom_components/googlefindmy",
+    "*/site-packages/custom_components/googlefindmy",
+]
