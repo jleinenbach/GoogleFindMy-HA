@@ -3,15 +3,17 @@
 # please do not add a local wrapper or dependency for it here.
 homeassistant>=2025.7.0
 beautifulsoup4>=4.12.3
+certifi>=2024.7.4
+ecdsa>=0.19.1
+gpsoauth>=2.0.0
 mypy>=1.11
 pre-commit>=3.7
-protobuf>=5.28.3
+protobuf>=6.32.0
 pyscrypt>=1.6.2
-selenium>=4.25.0
 pytest>=8.3
 pytest-asyncio>=0.23
 pytest-cov>=5.0
 pytest-homeassistant-custom-component>=0.13
 ruff>=0.14.1
+selenium>=4.25.0
 types-requests>=2.32.0.20240712
-certifi>=2024.7.4
