@@ -790,6 +790,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
+        self._consecutive_timeouts: int = 0
+        self._last_poll_result: str | None = None
+
         # Granular status tracking (API polling vs. push transport)
         self._api_status_state: str = ApiStatus.UNKNOWN
         self._api_status_reason: str | None = None
@@ -3851,6 +3854,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return self._fcm_status_state == FcmStatus.CONNECTED
 
+    @property
+    def consecutive_timeouts(self) -> int:
+        """Return the number of consecutive poll timeouts."""
+
+        return self._consecutive_timeouts
+
+    @property
+    def last_poll_result(self) -> str | None:
+        """Return the last recorded poll result ("success"/"failed")."""
+
+        return self._last_poll_result
+
     # --- END: Add/Replace inside Coordinator class --------------------------------
 
     # ---------------------------- Event loop helpers ------------------------
@@ -4711,6 +4726,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             google_home_filter = self._get_google_home_filter()
 
             try:
+                cycle_failed = False
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -4904,6 +4920,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         location["last_updated"] = wall_now  # wall-clock for UX
                         self._device_location_data[dev_id] = location
                         self.increment_stat("polled_updates")
+                        self._consecutive_timeouts = 0
 
                         # Immediate per-device update for more responsive UI during long poll cycles.
                         self.push_updated([dev_id])
@@ -4915,6 +4932,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             LOCATION_REQUEST_TIMEOUT_S,
                         )
                         self.increment_stat("timeouts")
+                        self._consecutive_timeouts += 1
+                        cycle_failed = True
                         self.note_error(terr, where="poll_timeout", device=dev_name)
                     except ConfigEntryAuthFailed as auth_exc:
                         # Mark auth failures to HA; abort remaining devices by re-raising.
@@ -4922,11 +4941,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             failed=True,
                             reason=f"Auth failed during poll for {dev_name}: {auth_exc}",
                         )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
                         raise
                     except Exception as err:
                         _LOGGER.error(
                             "Failed to get location for %s: %s", dev_name, err
                         )
+                        cycle_failed = True
+                        self._consecutive_timeouts = 0
                         self.note_error(err, where="poll_exception", device=dev_name)
 
                     # Inter-device delay (except after the last one)
@@ -4939,6 +4963,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self._last_poll_mono = time.monotonic()
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
+                if cycle_failed:
+                    self._last_poll_result = "failed"
+                elif self._last_poll_result is None:
+                    self._last_poll_result = "success"
                 # Publish a full, visible snapshot (not just polled devices)
                 ignored = self._get_ignored_set()
                 # Use the latest remembered full list; filter ignored

@@ -435,8 +435,9 @@ def test_async_unload_entry_removes_subentries_and_registries(
 
     hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
 
-    async def _fake_release_fcm(hass_obj: Any) -> None:
+    async def _fake_release_fcm(hass_obj: Any, entry_obj: Any | None = None) -> None:
         hass_obj.data[DOMAIN]["fcm_refcount"] = 0
+        assert entry_obj is entry
 
     monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release_fcm)
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
@@ -485,8 +486,9 @@ def test_async_unload_entry_defaults_parent_forward_flag(monkeypatch: Any) -> No
 
     hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
 
-    async def _fake_release_fcm(hass_obj: Any) -> None:
+    async def _fake_release_fcm(hass_obj: Any, entry_obj: Any | None = None) -> None:
         hass_obj.data[DOMAIN]["fcm_refcount"] = 0
+        assert entry_obj is entry
 
     monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release_fcm)
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
@@ -501,6 +503,48 @@ def test_async_unload_entry_defaults_parent_forward_flag(monkeypatch: Any) -> No
         (entry, tuple(integration.PLATFORMS))
     ]
     assert hass.config_entries.removed_subentries == []
+
+
+def test_async_unload_entry_passes_entry_to_fcm_release(monkeypatch: Any) -> None:
+    """Unload should release FCM with the active entry context."""
+
+    entry = _EntryStub()
+    subentry = entry.add_subentry("core", ("dev-1",))
+
+    entity_registry = _RegistryTracker()
+    device_registry = _RegistryTracker()
+    entity_registry.apply(subentry.subentry_id, subentry.data["visible_device_ids"])
+    device_registry.apply(subentry.subentry_id, subentry.data["visible_device_ids"])
+
+    token_cache = _TokenCacheStub()
+    coordinator = _CoordinatorStub()
+    subentry_manager = _SubentryManagerStub(entry, entity_registry, device_registry)
+    runtime_data = integration.RuntimeData(
+        coordinator=coordinator,
+        token_cache=token_cache,
+        subentry_manager=subentry_manager,
+        fcm_receiver=None,
+    )
+    entry.runtime_data = runtime_data
+    entry._gfm_parent_platforms_forwarded = True
+
+    hass = _HassStub(entry, runtime_data, entity_registry, device_registry)
+
+    release_calls: list[tuple[Any, Any | None]] = []
+
+    async def _fake_release_fcm(hass_obj: Any, entry_obj: Any | None = None) -> None:
+        hass_obj.data[DOMAIN]["fcm_refcount"] = 0
+        release_calls.append((hass_obj, entry_obj))
+
+    monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release_fcm)
+    monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
+    monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
+    monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
+
+    result = asyncio.run(integration.async_unload_entry(hass, entry))
+
+    assert result is True
+    assert release_calls == [(hass, entry)]
 
 
 def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -> None:
@@ -545,8 +589,9 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
         purge_calls.append({"args": args, "kwargs": kwargs})
         return (0, 0)
 
-    async def _fake_release_fcm(hass_obj: Any) -> None:
+    async def _fake_release_fcm(hass_obj: Any, entry_obj: Any | None = None) -> None:
         hass_obj.data[DOMAIN]["fcm_refcount"] = 0
+        assert entry_obj is entry
 
     monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release_fcm)
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
@@ -611,8 +656,9 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
 
     hass.config_entries.async_unload_platforms = _fail_parent_unload  # type: ignore[assignment]
 
-    async def _fake_release_fcm(hass_obj: Any) -> None:
+    async def _fake_release_fcm(hass_obj: Any, entry_obj: Any | None = None) -> None:
         hass_obj.data[DOMAIN]["fcm_refcount"] = 0
+        assert entry_obj is entry
 
     monkeypatch.setattr(integration, "_async_release_shared_fcm", _fake_release_fcm)
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)

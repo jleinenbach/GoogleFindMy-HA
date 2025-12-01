@@ -4,10 +4,11 @@ from typing import Any
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from custom_components.googlefindmy import binary_sensor
+from custom_components.googlefindmy import EntityRecoveryManager, binary_sensor
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DATA_SECRET_BUNDLE,
@@ -96,6 +97,7 @@ async def test_setup_iterates_service_subentries(stub_coordinator_factory: Any) 
     } == {
         f"{entry.entry_id}:{service_subentry.subentry_id}:polling",
         f"{entry.entry_id}:{service_subentry.subentry_id}:auth_status",
+        f"{entry.entry_id}:{service_subentry.subentry_id}:connectivity",
     }
 
 
@@ -141,9 +143,9 @@ async def test_dispatcher_adds_new_service_subentries(stub_coordinator_factory: 
     await asyncio.gather(*pending)
 
     configs = [config for _, config in added]
-    assert configs.count(service_subentry.subentry_id) == 2
-    assert configs.count(new_subentry.subentry_id) == 2
-    assert len({entity.unique_id for entity, _ in added}) == 4
+    assert configs.count(service_subentry.subentry_id) == 3
+    assert configs.count(new_subentry.subentry_id) == 3
+    assert len({entity.unique_id for entity, _ in added}) == 6
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
 
 
@@ -186,7 +188,7 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
     async_dispatcher_send(hass, signal, service_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    assert len(added) == initial_count == 2
+    assert len(added) == initial_count == 3
     assert {config for _, config in added} == {service_subentry.subentry_id}
 
 
@@ -223,3 +225,48 @@ async def test_binary_sensor_skips_tracker_subentry(
     await asyncio.gather(*pending)
 
     assert added == []
+
+
+@pytest.mark.asyncio
+async def test_recovery_registers_connectivity_sensor(
+    stub_coordinator_factory: Any,
+) -> None:
+    """Recovery manager should include connectivity sensors for service subentries."""
+
+    loop = asyncio.get_running_loop()
+    hass = _make_hass(loop)
+
+    entry = _ConfigEntryStub()
+    service_subentry = ConfigSubentry(
+        data={"group_key": SERVICE_SUBENTRY_KEY, "features": ("binary_sensor",)},
+        subentry_type=SUBENTRY_TYPE_SERVICE,
+        title="Service",
+        subentry_id="service-subentry",
+    )
+    entry.subentries = {service_subentry.subentry_id: service_subentry}
+
+    coordinator_cls = stub_coordinator_factory()
+    coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+    recovery_manager = EntityRecoveryManager(hass, entry, coordinator)
+    entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, entity_recovery_manager=recovery_manager
+    )
+
+    add_entities, added, pending = _make_add_entities(hass, loop)
+
+    await binary_sensor.async_setup_entry(hass, entry, add_entities)
+    await asyncio.gather(*pending)
+
+    registration = recovery_manager._platforms.get(str(Platform.BINARY_SENSOR))
+    assert registration is not None
+
+    expected = {
+        f"{entry.entry_id}:{service_subentry.subentry_id}:polling",
+        f"{entry.entry_id}:{service_subentry.subentry_id}:auth_status",
+        f"{entry.entry_id}:{service_subentry.subentry_id}:connectivity",
+    }
+
+    assert registration.expected_unique_ids() == expected
+
+    recovered = registration.entity_factory(set(expected))
+    assert {entity.unique_id for entity in recovered} == expected
