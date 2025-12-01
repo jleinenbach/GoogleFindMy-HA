@@ -43,6 +43,9 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -188,14 +191,16 @@ class _CallbackContext:
         data: The data payload received from the callback.
     """
 
-    __slots__ = ("event", "data")
+    __slots__ = ("event", "data", "error")
     event: asyncio.Event
     data: list[dict[str, Any]] | None
+    error: Exception | None
 
     def __init__(self) -> None:
         """Initialize the callback context."""
         self.event: asyncio.Event = asyncio.Event()
         self.data: list[dict[str, Any]] | None = None
+        self.error: Exception | None = None
 
 
 def _make_location_callback(  # noqa: PLR0915, PLR0913
@@ -337,7 +342,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
                     )
-                    ctx.data = cast(list[dict[str, Any]], [])
+                    ctx.error = err
                     ctx.event.set()
                     return
                 except Exception as err:
@@ -657,6 +662,10 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             )
             return []
 
+        if ctx.error:
+            if isinstance(ctx.error, SpotApiEmptyResponseError):
+                raise ctx.error
+
         data = ctx.data or []
         if data and data[0].get("canonic_id") == canonic_device_id:
             _LOGGER.info("Successfully received location data for %s", name)
@@ -672,6 +681,9 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
     except asyncio.CancelledError:
         _LOGGER.info("Location request cancelled for %s", name)
+        raise
+    except SpotApiEmptyResponseError:
+        # Bubble up auth failures so the coordinator can trigger reauth.
         raise
     except Exception as e:
         _LOGGER.error("Error requesting location for %s: %s", name, e)

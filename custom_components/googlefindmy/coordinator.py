@@ -143,6 +143,9 @@ from .const import (
     service_device_identifier,
 )
 from .ha_typing import DataUpdateCoordinator, callback
+from .SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -4935,6 +4938,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self._consecutive_timeouts += 1
                         cycle_failed = True
                         self.note_error(terr, where="poll_timeout", device=dev_name)
+                    except SpotApiEmptyResponseError:
+                        _LOGGER.warning(
+                            "Authentication failed for %s; triggering reauth flow.",
+                            dev_name,
+                        )
+                        self._set_auth_state(
+                            failed=True,
+                            reason=f"Auth failed during poll for {dev_name}: session invalid",
+                        )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        raise ConfigEntryAuthFailed("Google session invalid")
                     except ConfigEntryAuthFailed as auth_exc:
                         # Mark auth failures to HA; abort remaining devices by re-raising.
                         self._set_auth_state(
