@@ -37,8 +37,14 @@ from .const import (
     # secrets in entry.data (must never be exposed)
     CONF_OAUTH_TOKEN,
     # defaults for options (used to avoid hard-coded literals)
+    DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_ENABLE_STATS_ENTITIES,
+    DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
+    DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
+    DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_MIN_ACCURACY_THRESHOLD,
+    DEFAULT_MOVEMENT_THRESHOLD,
     DOMAIN,
     OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
@@ -432,10 +438,28 @@ async def async_get_config_entry_diagnostics(
             coordinator = candidate
 
     # --- Build a compact, anonymized options snapshot (no raw strings that could contain PII) ---
-    opt = entry.options
-    ignored_raw = (
-        opt.get(OPT_IGNORED_DEVICES) or entry.data.get(OPT_IGNORED_DEVICES) or {}
+    try:
+        effective_config: dict[str, Any] = dict(entry.data)
+    except Exception:
+        effective_config = {}
+
+    if isinstance(entry.options, Mapping):
+        effective_config.update(entry.options)
+    else:  # pragma: no cover - defensive fallback
+        try:
+            effective_config.update(dict(entry.options))
+        except Exception:
+            effective_config = dict(effective_config)
+
+    keywords_count = _count_keywords(
+        effective_config.get(
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS, DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS
+        )
     )
+
+    ignored_raw = effective_config.get(OPT_IGNORED_DEVICES) or {}
+
+    effective_config_for_diag = dict(effective_config)
 
     # Coerce to handle legacy list[str] format gracefully
     if isinstance(ignored_raw, list):
@@ -445,31 +469,59 @@ async def async_get_config_entry_diagnostics(
     else:
         ignored_count = 0
 
+    if ignored_count:
+        effective_config_for_diag[OPT_IGNORED_DEVICES] = [REDACTED] * ignored_count
+    elif OPT_IGNORED_DEVICES in effective_config_for_diag:
+        effective_config_for_diag[OPT_IGNORED_DEVICES] = []
+
+    if keywords_count:
+        effective_config_for_diag[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = [
+            REDACTED
+        ] * keywords_count
+    elif OPT_GOOGLE_HOME_FILTER_KEYWORDS in effective_config_for_diag:
+        effective_config_for_diag[OPT_GOOGLE_HOME_FILTER_KEYWORDS] = []
+
+    redacted_effective_config = async_redact_data(effective_config_for_diag, TO_REDACT)
+
     config_summary = {
         # Durations and numeric thresholds
         "location_poll_interval": _coerce_pos_int(
-            opt.get(OPT_LOCATION_POLL_INTERVAL, 300), 300
+            effective_config.get(
+                OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
+            ),
+            DEFAULT_LOCATION_POLL_INTERVAL,
         ),
-        "device_poll_delay": _coerce_pos_int(opt.get(OPT_DEVICE_POLL_DELAY, 5), 5),
+        "device_poll_delay": _coerce_pos_int(
+            effective_config.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
+            DEFAULT_DEVICE_POLL_DELAY,
+        ),
         "min_accuracy_threshold": _coerce_pos_int(
-            opt.get(OPT_MIN_ACCURACY_THRESHOLD, 100), 100
+            effective_config.get(
+                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
+            ),
+            DEFAULT_MIN_ACCURACY_THRESHOLD,
         ),
-        "movement_threshold": _coerce_pos_int(opt.get(OPT_MOVEMENT_THRESHOLD, 50), 50),
+        "movement_threshold": _coerce_pos_int(
+            effective_config.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD),
+            DEFAULT_MOVEMENT_THRESHOLD,
+        ),
         # Feature toggles
         "google_home_filter_enabled": bool(
-            opt.get(OPT_GOOGLE_HOME_FILTER_ENABLED, False)
+            effective_config.get(
+                OPT_GOOGLE_HOME_FILTER_ENABLED, DEFAULT_GOOGLE_HOME_FILTER_ENABLED
+            )
         ),
         "enable_stats_entities": bool(
-            opt.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+            effective_config.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
         ),
         # Token lifetime: store boolean value
         "map_view_token_expiration": bool(
-            opt.get(OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+            effective_config.get(
+                OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
         ),
         # Counts only (never expose strings/IDs)
-        "google_home_filter_keywords_count": _count_keywords(
-            opt.get(OPT_GOOGLE_HOME_FILTER_KEYWORDS)
-        ),
+        "google_home_filter_keywords_count": keywords_count,
         "ignored_devices_count": ignored_count,
     }
 
@@ -585,6 +637,7 @@ async def async_get_config_entry_diagnostics(
             "domain": entry.domain,
         },
         "config": config_summary,
+        "effective_config": redacted_effective_config,
         "registries": {
             "device": device_registry_counts,
             "entity": entity_registry_counts,
