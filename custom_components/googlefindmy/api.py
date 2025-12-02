@@ -139,13 +139,18 @@ class CacheProtocol(Protocol):
 
 
 # Module-local FCM provider getter; installed by the integration at setup time.
-_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
+_FCM_ReceiverGetter: Callable[[str | None], FcmReceiverProtocol] | None = None
 
 
-def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
+def register_fcm_receiver_provider(
+    getter: Callable[[str | None], FcmReceiverProtocol],
+) -> None:
     """Register a getter that returns the shared FCM receiver (HA-managed).
 
-    The provider is a zero-arg callable that returns the current receiver instance.
+    The provider accepts an optional entry ID and returns the current receiver
+    instance for that scope. We keep this indirection to avoid importing heavy modules
+    at import time and to stay resilient to reloads (the callable resolves the live
+    object on access).
     We keep this indirection to avoid importing heavy modules at import time and
     to stay resilient to reloads (the callable resolves the live object on access).
 
@@ -631,17 +636,6 @@ class GoogleFindMyAPI:
         if _FCM_ReceiverGetter is None:
             _LOGGER.error("Cannot obtain FCM token: no provider registered.")
             return None
-        try:
-            receiver = _FCM_ReceiverGetter()
-        except Exception as err:
-            _LOGGER.error(
-                "Cannot obtain FCM token: provider callable failed",
-                exc_info=err,
-            )
-            return None
-        if receiver is None:
-            _LOGGER.error("Cannot obtain FCM token: provider returned None.")
-            return None
         entry_id: str | None
         try:
             raw_entry_id = getattr(self._cache, "entry_id", None)
@@ -651,6 +645,17 @@ class GoogleFindMyAPI:
             entry_id = raw_entry_id.strip()
         else:
             entry_id = self._namespace()
+        try:
+            receiver = _FCM_ReceiverGetter(entry_id)
+        except Exception as err:
+            _LOGGER.error(
+                "Cannot obtain FCM token: provider callable failed",
+                exc_info=err,
+            )
+            return None
+        if receiver is None:
+            _LOGGER.error("Cannot obtain FCM token: provider returned None.")
+            return None
         try:
             if entry_id is not None:
                 token = receiver.get_fcm_token(entry_id)
@@ -687,17 +692,6 @@ class GoogleFindMyAPI:
         if _FCM_ReceiverGetter is None:
             _LOGGER.debug("FCM readiness probe: no provider registered.")
             return None
-        try:
-            receiver = _FCM_ReceiverGetter()
-        except Exception as err:
-            _LOGGER.debug(
-                "FCM readiness probe: provider callable failed",
-                exc_info=err,
-            )
-            return None
-        if receiver is None:
-            _LOGGER.debug("FCM readiness probe: provider returned None.")
-            return None
         entry_id: str | None
         try:
             raw_entry_id = getattr(self._cache, "entry_id", None)
@@ -707,6 +701,17 @@ class GoogleFindMyAPI:
             entry_id = raw_entry_id.strip()
         else:
             entry_id = self._namespace()
+        try:
+            receiver = _FCM_ReceiverGetter(entry_id)
+        except Exception as err:
+            _LOGGER.debug(
+                "FCM readiness probe: provider callable failed",
+                exc_info=err,
+            )
+            return None
+        if receiver is None:
+            _LOGGER.debug("FCM readiness probe: provider returned None.")
+            return None
         try:
             if entry_id is not None:
                 token = receiver.get_fcm_token(entry_id)
@@ -1127,8 +1132,18 @@ class GoogleFindMyAPI:
             return False
 
         # Resolve live receiver (may change across reloads)
+        entry_id: str | None
         try:
-            receiver = _FCM_ReceiverGetter()
+            raw_entry_id = getattr(self._cache, "entry_id", None)
+        except Exception:
+            raw_entry_id = None
+        if isinstance(raw_entry_id, str) and raw_entry_id.strip():
+            entry_id = raw_entry_id.strip()
+        else:
+            entry_id = self._namespace()
+
+        try:
+            receiver = _FCM_ReceiverGetter(entry_id)
         except Exception:
             return False
         if receiver is None:

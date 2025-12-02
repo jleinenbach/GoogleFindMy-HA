@@ -101,13 +101,15 @@ def _import_eid_info_module() -> ModuleType:
     )
 
 
-_fcm_receiver_state: dict[str, Callable[[], FcmReceiverProtocol] | None] = {
+_fcm_receiver_state: dict[str, Callable[[str | None], FcmReceiverProtocol] | None] = {
     "getter": None
 }
-_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
+_FCM_ReceiverGetter: Callable[[str | None], FcmReceiverProtocol] | None = None
 
 
-def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
+def register_fcm_receiver_provider(
+    getter: Callable[[str | None], FcmReceiverProtocol]
+) -> None:
     """Register a callable returning the long-lived FCM receiver instance.
 
     The getter must return an initialized receiver exposing:
@@ -115,7 +117,8 @@ def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) ->
       - async_unregister_for_location_updates(device_id) -> None
 
     Args:
-        getter: A callable that returns the singleton FCM receiver instance.
+        getter: A callable that returns the singleton FCM receiver instance for
+            an optional entry_id context.
     """
     _fcm_receiver_state["getter"] = getter
 
@@ -451,7 +454,8 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
     if fcm_getter is None:
         raise RuntimeError("FCM receiver provider has not been registered.")
-    fcm_receiver = fcm_getter()
+    entry_id = getattr(cache, "entry_id", None) if cache else None
+    fcm_receiver = fcm_getter(entry_id)
     if fcm_receiver is None:
         raise RuntimeError("FCM receiver provider returned None.")
 
@@ -471,7 +475,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
         cache_provider = _cache_provider
 
-    resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
+    resolved_namespace = namespace or entry_id
     if not resolved_namespace:
         raise MissingNamespaceError()
 
