@@ -1660,12 +1660,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return [dict(row) for row in entries]
 
     def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
-        """Return True if a device is visible within the subentry scope."""
+        """Return True if a device is visible within the subentry scope.
+
+        Handles both raw device IDs and namespaced identifiers (ENTRY_ID:DEVICE_ID)
+        to ensure robust visibility checks in multi-account setups.
+        """
 
         meta = self._subentry_metadata.get(subentry_key)
         if meta is None:
             return False
-        return device_id in meta.visible_device_ids
+
+        # Fast path: Check for exact match (raw ID)
+        if device_id in meta.visible_device_ids:
+            return True
+
+        # Robust path: Check for namespaced IDs (e.g., "01KBB...:DEVICE_ID")
+        # The registry index may contain the fully qualified identifier.
+        suffix = f":{device_id}"
+        for visible_id in meta.visible_device_ids:
+            if visible_id.endswith(suffix):
+                return True
+
+        return False
 
     def get_device_location_data_for_subentry(
         self, subentry_key: str, device_id: str
