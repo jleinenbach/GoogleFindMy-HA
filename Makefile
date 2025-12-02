@@ -1,4 +1,4 @@
-.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse
+.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse test-deps translation-check
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -59,6 +59,15 @@ install-ha-stubs:
 test-stubs:
 	@echo "[make test-stubs] Installing Home Assistant test dependencies"
 	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+
+test-deps:
+	@echo "[make test-deps] Installing stub and integration development dependencies"
+	@$(MAKE) test-stubs
+	@$(PYTHON) -m pip install --upgrade -r $(DEV_REQUIREMENTS)
+
+translation-check:
+	@echo "[make translation-check] Checking for missing translation keys"
+	@$(PYTHON) -m script.translation_key_check
 
 test-single:
 	@echo "[make test-single] Ensuring Home Assistant test dependencies are installed"

@@ -41,6 +41,9 @@
       "last_seen": {
         "default": "mdi:clock-outline"
       },
+      "semantic_labels": {
+        "default": "mdi:format-list-text"
+      },
       "stat_background_updates": {
         "default": "mdi:cloud-download"
       },

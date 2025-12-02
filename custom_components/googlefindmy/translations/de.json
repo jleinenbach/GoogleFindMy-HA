@@ -165,7 +165,79 @@
           "credentials": "Anmeldedaten aktualisieren",
           "settings": "Einstellungen ändern",
           "visibility": "Gerätesichtbarkeit",
+          "semantic_locations": "Semantische Orte",
           "repairs": "Reparaturen für Funktionsgruppen"
+        }
+      },
+      "semantic_locations_menu": {
+        "title": "Semantische Orte",
+        "description": "Verwalte semantische Ortsüberschreibungen. Vorhandene Zuordnungen:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Semantischen Ort hinzufügen",
+          "semantic_location_edit": "Semantischen Ort bearbeiten",
+          "semantic_locations_delete": "Semantischen Ort löschen"
+        }
+      },
+      "semantic_locations": {
+        "title": "Semantische Orte",
+        "description": "Verwalte semantische Ortsüberschreibungen. Vorhandene Zuordnungen:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Semantischen Ort hinzufügen",
+          "semantic_locations_edit": "Semantischen Ort bearbeiten",
+          "semantic_locations_delete": "Semantischen Ort löschen"
+        }
+      },
+      "semantic_locations_add": {
+        "title": "Semantischen Ort hinzufügen",
+        "description": "Definiere eine semantische Ortsüberschreibung mit Koordinaten und Genauigkeit.",
+        "data": {
+          "semantic_name": "Semantischer Name",
+          "latitude": "Breitengrad",
+          "longitude": "Längengrad",
+          "accuracy": "Erkennungsradius (m)"
+        },
+        "data_description": {
+          "accuracy": "Schätzt die Verbindungsreichweite des Geräts ab (z. B. 15-20 m bei Bluetooth)."
+        }
+      },
+      "semantic_locations_edit": {
+        "title": "Semantischen Ort auswählen",
+        "description": "Wähle einen semantischen Ort zur Bearbeitung aus.",
+        "data": {
+          "semantic_location": "Semantischer Ort"
+        }
+      },
+      "semantic_location_edit": {
+        "title": "Semantischen Ort bearbeiten",
+        "description": "Aktualisiere Koordinaten und Genauigkeit für den ausgewählten semantischen Ort.",
+        "data": {
+          "semantic_name": "Semantischer Name",
+          "latitude": "Breitengrad",
+          "longitude": "Längengrad",
+          "accuracy": "Erkennungsradius (m)"
+        },
+        "data_description": {
+          "accuracy": "Schätzt die Verbindungsreichweite des Geräts ab (z. B. 15-20 m bei Bluetooth)."
+        }
+      },
+      "semantic_locations_edit_form": {
+        "title": "Semantischen Ort bearbeiten",
+        "description": "Aktualisiere Koordinaten und Genauigkeit für den ausgewählten semantischen Ort.",
+        "data": {
+          "semantic_name": "Semantischer Name",
+          "latitude": "Breitengrad",
+          "longitude": "Längengrad",
+          "accuracy": "Erkennungsradius (m)"
+        },
+        "data_description": {
+          "accuracy": "Schätzt die Verbindungsreichweite des Geräts ab (z. B. 15-20 m bei Bluetooth)."
+        }
+      },
+      "semantic_locations_delete": {
+        "title": "Semantische Orte löschen",
+        "description": "Wähle semantische Orte zum Löschen aus.",
+        "data": {
+          "semantic_locations": "Semantische Orte"
         }
       },
       "credentials": {
@@ -252,12 +324,15 @@
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "invalid_token": "Ungültige Anmeldedaten (Token/E-Mail). Bitte prüfe Format und Inhalt.",
+      "duplicate_name": "Der semantische Name ist bereits vorhanden. Wähle einen anderen Namen.",
+      "duplicate_semantic_location": "Der semantische Name ist bereits vorhanden. Wähle einen anderen Namen.",
       "unknown": "Unerwarteter Fehler.",
       "invalid_subentry": "Wähle eine gültige Funktionsgruppe."
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
       "no_ignored_devices": "Es gibt keine ignorierten Geräte, die wiederhergestellt werden können.",
+      "no_semantic_locations": "Es sind keine semantischen Orte konfiguriert.",
       "repairs_no_subentries": "Es sind keine Funktionsgruppen zur Reparatur vorhanden.",
       "repair_no_devices": "Wähle mindestens ein Gerät zum Verschieben aus.",
       "subentry_move_success": "Geräte wurden **{subentry}** zugewiesen ({count} aktualisiert).",
@@ -489,6 +564,9 @@
             "name": "Höhe (m)"
           }
         }
+      },
+      "semantic_labels": {
+        "name": "Semantische Bezeichnungen"
       },
       "stat_background_updates": {
         "name": "Hintergrund-Aktualisierungen"
