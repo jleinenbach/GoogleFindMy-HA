@@ -41,11 +41,25 @@ class _DummyEntry(SimpleNamespace):
     entry_id: str
 
 
-class _DefaultAwareReceiver(SimpleNamespace):
+class _ReadyableReceiver(FcmReceiverHA):
+    """Receiver stub with overridable readiness for tests."""
+
+    def __init__(self, *, ready: bool) -> None:
+        super().__init__()
+        self._ready_flag = ready
+
+    @property
+    def is_ready(self) -> bool:
+        return self._ready_flag
+
+    ready = is_ready
+
+
+class _DefaultAwareReceiver(_ReadyableReceiver):
     """Receiver stub that tracks the default entry for token lookups."""
 
     def __init__(self, mapping: dict[str, str], *, is_ready: bool) -> None:
-        super().__init__(is_ready=is_ready)
+        super().__init__(ready=is_ready)
         self._tokens = mapping
         self.default_entry_id: str | None = None
 
@@ -204,13 +218,28 @@ async def test_legacy_fcm_receiver_alias_preserved() -> None:
     await _async_release(receiver, hass, entry)
 
 
+def test_domain_provider_respects_explicit_entry_id() -> None:
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    bucket = hass.data[DOMAIN]
+
+    receiver_1 = _ReadyableReceiver(ready=True)
+    receiver_2 = _ReadyableReceiver(ready=True)
+
+    bucket["fcm_receivers"] = {"entry-1": receiver_1, "entry-2": receiver_2}
+    bucket["default_fcm_entry_id"] = "entry-1"
+
+    receiver = _domain_fcm_provider(hass, "entry-2")
+
+    assert receiver is receiver_2
+
+
 @pytest.mark.asyncio
 async def test_domain_provider_prefers_ready_receiver() -> None:
     hass = SimpleNamespace(data={DOMAIN: {}})
     bucket = hass.data[DOMAIN]
 
-    offline_receiver = SimpleNamespace(is_ready=False)
-    online_receiver = SimpleNamespace(is_ready=True)
+    offline_receiver = _ReadyableReceiver(ready=False)
+    online_receiver = _ReadyableReceiver(ready=True)
 
     bucket["fcm_receivers"] = {
         "entry-offline": offline_receiver,
