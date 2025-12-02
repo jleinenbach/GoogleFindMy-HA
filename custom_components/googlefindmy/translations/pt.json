@@ -165,7 +165,79 @@
           "credentials": "Atualizar credenciais",
           "settings": "Modificar configurações",
           "visibility": "Visibilidade do dispositivo",
+          "semantic_locations": "Semantic locations",
           "repairs": "Reparos de subentrada"
+        }
+      },
+      "semantic_locations_menu": {
+        "title": "Semantic locations",
+        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Add semantic location",
+          "semantic_location_edit": "Edit semantic location",
+          "semantic_locations_delete": "Delete semantic location"
+        }
+      },
+      "semantic_locations": {
+        "title": "Semantic Locations",
+        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Add semantic location",
+          "semantic_locations_edit": "Edit semantic location",
+          "semantic_locations_delete": "Delete semantic location"
+        }
+      },
+      "semantic_locations_add": {
+        "title": "Adicionar localização semântica",
+        "description": "Defina uma substituição de localização semântica usando coordenadas e precisão.",
+        "data": {
+          "semantic_name": "Nome semântico",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Raio de deteção (m)"
+        },
+        "data_description": {
+          "accuracy": "Estima o alcance de conexão do dispositivo (por ex., 15-20 m por Bluetooth)."
+        }
+      },
+      "semantic_locations_edit": {
+        "title": "Choose semantic location",
+        "description": "Select a semantic location to edit.",
+        "data": {
+          "semantic_location": "Semantic location"
+        }
+      },
+      "semantic_location_edit": {
+        "title": "Editar localização semântica",
+        "description": "Atualize as coordenadas e a precisão para a localização semântica selecionada.",
+        "data": {
+          "semantic_name": "Nome semântico",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Raio de deteção (m)"
+        },
+        "data_description": {
+          "accuracy": "Estima o alcance de conexão do dispositivo (por ex., 15-20 m por Bluetooth)."
+        }
+      },
+      "semantic_locations_edit_form": {
+        "title": "Editar localização semântica",
+        "description": "Atualize as coordenadas e a precisão para a localização semântica selecionada.",
+        "data": {
+          "semantic_name": "Nome semântico",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Raio de deteção (m)"
+        },
+        "data_description": {
+          "accuracy": "Estima o alcance de conexão do dispositivo (por ex., 15-20 m por Bluetooth)."
+        }
+      },
+      "semantic_locations_delete": {
+        "title": "Delete semantic locations",
+        "description": "Select semantic locations to delete.",
+        "data": {
+          "semantic_locations": "Semantic locations"
         }
       },
       "credentials": {
@@ -252,12 +324,15 @@
       "choose_one": "Forneça exatamente um método de credencial.",
       "required": "Este campo é obrigatório.",
       "invalid_token": "Credenciais inválidas (token/e-mail). ",
+      "duplicate_name": "Semantic name already exists. Choose a different name.",
+      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
       "unknown": "Ocorreu um erro inesperado.",
       "invalid_subentry": "Escolha um grupo de recursos válido."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
       "no_ignored_devices": "Não há dispositivos ignorados para restaurar.",
+      "no_semantic_locations": "No semantic locations are configured.",
       "repairs_no_subentries": "Não há subentradas para reparar.",
       "repair_no_devices": "Selecione pelo menos um dispositivo para mover.",
       "subentry_move_success": "Dispositivos atribuídos a **{subentry}** ({count} atualizado).",

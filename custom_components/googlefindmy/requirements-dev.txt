@@ -6,6 +6,7 @@ beautifulsoup4>=4.12.3
 certifi>=2024.7.4
 ecdsa>=0.19.1
 gpsoauth>=2.0.0
+httpx[http2]>=0.28.0
 mypy>=1.11
 pre-commit>=3.7
 protobuf>=6.32.0

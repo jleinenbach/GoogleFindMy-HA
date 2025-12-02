@@ -165,7 +165,79 @@
           "credentials": "Update credentials",
           "settings": "Modify settings",
           "visibility": "Device visibility",
+          "semantic_locations": "Semantic locations",
           "repairs": "Subentry repairs"
+        }
+      },
+      "semantic_locations_menu": {
+        "title": "Semantic locations",
+        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Add semantic location",
+          "semantic_location_edit": "Edit semantic location",
+          "semantic_locations_delete": "Delete semantic location"
+        }
+      },
+      "semantic_locations": {
+        "title": "Semantic Locations",
+        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Add semantic location",
+          "semantic_locations_edit": "Edit semantic location",
+          "semantic_locations_delete": "Delete semantic location"
+        }
+      },
+      "semantic_locations_add": {
+        "title": "Add semantic location",
+        "description": "Define a semantic location override using coordinates and accuracy.",
+        "data": {
+          "semantic_name": "Semantic name",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Detection radius (m)"
+        },
+        "data_description": {
+          "accuracy": "Approximates the connection range of the device (e.g., 15-20m for Bluetooth)."
+        }
+      },
+      "semantic_locations_edit": {
+        "title": "Choose semantic location",
+        "description": "Select a semantic location to edit.",
+        "data": {
+          "semantic_location": "Semantic location"
+        }
+      },
+      "semantic_location_edit": {
+        "title": "Edit semantic location",
+        "description": "Update coordinates and accuracy for the selected semantic location.",
+        "data": {
+          "semantic_name": "Semantic name",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Detection radius (m)"
+        },
+        "data_description": {
+          "accuracy": "Approximates the connection range of the device (e.g., 15-20m for Bluetooth)."
+        }
+      },
+      "semantic_locations_edit_form": {
+        "title": "Edit semantic location",
+        "description": "Update coordinates and accuracy for the selected semantic location.",
+        "data": {
+          "semantic_name": "Semantic name",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Detection radius (m)"
+        },
+        "data_description": {
+          "accuracy": "Approximates the connection range of the device (e.g., 15-20m for Bluetooth)."
+        }
+      },
+      "semantic_locations_delete": {
+        "title": "Delete semantic locations",
+        "description": "Select semantic locations to delete.",
+        "data": {
+          "semantic_locations": "Semantic locations"
         }
       },
       "credentials": {
@@ -261,12 +333,15 @@
       "choose_one": "Please provide exactly one credential method.",
       "required": "This field is required.",
       "invalid_token": "Invalid credentials (token/email). Please check format and content.",
+      "duplicate_name": "Semantic name already exists. Choose a different name.",
+      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
       "unknown": "Unexpected error occurred.",
       "invalid_subentry": "Choose a valid feature group."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration successful.",
       "no_ignored_devices": "There are no ignored devices to restore.",
+      "no_semantic_locations": "No semantic locations are configured.",
       "repairs_no_subentries": "There are no subentries to repair.",
       "repair_no_devices": "Select at least one device to move.",
       "subentry_move_success": "Devices assigned to **{subentry}** ({count} updated).",
