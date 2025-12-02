@@ -2905,8 +2905,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             canonical = canonical.strip()
             if not canonical:
                 continue
-            owner_index[canonical] = entry_id
-            seen.add(canonical)
+
+            # Do not overwrite an existing routing entry from another account.
+            # Shared devices may appear under multiple entries; keep the first
+            # registration so FCM messages route to the primary owner instead
+            # of the most recently loaded account.
+            if canonical not in owner_index or owner_index[canonical] == entry_id:
+                owner_index[canonical] = entry_id
+                seen.add(canonical)
 
         if owner_index:
             stale = [
