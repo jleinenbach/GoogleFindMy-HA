@@ -1,12 +1,14 @@
-# tests/test_platinum_compliance.py
-"""Repository-level compliance checks for manifest and runtime data scaffolding."""
+"""Automated compliance checks for the Platinum quality level."""
 
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
@@ -68,3 +70,84 @@ def test_runtime_data_and_coordinator_usage(integration_root: Path) -> None:
     assert "from .coordinator import GoogleFindMyCoordinator" in init_text
     assert "entry.runtime_data" in init_text
     assert "RuntimeData(" in init_text
+
+
+def run_command(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+    """Run a shell command and capture its output for assertions."""
+
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_mypy_strict_compliance(integration_root: Path) -> None:
+    """The integration must pass strict static type checking."""
+
+    repo_root = Path(__file__).resolve().parent.parent
+    cmd = [sys.executable, "-m", "mypy", "custom_components/googlefindmy"]
+
+    result = run_command(cmd, cwd=repo_root)
+
+    error_msg = (
+        "Mypy strict type checking failed.\n"
+        f"Exit Code: {result.returncode}\n"
+        f"Output:\n{result.stdout}\n"
+        f"Errors:\n{result.stderr}"
+    )
+
+    assert result.returncode == 0, error_msg
+
+
+def test_ruff_linting_compliance() -> None:
+    """The integration must pass ruff linting checks."""
+
+    repo_root = Path(__file__).resolve().parent.parent
+    cmd = [sys.executable, "-m", "ruff", "check", "."]
+
+    result = run_command(cmd, cwd=repo_root)
+
+    error_msg = (
+        "Ruff linting failed.\n"
+        "Run 'ruff check . --fix' to automatically fix some of these issues.\n"
+        f"Output:\n{result.stdout}\n"
+        f"Errors:\n{result.stderr}"
+    )
+
+    assert result.returncode == 0, error_msg
+
+
+def test_quality_scale_evidence_existence(integration_root: Path) -> None:
+    """Verify that evidence paths in quality_scale.yaml point to real files."""
+
+    repo_root = Path(__file__).resolve().parent.parent
+    quality_yaml_path = integration_root / "quality_scale.yaml"
+
+    if not quality_yaml_path.exists():
+        pytest.skip("quality_scale.yaml not found")
+
+    quality_data = yaml.safe_load(quality_yaml_path.read_text(encoding="utf-8"))
+
+    rules = quality_data.get("rules", {}) if isinstance(quality_data, dict) else {}
+    missing_files: list[str] = []
+
+    for tier_rules in rules.values():
+        if not isinstance(tier_rules, list):
+            continue
+        for rule in tier_rules:
+            evidence_entries = rule.get("evidence", []) if isinstance(rule, dict) else []
+            for evidence in evidence_entries:
+                if not isinstance(evidence, str):
+                    continue
+                file_reference = evidence.split(":", 1)[0].split("#", 1)[0]
+                full_path = repo_root / file_reference
+                if not full_path.exists():
+                    missing_files.append(file_reference)
+
+    assert not missing_files, (
+        "The following evidence files listed in quality_scale.yaml do not exist:\n"
+        + "\n".join(sorted(set(missing_files)))
+    )
