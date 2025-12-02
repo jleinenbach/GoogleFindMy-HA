@@ -20,6 +20,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.sensor import (
     STATS_DESCRIPTIONS,
+    GoogleFindMySemanticLabelSensor,
     GoogleFindMyStatsSensor,
 )
 from tests.helpers import drain_loop
@@ -425,5 +426,40 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
             include_subentry_identifier=True
         )
         assert getattr(service_info, "config_entry_id", None) is None
+    finally:
+        drain_loop(loop)
+
+
+def test_semantic_label_sensor_exposes_observations() -> None:
+    """Semantic label sensor should surface cached labels and device IDs."""
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    try:
+        hass = _StubHass(loop)
+        coordinator = GoogleFindMyCoordinator(hass, cache=_StubCache())
+        coordinator.config_entry = _StubConfigEntry()
+
+        subentry_identifier = coordinator.stable_subentry_identifier(key=SERVICE_SUBENTRY_KEY)
+        sensor = GoogleFindMySemanticLabelSensor(
+            coordinator,
+            subentry_key=SERVICE_SUBENTRY_KEY,
+            subentry_identifier=subentry_identifier,
+        )
+
+        coordinator._record_semantic_label(
+            {"semantic_name": "Kitchen Display", "latitude": 1.0, "longitude": 2.0},
+            device_id="dev-1",
+        )
+        coordinator._record_semantic_label(
+            {"semantic_name": "kitchen display", "latitude": 3.0, "longitude": 4.0},
+            device_id="dev-2",
+        )
+
+        attrs = sensor.extra_state_attributes
+        assert attrs["labels"] == ["Kitchen Display"]
+        assert attrs["observations"][0]["devices"] == ["dev-1", "dev-2"]
+        assert sensor.native_value == 1
     finally:
         drain_loop(loop)
