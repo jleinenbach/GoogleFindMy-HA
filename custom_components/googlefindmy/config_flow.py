@@ -97,7 +97,6 @@ from .const import (
     DEFAULT_OPTIONS,
     # Core domain & credential keys
     DOMAIN,
-    OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
@@ -107,8 +106,8 @@ from .const import (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
+    OPTION_KEYS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
@@ -2046,20 +2045,7 @@ class ConfigFlow(
         old_options = dict(getattr(entry, "options", {}) or {})
 
         options_payload: dict[str, Any] = dict(DEFAULT_OPTIONS)
-        all_option_keys = (
-            OPT_LOCATION_POLL_INTERVAL,
-            OPT_DEVICE_POLL_DELAY,
-            OPT_MIN_ACCURACY_THRESHOLD,
-            OPT_MAP_VIEW_TOKEN_EXPIRATION,
-            OPT_CONTRIBUTOR_MODE,
-            OPT_MOVEMENT_THRESHOLD,
-            OPT_GOOGLE_HOME_FILTER_ENABLED,
-            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-            OPT_ENABLE_STATS_ENTITIES,
-            OPT_ALLOW_HISTORY_FALLBACK,
-            OPT_MIN_POLL_INTERVAL,
-            OPT_IGNORED_DEVICES,
-        )
+        all_option_keys = OPTION_KEYS
 
         for key in all_option_keys:
             if key is None:
