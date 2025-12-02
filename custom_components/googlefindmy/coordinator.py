@@ -123,6 +123,7 @@ from .const import (
     LOCATION_REQUEST_TIMEOUT_S,
     MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     OPT_IGNORED_DEVICES,
+    OPT_SEMANTIC_LOCATIONS,
     SERVICE_DEVICE_MANUFACTURER,
     # Integration "service device" metadata
     SERVICE_DEVICE_MODEL,
@@ -4122,6 +4123,71 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return True
 
+    # ---------------------------- Semantic mappings ------------------------
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        """Return a float representation or ``None`` when conversion fails."""
+
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(coerced):
+            return None
+        return coerced
+
+    def _apply_semantic_mapping(self, payload: dict[str, Any]) -> bool:
+        """Substitute coordinates using user-defined semantic mappings when available."""
+
+        semantic_name = payload.get("semantic_name")
+        if not isinstance(semantic_name, str) or not semantic_name.strip():
+            return False
+
+        # Skip replayed semantic hints to preserve debounce behaviour when mappings are absent.
+        if payload.get("is_replayed") is True or payload.get("replayed") is True:
+            return False
+
+        entry = self.config_entry
+        if entry is None:
+            return False
+
+        raw_mappings = entry.options.get(OPT_SEMANTIC_LOCATIONS)
+        if not raw_mappings:
+            raw_mappings = entry.data.get(OPT_SEMANTIC_LOCATIONS)
+        if not isinstance(raw_mappings, Mapping):
+            return False
+
+        normalized: dict[str, dict[str, float]] = {}
+        for name, coords in raw_mappings.items():
+            if not isinstance(name, str) or not isinstance(coords, Mapping):
+                continue
+
+            latitude = self._coerce_float(coords.get("latitude"))
+            longitude = self._coerce_float(coords.get("longitude"))
+            if latitude is None or longitude is None:
+                continue
+
+            accuracy = self._coerce_float(coords.get("accuracy"))
+            if accuracy is None:
+                accuracy = 0.0
+
+            normalized[name.casefold()] = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "accuracy": accuracy,
+            }
+
+        mapped = normalized.get(semantic_name.casefold())
+        if mapped is None:
+            return False
+
+        payload["latitude"] = mapped["latitude"]
+        payload["longitude"] = mapped["longitude"]
+        payload["accuracy"] = mapped["accuracy"]
+        payload["location_type"] = "trusted"
+
+        return True
+
     # ---------------------------- Ignore helpers ----------------------------
     def _get_ignored_set(self) -> set[str]:
         """Return the set of device IDs the user chose to ignore (options-first).
@@ -4779,10 +4845,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             )
                             continue
 
+                        cached_loc = self._device_location_data.get(dev_id)
+                        is_replay = False
+                        if isinstance(cached_loc, Mapping):
+                            new_ts = _normalize_epoch_seconds(location.get("last_seen"))
+                            old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+                            if (
+                                new_ts is not None
+                                and old_ts is not None
+                                and new_ts == old_ts
+                            ):
+                                is_replay = True
+
+                        location["is_replayed"] = is_replay
+                        mapping_applied = self._apply_semantic_mapping(location)
+
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
                         # Consume coordinate substitution from the filter when needed.
                         semantic_name = location.get("semantic_name")
-                        if semantic_name and google_home_filter is not None:
+                        if (
+                            not mapping_applied
+                            and not is_replay
+                            and semantic_name
+                            and google_home_filter is not None
+                        ):
                             try:
                                 (
                                     should_filter,
@@ -4849,6 +4935,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                             )
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
+                        location.pop("is_replayed", None)
                         # ------------------------------------------------------------------
 
                         # If we only got a semantic location, preserve previous coordinates.
@@ -6148,10 +6235,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if not location_data:
                 return {}
 
+            cached_loc = self._device_location_data.get(device_id)
+            is_replay = False
+            if isinstance(cached_loc, Mapping):
+                new_ts = _normalize_epoch_seconds(location_data.get("last_seen"))
+                old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+                if new_ts is not None and old_ts is not None and new_ts == old_ts:
+                    is_replay = True
+
+            location_data["is_replayed"] = is_replay
+            mapping_applied = self._apply_semantic_mapping(location_data)
+
             # --- Parity with polling path: Google Home semantic spam filter --------
             # Consume coordinate substitution from the filter when needed.
             semantic_name = location_data.get("semantic_name")
-            if semantic_name and google_home_filter is not None:
+            if (
+                not mapping_applied
+                and not is_replay
+                and semantic_name
+                and google_home_filter is not None
+            ):
                 try:
                     (should_filter, replacement_attrs) = (
                         google_home_filter.should_filter_detection(
@@ -6209,6 +6312,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 )
                         # Clear semantic name so HA Core's zone engine determines the final state.
                         location_data["semantic_name"] = None
+            location_data.pop("is_replayed", None)
             # ----------------------------------------------------------------------
 
             # Preserve previous coordinates if only semantic location is provided.

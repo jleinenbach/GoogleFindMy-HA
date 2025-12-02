@@ -165,7 +165,79 @@
           "credentials": "Mettre à jour les identifiants",
           "settings": "Modifier les paramètres",
           "visibility": "Visibilité des appareils",
+          "semantic_locations": "Semantic locations",
           "repairs": "Réparations des groupes de fonctionnalités"
+        }
+      },
+      "semantic_locations_menu": {
+        "title": "Semantic locations",
+        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Add semantic location",
+          "semantic_location_edit": "Edit semantic location",
+          "semantic_locations_delete": "Delete semantic location"
+        }
+      },
+      "semantic_locations": {
+        "title": "Semantic Locations",
+        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Add semantic location",
+          "semantic_locations_edit": "Edit semantic location",
+          "semantic_locations_delete": "Delete semantic location"
+        }
+      },
+      "semantic_locations_add": {
+        "title": "Ajouter un emplacement sémantique",
+        "description": "Définissez un remplacement d'emplacement sémantique avec coordonnées et précision.",
+        "data": {
+          "semantic_name": "Nom sémantique",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Rayon de détection (m)"
+        },
+        "data_description": {
+          "accuracy": "Estime la portée de connexion de l'appareil (p. ex. 15-20 m pour le Bluetooth)."
+        }
+      },
+      "semantic_locations_edit": {
+        "title": "Choose semantic location",
+        "description": "Select a semantic location to edit.",
+        "data": {
+          "semantic_location": "Semantic location"
+        }
+      },
+      "semantic_location_edit": {
+        "title": "Modifier un emplacement sémantique",
+        "description": "Mettez à jour les coordonnées et la précision de l'emplacement sémantique sélectionné.",
+        "data": {
+          "semantic_name": "Nom sémantique",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Rayon de détection (m)"
+        },
+        "data_description": {
+          "accuracy": "Estime la portée de connexion de l'appareil (p. ex. 15-20 m pour le Bluetooth)."
+        }
+      },
+      "semantic_locations_edit_form": {
+        "title": "Modifier un emplacement sémantique",
+        "description": "Mettez à jour les coordonnées et la précision de l'emplacement sémantique sélectionné.",
+        "data": {
+          "semantic_name": "Nom sémantique",
+          "latitude": "Latitude",
+          "longitude": "Longitude",
+          "accuracy": "Rayon de détection (m)"
+        },
+        "data_description": {
+          "accuracy": "Estime la portée de connexion de l'appareil (p. ex. 15-20 m pour le Bluetooth)."
+        }
+      },
+      "semantic_locations_delete": {
+        "title": "Delete semantic locations",
+        "description": "Select semantic locations to delete.",
+        "data": {
+          "semantic_locations": "Semantic locations"
         }
       },
       "credentials": {
@@ -252,12 +324,15 @@
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "invalid_token": "Identifiants invalides (jeton/e-mail). Veuillez vérifier le format et le contenu.",
+      "duplicate_name": "Semantic name already exists. Choose a different name.",
+      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
       "unknown": "Erreur inattendue.",
       "invalid_subentry": "Choisissez un groupe de fonctionnalités valide."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
       "no_ignored_devices": "Aucun appareil ignoré à restaurer.",
+      "no_semantic_locations": "No semantic locations are configured.",
       "repairs_no_subentries": "Aucun groupe de fonctionnalités à réparer.",
       "repair_no_devices": "Sélectionnez au moins un appareil à déplacer.",
       "subentry_move_success": "Appareils attribués à **{subentry}** ({count} mis à jour).",
