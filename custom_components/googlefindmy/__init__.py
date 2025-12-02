@@ -5948,7 +5948,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         automations referencing these services.
     """
 
-    _ensure_runtime_imports()
+    await hass.async_add_executor_job(_ensure_runtime_imports)
     bucket = _domain_data(hass)
     _ensure_entries_bucket(bucket)  # entry_id -> RuntimeData
     _ensure_device_owner_index(bucket)  # canonical_id -> entry_id (E2.5 scaffold)
