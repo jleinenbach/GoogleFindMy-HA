@@ -9,7 +9,18 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.googlefindmy import diagnostics
-from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.const import (
+    CONF_OAUTH_TOKEN,
+    DOMAIN,
+    OPT_DEVICE_POLL_DELAY,
+    OPT_ENABLE_STATS_ENTITIES,
+    OPT_GOOGLE_HOME_FILTER_ENABLED,
+    OPT_GOOGLE_HOME_FILTER_KEYWORDS,
+    OPT_IGNORED_DEVICES,
+    OPT_LOCATION_POLL_INTERVAL,
+    OPT_MIN_ACCURACY_THRESHOLD,
+    OPT_MOVEMENT_THRESHOLD,
+)
 from tests.helpers import drain_loop
 
 
@@ -66,12 +77,18 @@ class _StubCoordinator:
 class _StubEntry:
     """Minimal config entry stub referencing the coordinator."""
 
-    def __init__(self, coordinator: _StubCoordinator) -> None:
+    def __init__(
+        self,
+        coordinator: _StubCoordinator,
+        *,
+        data: dict[str, object] | None = None,
+        options: dict[str, object] | None = None,
+    ) -> None:
         self.entry_id = "entry-id"
         self.version = 1
         self.domain = DOMAIN
-        self.data: dict[str, object] = {}
-        self.options: dict[str, object] = {}
+        self.data = data or {}
+        self.options = options or {}
         self.runtime_data = SimpleNamespace(coordinator=coordinator)
 
 
@@ -157,3 +174,62 @@ def test_async_get_config_entry_diagnostics_includes_buffer(
     assert "device_name" not in first_error
     assert first_error["detail"].endswith("…")
     assert len(first_error["detail"]) <= 160
+
+
+def test_diagnostics_merge_entry_data_and_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Diagnostics merge entry data defaults with option overrides."""
+
+    coordinator = _StubCoordinator()
+    entry = _StubEntry(
+        coordinator,
+        data={
+            OPT_LOCATION_POLL_INTERVAL: 600,
+            OPT_DEVICE_POLL_DELAY: 10,
+            OPT_MOVEMENT_THRESHOLD: 75,
+            OPT_ENABLE_STATS_ENTITIES: True,
+            OPT_GOOGLE_HOME_FILTER_ENABLED: False,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS: "legacy",
+            OPT_IGNORED_DEVICES: ["legacy-id"],
+            OPT_MIN_ACCURACY_THRESHOLD: 123,
+            CONF_OAUTH_TOKEN: "secret-token",
+        },
+        options={
+            OPT_LOCATION_POLL_INTERVAL: "45",  # coercion
+            OPT_GOOGLE_HOME_FILTER_ENABLED: True,
+            OPT_GOOGLE_HOME_FILTER_KEYWORDS: "one, two, three",
+            OPT_IGNORED_DEVICES: {"dev1": {}, "dev2": {}},
+            OPT_ENABLE_STATS_ENTITIES: False,
+        },
+    )
+    hass = _StubHass(entry, coordinator)
+
+    async def _fake_get_integration(_hass, _domain):
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={}))
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+
+    payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
+
+    effective_config = payload["effective_config"]
+    assert effective_config[OPT_LOCATION_POLL_INTERVAL] == "45"
+    assert effective_config[OPT_DEVICE_POLL_DELAY] == 10
+    assert effective_config[OPT_MOVEMENT_THRESHOLD] == 75
+    assert effective_config[OPT_GOOGLE_HOME_FILTER_KEYWORDS] == "one, two, three"
+    assert effective_config[OPT_IGNORED_DEVICES] == {"dev1": {}, "dev2": {}}
+    assert effective_config[CONF_OAUTH_TOKEN] == diagnostics.REDACTED
+
+    config_summary = payload["config"]
+    assert config_summary["location_poll_interval"] == 45
+    assert config_summary["device_poll_delay"] == 10
+    assert config_summary["min_accuracy_threshold"] == 123
+    assert config_summary["movement_threshold"] == 75
+    assert config_summary["google_home_filter_enabled"] is True
+    assert config_summary["enable_stats_entities"] is False
+    assert config_summary["google_home_filter_keywords_count"] == 3
+    assert config_summary["ignored_devices_count"] == 2
