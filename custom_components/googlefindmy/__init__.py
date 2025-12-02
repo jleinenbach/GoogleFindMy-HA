@@ -3102,6 +3102,11 @@ def _domain_fcm_provider(
 
     if not candidates:
         candidates.extend(receivers.items())
+    else:
+        selected = {entry for entry, _ in candidates}
+        for entry_key, receiver in receivers.items():
+            if entry_key not in selected:
+                candidates.append((entry_key, receiver))
 
     for candidate_entry_id, receiver in candidates:
         if getattr(receiver, "is_ready", False):
@@ -5359,18 +5364,22 @@ async def _async_acquire_shared_fcm(
 
             # Register provider for both consumer modules (exactly once on first acquire)
             # Re-registering ensures downstream modules resolve the refreshed instance.
-            def provider() -> FcmReceiverHAType:
+            def provider(entry_id: str | None = None) -> FcmReceiverHAType:
                 """Return the shared FCM receiver for integration consumers."""
 
-                return _domain_fcm_provider(hass)
+                return _domain_fcm_provider(hass, entry_id)
 
-            provider_fn: Callable[[], FcmReceiverHAType] = provider
+            provider_fn: Callable[[str | None], FcmReceiverHAType] = provider
             if not providers_registered:
                 loc_register_fcm_provider(
-                    cast(Callable[[], NovaFcmReceiverProtocol], provider_fn)
+                    cast(
+                        Callable[[str | None], NovaFcmReceiverProtocol], provider_fn
+                    )
                 )
                 api_register_fcm_provider(
-                    cast(Callable[[], ApiFcmReceiverProtocol], provider_fn)
+                    cast(
+                        Callable[[str | None], ApiFcmReceiverProtocol], provider_fn
+                    )
                 )
                 bucket["providers_registered"] = True
 
