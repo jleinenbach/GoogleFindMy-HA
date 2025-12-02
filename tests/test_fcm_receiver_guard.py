@@ -84,13 +84,16 @@ def test_async_acquire_discards_invalid_cached_receiver(
     new_receiver = asyncio.run(_run())
 
     assert isinstance(new_receiver, FcmReceiverHA)
-    assert hass.data[DOMAIN]["fcm_receiver"] is new_receiver
+    receivers = hass.data[DOMAIN].get("fcm_receivers", {})
+    assert isinstance(receivers, dict)
+    assert new_receiver in receivers.values()
     assert stub.stop_calls == 1
     assert "loc" in recorded_getters
     assert "api" in recorded_getters
     assert recorded_getters["loc"]() is new_receiver
     assert recorded_getters["api"]() is new_receiver
-    assert hass.data[DOMAIN]["fcm_refcount"] == 1
+    refcounts = hass.data[DOMAIN].get("fcm_refcounts", {})
+    assert refcounts.get("default") == 1
 
 
 def test_call_in_executor_without_running_loop(

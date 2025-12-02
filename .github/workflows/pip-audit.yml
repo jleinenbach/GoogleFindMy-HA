@@ -16,7 +16,7 @@ permissions:
   pull-requests: write
 
 env:
-  REQ_FILES: "requirements-dev.txt custom_components/googlefindmy/requirements.txt"
+  REQ_FILES: "custom_components/googlefindmy/requirements-dev.txt custom_components/googlefindmy/requirements.txt"
 
 jobs:
   # 1) On PRs: report-only (green) + warnings; no code changes.

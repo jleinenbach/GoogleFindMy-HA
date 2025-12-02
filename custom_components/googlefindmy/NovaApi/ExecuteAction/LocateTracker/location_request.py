@@ -43,6 +43,9 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,13 +101,22 @@ def _import_eid_info_module() -> ModuleType:
     )
 
 
-_fcm_receiver_state: dict[str, Callable[[], FcmReceiverProtocol] | None] = {
+_fcm_receiver_state: dict[
+    str, Callable[[str | None], FcmReceiverProtocol] | Callable[[], FcmReceiverProtocol] | None
+] = {
     "getter": None
 }
-_FCM_ReceiverGetter: Callable[[], FcmReceiverProtocol] | None = None
+_FCM_ReceiverGetter: (
+    Callable[[str | None], FcmReceiverProtocol]
+    | Callable[[], FcmReceiverProtocol]
+    | None
+) = None
 
 
-def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) -> None:
+def register_fcm_receiver_provider(
+    getter: Callable[[str | None], FcmReceiverProtocol]
+    | Callable[[], FcmReceiverProtocol]
+) -> None:
     """Register a callable returning the long-lived FCM receiver instance.
 
     The getter must return an initialized receiver exposing:
@@ -112,7 +124,8 @@ def register_fcm_receiver_provider(getter: Callable[[], FcmReceiverProtocol]) ->
       - async_unregister_for_location_updates(device_id) -> None
 
     Args:
-        getter: A callable that returns the singleton FCM receiver instance.
+        getter: A callable that returns the singleton FCM receiver instance for
+            an optional entry_id context.
     """
     _fcm_receiver_state["getter"] = getter
 
@@ -188,14 +201,16 @@ class _CallbackContext:
         data: The data payload received from the callback.
     """
 
-    __slots__ = ("event", "data")
+    __slots__ = ("event", "data", "error")
     event: asyncio.Event
     data: list[dict[str, Any]] | None
+    error: Exception | None
 
     def __init__(self) -> None:
         """Initialize the callback context."""
         self.event: asyncio.Event = asyncio.Event()
         self.data: list[dict[str, Any]] | None = None
+        self.error: Exception | None = None
 
 
 def _make_location_callback(  # noqa: PLR0915, PLR0913
@@ -337,7 +352,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
                     )
-                    ctx.data = cast(list[dict[str, Any]], [])
+                    ctx.error = err
                     ctx.event.set()
                     return
                 except Exception as err:
@@ -446,7 +461,16 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
     if fcm_getter is None:
         raise RuntimeError("FCM receiver provider has not been registered.")
-    fcm_receiver = fcm_getter()
+    entry_id = getattr(cache, "entry_id", None) if cache else None
+    try:
+        fcm_receiver = cast(Callable[[str | None], FcmReceiverProtocol], fcm_getter)(
+            entry_id
+        )
+    except TypeError:
+        _LOGGER.debug(
+            "FCM receiver provider does not accept entry context; retrying without entry_id."
+        )
+        fcm_receiver = cast(Callable[[], FcmReceiverProtocol], fcm_getter)()
     if fcm_receiver is None:
         raise RuntimeError("FCM receiver provider returned None.")
 
@@ -466,7 +490,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
         cache_provider = _cache_provider
 
-    resolved_namespace = namespace or getattr(cache_ref, "entry_id", None)
+    resolved_namespace = namespace or entry_id
     if not resolved_namespace:
         raise MissingNamespaceError()
 
@@ -657,6 +681,10 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             )
             return []
 
+        if ctx.error:
+            if isinstance(ctx.error, SpotApiEmptyResponseError):
+                raise ctx.error
+
         data = ctx.data or []
         if data and data[0].get("canonic_id") == canonic_device_id:
             _LOGGER.info("Successfully received location data for %s", name)
@@ -672,6 +700,9 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
     except asyncio.CancelledError:
         _LOGGER.info("Location request cancelled for %s", name)
+        raise
+    except SpotApiEmptyResponseError:
+        # Bubble up auth failures so the coordinator can trigger reauth.
         raise
     except Exception as e:
         _LOGGER.error("Error requesting location for %s: %s", name, e)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, cast
 
-import ecdsa  # type: ignore[import-untyped]
+import ecdsa
 
 
 class CurveFpProtocol(Protocol):

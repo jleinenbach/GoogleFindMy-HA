@@ -16,7 +16,10 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    GoogleFindMyCoordinator,
+    SubentryMetadata,
+)
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -62,6 +65,33 @@ class _ManagerStub:
         self, subentry_key: str, device_ids: tuple[str, ...]
     ) -> None:
         self.calls.append((subentry_key, device_ids))
+
+
+def test_visibility_accepts_namespaced_device_id() -> None:
+    """Visibility checks must accept namespaced registry identifiers."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._subentry_metadata = {
+        TRACKER_SUBENTRY_KEY: SubentryMetadata(
+            key=TRACKER_SUBENTRY_KEY,
+            config_subentry_id="subentry-1",
+            features=(),
+            title=None,
+            poll_intervals=MappingProxyType({}),
+            filters=MappingProxyType({}),
+            feature_flags=MappingProxyType({}),
+            visible_device_ids=("parent123:device-abc",),
+            enabled_device_ids=(),
+        )
+    }
+
+    assert coordinator.is_device_visible_in_subentry(TRACKER_SUBENTRY_KEY, "device-abc")
+    assert coordinator.is_device_visible_in_subentry(
+        TRACKER_SUBENTRY_KEY, "parent123:device-abc"
+    )
+    assert not coordinator.is_device_visible_in_subentry(
+        TRACKER_SUBENTRY_KEY, "other-device"
+    )
 
 
 def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:

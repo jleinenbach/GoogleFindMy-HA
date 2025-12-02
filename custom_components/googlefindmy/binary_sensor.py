@@ -20,6 +20,8 @@ Provided sensors:
 - `polling` (diagnostic): `on` while a sequential polling cycle runs.
 - `auth_status` (diagnostic): `on` when an authentication problem exists
   (active Repairs issue or recent auth-error event for this entry).
+- `connectivity` (diagnostic): `on` when the FCM push transport is connected and
+  ready for Nova responses.
 """
 
 from __future__ import annotations
@@ -60,6 +62,8 @@ from .entity import (
 from .ha_typing import BinarySensorEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
+
+CONNECTIVITY_DEVICE_CLASS = getattr(BinarySensorDeviceClass, "CONNECTIVITY", None)
 
 
 class _ServiceScope(NamedTuple):
@@ -102,6 +106,13 @@ AUTH_STATUS_DESC = BinarySensorEntityDescription(
     translation_key=TRANSLATION_KEY_AUTH_STATUS,
     device_class=BinarySensorDeviceClass.PROBLEM,  # True => problem present
     icon="mdi:account-alert",
+    entity_category=EntityCategory.DIAGNOSTIC,
+)
+
+CONNECTIVITY_DESC = BinarySensorEntityDescription(
+    key="connectivity",
+    translation_key="connectivity",
+    device_class=CONNECTIVITY_DEVICE_CLASS,
     entity_category=EntityCategory.DIAGNOSTIC,
 )
 
@@ -290,6 +301,12 @@ async def async_setup_entry(  # noqa: PLR0915
                 subentry_key=scope.subentry_key,
                 subentry_identifier=subentry_identifier,
             ),
+            GoogleFindMyConnectivitySensor(
+                coordinator,
+                entry,
+                subentry_key=scope.subentry_key,
+                subentry_identifier=subentry_identifier,
+            ),
         ]
 
         deduped_entities: list[BinarySensorEntity] = []
@@ -391,6 +408,7 @@ async def async_setup_entry(  # noqa: PLR0915
             return {
                 f"{entry_id}:{service_subentry_identifier}:polling",
                 f"{entry_id}:{service_subentry_identifier}:auth_status",
+                f"{entry_id}:{service_subentry_identifier}:connectivity",
             }
 
         def _build_entities(missing: set[str]) -> list[BinarySensorEntity]:
@@ -409,6 +427,12 @@ async def async_setup_entry(  # noqa: PLR0915
                     subentry_identifier=service_subentry_identifier,
                 ),
                 f"{entry_id}:{service_subentry_identifier}:auth_status": lambda: GoogleFindMyAuthStatusSensor(
+                    coordinator,
+                    entry,
+                    subentry_key=service_subentry_key,
+                    subentry_identifier=service_subentry_identifier,
+                ),
+                f"{entry_id}:{service_subentry_identifier}:connectivity": lambda: GoogleFindMyConnectivitySensor(
                     coordinator,
                     entry,
                     subentry_key=service_subentry_key,
@@ -654,4 +678,99 @@ class GoogleFindMyAuthStatusSensor(GoogleFindMyEntity, BinarySensorEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Attach the sensor to the per-entry service device."""
+        return self.service_device_info(include_subentry_identifier=True)
+
+
+# --------------------------------------------------------------------------------------
+# Connectivity sensor
+# --------------------------------------------------------------------------------------
+class GoogleFindMyConnectivitySensor(GoogleFindMyEntity, BinarySensorEntity):
+    """Binary sensor reflecting push transport connectivity for Nova responses."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = CONNECTIVITY_DEVICE_CLASS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    entity_description = CONNECTIVITY_DESC
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        entry: ConfigEntry,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the connectivity sensor."""
+
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+        entry_id = self.entry_id or entry.entry_id
+        self._attr_unique_id = self.build_unique_id(
+            entry_id,
+            subentry_identifier,
+            "connectivity",
+        )
+
+    @property
+    def is_on(self) -> bool:
+        """Return True when the push transport reports as ready."""
+
+        api = getattr(self.coordinator, "api", None)
+        fn = getattr(api, "is_push_ready", None)
+        if callable(fn):
+            try:
+                return bool(fn())
+            except Exception:
+                return False
+
+        ready_flag = getattr(self.coordinator, "is_fcm_connected", None)
+        if isinstance(ready_flag, bool):
+            return ready_flag
+
+        return False
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose Nova polling and FCM connection diagnostics."""
+
+        attributes: dict[str, Any] = {}
+
+        last_result = getattr(self.coordinator, "last_poll_result", None)
+        if isinstance(last_result, str):
+            attributes["last_poll_result"] = last_result
+
+        timeouts = getattr(self.coordinator, "consecutive_timeouts", None)
+        if isinstance(timeouts, int):
+            attributes["consecutive_timeouts"] = timeouts
+
+        api = getattr(self.coordinator, "api", None)
+        fcm = getattr(api, "fcm", None)
+        connected_at = None
+        entry_id = self.entry_id
+        getter = getattr(fcm, "get_last_connected_wall_time", None)
+        if callable(getter):
+            try:
+                connected_at = getter(entry_id)
+            except Exception:
+                connected_at = None
+
+        if connected_at is None and bool(
+            getattr(self.coordinator, "is_fcm_connected", False)
+        ):
+            fcm_status = getattr(self.coordinator, "fcm_status", None)
+            connected_at = getattr(fcm_status, "changed_at", None)
+
+        connected_at_iso = format_epoch_utc(connected_at)
+        if connected_at_iso is not None:
+            attributes["fcm_connected_at"] = connected_at_iso
+
+        return attributes or None
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Attach the sensor to the per-entry service device."""
+
         return self.service_device_info(include_subentry_identifier=True)

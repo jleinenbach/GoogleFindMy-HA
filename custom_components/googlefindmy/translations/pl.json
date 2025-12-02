@@ -355,6 +355,20 @@
       "polling": {
         "name": "Odpytywanie"
       },
+      "connectivity": {
+        "name": "Status połączenia",
+        "state_attributes": {
+          "last_poll_result": {
+            "name": "Wynik ostatniego odpytywania"
+          },
+          "consecutive_timeouts": {
+            "name": "Kolejne przekroczenia limitu czasu"
+          },
+          "fcm_connected_at": {
+            "name": "FCM połączono"
+          }
+        }
+      },
       "nova_auth_status": {
         "name": "Status uwierzytelniania interfejsu API Nova",
         "state_attributes": {

@@ -143,6 +143,9 @@ from .const import (
     service_device_identifier,
 )
 from .ha_typing import DataUpdateCoordinator, callback
+from .SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -789,6 +792,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             "non_significant_dropped": 0,  # drops by significance gate
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
+
+        self._consecutive_timeouts: int = 0
+        self._last_poll_result: str | None = None
 
         # Granular status tracking (API polling vs. push transport)
         self._api_status_state: str = ApiStatus.UNKNOWN
@@ -1654,12 +1660,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return [dict(row) for row in entries]
 
     def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
-        """Return True if a device is visible within the subentry scope."""
+        """Return True if a device is visible within the subentry scope.
+
+        Handles both raw device IDs and namespaced identifiers (ENTRY_ID:DEVICE_ID)
+        to ensure robust visibility checks in multi-account setups.
+        """
 
         meta = self._subentry_metadata.get(subentry_key)
         if meta is None:
             return False
-        return device_id in meta.visible_device_ids
+
+        # Fast path: Check for exact match (raw ID)
+        if device_id in meta.visible_device_ids:
+            return True
+
+        # Robust path: Check for namespaced IDs (e.g., "01KBB...:DEVICE_ID")
+        # The registry index may contain the fully qualified identifier.
+        suffix = f":{device_id}"
+        for visible_id in meta.visible_device_ids:
+            if visible_id.endswith(suffix):
+                return True
+
+        return False
 
     def get_device_location_data_for_subentry(
         self, subentry_key: str, device_id: str
@@ -2899,8 +2921,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             canonical = canonical.strip()
             if not canonical:
                 continue
-            owner_index[canonical] = entry_id
-            seen.add(canonical)
+
+            # Do not overwrite an existing routing entry from another account.
+            # Shared devices may appear under multiple entries; keep the first
+            # registration so FCM messages route to the primary owner instead
+            # of the most recently loaded account.
+            if canonical not in owner_index or owner_index[canonical] == entry_id:
+                owner_index[canonical] = entry_id
+                seen.add(canonical)
 
         if owner_index:
             stale = [
@@ -3851,6 +3879,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return self._fcm_status_state == FcmStatus.CONNECTED
 
+    @property
+    def consecutive_timeouts(self) -> int:
+        """Return the number of consecutive poll timeouts."""
+
+        return self._consecutive_timeouts
+
+    @property
+    def last_poll_result(self) -> str | None:
+        """Return the last recorded poll result ("success"/"failed")."""
+
+        return self._last_poll_result
+
     # --- END: Add/Replace inside Coordinator class --------------------------------
 
     # ---------------------------- Event loop helpers ------------------------
@@ -4710,7 +4750,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             google_home_filter = self._get_google_home_filter()
 
+            last_exception: Exception | None = None
             try:
+                cycle_failed = False
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -4843,16 +4885,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             and isinstance(acc, (int, float))
                             and acc > self._min_accuracy_threshold
                         ):
-                            _LOGGER.debug(
-                                "Dropping low-quality fix for %s (accuracy=%sm > %sm)",
-                                dev_name,
-                                acc,
-                                self._min_accuracy_threshold,
-                            )
-                            self.increment_stat("low_quality_dropped")
-                            # Strip any internal hint before dropping to avoid accidental exposure
-                            location.pop("_report_hint", None)
-                            continue
+                            prev_location = self._device_location_data.get(dev_id)
+                            if isinstance(prev_location, dict):
+                                prev_lat = prev_location.get("latitude")
+                                prev_lon = prev_location.get("longitude")
+                                prev_acc = prev_location.get("accuracy")
+                            else:
+                                prev_lat = None
+                                prev_lon = None
+                                prev_acc = None
+
+                            if prev_lat is not None and prev_lon is not None:
+                                location = dict(location)
+                                _LOGGER.debug(
+                                    "Low accuracy (%sm); preserving previous coordinates for %s but updating timestamp.",
+                                    acc,
+                                    dev_name,
+                                )
+                                location["latitude"] = prev_lat
+                                location["longitude"] = prev_lon
+                                if prev_acc is not None:
+                                    location["accuracy"] = prev_acc
+                            else:
+                                _LOGGER.debug(
+                                    "Dropping low-quality fix for %s (accuracy=%sm > %sm)",
+                                    dev_name,
+                                    acc,
+                                    self._min_accuracy_threshold,
+                                )
+                                self.increment_stat("low_quality_dropped")
+                                # Strip any internal hint before dropping to avoid accidental exposure
+                                location.pop("_report_hint", None)
+                                continue
 
                         # Sanitize invariants + enrich fields (label, utc-string)
                         location = _sanitize_decoder_row(location)
@@ -4900,10 +4964,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         report_hint = location.get("_report_hint")
                         self._apply_report_type_cooldown(dev_id, report_hint)
 
+                        # Drop internal hint before caching to avoid exposure
+                        location.pop("_report_hint", None)
+
                         # Commit to cache and bump statistics
                         location["last_updated"] = wall_now  # wall-clock for UX
                         self._device_location_data[dev_id] = location
                         self.increment_stat("polled_updates")
+                        self._consecutive_timeouts = 0
 
                         # Immediate per-device update for more responsive UI during long poll cycles.
                         self.push_updated([dev_id])
@@ -4915,19 +4983,51 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             LOCATION_REQUEST_TIMEOUT_S,
                         )
                         self.increment_stat("timeouts")
+                        self._consecutive_timeouts += 1
+                        cycle_failed = True
                         self.note_error(terr, where="poll_timeout", device=dev_name)
+                        if last_exception is None:
+                            last_exception = UpdateFailed(
+                                f"Location request timed out for {dev_name}"
+                            )
+                            last_exception.__cause__ = terr
+                    except SpotApiEmptyResponseError:
+                        _LOGGER.warning(
+                            "Authentication failed for %s; triggering reauth flow.",
+                            dev_name,
+                        )
+                        self._set_auth_state(
+                            failed=True,
+                            reason=f"Auth failed during poll for {dev_name}: session invalid",
+                        )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        auth_exc = ConfigEntryAuthFailed(
+                            "Google session invalid; re-authentication required"
+                        )
+                        last_exception = auth_exc
+                        raise auth_exc
                     except ConfigEntryAuthFailed as auth_exc:
                         # Mark auth failures to HA; abort remaining devices by re-raising.
                         self._set_auth_state(
                             failed=True,
                             reason=f"Auth failed during poll for {dev_name}: {auth_exc}",
                         )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        last_exception = auth_exc
                         raise
                     except Exception as err:
                         _LOGGER.error(
                             "Failed to get location for %s: %s", dev_name, err
                         )
+                        cycle_failed = True
+                        self._consecutive_timeouts = 0
                         self.note_error(err, where="poll_exception", device=dev_name)
+                        if last_exception is None:
+                            last_exception = err
 
                     # Inter-device delay (except after the last one)
                     if idx < len(devices) - 1 and self.device_poll_delay > 0:
@@ -4939,7 +5039,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self._last_poll_mono = time.monotonic()
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
-                # Publish a full, visible snapshot (not just polled devices)
+                if cycle_failed:
+                    self._last_poll_result = "failed"
+                elif self._last_poll_result is None:
+                    self._last_poll_result = "success"
+                # Always publish the full snapshot so cached devices remain visible
                 ignored = self._get_ignored_set()
                 # Use the latest remembered full list; filter ignored
                 visible_devices = [
@@ -4951,6 +5055,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     visible_devices, wall_now=time.time()
                 )
                 self.async_set_updated_data(end_snapshot)
+                if last_exception:
+                    self.async_set_update_error(last_exception)
 
     # ---------------------------- Snapshot helpers --------------------------
     def _build_base_snapshot_entry(self, device_dict: dict[str, Any]) -> dict[str, Any]:
