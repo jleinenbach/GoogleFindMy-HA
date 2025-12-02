@@ -565,6 +565,9 @@
           }
         }
       },
+      "semantic_labels": {
+        "name": "Etiquetas semánticas"
+      },
       "stat_background_updates": {
         "name": "Actualizaciones en segundo plano"
       },

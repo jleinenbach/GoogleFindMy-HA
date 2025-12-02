@@ -565,6 +565,9 @@
           }
         }
       },
+      "semantic_labels": {
+        "name": "Rótulos semânticos"
+      },
       "stat_background_updates": {
         "name": "Atualizações em segundo plano"
       },

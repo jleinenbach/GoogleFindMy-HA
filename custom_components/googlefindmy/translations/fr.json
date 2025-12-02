@@ -565,6 +565,9 @@
           }
         }
       },
+      "semantic_labels": {
+        "name": "Étiquettes sémantiques"
+      },
       "stat_background_updates": {
         "name": "Mises à jour en arrière-plan"
       },

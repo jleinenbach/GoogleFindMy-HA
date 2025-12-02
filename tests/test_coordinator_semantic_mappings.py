@@ -75,6 +75,7 @@ def _base_coordinator(
     coordinator.can_request_location = lambda _device_id: True
     coordinator._api_push_ready = lambda: True
     coordinator._is_on_hass_loop = lambda: True
+    coordinator._semantic_label_cache = {}
     return coordinator
 
 
@@ -116,6 +117,26 @@ def _polling_coordinator(
     return coordinator
 
 
+def _push_coordinator(options: dict[str, Any]) -> GoogleFindMyCoordinator:
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.config_entry = GoogleFindMyConfigEntryStub(options=options)
+    coordinator.hass = SimpleNamespace()
+    coordinator.increment_stat = lambda *_args, **_kwargs: None
+    coordinator._apply_report_type_cooldown = lambda *_args, **_kwargs: None
+    coordinator._is_significant_update = lambda *_args, **_kwargs: True
+    coordinator._run_on_hass_loop = lambda *_args, **_kwargs: None
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._device_location_data = {}
+    coordinator._device_name_cache = {}
+    coordinator._device_update_history = {}
+    coordinator._device_poll_cooldown_until = {}
+    coordinator._present_last_seen = {}
+    coordinator._semantic_label_cache = {}
+    coordinator._min_accuracy_threshold = 0
+    coordinator._movement_threshold = 0
+    return coordinator
+
+
 @pytest.mark.asyncio
 async def test_poll_cycle_applies_mapping_before_spam_filter() -> None:
     options = {
@@ -145,3 +166,41 @@ async def test_poll_cycle_preserves_spam_filter_for_unmapped_semantics() -> None
 
     assert "dev-2" not in coordinator._device_location_data
     assert google_filter.called == 1
+
+
+def test_push_cache_applies_semantic_mapping() -> None:
+    options = {
+        OPT_SEMANTIC_LOCATIONS: {
+            "Lobby": {"latitude": 5.0, "longitude": 6.0, "accuracy": 7.5}
+        }
+    }
+    coordinator = _push_coordinator(options)
+
+    coordinator.update_device_cache("dev-3", {"semantic_name": "lobby", "last_seen": 1234})
+
+    cached = coordinator._device_location_data["dev-3"]
+    assert cached["latitude"] == pytest.approx(5.0)
+    assert cached["longitude"] == pytest.approx(6.0)
+    assert cached["accuracy"] == pytest.approx(7.5)
+    assert cached["location_type"] == "trusted"
+
+
+@pytest.mark.asyncio
+async def test_semantic_labels_are_recorded_with_device_ids() -> None:
+    google_filter = _TrackingFilter(should_filter=False)
+    coordinator = _polling_coordinator(
+        {},
+        google_filter,
+        {
+            "semantic_name": "Lobby",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "accuracy": 3.0,
+        },
+    )
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-3", "name": "Device"}])
+
+    observations = coordinator.get_observed_semantic_labels()
+    assert [obs.label for obs in observations] == ["Lobby"]
+    assert observations[0].devices == {"dev-3"}

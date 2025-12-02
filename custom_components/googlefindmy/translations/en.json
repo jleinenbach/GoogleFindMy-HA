@@ -560,10 +560,13 @@
           "accuracy_m": {
             "name": "Accuracy (m)"
           },
-          "altitude_m": {
-            "name": "Altitude (m)"
-          }
+        "altitude_m": {
+          "name": "Altitude (m)"
         }
+      }
+    },
+      "semantic_labels": {
+        "name": "Semantic labels"
       },
       "stat_background_updates": {
         "name": "Background updates"

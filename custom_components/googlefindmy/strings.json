@@ -490,11 +490,11 @@
           "status": {
             "name": "Status"
           },
-          "semantic_name": {
-            "name": "Semantic label"
-          },
-          "battery_level": {
-            "name": "Battery level"
+        "semantic_name": {
+          "name": "Semantic label"
+        },
+        "battery_level": {
+          "name": "Battery level"
           },
           "last_seen": {
             "name": "Last seen (reported)"
@@ -573,6 +573,9 @@
             "name": "Altitude (m)"
           }
         }
+      },
+      "semantic_labels": {
+        "name": "Semantic labels"
       },
       "stat_background_updates": {
         "name": "Background updates"

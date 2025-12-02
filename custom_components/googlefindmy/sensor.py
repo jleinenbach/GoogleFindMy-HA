@@ -41,7 +41,11 @@ from .const import (
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
 )
-from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
+from .coordinator import (
+    GoogleFindMyCoordinator,
+    SemanticLabelRecord,
+    _as_ha_attributes,
+)
 from .entity import (
     GoogleFindMyDeviceEntity,
     GoogleFindMyEntity,
@@ -87,6 +91,12 @@ LAST_SEEN_DESCRIPTION = SensorEntityDescription(
     translation_key="last_seen",
     icon="mdi:clock-outline",
     device_class=SensorDeviceClass.TIMESTAMP,
+)
+
+SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
+    key="semantic_labels",
+    translation_key="semantic_labels",
+    icon="mdi:format-list-text",
 )
 
 # NOTE:
@@ -343,13 +353,28 @@ async def async_setup_entry(
                 logger=_LOGGER,
             )
 
+        service_entities: list[SensorEntity] = []
+
+        semantic_sensor = GoogleFindMySemanticLabelSensor(
+            coordinator,
+            subentry_key=scope.subentry_key,
+            subentry_identifier=identifier,
+        )
+        semantic_unique_id = getattr(semantic_sensor, "unique_id", None)
+        if not isinstance(semantic_unique_id, str) or (
+            isinstance(semantic_unique_id, str)
+            and semantic_unique_id not in added_unique_ids
+        ):
+            if isinstance(semantic_unique_id, str):
+                added_unique_ids.add(semantic_unique_id)
+            service_entities.append(semantic_sensor)
+
         if not enable_stats:
-            _schedule_service_entities([], True)
+            _schedule_service_entities(service_entities, True)
             return
 
-        stats_entities: list[SensorEntity] = []
-        created_for_scope: list[str] = []
         if hasattr(coordinator, "stats"):
+            created_for_scope: list[str] = []
             for stat_key, desc in STATS_DESCRIPTIONS.items():
                 if stat_key not in coordinator.stats:
                     continue
@@ -365,18 +390,22 @@ async def async_setup_entry(
                     continue
                 if isinstance(unique_id, str):
                     added_unique_ids.add(unique_id)
-                stats_entities.append(entity)
+                service_entities.append(entity)
                 created_for_scope.append(stat_key)
 
-        if stats_entities:
+            if created_for_scope:
+                created_stats[identifier] = created_for_scope
+
+        if service_entities:
             _LOGGER.debug(
-                "Sensor setup: service_key=%s, config_subentry_id=%s (stats=%d)",
+                "Sensor setup: service_key=%s, config_subentry_id=%s (entities=%d)",
                 scope.subentry_key,
                 sanitized_config_id,
-                len(stats_entities),
+                len(service_entities),
             )
-            _schedule_service_entities(stats_entities, True)
-            created_stats[identifier] = created_for_scope
+            _schedule_service_entities(service_entities, True)
+        else:
+            _schedule_service_entities([], True)
 
     def _add_tracker_scope(scope: _Scope, forwarded_config_id: str | None) -> None:
         nonlocal primary_tracker_scope, tracker_scheduler
@@ -764,6 +793,93 @@ async def async_setup_entry(
             add_entities=_recovery_add_entities,
         )
 # ------------------------------- Stats Sensor ---------------------------------
+
+
+class GoogleFindMySemanticLabelSensor(GoogleFindMyEntity, SensorEntity):
+    """Expose observed semantic labels for mapping and diagnostics."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_has_entity_name = True
+    entity_description = SEMANTIC_LABEL_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            "semantic_labels",
+            separator="_",
+        )
+
+    @staticmethod
+    def _as_iso(ts: float | None) -> str | None:
+        """Render epoch seconds as an ISO 8601 string."""
+
+        if not isinstance(ts, (int, float)) or ts <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
+        except Exception:
+            return None
+
+    def _observations(self) -> list[SemanticLabelRecord]:
+        getter = getattr(self.coordinator, "get_observed_semantic_labels", None)
+        if not callable(getter):
+            return []
+        try:
+            result = getter()
+        except Exception as err:  # pragma: no cover - defensive logging path
+            _LOGGER.debug("Semantic label snapshot failed: %s", err)
+            return []
+
+        observations: list[SemanticLabelRecord] = []
+        for record in result:
+            if isinstance(record, SemanticLabelRecord):
+                observations.append(record)
+
+        return observations
+
+    @property
+    def native_value(self) -> int:
+        """Return the number of observed semantic labels."""
+
+        return len(self._observations())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose observed semantic labels and their metadata."""
+
+        observations = self._observations()
+        attrs: list[dict[str, Any]] = []
+        for record in observations:
+            attrs.append(
+                {
+                    "label": record.label,
+                    "first_seen": self._as_iso(record.first_seen),
+                    "last_seen": self._as_iso(record.last_seen),
+                    "devices": sorted(record.devices),
+                }
+            )
+
+        return {"labels": [item["label"] for item in attrs], "observations": attrs}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Attach to the service device for diagnostic grouping."""
+
+        return self.service_device_info(include_subentry_identifier=True)
 
 
 class GoogleFindMyStatsSensor(GoogleFindMyEntity, SensorEntity):

@@ -603,6 +603,21 @@ class FcmStatus:
     DISCONNECTED = "disconnected"
 
 
+@dataclass
+class SemanticLabelRecord:
+    """Observed semantic label metadata cached for diagnostics."""
+
+    label: str
+    first_seen: float
+    last_seen: float
+    devices: set[str] = field(default_factory=set)
+
+    def copy(self) -> SemanticLabelRecord:
+        """Return a shallow copy with a cloned device set."""
+
+        return replace(self, devices=set(self.devices))
+
+
 class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     """Coordinator that manages polling, cache, and push updates for Google Find My Device.
 
@@ -723,6 +738,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._present_device_ids: set[str] = (
             set()
         )  # diagnostics-only set from latest non-empty list
+        self._semantic_label_cache: dict[str, SemanticLabelRecord] = {}
 
         # Flag to separate initial discovery from later runtime additions.
         # After the first successful non-empty device list is processed, this becomes True.
@@ -4147,7 +4163,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if payload.get("is_replayed") is True or payload.get("replayed") is True:
             return False
 
-        entry = self.config_entry
+        entry = getattr(self, "config_entry", None)
         if entry is None:
             return False
 
@@ -4187,6 +4203,52 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         payload["location_type"] = "trusted"
 
         return True
+
+    def _record_semantic_label(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        device_id: str | None = None,
+    ) -> None:
+        """Track observed semantic labels for diagnostics and UX helpers."""
+
+        raw_name = payload.get("semantic_name")
+        if not isinstance(raw_name, str):
+            return
+
+        semantic_name = raw_name.strip()
+        if not semantic_name:
+            return
+
+        cache = getattr(self, "_semantic_label_cache", None)
+        if cache is None:
+            cache = {}
+            self._semantic_label_cache = cache
+
+        normalized = semantic_name.casefold()
+        now = time.time()
+        record = cache.get(normalized)
+        if record is None:
+            record = SemanticLabelRecord(
+                label=semantic_name, first_seen=now, last_seen=now
+            )
+            cache[normalized] = record
+        else:
+            record.last_seen = now
+
+        if device_id:
+            record.devices.add(device_id)
+
+    def get_observed_semantic_labels(self) -> list[SemanticLabelRecord]:
+        """Return a stable snapshot of observed semantic labels."""
+
+        cache = getattr(self, "_semantic_label_cache", None)
+        if not cache:
+            return []
+
+        snapshot = [record.copy() for record in cache.values()]
+        snapshot.sort(key=lambda item: item.label.casefold())
+        return snapshot
 
     # ---------------------------- Ignore helpers ----------------------------
     def _get_ignored_set(self) -> set[str]:
@@ -4844,6 +4906,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 "No location data returned for %s", dev_name
                             )
                             continue
+
+                        self._record_semantic_label(location, device_id=dev_id)
 
                         cached_loc = self._device_location_data.get(dev_id)
                         is_replay = False
@@ -5523,6 +5587,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
+
+        self._record_semantic_label(slot, device_id=device_id)
+
+        cached_loc = self._device_location_data.get(device_id)
+        is_replay = False
+        if isinstance(cached_loc, Mapping):
+            new_ts = _normalize_epoch_seconds(slot.get("last_seen"))
+            old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+            if new_ts is not None and old_ts is not None and new_ts == old_ts:
+                is_replay = True
+
+        slot["is_replayed"] = is_replay
+        self._apply_semantic_mapping(slot)
+        slot.pop("is_replayed", None)
 
         # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
         # then drop the hint to keep internal-only.
@@ -6234,6 +6312,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             if not location_data:
                 return {}
+
+            self._record_semantic_label(location_data, device_id=device_id)
 
             cached_loc = self._device_location_data.get(device_id)
             is_replay = False
