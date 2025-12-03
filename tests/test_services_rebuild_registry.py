@@ -7,6 +7,7 @@ import logging
 from collections.abc import Iterable
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from homeassistant.core import ServiceCall
@@ -22,6 +23,8 @@ from custom_components.googlefindmy.const import (
 from tests.helpers import (
     FakeConfigEntriesManager,
     FakeConfigEntry,
+    FakeDeviceEntry,
+    FakeDeviceRegistry,
     FakeEntityRegistry,
     FakeHass,
     config_entry_with_runtime_managed_subentries,
@@ -63,6 +66,38 @@ async def test_rebuild_registry_reloads_primary_entry(caplog: pytest.LogCaptureF
 
 
 @pytest.mark.asyncio
+async def test_rebuild_registry_runs_migration_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invoke migration helpers when the mode is set to ``migrate``."""
+
+    manager = FakeConfigEntriesManager([FakeConfigEntry(entry_id="primary")])
+    hass = FakeHass(manager)
+
+    soft_migrate = AsyncMock()
+    migrate_unique_ids = AsyncMock()
+    relink_buttons = AsyncMock()
+    relink_entities = AsyncMock()
+
+    handler = await _register_rebuild_service(
+        hass,
+        {
+            "soft_migrate_entry": soft_migrate,
+            "migrate_unique_ids": migrate_unique_ids,
+            "relink_button_devices": relink_buttons,
+            "relink_subentry_entities": relink_entities,
+        },
+    )
+
+    await handler(ServiceCall({"mode": "migrate"}))
+
+    assert manager.reload_calls == ["primary"]
+    entry = manager.async_entries()[0]
+    soft_migrate.assert_awaited_once_with(hass, entry)
+    migrate_unique_ids.assert_awaited_once_with(hass, entry)
+    relink_buttons.assert_awaited_once_with(hass, entry)
+    relink_entities.assert_awaited_once_with(hass, entry)
+
+
+@pytest.mark.asyncio
 async def test_rebuild_registry_reloads_specific_ids(caplog: pytest.LogCaptureFixture) -> None:
     """Reload only the config entries explicitly requested by ID."""
 
@@ -90,6 +125,41 @@ async def test_rebuild_registry_reloads_specific_ids(caplog: pytest.LogCaptureFi
 
 
 @pytest.mark.asyncio
+async def test_rebuild_registry_filters_by_device_ids(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Select config entries based on the provided device IDs when reloading."""
+
+    manager = FakeConfigEntriesManager(
+        [
+            FakeConfigEntry(entry_id="primary"),
+            FakeConfigEntry(entry_id="secondary"),
+        ]
+    )
+    hass = FakeHass(manager)
+
+    device_registry = FakeDeviceRegistry(
+        [
+            FakeDeviceEntry(
+                id="dev-secondary",
+                config_entries={"secondary"},
+            )
+        ]
+    )
+    monkeypatch.setattr(dr, "async_get", lambda hass: device_registry)
+
+    handler = await _register_rebuild_service(hass, {})
+
+    caplog.set_level(logging.INFO)
+    await handler(ServiceCall({"device_ids": ["dev-secondary"]}))
+
+    assert manager.reload_calls == ["secondary"]
+    assert any(
+        "Reloading config entry: secondary" in record.message for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
 async def test_rebuild_registry_accepts_single_entry_id(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -110,8 +180,7 @@ async def test_rebuild_registry_accepts_single_entry_id(
 
     assert manager.reload_calls == ["primary"]
     assert any(
-        "Reloading config entries: ['primary']" in record.message
-        for record in caplog.records
+        "Reloading config entry: primary" in record.message for record in caplog.records
     )
 
 
