@@ -778,7 +778,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
 
         # Play Sound UUID tracking (needed to properly cancel sound requests)
-        self._sound_request_uuids: dict[str, str] = {}         # device_id -> request_uuid
+        self._sound_request_uuids: dict[str, str] = {}  # device_id -> request_uuid
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
@@ -5414,6 +5414,41 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except Exception as err:
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
 
+        try:
+            sound_request_uuids = await self._cache.async_get_cached_value(
+                "sound_request_uuids"
+            )
+            if not isinstance(sound_request_uuids, dict):
+                _LOGGER.debug("No cached Play Sound UUIDs found; keeping current map")
+                return
+
+            loaded_sound_request_uuids = {
+                str(device_id): str(request_uuid)
+                for device_id, request_uuid in sound_request_uuids.items()
+                if isinstance(device_id, str) and isinstance(request_uuid, str)
+            }
+
+            if self._sound_request_uuids and not loaded_sound_request_uuids:
+                _LOGGER.debug(
+                    "Skipping cached empty Play Sound UUID map; runtime map already populated"
+                )
+                return
+
+            merged_sound_request_uuids = {
+                **loaded_sound_request_uuids,
+                **self._sound_request_uuids,
+            }
+            if merged_sound_request_uuids != self._sound_request_uuids:
+                self._sound_request_uuids = merged_sound_request_uuids
+                _LOGGER.debug(
+                    "Loaded Play Sound UUIDs from cache: %s", self._sound_request_uuids
+                )
+        except Exception as err:
+            _LOGGER.debug(
+                "Failed to load Play Sound UUIDs from cache; keeping current map: %s",
+                err,
+            )
+
     async def _async_save_stats(self) -> None:
         """Persist statistics to entry-scoped cache."""
         try:
@@ -5422,6 +5457,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
+
+    async def _async_save_sound_uuids(self) -> None:
+        """Persist Play Sound request UUIDs to entry-scoped cache."""
+        try:
+            await self._cache.async_set_cached_value(
+                "sound_request_uuids", self._sound_request_uuids.copy()
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed to save Play Sound UUIDs to cache: %s", err)
 
     async def _debounced_save_stats(self) -> None:
         """Debounce wrapper to coalesce frequent stat updates into a single write.
@@ -5920,9 +5964,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
-        self._sound_request_uuids.pop(device_id, None)
+        removed_uuid = self._sound_request_uuids.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
+
+        if removed_uuid is not None:
+            self.hass.async_create_task(self._async_save_sound_uuids())
         self._present_last_seen.pop(device_id, None)
         # Rebuild the cached snapshot without the purged device
         current_snapshot: list[dict[str, Any]] = []
@@ -6566,6 +6613,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 _LOGGER.debug(
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
+                await self._async_save_sound_uuids()
             if not ok:
                 self._note_push_transport_problem()
             # Success implies credentials worked
@@ -6632,7 +6680,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Success implies credentials worked
             self._set_auth_state(failed=False)
             if ok:
-                self._sound_request_uuids.pop(device_id, None)
+                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
+                if removed_request_uuid is not None:
+                    await self._async_save_sound_uuids()
             return bool(ok)
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(
