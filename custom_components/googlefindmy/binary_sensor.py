@@ -767,6 +767,14 @@ class GoogleFindMyConnectivitySensor(GoogleFindMyEntity, BinarySensorEntity):
         if connected_at_iso is not None:
             attributes["fcm_connected_at"] = connected_at_iso
 
+        fatal_error: str | None = None
+        fatal_by_entry = getattr(fcm, "_fatal_errors", None)
+        if isinstance(fatal_by_entry, Mapping) and entry_id:
+            fatal_error = fatal_by_entry.get(entry_id)
+        fatal_error = fatal_error or getattr(fcm, "_fatal_error", None)
+        if isinstance(fatal_error, str) and fatal_error:
+            attributes["fcm_fatal_error"] = fatal_error
+
         return attributes or None
 
     @property

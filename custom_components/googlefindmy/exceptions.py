@@ -50,3 +50,10 @@ class MissingNamespaceError(HomeAssistantError):
         super().__init__(_MISSING_NAMESPACE)
         self.translation_domain = DOMAIN
         self.translation_key = "missing_namespace"
+
+
+class FatalRegistrationError(HomeAssistantError):
+    """Raised when FCM registration fails with a fatal status code."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
