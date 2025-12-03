@@ -98,6 +98,51 @@ async def test_manual_locate_prefers_semantic_mapping() -> None:
     assert google_filter.called == 0
 
 
+@pytest.mark.parametrize(
+    "api_name",
+    ["living room", "Living Room", "Near Living Room"],
+)
+def test_semantic_mapping_normalizes_api_names(api_name: str) -> None:
+    options = {
+        OPT_SEMANTIC_LOCATIONS: {
+            "Living Room": {"latitude": 8.5, "longitude": 9.5, "accuracy": 10.0}
+        }
+    }
+    coordinator = _push_coordinator(options)
+
+    coordinator.update_device_cache(
+        "dev-norm",
+        {
+            "semantic_name": api_name,
+            "last_seen": 10,
+        },
+    )
+
+    cached = coordinator._device_location_data["dev-norm"]
+    assert cached["latitude"] == pytest.approx(8.5)
+    assert cached["longitude"] == pytest.approx(9.5)
+    assert cached["accuracy"] == pytest.approx(10.0)
+
+
+def test_semantic_mapping_rejects_partial_matches() -> None:
+    options = {
+        OPT_SEMANTIC_LOCATIONS: {
+            "Kitchen": {"latitude": 3.0, "longitude": 4.0, "accuracy": 5.0}
+        }
+    }
+    coordinator = _push_coordinator(options)
+
+    coordinator.update_device_cache(
+        "dev-partial",
+        {"semantic_name": "Kitchen 2", "last_seen": 20},
+    )
+
+    cached = coordinator._device_location_data["dev-partial"]
+    assert cached.get("latitude") is None
+    assert cached.get("longitude") is None
+    assert cached.get("semantic_name") == "Kitchen 2"
+
+
 def _polling_coordinator(
     options: dict[str, Any], google_filter: Any, api_payload: dict[str, Any]
 ) -> GoogleFindMyCoordinator:
@@ -166,6 +211,30 @@ async def test_poll_cycle_preserves_spam_filter_for_unmapped_semantics() -> None
 
     assert "dev-2" not in coordinator._device_location_data
     assert google_filter.called == 1
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_preserves_coordinates_and_updates_semantic_name() -> None:
+    google_filter = _TrackingFilter(should_filter=False)
+    coordinator = _polling_coordinator(
+        {}, google_filter, {"semantic_name": "Unknown Room", "last_seen": 200}
+    )
+    coordinator._device_location_data["dev-hybrid"] = {
+        "latitude": 50.0,
+        "longitude": 10.0,
+        "accuracy": 5.0,
+        "last_seen": 100.0,
+    }
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-hybrid", "name": "Hybrid Device"}]
+    )
+
+    cached = coordinator._device_location_data["dev-hybrid"]
+    assert cached["latitude"] == pytest.approx(50.0)
+    assert cached["longitude"] == pytest.approx(10.0)
+    assert cached["semantic_name"] == "Unknown Room"
+    assert cached["last_seen"] == pytest.approx(200)
 
 
 def test_push_cache_applies_semantic_mapping() -> None:

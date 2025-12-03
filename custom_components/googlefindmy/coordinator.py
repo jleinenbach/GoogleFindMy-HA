@@ -4152,6 +4152,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return None
         return coerced
 
+    def _find_semantic_match(
+        self, raw_name: str, mapping: Mapping[str, dict[str, float]]
+    ) -> dict[str, float] | None:
+        """Return a semantic mapping entry using normalized matching."""
+
+        normalized_name = raw_name.casefold().strip()
+        if normalized_name.startswith("near "):
+            normalized_name = normalized_name[len("near ") :].strip()
+
+        normalized_mapping = {key.casefold(): value for key, value in mapping.items()}
+        return normalized_mapping.get(normalized_name)
+
     def _apply_semantic_mapping(self, payload: dict[str, Any]) -> bool:
         """Substitute coordinates using user-defined semantic mappings when available."""
 
@@ -4193,7 +4205,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 "accuracy": accuracy,
             }
 
-        mapped = normalized.get(semantic_name.casefold())
+        mapped = self._find_semantic_match(semantic_name, normalized)
         if mapped is None:
             return False
 
@@ -4908,6 +4920,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             continue
 
                         self._record_semantic_label(location, device_id=dev_id)
+                        raw_semantic_name = (
+                            location.get("semantic_name")
+                            if isinstance(location.get("semantic_name"), str)
+                            else None
+                        )
+                        semantic_replaced = False
 
                         cached_loc = self._device_location_data.get(dev_id)
                         is_replay = False
@@ -4999,8 +5017,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                             )
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
+                                    semantic_replaced = True
                         location.pop("is_replayed", None)
                         # ------------------------------------------------------------------
+
+                        if raw_semantic_name and not semantic_replaced:
+                            location["semantic_name"] = raw_semantic_name
 
                         # If we only got a semantic location, preserve previous coordinates.
                         if (

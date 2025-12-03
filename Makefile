@@ -10,6 +10,14 @@ SKIP_WHEELHOUSE_REFRESH ?= 0
 WHEELHOUSE ?= .wheelhouse
 WHEELHOUSE_SENTINEL := $(WHEELHOUSE)/.requirements-dev.stamp
 BOOTSTRAP_SENTINEL := .bootstrap/homeassistant-preinstall.stamp
+BASE_BOOTSTRAP_PACKAGES := \
+        homeassistant \
+        pytest-homeassistant-custom-component \
+        gpsoauth \
+        ecdsa \
+        pyscrypt \
+        http-ece \
+        'httpx[http2]'
 # Remove DOCTOC_SENTINEL via `make clean` to force a DocToc reinstall when the cached dev dependency changes.
 DOCTOC_SENTINEL := .bootstrap/doctoc-preinstall.stamp
 NPM_CACHE ?= .npm-cache
@@ -80,8 +88,8 @@ bootstrap-base-deps: $(BOOTSTRAP_SENTINEL)
 
 $(BOOTSTRAP_SENTINEL):
 	@mkdir -p $(dir $(BOOTSTRAP_SENTINEL))
-	@echo "[make bootstrap-base-deps] Pre-installing Home Assistant base dependencies"
-	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+	@echo "[make bootstrap-base-deps] Pre-installing Home Assistant base dependencies (including common runtime crypto/HTTP helpers)"
+	@$(PYTHON) -m pip install --upgrade $(BASE_BOOTSTRAP_PACKAGES)
 	@touch $(BOOTSTRAP_SENTINEL)
 
 $(WHEELHOUSE_SENTINEL): $(DEV_REQUIREMENTS)
