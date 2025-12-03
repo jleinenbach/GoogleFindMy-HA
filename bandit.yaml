@@ -1,0 +1,4 @@
+# Bandit configuration focusing on integration code with actionable findings.
+exclude_dirs:
+  - tests
+severity: medium
