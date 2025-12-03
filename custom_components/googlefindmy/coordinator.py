@@ -4403,6 +4403,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
             if not fcm:
                 return False
+            fatal_error: str | None = getattr(fcm, "_fatal_error", None)
+            entry_id = self._entry_id()
+            fatal_by_entry = getattr(fcm, "_fatal_errors", None)
+            if isinstance(fatal_by_entry, Mapping) and entry_id:
+                fatal_error = fatal_by_entry.get(entry_id) or fatal_error
+            if isinstance(fatal_error, str) and fatal_error:
+                return False
             for attr in ("is_ready", "ready"):
                 val = getattr(fcm, attr, None)
                 if isinstance(val, bool):
@@ -4483,6 +4490,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             UpdateFailed: For other transient or unexpected errors.
         """
         try:
+            api_fcm = getattr(self.api, "fcm", None)
+            fatal_error: str | None = None
+            if api_fcm is not None:
+                fatal_error = getattr(api_fcm, "_fatal_error", None)
+                fatal_by_entry = getattr(api_fcm, "_fatal_errors", None)
+                entry_id = self._entry_id()
+                if isinstance(fatal_by_entry, Mapping) and entry_id:
+                    fatal_error = fatal_by_entry.get(entry_id) or fatal_error
+
+            if isinstance(fatal_error, str) and fatal_error:
+                self._set_auth_state(failed=True, reason=fatal_error)
+                raise ConfigEntryAuthFailed(fatal_error)
+
             # One-time wait for FCM on first run.
             if not self._startup_complete:
                 fcm_evt = getattr(self, "fcm_ready_event", None)

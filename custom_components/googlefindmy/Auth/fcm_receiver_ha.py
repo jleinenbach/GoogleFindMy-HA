@@ -67,8 +67,10 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
+from aiohttp import ClientError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi import nova_request
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
@@ -235,6 +237,9 @@ class FcmReceiverHA:
         self._pending_targets: dict[tuple[str, str], set[str] | None] = {}
         self._flush_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._debounce_ms: int = 250
+
+        self._fatal_error: str | None = None
+        self._fatal_errors: dict[str, str] = {}
 
         # Aggregate telemetry
         self.last_start_monotonic: float = 0.0
@@ -597,7 +602,26 @@ class FcmReceiverHA:
                         backoff = min(backoff * 2, 60.0)
                         continue
 
-                    ok_reg = await self._register_for_fcm_entry(entry_id)
+                    try:
+                        ok_reg = await self._register_for_fcm_entry(entry_id)
+                    except FatalRegistrationError as err:
+                        message = str(err) or "FCM registration failed"
+                        self._fatal_error = message
+                        self._fatal_errors[entry_id] = message
+                        _LOGGER.error(
+                            "[entry=%s] FCM registration failed permanently; credentials may be invalid: %s",
+                            entry_id,
+                            message,
+                        )
+                        try:
+                            await pc.stop()
+                        except Exception:
+                            pass
+                        finally:
+                            async with self._lock:
+                                self.pcs.pop(entry_id, None)
+                        break
+
                     if not ok_reg:
                         try:
                             await pc.stop()
@@ -743,6 +767,30 @@ class FcmReceiverHA:
                     await self._persist_routing_token(entry_id, token)
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
+            return False
+        except FatalRegistrationError:
+            raise
+        except ClientError as err:
+            status_raw = getattr(err, "status", None)
+            if status_raw is None:
+                status_raw = getattr(err, "status_code", None)
+            try:
+                status_int = int(cast(int | str, status_raw))
+            except (TypeError, ValueError):
+                status_int = None
+
+            if status_int in {401, 404}:
+                message = f"GCM Registration failed ({status_int}): Credentials invalid"
+                self._fatal_error = message
+                self._fatal_errors[entry_id] = message
+                raise FatalRegistrationError(message) from err
+
+            _LOGGER.error(
+                "[entry=%s] FCM registration client error (status=%s): %s",
+                entry_id,
+                status_raw,
+                err,
+            )
             return False
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
