@@ -192,7 +192,7 @@ rules:
     - id: dynamic-devices
       status: done
       evidence:
-        - "custom_components/googlefindmy/device_tracker.py:_sync_entities_from_coordinator"
+        - "custom_components/googlefindmy/device_tracker.py:_scan_available_trackers_from_coordinator"
     - id: entity-category
       status: done
       evidence:
