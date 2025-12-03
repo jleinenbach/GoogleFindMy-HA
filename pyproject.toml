@@ -28,6 +28,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "bandit[toml]>=1.7.10",
     "mypy>=1.11",
     "pre-commit>=3.7",
     "pytest>=8.3",
@@ -162,7 +163,7 @@ indent-style = "space"
 line-ending = "auto"
 
 [tool.pytest.ini_options]
-addopts = ["-q", "--cov-report=term"]
+addopts = ["-q", "--cov", "--cov-report=term"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [

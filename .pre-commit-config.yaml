@@ -8,8 +8,30 @@ repos:
     hooks:
       - id: ruff
         args:
+          - check
           - --fix
+          - --exit-non-zero-on-fix
       - id: ruff-format
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        args:
+          - --strict
+        additional_dependencies:
+          - types-requests>=2.32.0.20240712
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.10
+    hooks:
+      - id: bandit
+        args:
+          - -ll
+          - -c
+          - bandit.yaml
+          - -r
+          - custom_components
+        additional_dependencies:
+          - bandit[toml]
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -37,5 +59,13 @@ repos:
         args:
           - --quiet
         language: python
+        pass_filenames: false
+        always_run: true
+      - id: pytest
+        name: pytest with coverage
+        entry: python -m pytest --cov -q
+        language: python
+        additional_dependencies:
+          - .[dev]
         pass_filenames: false
         always_run: true

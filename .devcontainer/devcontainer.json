@@ -1,0 +1,36 @@
+{
+  "name": "GoogleFindMy-HA Dev",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13",
+  "features": {
+    "ghcr.io/devcontainers/features/git:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.mypy-type-checker",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "python.testing.pytestArgs": [
+          "--cov",
+          "-q"
+        ],
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestEnabled": true,
+        "python.formatting.provider": "ruff",
+        "python.analysis.typeCheckingMode": "strict"
+      }
+    }
+  },
+  "postCreateCommand": "python -m pip install --upgrade pip && python -m pip install -e .[dev] && pre-commit install",
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=pip-cache,target=/home/vscode/.cache/pip,type=volume"
+  ]
+}
