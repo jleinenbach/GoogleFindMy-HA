@@ -1179,16 +1179,18 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         await async_rebuild_device_registry(hass, call)
 
     async def async_rebuild_registry_service(call: ServiceCall) -> None:
-        """Handle the service call to reload the integration."""
-        _LOGGER.info(
-            "Service 'rebuild_device_registry' (reloading config entry) called."
-        )
+        """Handle the service call to migrate or rebuild the integration."""
+
+        mode = str(call.data.get("mode") or "rebuild").lower()
+        if mode not in {"rebuild", "migrate"}:
+            _LOGGER.warning("Unsupported rebuild_registry mode '%s'; defaulting to rebuild", mode)
+            mode = "rebuild"
 
         entry_ids_from_service = call.data.get(ATTR_ENTRY_ID)
         if isinstance(entry_ids_from_service, str):
             provided_entry_ids: list[str] = [entry_ids_from_service]
         elif isinstance(entry_ids_from_service, Iterable):
-            provided_entry_ids = list(entry_ids_from_service)
+            provided_entry_ids = [str(item) for item in entry_ids_from_service]
         elif entry_ids_from_service is None:
             provided_entry_ids = []
         else:
@@ -1199,34 +1201,108 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             )
             return
 
-        config_entry_ids: list[str] = []
+        device_ids_raw = call.data.get("device_ids")
+        if isinstance(device_ids_raw, str):
+            requested_device_ids: list[str] = [device_ids_raw]
+        elif isinstance(device_ids_raw, Iterable):
+            requested_device_ids = [str(item) for item in device_ids_raw]
+        elif device_ids_raw is None:
+            requested_device_ids = []
+        else:
+            _LOGGER.warning(
+                "Invalid device_ids payload type: %s", type(device_ids_raw)
+            )
+            return
 
         entries = hass.config_entries.async_entries(DOMAIN)
-        entry: Any | None = entries[0] if entries else None
+        entry_map: dict[str, Any] = {entry.entry_id: entry for entry in entries}
+        target_entry_ids: list[str] = []
 
-        if provided_entry_ids:
-            config_entry_ids.extend(
-                entry_id
-                for entry_id in provided_entry_ids
-                if any(e.entry_id == entry_id for e in entries)
+        def _extend_target_entries(entry_ids: Iterable[str]) -> None:
+            for candidate in entry_ids:
+                if candidate in entry_map and candidate not in target_entry_ids:
+                    target_entry_ids.append(candidate)
+
+        _extend_target_entries(provided_entry_ids)
+
+        if provided_entry_ids and not target_entry_ids:
+            _LOGGER.warning(
+                "No valid config entries found for IDs: %s", provided_entry_ids
             )
-            if not config_entry_ids:
+            return
+
+        if requested_device_ids:
+            dev_reg = dr.async_get(hass)
+            missing_devices: list[str] = []
+            for device_id in requested_device_ids:
+                getter = getattr(dev_reg, "async_get", None)
+                device = getter(device_id) if callable(getter) else None
+                if device is None:
+                    missing_devices.append(device_id)
+                    continue
+
+                config_entries = getattr(device, "config_entries", None) or []
+                _extend_target_entries(str(entry_id) for entry_id in config_entries)
+
+            if missing_devices:
                 _LOGGER.warning(
-                    "No valid config entries found for IDs: %s",
-                    provided_entry_ids,
+                    "No device registry entries found for device_ids: %s", missing_devices
+                )
+
+            if requested_device_ids and not target_entry_ids:
+                _LOGGER.warning(
+                    "No config entries available for the requested device_ids: %s",
+                    requested_device_ids,
                 )
                 return
 
-        if not config_entry_ids:
-            if entry is None:
+        if not target_entry_ids:
+            if not entries:
                 _LOGGER.warning("No config entries available to reload.")
                 return
-            _LOGGER.info("Reloading config entry: %s", entry.entry_id)
-            await hass.config_entries.async_reload(entry.entry_id)
-            return
 
-        _LOGGER.info("Reloading config entries: %s", config_entry_ids)
-        for entry_id in config_entry_ids:
+            target_entry_ids.append(entries[0].entry_id)
+
+        if mode == "migrate":
+            migration_log_context = (
+                f"Running migration helpers for config entry: {target_entry_ids[0]}"
+                if len(target_entry_ids) == 1
+                else f"Running migration helpers for config entries: {target_entry_ids}"
+            )
+            _LOGGER.info(migration_log_context)
+            migration_steps = (
+                ctx.get("soft_migrate_entry"),
+                ctx.get("migrate_unique_ids"),
+                ctx.get("relink_button_devices"),
+                ctx.get("relink_subentry_entities"),
+            )
+
+            for entry_id in target_entry_ids:
+                entry = entry_map.get(entry_id)
+                if entry is None:
+                    _LOGGER.warning("Config entry %s no longer available; skipping", entry_id)
+                    continue
+
+                for step in migration_steps:
+                    if not callable(step):
+                        continue
+                    try:
+                        await step(hass, entry)
+                    except Exception as err:  # noqa: BLE001 - defensive logging
+                        _LOGGER.error(
+                            "Error running migration step %s for entry %s: %s",
+                            getattr(step, "__name__", step),
+                            entry_id,
+                            err,
+                        )
+        reload_log_context = (
+            f"Reloading config entry: {target_entry_ids[0]}"
+            if len(target_entry_ids) == 1
+            else f"Reloading config entries: {target_entry_ids}"
+        )
+
+        _LOGGER.info(reload_log_context)
+        for entry_id in target_entry_ids:
             try:
                 await hass.config_entries.async_reload(entry_id)
             except Exception as err:

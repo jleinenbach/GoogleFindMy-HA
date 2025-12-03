@@ -1163,10 +1163,10 @@ def test_hass_data_layout(
                 (DOMAIN, SERVICE_REBUILD_REGISTRY)
             ]
             await migrate_handler(SimpleNamespace(data={ATTR_MODE: MODE_MIGRATE}))
-            assert integration._async_soft_migrate_data_to_options.await_count == 1
-            assert integration._async_migrate_unique_ids.await_count == 1
-            assert integration._async_relink_button_devices.await_count == 1
-            assert integration._async_relink_subentry_entities.await_count == 1
+            assert integration._async_soft_migrate_data_to_options.await_count == 2
+            assert integration._async_migrate_unique_ids.await_count == 2
+            assert integration._async_relink_button_devices.await_count == 2
+            assert integration._async_relink_subentry_entities.await_count == 2
             assert hass.config_entries.reload_calls == [entry.entry_id]
 
             assert await integration.async_unload_entry(hass, entry) is True
