@@ -149,8 +149,9 @@ LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 
 # Quality/logic thresholds
 DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disabled)
-DEFAULT_MOVEMENT_THRESHOLD: int = 50  # meters; used for future movement gating
+DEFAULT_MOVEMENT_THRESHOLD: int = 15  # meters; used for future movement gating
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
+DEFAULT_SEMANTIC_DETECTION_RADIUS: float = 50.0  # meters; soft floor for semantic locations
 
 # Location timestamp acceptance window
 MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S: float = 24 * 60 * 60  # 24 hours

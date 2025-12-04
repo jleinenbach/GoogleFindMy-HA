@@ -651,7 +651,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         device_poll_delay: int = 5,
         min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
         min_accuracy_threshold: int = 100,
-        movement_threshold: int = 50,
+        movement_threshold: int = 15,
         allow_history_fallback: bool = False,
         contributor_mode: str = DEFAULT_CONTRIBUTOR_MODE,
         contributor_mode_switch_epoch: int | None = None,
@@ -672,7 +672,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
-            movement_threshold: Movement delta in meters for significance gating (default 50 m).
+            movement_threshold: Movement delta in meters for significance gating (default 15 m).
             allow_history_fallback: Whether to fall back to Recorder history for location.
             contributor_mode: Preferred Nova contributor mode ("high_traffic" or "in_all_areas").
             contributor_mode_switch_epoch: Epoch timestamp when the contributor mode last changed.

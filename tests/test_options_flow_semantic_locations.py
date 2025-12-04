@@ -9,7 +9,10 @@ import pytest
 from homeassistant.helpers import frame
 
 from custom_components.googlefindmy import config_flow
-from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
+from custom_components.googlefindmy.const import (
+    DEFAULT_SEMANTIC_DETECTION_RADIUS,
+    OPT_SEMANTIC_LOCATIONS,
+)
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
 
@@ -68,14 +71,18 @@ class _FakeStates:
 class _HassStub:
     """Minimal Home Assistant stub for semantic options flows."""
 
-    def __init__(self, entry: _SemanticEntry) -> None:
+    def __init__(self, entry: _SemanticEntry, *, home_radius: float = 90.0) -> None:
         self.config_entries = _SemanticConfigEntries(entry)
         prepare_flow_hass_config_entries(
             self, lambda: self.config_entries, frame_module=frame
         )
         self.config = SimpleNamespace(latitude=12.5, longitude=34.5)
         self.states = _FakeStates(
-            {"zone.home": _FakeState({"latitude": 56.0, "longitude": 78.0, "radius": 90})}
+            {
+                "zone.home": _FakeState(
+                    {"latitude": 56.0, "longitude": 78.0, "radius": home_radius}
+                )
+            }
         )
         self.data: dict[str, Any] = {}
         self._tasks: list[asyncio.Task[Any]] = []
@@ -170,6 +177,33 @@ async def test_semantic_locations_options_lifecycle() -> None:
         "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
     }
     assert hass.config_entries.reloaded == [entry.entry_id, entry.entry_id]
+
+
+@pytest.mark.asyncio
+async def test_semantic_location_defaults_floor_accuracy() -> None:
+    """Defaults should treat semantic detections as broad (>=50m) receivers."""
+
+    entry = _SemanticEntry()
+    hass = _HassStub(entry, home_radius=10.0)
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    add_form = await flow.async_step_semantic_locations_add(None)
+    defaults: dict[str, float | str] = {}
+    for marker in add_form["data_schema"].schema:
+        default_factory = marker.default
+        defaults[marker.schema] = (
+            default_factory() if isinstance(default_factory, Callable) else default_factory
+        )
+
+    assert defaults == {
+        "semantic_name": "",
+        "latitude": 56.0,
+        "longitude": 78.0,
+        "accuracy": DEFAULT_SEMANTIC_DETECTION_RADIUS,
+    }
 
 
 @pytest.mark.asyncio

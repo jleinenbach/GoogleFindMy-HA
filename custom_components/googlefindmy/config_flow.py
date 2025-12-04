@@ -95,6 +95,7 @@ from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_OPTIONS,
+    DEFAULT_SEMANTIC_DETECTION_RADIUS,
     # Core domain & credential keys
     DOMAIN,
     OPT_CONTRIBUTOR_MODE,
@@ -4958,7 +4959,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
         latitude = getattr(self.hass.config, "latitude", None)
         longitude = getattr(self.hass.config, "longitude", None)
-        accuracy = 100.0
+        accuracy = DEFAULT_SEMANTIC_DETECTION_RADIUS
 
         zone_state = self.hass.states.get("zone.home")
         if zone_state is not None:
@@ -4978,9 +4979,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             lon_float = 0.0
 
         try:
-            acc_float = float(accuracy) if accuracy is not None else 100.0
+            acc_float = (
+                float(accuracy)
+                if accuracy is not None
+                else DEFAULT_SEMANTIC_DETECTION_RADIUS
+            )
         except (TypeError, ValueError):
-            acc_float = 100.0
+            acc_float = DEFAULT_SEMANTIC_DETECTION_RADIUS
+
+        acc_float = max(acc_float, DEFAULT_SEMANTIC_DETECTION_RADIUS)
 
         return lat_float, lon_float, acc_float
 

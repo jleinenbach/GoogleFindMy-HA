@@ -223,6 +223,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * Dependency bootstrap: `python -m pip install --upgrade homeassistant pytest-homeassistant-custom-component` or run `make test-stubs` before linting or tests.
 * Dependency primer (fresh environments): install core extras such as `httpx[http2]`, `ecdsa`, and `selenium` alongside the Home Assistant stubs so coverage and flow tests do not stall on missing HTTP/crypto/browser drivers.
 * Cache accelerators: preserve the pip download cache (for example, mount/retain `.cache/pip`) so repeated `make test-stubs` and `pip install -r custom_components/googlefindmy/requirements-dev.txt` runs reuse the built wheels instead of redownloading them on every validation cycle.
+* Optional driver preload: `make test-stubs` now also installs `custom_components/googlefindmy/requirements-dev.txt` so optional clients (for example, `gpsoauth`) are ready for `pytest --cov -q` without extra commands.
 * Required checks (in order): `python -m ruff check --fix`, `python -m mypy --strict`, `python -m pytest --cov -q`.
 * Registry helpers: when adjusting device/entity relink logic, reuse the shared helper contract documented near `_async_relink_entities_for_entry` instead of adding new lookup paths so registry fallbacks stay consistent.
 
