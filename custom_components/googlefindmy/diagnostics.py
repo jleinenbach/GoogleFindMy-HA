@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
@@ -203,6 +204,43 @@ def _safe_truncate(text: Any, limit: int = 160) -> str:
     if len(s) <= limit:
         return s
     return s[: max(0, limit - 1)] + "…"
+
+
+def _status_snapshot_to_dict(snapshot: Any) -> dict[str, Any] | None:
+    """Serialize a StatusSnapshot dataclass (state/reason/changed_at)."""
+
+    if snapshot is None:
+        return None
+
+    try:
+        if is_dataclass(snapshot):
+            data = asdict(snapshot)
+        else:
+            data = {
+                "state": getattr(snapshot, "state", None),
+                "reason": getattr(snapshot, "reason", None),
+                "changed_at": getattr(snapshot, "changed_at", None),
+            }
+    except Exception:
+        return None
+
+    changed_at = data.get("changed_at")
+    if not isinstance(changed_at, (int, float)):
+        data["changed_at"] = None
+
+    state = data.get("state")
+    if state is not None and not isinstance(state, (str, int, float, bool)):
+        data["state"] = str(state)
+
+    reason = data.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        data["reason"] = str(reason)
+
+    return {
+        "state": data.get("state"),
+        "reason": data.get("reason"),
+        "changed_at": data.get("changed_at"),
+    }
 
 
 def _sanitize_diag_entry(payload: Any) -> dict[str, Any]:
@@ -600,13 +638,18 @@ async def async_get_config_entry_diagnostics(
             present_devices_seen_count = None
 
         coordinator_block = {
-            "is_polling": bool(getattr(coordinator, "_is_polling", False)),
             "known_devices_count": known_devices_count,
             "cache_items_count": cache_items_count,
             "last_poll_wall_ts": last_poll_wall,  # seconds since epoch (UTC)
             "stats": stats,
             "enabled_poll_targets_count": enabled_poll_targets_count,
             "present_devices_seen_count": present_devices_seen_count,
+            "api_status": _status_snapshot_to_dict(
+                getattr(coordinator, "api_status", None)
+            ),
+            "fcm_status": _status_snapshot_to_dict(
+                getattr(coordinator, "fcm_status", None)
+            ),
         }
         if setup_perf:
             coordinator_block["setup_performance"] = setup_perf
