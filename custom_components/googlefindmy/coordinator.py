@@ -5174,20 +5174,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self.push_updated([dev_id])
 
                     except TimeoutError as terr:
-                        _LOGGER.info(
-                            "Location request timed out for %s after %s seconds",
-                            dev_name,
-                            LOCATION_REQUEST_TIMEOUT_S,
-                        )
-                        self.increment_stat("timeouts")
-                        self._consecutive_timeouts += 1
-                        cycle_failed = True
-                        self.note_error(terr, where="poll_timeout", device=dev_name)
-                        if last_exception is None:
-                            last_exception = UpdateFailed(
-                                f"Location request timed out for {dev_name}"
+                        if self.is_fcm_connected:
+                            _LOGGER.warning(
+                                "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
+                                dev_name,
                             )
-                            last_exception.__cause__ = terr
+                            self.increment_stat("timeouts")
+                        else:
+                            _LOGGER.info(
+                                "Location request timed out for %s after %s seconds",
+                                dev_name,
+                                LOCATION_REQUEST_TIMEOUT_S,
+                            )
+                            self.increment_stat("timeouts")
+                            self._consecutive_timeouts += 1
+                            cycle_failed = True
+                            self.note_error(terr, where="poll_timeout", device=dev_name)
+                            if last_exception is None:
+                                last_exception = UpdateFailed(
+                                    f"Location request timed out for {dev_name}"
+                                )
+                                last_exception.__cause__ = terr
                     except SpotApiEmptyResponseError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -5238,7 +5245,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 if cycle_failed:
                     self._last_poll_result = "failed"
-                elif self._last_poll_result is None:
+                else:
                     self._last_poll_result = "success"
                 # Always publish the full snapshot so cached devices remain visible
                 ignored = self._get_ignored_set()
