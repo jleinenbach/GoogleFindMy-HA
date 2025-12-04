@@ -1910,28 +1910,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         entry_id = self._entry_id()
         for item in device.identifiers:
-            try:
-                domain, ident = item  # spec: 2-tuple (DOMAIN, identifier)
-            except (TypeError, ValueError):
-                if device.id not in self._warned_bad_identifier_devices:
-                    self._warned_bad_identifier_devices.add(device.id)
-                    _LOGGER.warning(
-                        "Device %s has a non-conforming identifier: %r "
-                        "(spec requires (DOMAIN, identifier) tuple); item ignored.",
-                        device.id,
-                        item,
-                    )
-                    self._diag.add_warning(
-                        code="malformed_device_identifier",
-                        context={
-                            "device_id": device.id,
-                            "device_name": self._device_display_name(device, ""),
-                            "offending_item": self._redact_text(repr(item)),
-                            "note": "Non-conforming identifier; ignored by parser.",
-                        },
-                    )
+            # Robust check: strict unpacking causes crashes with 3-tuple identifiers (e.g. 'hon')
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
                 continue
 
+            domain, ident = item
             if domain != DOMAIN or not isinstance(ident, str) or not ident:
                 continue
 
@@ -5851,12 +5834,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self.increment_stat("invalid_ts_drop_count")
             return False
 
-        if (
-            n_seen_norm is not None
-            and e_seen_norm is not None
-            and n_seen_norm > e_seen_norm
-        ):
-            return True
+        if n_seen_norm is not None:
+            # If we have no prior timestamp, any valid new timestamp is significant.
+            if e_seen_norm is None:
+                return True
+            # Standard monotonic check
+            if n_seen_norm > e_seen_norm:
+                return True
 
         if (
             n_seen_norm is not None
