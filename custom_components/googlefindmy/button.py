@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from typing import Any, NamedTuple
+from datetime import datetime
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from homeassistant.components.button import ButtonEntityDescription
 from homeassistant.config_entries import ConfigEntry
@@ -33,6 +34,13 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity as HARestoreEntity
+from homeassistant.util import dt as dt_util
+
+if TYPE_CHECKING:
+    from .ha_typing import RestoreEntity as RestoreEntityType
+else:
+    RestoreEntityType = HARestoreEntity
 
 try:
     from homeassistant.const import EntityCategory
@@ -853,7 +861,9 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity):
         )
 
 
-class GoogleFindMyButtonEntity(GoogleFindMyDeviceEntity, ButtonEntity):
+class GoogleFindMyButtonEntity(
+    GoogleFindMyDeviceEntity, ButtonEntity, RestoreEntityType
+):
     """Common helpers for all per-device buttons."""
 
     _attr_entity_registry_enabled_default = True
@@ -877,6 +887,29 @@ class GoogleFindMyButtonEntity(GoogleFindMyDeviceEntity, ButtonEntity):
             subentry_identifier=subentry_identifier,
             fallback_label=fallback_label,
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last press timestamp to avoid 'Unknown' state."""
+
+        await super().async_added_to_hass()
+        if (state := await self.async_get_last_state()) is None:
+            return
+
+        parse_datetime = getattr(dt_util, "parse_datetime", None)
+        restored = parse_datetime(state.state) if callable(parse_datetime) else None
+        if restored is None:
+            try:
+                restored = datetime.fromisoformat(state.state)
+            except (TypeError, ValueError):
+                return
+
+        self._attr_last_pressed = restored
+
+    def _update_last_pressed(self) -> None:
+        """Record the current timestamp and push state to Home Assistant."""
+
+        self._attr_last_pressed = dt_util.utcnow()
+        self.async_write_ha_state()
 
     async def async_trigger_coordinator_refresh(self) -> None:
         """Request a coordinator refresh via the entity service placeholder."""
@@ -973,6 +1006,7 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
                 {"device_id": device_id},
                 blocking=True,
             )
+            self._update_last_pressed()
             _LOGGER.info("Successfully submitted Play Sound request for %s", device_name)
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
@@ -1067,6 +1101,7 @@ class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
                 {"device_id": device_id},
                 blocking=True,
             )
+            self._update_last_pressed()
             _LOGGER.info("Successfully submitted Stop Sound request for %s", device_name)
         except Exception as err:
             _LOGGER.error("Error stopping sound on %s: %s", device_name, err)
@@ -1158,6 +1193,7 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
                 {"device_id": device_id},
                 blocking=False,  # non-blocking: avoid UI stall
             )
+            self._update_last_pressed()
             _LOGGER.info("Successfully submitted manual locate for %s", device_name)
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error submitting manual locate for %s: %s", device_name, err)
