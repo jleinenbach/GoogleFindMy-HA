@@ -213,7 +213,7 @@ def _status_snapshot_to_dict(snapshot: Any) -> dict[str, Any] | None:
         return None
 
     try:
-        if is_dataclass(snapshot):
+        if is_dataclass(snapshot) and not isinstance(snapshot, type):
             data = asdict(snapshot)
         else:
             data = {
