@@ -26,7 +26,7 @@ Google sometimes reports a **semantic name** (for example, "Kitchen Display") wi
 
 - **Semantic name**: The label reported by Google (case-insensitive). Avoid leading/trailing spaces.
 - **Latitude / Longitude**: Coordinates to substitute when this semantic name arrives.
-- **Detection radius (m)**: Approximates the device's connection range (for example, 15–20m for Bluetooth). Use a value that reflects how close you need to be for the beacon/device to report.
+- **Detection radius (m)**: Approximates the device's connection range. The default floor is 50m to mirror how far strong Bluetooth and Wi‑Fi beacons can reach and to ensure GPS fixes with <50m accuracy remain authoritative. Raise or lower this as needed for your environment.
 
 ### Save behavior
 

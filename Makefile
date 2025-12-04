@@ -67,6 +67,8 @@ install-ha-stubs:
 test-stubs:
 	@echo "[make test-stubs] Installing Home Assistant test dependencies"
 	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+	@echo "[make test-stubs] Preloading optional integration drivers"
+	@$(PYTHON) -m pip install --upgrade -r custom_components/googlefindmy/requirements-dev.txt
 
 test-deps:
 	@echo "[make test-deps] Installing stub and integration development dependencies"
