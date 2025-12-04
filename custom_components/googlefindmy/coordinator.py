@@ -1910,28 +1910,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         entry_id = self._entry_id()
         for item in device.identifiers:
-            try:
-                domain, ident = item  # spec: 2-tuple (DOMAIN, identifier)
-            except (TypeError, ValueError):
-                if device.id not in self._warned_bad_identifier_devices:
-                    self._warned_bad_identifier_devices.add(device.id)
-                    _LOGGER.warning(
-                        "Device %s has a non-conforming identifier: %r "
-                        "(spec requires (DOMAIN, identifier) tuple); item ignored.",
-                        device.id,
-                        item,
-                    )
-                    self._diag.add_warning(
-                        code="malformed_device_identifier",
-                        context={
-                            "device_id": device.id,
-                            "device_name": self._device_display_name(device, ""),
-                            "offending_item": self._redact_text(repr(item)),
-                            "note": "Non-conforming identifier; ignored by parser.",
-                        },
-                    )
+            # Robust check: strict unpacking causes crashes with 3-tuple identifiers (e.g. 'hon')
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
                 continue
 
+            domain, ident = item
             if domain != DOMAIN or not isinstance(ident, str) or not ident:
                 continue
 
@@ -5803,28 +5786,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return R * c
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
-        """Return True if the update carries meaningful new information.
+        """Return True when the update should be applied (clamped or accepted).
 
-        This function acts as the primary gate to prevent redundant or low-value
-        updates from churning the state machine and recorder.
-
-        Criteria (in order of evaluation):
-          1. No previous data exists for the device.
-          2. The `last_seen` timestamp of the new data is newer than the existing one.
-          3. If timestamps are identical, an update is significant if:
-             a) The position has moved more than `self._movement_threshold` meters, OR
-             b) The accuracy has improved by at least 20% (smaller radius is better), OR
-             c) The qualitative data has changed (source, status, or semantic name).
-
-        Notes:
-          * This replaces a simple "same last_seen == duplicate" heuristic with a more
-            intelligent assessment of data quality.
-          * Stale-guard: If a normalized `last_seen` is **older** than the existing one,
-            we drop it and reuse `invalid_ts_drop_count` to track this case to avoid
-            adding a new counter (see diagnostics & stats entity mapping).
-          * It is assumed that a staleness guard has already discarded updates where
-            `new_seen` is in the far past (< 2000) or beyond the accepted future drift
-            tolerance.
+        The gate now focuses on **correctness** over throttling:
+        - Do not reject fresh data just because it is close in time; only drop
+          truly stale packets (older than what we already hold) or invalid
+          timestamps.
+        - Use a dynamic "error circle" to decide whether to move the pin: the
+          threshold is ``max(self._movement_threshold, incoming_accuracy)`` so
+          poor fixes do not cause jitter while good fixes still register short
+          trips.
+        - If movement is insignificant, we *clamp* the new coordinates back to
+          the cached ones but still accept the update so "last seen" and
+          presence metadata advance.
         """
         existing = self._device_location_data.get(device_id)
         if not existing:
@@ -5851,70 +5825,63 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self.increment_stat("invalid_ts_drop_count")
             return False
 
-        if (
-            n_seen_norm is not None
-            and e_seen_norm is not None
-            and n_seen_norm > e_seen_norm
-        ):
-            return True
-
-        if (
-            n_seen_norm is not None
-            and e_seen_norm is not None
-            and n_seen_norm == e_seen_norm
-        ):
-            n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
-            e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
-            if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
-                try:
-                    e_lat_f = float(cast(float, e_lat))
-                    e_lon_f = float(cast(float, e_lon))
-                    n_lat_f = float(cast(float, n_lat))
-                    n_lon_f = float(cast(float, n_lon))
-                    dist = self._haversine_distance(e_lat_f, e_lon_f, n_lat_f, n_lon_f)
-                    if dist > float(self._movement_threshold):
-                        return True
-                except Exception:
-                    # Ignore distance errors and continue checks.
-                    pass
-
-            n_acc = new_data.get("accuracy")
-            e_acc = existing.get("accuracy")
-            if isinstance(n_acc, (int, float)) and isinstance(e_acc, (int, float)):
-                try:
-                    if float(n_acc) < float(e_acc) * 0.8:  # >=20% better accuracy
-                        return True
-                except Exception:
-                    pass
-
-            n_alt = new_data.get("altitude")
-            e_alt = existing.get("altitude")
-            if n_alt is None or e_alt is None:
-                if n_alt != e_alt:
-                    return True
-            else:
-                try:
-                    n_alt_f = float(n_alt)
-                    e_alt_f = float(e_alt)
-                except (TypeError, ValueError):
-                    if n_alt != e_alt:
-                        return True
-                else:
-                    if not (math.isfinite(n_alt_f) and math.isfinite(e_alt_f)):
-                        if n_alt_f != e_alt_f:
-                            return True
-                    elif abs(n_alt_f - e_alt_f) >= _ALTITUDE_SIGNIFICANT_DELTA_M:
-                        return True
-
-        # Source or qualitative changes can still be valuable.
-        if new_data.get("is_own_report") != existing.get("is_own_report"):
-            return True
+        # Qualitative changes always matter regardless of spatial checks.
         if new_data.get("status") != existing.get("status"):
+            return True
+        if new_data.get("source_label") != existing.get("source_label"):
+            return True
+        if new_data.get("is_own_report") != existing.get("is_own_report"):
             return True
         if new_data.get("semantic_name") != existing.get("semantic_name"):
             return True
 
-        return False
+        # Distance and accuracy based decisions (dynamic error circle)
+        n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
+        e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
+        n_acc = new_data.get("accuracy")
+        e_acc = existing.get("accuracy")
+
+        distance: float | None = None
+        if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
+            try:
+                e_lat_f = float(cast(float, e_lat))
+                e_lon_f = float(cast(float, e_lon))
+                n_lat_f = float(cast(float, n_lat))
+                n_lon_f = float(cast(float, n_lon))
+                distance = self._haversine_distance(e_lat_f, e_lon_f, n_lat_f, n_lon_f)
+            except Exception:
+                distance = None
+
+        movement_threshold = float(self._movement_threshold)
+        if isinstance(n_acc, (int, float)):
+            try:
+                n_acc_f = float(n_acc)
+                if math.isfinite(n_acc_f):
+                    movement_threshold = max(movement_threshold, n_acc_f)
+            except (TypeError, ValueError):
+                pass
+
+        if (
+            isinstance(n_acc, (int, float))
+            and isinstance(e_acc, (int, float))
+            and math.isfinite(float(n_acc))
+            and math.isfinite(float(e_acc))
+            and float(n_acc) <= float(e_acc) * 0.5
+        ):
+            # Accuracy jump: snap to the better fix even if distance is small.
+            return True
+
+        if distance is not None and distance > movement_threshold:
+            # Significant move: accept and advance coordinates.
+            return True
+
+        # Stationary heartbeat: keep presence metadata while clamping position to
+        # avoid GPS jitter. We preserve timing/battery but revert coordinates to
+        # the cached values before committing the update.
+        if distance is not None:
+            for key in ("latitude", "longitude", "accuracy", "altitude"):
+                new_data[key] = existing.get(key)
+        return True
 
     def get_device_last_seen(self, device_id: str) -> datetime | None:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
