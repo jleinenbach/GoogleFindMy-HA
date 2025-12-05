@@ -50,11 +50,16 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
-import gpsoauth
-
 # Prefer relative imports inside the package for robustness
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
 from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
+from .gpsoauth_loader import (
+    GpsoauthModule,
+    require_gpsoauth,
+)
+from .gpsoauth_loader import (
+    gpsoauth as _gpsoauth_proxy,
+)
 from .token_cache import TokenCache
 from .token_retrieval import (
     InvalidAasTokenError,
@@ -69,6 +74,7 @@ _LOGGER = logging.getLogger(__name__)
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 _APP_ID: str = "com.google.android.apps.adm"
 _AUTH_METHOD_INDIVIDUAL_TOKENS = "individual_tokens"
+gpsoauth = _gpsoauth_proxy
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +600,8 @@ async def _perform_oauth_with_provided_aas(
     """
 
     def _run() -> str:
+        gpsoauth: GpsoauthModule = require_gpsoauth()
+
         resp = gpsoauth.perform_oauth(
             username,
             aas_token,

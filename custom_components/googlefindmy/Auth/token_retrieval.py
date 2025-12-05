@@ -12,7 +12,6 @@ import random
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import gpsoauth
 from custom_components.googlefindmy.Auth.aas_token_retrieval import (
     _mask_email_for_logs,
     async_get_aas_token,
@@ -20,11 +19,28 @@ from custom_components.googlefindmy.Auth.aas_token_retrieval import (
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
+from .gpsoauth_loader import (
+    GpsoauthModule,
+    require_gpsoauth,
+)
+from .gpsoauth_loader import (
+    gpsoauth as _gpsoauth_proxy,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
 
 class InvalidAasTokenError(RuntimeError):
     """Raised when the cached AAS token is rejected by gpsoauth."""
+
+
+def _gpsoauth() -> GpsoauthModule:
+    """Return the optional gpsoauth module with runtime import."""
+
+    return require_gpsoauth()
+
+
+gpsoauth = _gpsoauth_proxy
 
 
 def _is_invalid_aas_error_text(text: str) -> bool:
@@ -167,6 +183,8 @@ def _perform_oauth_sync(
     request_app = (
         "com.google.android.gms" if play_services else "com.google.android.apps.adm"
     )
+
+    gpsoauth = _gpsoauth()
 
     try:
         auth_response: dict[str, Any] = gpsoauth.perform_oauth(
