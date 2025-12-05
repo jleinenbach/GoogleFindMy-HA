@@ -555,9 +555,10 @@ class TTLPolicy:
                     # If clearly shorter than our current model (>10% shorter), recalibrate immediately.
                     if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
                         self.log.warning(
-                            "Unexpected short TTL – recalibrating best known TTL."
+                            "Unexpected short TTL – recalibrating best known TTL with safety buffer."
                         )
-                        self._set(self.k_bestttl, age_sec)
+                        safe_calibration = age_sec * 0.95
+                        self._set(self.k_bestttl, safe_calibration)
                 except (ValueError, TypeError) as e:
                     self.log.debug("Recalibration check failed: %s", e)
 
@@ -770,9 +771,10 @@ class AsyncTTLPolicy(TTLPolicy):
                     try:
                         if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
                             self.log.warning(
-                                "Unexpected short TTL – recalibrating best known TTL (async)."
+                                "Unexpected short TTL – recalibrating best known TTL with safety buffer (async)."
                             )
-                            await self._aset(self.k_bestttl, age_sec)
+                            safe_calibration = age_sec * 0.95
+                            await self._aset(self.k_bestttl, safe_calibration)
                     except (ValueError, TypeError) as e:
                         self.log.debug("Recalibration check failed (async): %s", e)
             return await self._do_refresh_async(now)
