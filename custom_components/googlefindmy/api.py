@@ -24,7 +24,6 @@ Token/Auth handling (Step 5.1-D):
 from __future__ import annotations
 
 import asyncio
-import datetime
 import logging
 import time
 from collections import OrderedDict
@@ -889,67 +888,6 @@ class GoogleFindMyAPI:
 
             payload = self._process_device_list_response(result_hex)
             _LOGGER.debug("nbe_list_devices: count=%d", len(payload))
-
-            for device in payload:
-                if not isinstance(device, dict):
-                    _LOGGER.debug(
-                        "[nbe_list_devices] Device <non-dict %s> skipped", type(device).__name__
-                    )
-                    continue
-
-                device_id = device.get("id") or device.get("canonicalId") or device.get("device_id")
-                device_name = device.get("name") or device.get("displayName") or "<no name>"
-
-                masked_id = "<unknown>"
-                if device_id:
-                    device_id_str = str(device_id)
-                    masked_id = f"...{device_id_str[-4:]}" if len(device_id_str) > 4 else f"...{device_id_str}"
-
-                latitude = device.get("latitude")
-                longitude = device.get("longitude")
-                location_status = "loc present" if latitude is not None and longitude is not None else "loc missing"
-
-                last_seen_raw = device.get("last_seen")
-                last_seen_iso = None
-                if isinstance(last_seen_raw, (int, float)):
-                    try:
-                        last_seen_iso = datetime.datetime.fromtimestamp(last_seen_raw).isoformat()
-                    except (OverflowError, OSError, ValueError, TypeError):
-                        last_seen_iso = None
-
-                known_keys = {
-                    "id",
-                    "name",
-                    "latitude",
-                    "longitude",
-                    "accuracy",
-                    "last_seen",
-                    "battery_level",
-                    "is_own_report",
-                    "can_ring",
-                    "device_id",
-                    "canonicalId",
-                    "displayName",
-                }
-                ignored_keys = sorted(
-                    str(k) for k in device.keys() if k not in known_keys
-                )
-
-                seen_value = (
-                    f"{last_seen_raw} ({last_seen_iso})" if last_seen_iso else last_seen_raw
-                )
-
-                _LOGGER.debug(
-                    "[nbe_list_devices] Device \"%s\" (%s): %s | acc=%s | seen=%s | bat=%s | own=%s | ignored_keys=%s",
-                    masked_id,
-                    device_name,
-                    location_status,
-                    device.get("accuracy"),
-                    seen_value,
-                    device.get("battery_level"),
-                    device.get("is_own_report"),
-                    ignored_keys,
-                )
             return payload
 
         except asyncio.CancelledError:
