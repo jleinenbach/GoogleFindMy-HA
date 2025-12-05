@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import binascii
 import datetime
-from importlib import import_module
+import logging
 import math
 import os
 import subprocess
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
 from google.protobuf.message import Message
@@ -22,7 +23,6 @@ except ImportError:
     ZoneInfo = None  # type: ignore
 
 if TYPE_CHECKING:
-    import google.protobuf.text_format as text_format  # type: ignore[import-not-found]
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
 from custom_components.googlefindmy.ProtoDecoders import (
@@ -31,6 +31,7 @@ from custom_components.googlefindmy.ProtoDecoders import (
     LocationReportsUpload_pb2,
 )
 
+_LOGGER = logging.getLogger(__name__)
 
 _text_format_module: Any | None = None
 
@@ -51,7 +52,7 @@ class _DecryptLocationsCallable(Protocol):
         self,
         device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
         *,
-        cache: "TokenCache",
+        cache: TokenCache,
     ) -> list[dict[str, Any]] | None:
         ...
 
@@ -125,32 +126,31 @@ def custom_message_formatter(
                         lines.append(
                             f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
                         )
-            else:
-                if field.message_type.name == "Time":
-                    # seconds (+ optional nanos) -> float seconds
-                    secs = getattr(value, "seconds", 0)
-                    nanos = getattr(value, "nanos", 0)
-                    unix_time = float(secs) + float(nanos) / 1e9
+            elif field.message_type.name == "Time":
+                # seconds (+ optional nanos) -> float seconds
+                secs = getattr(value, "seconds", 0)
+                nanos = getattr(value, "nanos", 0)
+                unix_time = float(secs) + float(nanos) / 1e9
 
-                    dt_utc = datetime.datetime.fromtimestamp(unix_time, tz=datetime.UTC)
-                    utc_str = dt_utc.isoformat().replace("+00:00", "Z")
-                    if display_tz_name == "UTC":
-                        lines.append(
-                            f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}}}"
-                        )
-                    else:
-                        dt_disp = dt_utc.astimezone(display_tz)
-                        disp_str = dt_disp.isoformat()
-                        lines.append(
-                            f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}  {display_tz_name}: {disp_str}\n{indent}}}"
-                        )
-                else:
-                    nested_message = custom_message_formatter(
-                        value, f"{indent}  ", _as_one_line
-                    )
+                dt_utc = datetime.datetime.fromtimestamp(unix_time, tz=datetime.UTC)
+                utc_str = dt_utc.isoformat().replace("+00:00", "Z")
+                if display_tz_name == "UTC":
                     lines.append(
-                        f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
+                        f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}}}"
                     )
+                else:
+                    dt_disp = dt_utc.astimezone(display_tz)
+                    disp_str = dt_disp.isoformat()
+                    lines.append(
+                        f"{indent}{field.name} {{\n{indent}  utc: {utc_str}\n{indent}  {display_tz_name}: {disp_str}\n{indent}}}"
+                    )
+            else:
+                nested_message = custom_message_formatter(
+                    value, f"{indent}  ", _as_one_line
+                )
+                lines.append(
+                    f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
+                )
         else:
             lines.append(f"{indent}{field.name}: {value}")
     return "\n".join(lines)
@@ -490,8 +490,7 @@ def _merge_semantics_if_near_ts(
 
     for n in normed_cands:
         ts = _extract_ts(n.get("last_seen"))
-        if ts > latest_seen:
-            latest_seen = ts
+        latest_seen = max(latest_seen, ts)
 
         if (
             isinstance(n.get("latitude"), (int, float))
@@ -527,7 +526,7 @@ def _merge_semantics_if_near_ts(
 def get_devices_with_location(
     device_list: DeviceUpdate_pb2.DevicesList,
     *,
-    cache: "TokenCache" | None = None,
+    cache: TokenCache | None = None,
 ) -> list[dict[str, Any]]:
     """Extract one consolidated row per canonic device ID from a device list.
 
@@ -578,6 +577,23 @@ def get_devices_with_location(
             canonic_ids = []
 
         device_name = getattr(device, "userDefinedDeviceName", None) or ""
+
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            debug_fields = [f.name for f, _ in device.ListFields()]
+            _LOGGER.debug("Device '%s' raw fields: %s", device_name, debug_fields)
+
+            if device.HasField("information"):
+                info_fields = [f.name for f, _ in device.information.ListFields()]
+                _LOGGER.debug("  -> information fields: %s", info_fields)
+
+                if device.information.HasField("locationInformation"):
+                    loc_fields = [
+                        f.name
+                        for f, _ in device.information.locationInformation.ListFields()
+                    ]
+                    _LOGGER.debug(
+                        "    -> locationInformation fields: %s", loc_fields
+                    )
 
         # Try decryption ONCE per device; share across all its canonic IDs
         location_candidates: list[dict[str, Any]] = []
