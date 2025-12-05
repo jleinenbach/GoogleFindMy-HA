@@ -474,6 +474,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     recent_location_time = locations_proto.recentLocationTimestamp
     network_locations: list[Any] = list(locations_proto.networkLocations)
     network_locations_time: list[Any] = list(locations_proto.networkLocationTimestamps)
+
+    len_diff = len(network_locations) - len(network_locations_time)
+    if len_diff > 0:
+        network_locations_time.extend([None] * len_diff)
+    elif len_diff < 0:
+        network_locations_time = network_locations_time[: len(network_locations)]
+
     if locations_proto.HasField("recentLocation"):
         network_locations.append(recent_location)
         network_locations_time.append(recent_location_time)
