@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
 
@@ -33,6 +34,17 @@ if importlib.util.find_spec("homeassistant") is None:
         "before executing pytest."
     )
 
+import homeassistant.components.http as ha_http
+
+if not hasattr(ha_http, "start_http_server_and_save_config"):
+
+    def start_http_server_and_save_config(*_: Any, **__: Any) -> None:
+        """Fallback stub for HA builds without HTTP server helper."""
+
+        return None
+
+    ha_http.start_http_server_and_save_config = start_http_server_and_save_config
+
 _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE = (
     importlib.util.find_spec("pytest_homeassistant_custom_component") is not None
 )
@@ -42,6 +54,20 @@ if not _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
         "Missing dependency: pytest-homeassistant-custom-component. Install it together "
         "with homeassistant before running the test suite."
     )
+
+
+@pytest.fixture(autouse=True)
+def disable_http_server() -> Iterable[None]:
+    """Stub Home Assistant's HTTP server helper for plugin patches."""
+
+    if not hasattr(ha_http, "start_http_server_and_save_config"):
+        ha_http.start_http_server_and_save_config = start_http_server_and_save_config
+
+    with patch(
+        "homeassistant.components.http.start_http_server_and_save_config",
+        create=True,
+    ):
+        yield
 
 _CONST_MODULE = load_googlefindmy_const_module()
 _SERVICE_DEVICE_NAME: str = getattr(

@@ -43,19 +43,28 @@ from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
 
-import gpsoauth
-
 from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
+from .gpsoauth_loader import (
+    GpsoauthModule,
+    load_gpsoauth_exceptions,
+    require_gpsoauth,
+)
+from .gpsoauth_loader import (
+    gpsoauth as _gpsoauth_proxy,
+)
 from .token_cache import TokenCache, async_get_all_cached_values
 from .username_provider import username_string
 
 _LOGGER = logging.getLogger(__name__)
 
-gpsoauth_exceptions: ModuleType | None = None
-try:  # pragma: no cover - defensive optional import layout
-    from gpsoauth import exceptions as gpsoauth_exceptions
-except Exception:  # noqa: BLE001
-    gpsoauth_exceptions = None
+gpsoauth_exceptions: ModuleType | None = load_gpsoauth_exceptions()
+gpsoauth = _gpsoauth_proxy
+
+
+def _gpsoauth() -> GpsoauthModule:
+    """Import the optional gpsoauth module on demand."""
+
+    return require_gpsoauth()
 
 _JWT_SEGMENT_MIN_COUNT = 2
 
@@ -217,7 +226,7 @@ async def _exchange_oauth_for_aas(
 
     def _run() -> dict[str, Any]:
         # gpsoauth.exchange_token(username, oauth_token, android_id) is blocking.
-        return gpsoauth.exchange_token(username, oauth_token, android_id)
+        return _gpsoauth().exchange_token(username, oauth_token, android_id)
 
     loop = asyncio.get_running_loop()
 
