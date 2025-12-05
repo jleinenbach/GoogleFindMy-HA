@@ -4699,6 +4699,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     slot = self._device_caps.setdefault(dev_id, {})
                     slot["can_ring"] = can_ring
 
+            # 2.2) Seed the location cache with list-provided coordinates when available
+            for dev in filtered_devices:
+                dev_id = dev["id"]
+                if dev_id in ignored:
+                    continue
+
+                lat = dev.get("latitude")
+                lon = dev.get("longitude")
+                if lat is None or lon is None:
+                    continue
+
+                self.update_device_cache(dev_id, dev)
+
             # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
             self._ensure_service_device_exists()
             created = self._ensure_registry_for_devices(filtered_devices, ignored)
