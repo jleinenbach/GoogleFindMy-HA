@@ -1,6 +1,7 @@
 # tests/test_coordinator_significance.py
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -21,6 +22,17 @@ def _make_coordinator(existing: dict[str, Any]) -> GoogleFindMyCoordinator:
     coordinator._is_on_hass_loop = lambda: True
     coordinator._run_on_hass_loop = lambda *_args, **_kwargs: None
     return coordinator
+
+
+def _stat_recorder() -> tuple[dict[str, int], Callable[[str], None]]:
+    """Return a stat counter map and increment callback for assertions."""
+
+    counts: dict[str, int] = {}
+
+    def _increment(stat_name: str) -> None:
+        counts[stat_name] = counts.get(stat_name, 0) + 1
+
+    return counts, _increment
 
 
 def test_same_timestamp_with_new_altitude_is_significant() -> None:
@@ -55,6 +67,66 @@ def test_same_timestamp_with_altitude_delta_is_significant() -> None:
     new_data = {**existing, "altitude": 126.5}
 
     assert coordinator._is_significant_update("device-1", new_data)
+
+
+def test_accuracy_gain_is_significant_even_when_stationary() -> None:
+    """A meaningful accuracy improvement should trigger an update without movement."""
+
+    existing = {
+        "latitude": 52.52,
+        "longitude": 13.405,
+        "accuracy": 150.0,
+        "last_seen": 1_700_000_000.0,
+    }
+    coordinator = _make_coordinator(existing)
+    stat_counts, increment = _stat_recorder()
+    coordinator.increment_stat = increment
+
+    new_data = {
+        **existing,
+        "latitude": existing["latitude"] + 0.00005,
+        "longitude": existing["longitude"] + 0.00005,
+        "accuracy": 100.0,  # ~33 % improvement triggers accuracy gate
+        "last_seen": existing["last_seen"] + 15,
+    }
+
+    assert coordinator._is_significant_update("device-1", new_data)
+    assert stat_counts.get("significant_accuracy") == 1
+
+
+def test_stationary_update_clamps_coordinates_but_refreshes_metadata() -> None:
+    """Stationary payloads should clamp coordinates while advancing freshness markers."""
+
+    existing = {
+        "latitude": 40.7128,
+        "longitude": -74.006,
+        "accuracy": 150.0,
+        "last_seen": 1_700_000_000.0,
+        "status": "coordinate",
+    }
+    coordinator = _make_coordinator(existing)
+    stat_counts, increment = _stat_recorder()
+    coordinator.increment_stat = increment
+
+    new_payload = {
+        "latitude": existing["latitude"] + 0.0003,  # ~33 m delta, below accuracy
+        "longitude": existing["longitude"] + 0.0003,
+        "accuracy": 115.0,
+        "last_seen": existing["last_seen"] + 30,
+        "battery_level": 0.55,
+        "status": existing["status"],
+    }
+
+    coordinator.update_device_cache("device-1", new_payload)
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["latitude"] == pytest.approx(existing["latitude"])
+    assert cached["longitude"] == pytest.approx(existing["longitude"])
+    assert cached["accuracy"] == pytest.approx(existing["accuracy"])
+    assert cached["last_seen"] == pytest.approx(new_payload["last_seen"])
+    assert cached["battery_level"] == pytest.approx(new_payload["battery_level"])
+    assert cached["status"] == "Stationary (Clamped)"
+    assert stat_counts.get("clamped_updates") == 1
 
 
 def test_update_cache_keeps_coordinates_when_semantic_refresh_arrives() -> None:
