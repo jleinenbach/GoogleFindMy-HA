@@ -807,6 +807,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             "invalid_ts_drop_count": 0,  # invalid or stale (< existing) timestamps
             "future_ts_drop_count": 0,  # timestamps too far in the future
             "non_significant_dropped": 0,  # drops by significance gate
+            "drop_reason_invalid_ts": 0,  # invalid/stale timestamps (detail bucket)
+            "clamped_updates": 0,  # accepted but coordinates reverted to cache
+            "significant_move": 0,  # accepted due to true movement
+            "significant_accuracy": 0,  # accepted due to improved accuracy
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
@@ -5807,19 +5811,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return R * c
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
-        """Return True when the update should be applied (clamped or accepted).
+        """Return True when the incoming payload should update the cache.
 
-        The gate now focuses on **correctness** over throttling:
-        - Do not reject fresh data just because it is close in time; only drop
-          truly stale packets (older than what we already hold) or invalid
-          timestamps.
-        - Use a dynamic "error circle" to decide whether to move the pin: the
-          threshold is ``max(self._movement_threshold, incoming_accuracy)`` so
-          poor fixes do not cause jitter while good fixes still register short
-          trips.
-        - If movement is insignificant, we *clamp* the new coordinates back to
-          the cached ones but still accept the update so "last seen" and
-          presence metadata advance.
+        The gate records why a payload was accepted and favors freshness over
+        unnecessary drops:
+
+        - Reject only invalid timestamps (pre-2000, future-dated, or older than
+          the cached entry) while tracking the drop reason.
+        - Treat a 30 % accuracy improvement (``<= 0.7`` of the previous
+          accuracy) as significant even without movement.
+        - Let qualitative metadata changes (status, semantic labels, battery
+          level, source markers) through so presence stays current.
+        - Consider movement significant when the great-circle distance exceeds
+          the dynamic error circle (``max(self._movement_threshold,
+          incoming_accuracy)``) and record the event in ``significant_move``.
+        - Clamp stationary updates: keep metadata and timestamps, restore cached
+          coordinates, and only stamp a stationary status marker when the
+          metadata itself has not changed. All clamped heartbeats increment
+          ``clamped_updates`` to avoid GPS jitter while keeping the sensor
+          fresh.
         """
         existing = self._device_location_data.get(device_id)
         if not existing:
@@ -5830,6 +5840,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if n_seen_norm is not None:
             if n_seen_norm < 946684800.0:  # < 2000-01-01
                 self.increment_stat("invalid_ts_drop_count")
+                self.increment_stat("drop_reason_invalid_ts")
                 return False
             if n_seen_norm > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
                 self.increment_stat("future_ts_drop_count")
@@ -5844,17 +5855,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             and n_seen_norm < e_seen_norm
         ):
             self.increment_stat("invalid_ts_drop_count")
+            self.increment_stat("drop_reason_invalid_ts")
             return False
 
-        # Qualitative changes always matter regardless of spatial checks.
-        if new_data.get("status") != existing.get("status"):
-            return True
-        if new_data.get("source_label") != existing.get("source_label"):
-            return True
-        if new_data.get("is_own_report") != existing.get("is_own_report"):
-            return True
-        if new_data.get("semantic_name") != existing.get("semantic_name"):
-            return True
+        metadata_changed = (
+            new_data.get("status") != existing.get("status")
+            or new_data.get("source_label") != existing.get("source_label")
+            or new_data.get("is_own_report") != existing.get("is_own_report")
+            or new_data.get("semantic_name") != existing.get("semantic_name")
+            or new_data.get("battery_level") != existing.get("battery_level")
+        )
 
         # Distance and accuracy based decisions (dynamic error circle)
         n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
@@ -5887,13 +5897,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             and isinstance(e_acc, (int, float))
             and math.isfinite(float(n_acc))
             and math.isfinite(float(e_acc))
-            and float(n_acc) <= float(e_acc) * 0.5
+            and float(n_acc) <= float(e_acc) * 0.7
         ):
             # Accuracy jump: snap to the better fix even if distance is small.
+            self.increment_stat("significant_accuracy")
             return True
 
         if distance is not None and distance > movement_threshold:
             # Significant move: accept and advance coordinates.
+            self.increment_stat("significant_move")
             return True
 
         # Stationary heartbeat: keep presence metadata while clamping position to
@@ -5901,7 +5913,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # the cached values before committing the update.
         if distance is not None:
             for key in ("latitude", "longitude", "accuracy", "altitude"):
-                new_data[key] = existing.get(key)
+                if key in existing:
+                    new_data[key] = existing[key]
+            if not metadata_changed:
+                new_data["status"] = "Stationary (Clamped)"
+            self.increment_stat("clamped_updates")
+            return True
+
+        if metadata_changed:
+            return True
+
         return True
 
     def get_device_last_seen(self, device_id: str) -> datetime | None:
