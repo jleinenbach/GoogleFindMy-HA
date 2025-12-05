@@ -12,6 +12,7 @@ from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.exceptions import HomeAssistantError
 
+import custom_components.googlefindmy as integration
 from custom_components.googlefindmy import (
     ConfigEntrySubentryDefinition,
     ConfigEntrySubEntryManager,
@@ -32,6 +33,7 @@ from custom_components.googlefindmy.const import (
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_ACCURACY_THRESHOLD,
     OPT_OPTIONS_SCHEMA_VERSION,
+    OPT_SEMANTIC_LOCATIONS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
@@ -881,3 +883,63 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
     confirm = await flow.async_step_migrate_complete({})
     assert confirm["type"] == "abort"
     assert confirm["reason"] == "migration_successful"
+
+
+@pytest.mark.asyncio
+async def test_soft_migrate_data_to_options_tracks_option_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Soft migration should copy all declared option keys from data to options."""
+
+    dynamic_option = "semantic_locations_v2"
+    dynamic_value = {"home": "device-home"}
+    entry = _EntryStub()
+    entry.data = {dynamic_option: dynamic_value}
+
+    class _ConfigEntriesStub:
+        def __init__(self) -> None:
+            self.updated: list[dict[str, Any]] = []
+
+        def async_update_entry(self, target: Any, **kwargs: Any) -> None:
+            self.updated.append(dict(kwargs))
+            if "options" in kwargs:
+                target.options = kwargs["options"]
+
+    hass = SimpleNamespace(config_entries=_ConfigEntriesStub())
+
+    monkeypatch.setattr(
+        integration,
+        "OPTION_KEYS",
+        integration.OPTION_KEYS + (dynamic_option,),
+    )
+
+    await integration._async_soft_migrate_data_to_options(hass, entry)
+
+    assert entry.options[dynamic_option] == dynamic_value
+    assert hass.config_entries.updated[-1]["options"][dynamic_option] == dynamic_value
+
+
+@pytest.mark.asyncio
+async def test_soft_migrate_data_to_options_copies_semantic_locations() -> None:
+    """Soft migration should move semantic location mappings into options."""
+
+    entry = _EntryStub()
+    semantic_locations = {"home": {"lat": 1.0, "lon": 2.0}}
+    entry.data = {OPT_SEMANTIC_LOCATIONS: semantic_locations}
+
+    class _ConfigEntriesStub:
+        def __init__(self) -> None:
+            self.updated: list[dict[str, Any]] = []
+
+        def async_update_entry(self, target: Any, **kwargs: Any) -> None:
+            self.updated.append(dict(kwargs))
+            target.options = kwargs.get("options", target.options)
+
+    hass = SimpleNamespace(config_entries=_ConfigEntriesStub())
+
+    await integration._async_soft_migrate_data_to_options(hass, entry)
+
+    assert entry.options[OPT_SEMANTIC_LOCATIONS] == semantic_locations
+    assert hass.config_entries.updated[-1]["options"][OPT_SEMANTIC_LOCATIONS] == (
+        semantic_locations
+    )

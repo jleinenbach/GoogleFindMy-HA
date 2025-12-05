@@ -58,7 +58,9 @@ from .ProtoDecoders.decoder import (
     _select_best_location as _decoder_select_best_location,
 )
 from .ProtoDecoders.decoder import (
-    get_canonic_ids,
+    get_canonic_ids as _decoder_get_canonic_ids,
+)
+from .ProtoDecoders.decoder import (
     get_devices_with_location,
     parse_device_list_protobuf,
 )
@@ -82,6 +84,10 @@ def _short_err(e: Exception | str) -> str:
     if len(msg) > _MAX_ERR_CHARS:
         return msg[: _MAX_ERR_CHARS - 3] + "..."
     return msg
+
+
+# Backward-compatible export for tests and legacy call sites.
+get_canonic_ids = _decoder_get_canonic_ids
 
 
 def _is_multi_entry_guard_message(msg: str) -> bool:
@@ -545,34 +551,70 @@ class GoogleFindMyAPI:
             A list of dictionaries, each representing a device with its basic info.
         """
         parsed = parse_device_list_protobuf(result_hex)
+        token_cache = self._decoder_token_cache()
         cap_index = _build_can_ring_index(
             parsed,
-            cache=self._decoder_token_cache(),
+            cache=token_cache,
         )
         if cap_index:
             self._device_capabilities.update(cap_index)
 
         devices_by_id: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        for device_name, canonic_id in get_canonic_ids(parsed):
-            canonical_id = str(canonic_id)
-            existing = devices_by_id.get(canonical_id)
-            can_ring_hint = self._device_capabilities.get(canonical_id)
+        device_rows = get_devices_with_location(parsed, cache=token_cache)
+        if device_rows:
+            for device in device_rows:
+                canonical_id = device.get("id")
+                if not isinstance(canonical_id, str) or not canonical_id:
+                    continue
 
-            if existing is not None:
+                normalized = dict(device)
+                last_seen = normalized.get("last_seen")
+                if isinstance(last_seen, dict):
+                    seconds = last_seen.get("seconds")
+                    nanos = last_seen.get("nanos", 0)
+                    if isinstance(seconds, (int, float)):
+                        normalized["last_seen"] = float(seconds) + float(nanos or 0) / 1e9
+                elif hasattr(last_seen, "seconds"):
+                    seconds = getattr(last_seen, "seconds", None)
+                    nanos = getattr(last_seen, "nanos", 0)
+                    if isinstance(seconds, (int, float)):
+                        normalized["last_seen"] = float(seconds) + float(nanos or 0) / 1e9
+
+                accuracy = normalized.get("accuracy")
+                if accuracy is None:
+                    accuracy_meters = normalized.get("accuracy_meters")
+                    if isinstance(accuracy_meters, (int, float)):
+                        normalized["accuracy"] = float(accuracy_meters)
+
+                for key in ("latitude", "longitude"):
+                    val = normalized.get(key)
+                    if isinstance(val, bool):
+                        continue
+                    if isinstance(val, int):
+                        normalized[key] = float(val) / 1e7
+                    elif isinstance(val, float) and abs(val) > 180:
+                        normalized[key] = val / 1e7
+
+                can_ring_hint = self._device_capabilities.get(canonical_id)
                 if can_ring_hint is not None:
-                    existing["can_ring"] = bool(can_ring_hint)
-                if not existing.get("name") and device_name:
-                    existing["name"] = device_name
-                continue
+                    normalized["can_ring"] = bool(can_ring_hint)
 
-            item: dict[str, Any] = {
-                "name": device_name,
-                "id": canonical_id,
-                "device_id": canonical_id,
-            }
-            if can_ring_hint is not None:
-                item["can_ring"] = bool(can_ring_hint)
-            devices_by_id[canonical_id] = item
+                devices_by_id[canonical_id] = normalized
+        else:
+            for device_name, canonic_id in get_canonic_ids(parsed):
+                canonical_id = str(canonic_id)
+                if not canonical_id:
+                    continue
+
+                can_ring_hint = self._device_capabilities.get(canonical_id)
+                item: dict[str, Any] = {
+                    "name": device_name,
+                    "id": canonical_id,
+                    "device_id": canonical_id,
+                }
+                if can_ring_hint is not None:
+                    item["can_ring"] = bool(can_ring_hint)
+                devices_by_id.setdefault(canonical_id, item)
 
         return list(devices_by_id.values())
 
@@ -845,18 +887,7 @@ class GoogleFindMyAPI:
                     result_hex = await legacy_request(username)
 
             payload = self._process_device_list_response(result_hex)
-            sample_keys: tuple[str, ...] = ()
-            if payload:
-                first_row = payload[0]
-                if isinstance(first_row, dict):
-                    sample_keys = tuple(sorted(str(key) for key in first_row.keys()))
-                else:
-                    sample_keys = (type(first_row).__name__,)
-            _LOGGER.debug(
-                "nbe_list_devices: count=%d, sample_keys=%s",
-                len(payload),
-                sample_keys,
-            )
+            _LOGGER.debug("nbe_list_devices: count=%d", len(payload))
             return payload
 
         except asyncio.CancelledError:

@@ -95,9 +95,9 @@ from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_OPTIONS,
+    DEFAULT_SEMANTIC_DETECTION_RADIUS,
     # Core domain & credential keys
     DOMAIN,
-    OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
@@ -107,8 +107,9 @@ from .const import (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
+    OPT_SEMANTIC_LOCATIONS,
+    OPTION_KEYS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
@@ -806,6 +807,7 @@ class _ConfigFlowMixin:
         *,
         step_id: str,
         menu_options: list[str],
+        description_placeholders: Mapping[str, Any] | None = None,
     ) -> FlowResult:
         ...
 
@@ -2046,20 +2048,7 @@ class ConfigFlow(
         old_options = dict(getattr(entry, "options", {}) or {})
 
         options_payload: dict[str, Any] = dict(DEFAULT_OPTIONS)
-        all_option_keys = (
-            OPT_LOCATION_POLL_INTERVAL,
-            OPT_DEVICE_POLL_DELAY,
-            OPT_MIN_ACCURACY_THRESHOLD,
-            OPT_MAP_VIEW_TOKEN_EXPIRATION,
-            OPT_CONTRIBUTOR_MODE,
-            OPT_MOVEMENT_THRESHOLD,
-            OPT_GOOGLE_HOME_FILTER_ENABLED,
-            OPT_GOOGLE_HOME_FILTER_KEYWORDS,
-            OPT_ENABLE_STATS_ENTITIES,
-            OPT_ALLOW_HISTORY_FALLBACK,
-            OPT_MIN_POLL_INTERVAL,
-            OPT_IGNORED_DEVICES,
-        )
+        all_option_keys = OPTION_KEYS
 
         for key in all_option_keys:
             if key is None:
@@ -4564,13 +4553,25 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
           automatically when using `OptionsFlowWithReload` (if available).
     """
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the options flow handler."""
+
+        super().__init__(*args, **kwargs)
+        self._semantic_location_editing: str | None = None
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Display a small menu for settings, credentials refresh, or visibility."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["settings", "credentials", "visibility", "repairs"],
+            menu_options=[
+                "settings",
+                "credentials",
+                "visibility",
+                "semantic_locations",
+                "repairs",
+            ],
         )
 
     # ---------- Helpers for live API/cache access ----------
@@ -4908,6 +4909,311 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     choices.setdefault(device_id, device_id)
 
         return dict(sorted(choices.items(), key=lambda item: item[1].lower()))
+
+    # ---------- Semantic locations ----------
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        """Return the float representation or ``None`` when conversion fails."""
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _semantic_locations(self) -> dict[str, dict[str, float]]:
+        """Return a normalized mapping of semantic locations from options."""
+
+        raw = self.config_entry.options.get(OPT_SEMANTIC_LOCATIONS) or {}
+        if not isinstance(raw, Mapping):
+            return {}
+
+        normalized: dict[str, dict[str, float]] = {}
+        for name, payload in raw.items():
+            if not isinstance(name, str) or not isinstance(payload, Mapping):
+                continue
+
+            latitude_obj = payload.get("latitude")
+            longitude_obj = payload.get("longitude")
+            if latitude_obj is None or longitude_obj is None:
+                continue
+
+            latitude = self._coerce_float(latitude_obj)
+            longitude = self._coerce_float(longitude_obj)
+            if latitude is None or longitude is None:
+                continue
+
+            accuracy = self._coerce_float(payload.get("accuracy"))
+            if accuracy is None:
+                accuracy = 0.0
+
+            normalized[name] = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "accuracy": accuracy,
+            }
+
+        return normalized
+
+    def _home_zone_defaults(self) -> tuple[float, float, float]:
+        """Return latitude/longitude/accuracy defaults from the Home zone."""
+
+        latitude = getattr(self.hass.config, "latitude", None)
+        longitude = getattr(self.hass.config, "longitude", None)
+        accuracy = DEFAULT_SEMANTIC_DETECTION_RADIUS
+
+        zone_state = self.hass.states.get("zone.home")
+        if zone_state is not None:
+            attrs = zone_state.attributes
+            latitude = attrs.get("latitude", latitude)
+            longitude = attrs.get("longitude", longitude)
+            accuracy = attrs.get("radius", accuracy)
+
+        try:
+            lat_float = float(latitude) if latitude is not None else 0.0
+        except (TypeError, ValueError):
+            lat_float = 0.0
+
+        try:
+            lon_float = float(longitude) if longitude is not None else 0.0
+        except (TypeError, ValueError):
+            lon_float = 0.0
+
+        try:
+            acc_float = (
+                float(accuracy)
+                if accuracy is not None
+                else DEFAULT_SEMANTIC_DETECTION_RADIUS
+            )
+        except (TypeError, ValueError):
+            acc_float = DEFAULT_SEMANTIC_DETECTION_RADIUS
+
+        acc_float = max(acc_float, DEFAULT_SEMANTIC_DETECTION_RADIUS)
+
+        return lat_float, lon_float, acc_float
+
+    async def async_step_semantic_locations(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """List semantic locations and expose add/edit/delete actions."""
+
+        semantic_locations = self._semantic_locations()
+        display: list[str] = []
+        for name, payload in sorted(semantic_locations.items()):
+            display.append(
+                f"{name}: {payload.get('latitude')} "
+                f"{payload.get('longitude')} (±{payload.get('accuracy')} m)"
+            )
+
+        menu_options = ["semantic_locations_add"]
+        if semantic_locations:
+            menu_options.extend(
+                ["semantic_locations_edit", "semantic_locations_delete"]
+            )
+
+        return cast(
+            FlowResult,
+            cast(Any, self.async_show_menu)(
+                step_id="semantic_locations",
+                description_placeholders={
+                    "semantic_locations": "\n".join(display)
+                    if display
+                    else "None configured",
+                },
+                menu_options=menu_options,
+            ),
+        )
+
+    async def async_step_semantic_locations_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Add a semantic location mapping."""
+
+        return await self._async_semantic_location_form(user_input)
+
+    async def async_step_semantic_locations_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Select and edit an existing semantic location mapping."""
+
+        semantic_locations = self._semantic_locations()
+        if not semantic_locations:
+            return self.async_abort(reason="no_semantic_locations")
+
+        choices = {name: name for name in sorted(semantic_locations)}
+        schema = vol.Schema(
+            {vol.Required("semantic_location"): vol.In(choices)}
+        )
+
+        if user_input is None:
+            return self.async_show_form(step_id="semantic_locations_edit", data_schema=schema)
+
+        selected = str(user_input.get("semantic_location", ""))
+        if selected not in semantic_locations:
+            return self.async_show_form(
+                step_id="semantic_locations_edit",
+                data_schema=schema,
+                errors={"semantic_location": "invalid"},
+            )
+
+        self._semantic_location_editing = selected
+        return await self._async_semantic_location_form(
+            None, selected, semantic_locations[selected]
+        )
+
+    async def async_step_semantic_locations_edit_form(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle submission for editing a semantic location."""
+
+        semantic_locations = self._semantic_locations()
+        existing_name = self._semantic_location_editing
+        existing = semantic_locations.get(existing_name or "") if existing_name else None
+        return await self._async_semantic_location_form(
+            user_input, existing_name, existing
+        )
+
+    async def async_step_semantic_locations_delete(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Delete one or more semantic location mappings."""
+
+        semantic_locations = self._semantic_locations()
+        if not semantic_locations:
+            return self.async_abort(reason="no_semantic_locations")
+
+        choices = {name: name for name in sorted(semantic_locations)}
+        schema = vol.Schema(
+            {
+                vol.Required("semantic_locations", default=[]): cv.multi_select(
+                    choices
+                )
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(step_id="semantic_locations_delete", data_schema=schema)
+
+        to_delete_raw = user_input.get("semantic_locations") or []
+        if not isinstance(to_delete_raw, list):
+            to_delete_raw = list(to_delete_raw)
+        to_delete = [name for name in to_delete_raw if name in semantic_locations]
+        if not to_delete:
+            return self.async_show_form(
+                step_id="semantic_locations_delete",
+                data_schema=schema,
+                errors={"base": "required"},
+            )
+
+        new_locations = {
+            name: data for name, data in semantic_locations.items() if name not in to_delete
+        }
+        new_options = dict(self.config_entry.options)
+        new_options[OPT_SEMANTIC_LOCATIONS] = new_locations
+
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        )
+        return await self.async_step_init()
+
+    async def _async_semantic_location_form(
+        self,
+        user_input: dict[str, Any] | None,
+        existing_name: str | None = None,
+        existing: Mapping[str, Any] | None = None,
+    ) -> FlowResult:
+        """Handle add/edit form for a semantic location mapping."""
+
+        if existing_name is None:
+            self._semantic_location_editing = None
+
+        semantic_default = existing_name or ""
+        latitude_default = self._coerce_float(existing.get("latitude")) if existing else None
+        longitude_default = (
+            self._coerce_float(existing.get("longitude")) if existing else None
+        )
+        accuracy_default = self._coerce_float(existing.get("accuracy")) if existing else None
+
+        if latitude_default is None or longitude_default is None:
+            lat, lon, acc = self._home_zone_defaults()
+            latitude_default = lat
+            longitude_default = lon
+            if accuracy_default is None:
+                accuracy_default = acc
+        elif accuracy_default is None:
+            _, _, acc = self._home_zone_defaults()
+            accuracy_default = acc
+
+        schema = vol.Schema(
+            {
+                vol.Required("semantic_name", default=semantic_default): str,
+                vol.Required("latitude", default=latitude_default): vol.All(
+                    vol.Coerce(float), vol.Range(min=-90, max=90)
+                ),
+                vol.Required("longitude", default=longitude_default): vol.All(
+                    vol.Coerce(float), vol.Range(min=-180, max=180)
+                ),
+                vol.Required("accuracy", default=accuracy_default): vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                ),
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="semantic_locations_add"
+                if existing_name is None
+                else "semantic_locations_edit_form",
+                data_schema=schema,
+            )
+
+        errors: dict[str, str] = {}
+        semantic_name = str(user_input.get("semantic_name", "")).strip()
+        if not semantic_name:
+            errors["semantic_name"] = "required"
+
+        semantic_locations = self._semantic_locations()
+        normalized_keys = {name.lower(): name for name in semantic_locations}
+        semantic_name_key = semantic_name.lower()
+        if (
+            semantic_name
+            and semantic_name_key in normalized_keys
+            and normalized_keys[semantic_name_key] != existing_name
+        ):
+            errors["semantic_name"] = "duplicate_semantic_location"
+
+        if errors:
+            return self.async_show_form(
+                step_id="semantic_locations_add"
+                if existing_name is None
+                else "semantic_locations_edit_form",
+                data_schema=schema,
+                errors=errors,
+            )
+
+        new_locations = dict(semantic_locations)
+        if existing_name and existing_name in new_locations:
+            new_locations.pop(existing_name)
+
+        new_locations[semantic_name] = {
+            "latitude": float(user_input["latitude"]),
+            "longitude": float(user_input["longitude"]),
+            "accuracy": float(user_input["accuracy"]),
+        }
+
+        new_options = dict(self.config_entry.options)
+        new_options[OPT_SEMANTIC_LOCATIONS] = new_locations
+
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        )
+        self._semantic_location_editing = None
+        return await self.async_step_init()
 
     # ---------- Settings (non-secret) ----------
     async def async_step_settings(

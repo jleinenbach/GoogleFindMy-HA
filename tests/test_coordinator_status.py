@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
 
@@ -16,6 +17,7 @@ from custom_components.googlefindmy.binary_sensor import GoogleFindMyPollingSens
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     DOMAIN,
+    EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
     ISSUE_AUTH_EXPIRED_KEY,
     SERVICE_SUBENTRY_KEY,
@@ -91,6 +93,7 @@ class _DummyAPI:
     def __init__(self) -> None:
         self.raise_auth = False
         self.device_list: list[dict[str, str]] = []
+        self.fcm: Any | None = None
 
     async def async_get_basic_device_list(self) -> list[dict[str, str]]:
         if self.raise_auth:
@@ -183,6 +186,69 @@ def test_api_auth_error_preserves_fcm_status(
     assert coordinator.config_entry.reauth_calls == 0
     assert coordinator.hass.config_entries.calls == []
     assert "Invalid" in (coordinator.api_status.reason or "")
+
+
+def test_fatal_fcm_registration_triggers_reauth(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A fatal FCM registration error escalates to ConfigEntryAuthFailed."""
+
+    fatal_error = "GCM Registration failed (404): Credentials invalid"
+
+    class _DummyFcm:
+        def __init__(self, message: str) -> None:
+            self._fatal_error = message
+            self._fatal_errors = {coordinator.config_entry.entry_id: message}
+
+    dummy_api.fcm = _DummyFcm(fatal_error)
+    coordinator.config_entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, fcm_receiver=dummy_api.fcm
+    )
+    coordinator._is_fcm_ready_soft = lambda: False
+
+    loop = coordinator.hass.loop
+    with pytest.raises(ConfigEntryAuthFailed):
+        loop.run_until_complete(coordinator._async_update_data())
+
+    assert coordinator.auth_error_active is True
+    assert coordinator._auth_error_message == fatal_error
+    assert (
+        coordinator.hass.bus.fired[-1]
+        == (
+            EVENT_AUTH_ERROR,
+            {
+                "entry_id": coordinator.config_entry.entry_id,
+                "email": coordinator._get_account_email(),
+                "message": fatal_error,
+            },
+        )
+    )
+
+
+def test_global_fatal_error_ignored_for_clean_entry(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """A global fatal flag should not trip reauth when entry-scoped errors are clear."""
+
+    fatal_error = "Global fail"
+
+    class _DummyFcm:
+        def __init__(self, message: str) -> None:
+            self._fatal_error = message
+            self._fatal_errors: dict[str, str] = {}
+
+    dummy_api.fcm = _DummyFcm(fatal_error)
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator.config_entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, fcm_receiver=dummy_api.fcm
+    )
+
+    loop = coordinator.hass.loop
+    result = loop.run_until_complete(coordinator._async_update_data())
+
+    assert result == []
+    assert coordinator.auth_error_active is False
+    assert coordinator.hass.bus.fired == []
 
 
 def test_api_status_recovers_after_success(

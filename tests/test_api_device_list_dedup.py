@@ -61,3 +61,61 @@ def test_process_device_list_response_merges_duplicate_ids(
             "can_ring": True,
         }
     ]
+
+
+def test_process_device_list_response_scales_e7_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E7 integer coordinates are scaled to degrees while floats pass through."""
+
+    api = _make_api()
+    parsed = object()
+
+    monkeypatch.setattr(
+        api_module, "parse_device_list_protobuf", lambda hex_blob: parsed
+    )
+    monkeypatch.setattr(
+        api_module,
+        "_build_can_ring_index",
+        lambda message, *, cache=None: {},
+    )
+
+    device_rows = [
+        {
+            "id": "near-zero",
+            "device_id": "near-zero",
+            "name": "Near Zero",
+            "latitude": 100,
+            "longitude": -123456,
+        },
+        {
+            "id": "float-deg",
+            "device_id": "float-deg",
+            "latitude": 48.5,
+            "longitude": -122.3,
+            "accuracy": 5.0,
+        },
+    ]
+
+    monkeypatch.setattr(
+        api_module, "get_devices_with_location", lambda message, cache=None: device_rows
+    )
+
+    devices = api._process_device_list_response("beadfeed")
+
+    assert devices == [
+        {
+            "id": "near-zero",
+            "device_id": "near-zero",
+            "name": "Near Zero",
+            "latitude": 0.00001,
+            "longitude": -0.0123456,
+        },
+        {
+            "id": "float-deg",
+            "device_id": "float-deg",
+            "latitude": 48.5,
+            "longitude": -122.3,
+            "accuracy": 5.0,
+        },
+    ]

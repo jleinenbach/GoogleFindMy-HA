@@ -123,6 +123,7 @@ from .const import (
     LOCATION_REQUEST_TIMEOUT_S,
     MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     OPT_IGNORED_DEVICES,
+    OPT_SEMANTIC_LOCATIONS,
     SERVICE_DEVICE_MANUFACTURER,
     # Integration "service device" metadata
     SERVICE_DEVICE_MODEL,
@@ -602,6 +603,21 @@ class FcmStatus:
     DISCONNECTED = "disconnected"
 
 
+@dataclass
+class SemanticLabelRecord:
+    """Observed semantic label metadata cached for diagnostics."""
+
+    label: str
+    first_seen: float
+    last_seen: float
+    devices: set[str] = field(default_factory=set)
+
+    def copy(self) -> SemanticLabelRecord:
+        """Return a shallow copy with a cloned device set."""
+
+        return replace(self, devices=set(self.devices))
+
+
 class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     """Coordinator that manages polling, cache, and push updates for Google Find My Device.
 
@@ -635,7 +651,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         device_poll_delay: int = 5,
         min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
         min_accuracy_threshold: int = 100,
-        movement_threshold: int = 50,
+        movement_threshold: int = 15,
         allow_history_fallback: bool = False,
         contributor_mode: str = DEFAULT_CONTRIBUTOR_MODE,
         contributor_mode_switch_epoch: int | None = None,
@@ -656,7 +672,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
             min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
-            movement_threshold: Movement delta in meters for significance gating (default 50 m).
+            movement_threshold: Movement delta in meters for significance gating (default 15 m).
             allow_history_fallback: Whether to fall back to Recorder history for location.
             contributor_mode: Preferred Nova contributor mode ("high_traffic" or "in_all_areas").
             contributor_mode_switch_epoch: Epoch timestamp when the contributor mode last changed.
@@ -722,6 +738,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._present_device_ids: set[str] = (
             set()
         )  # diagnostics-only set from latest non-empty list
+        self._semantic_label_cache: dict[str, SemanticLabelRecord] = {}
 
         # Flag to separate initial discovery from later runtime additions.
         # After the first successful non-empty device list is processed, this becomes True.
@@ -761,7 +778,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
 
         # Play Sound UUID tracking (needed to properly cancel sound requests)
-        self._sound_request_uuids: dict[str, str] = {}         # device_id -> request_uuid
+        self._sound_request_uuids: dict[str, str] = {}  # device_id -> request_uuid
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
@@ -790,6 +807,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             "invalid_ts_drop_count": 0,  # invalid or stale (< existing) timestamps
             "future_ts_drop_count": 0,  # timestamps too far in the future
             "non_significant_dropped": 0,  # drops by significance gate
+            "drop_reason_invalid_ts": 0,  # invalid/stale timestamps (detail bucket)
+            "clamped_updates": 0,  # accepted but coordinates reverted to cache
+            "significant_move": 0,  # accepted due to true movement
+            "significant_accuracy": 0,  # accepted due to improved accuracy
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
@@ -1893,28 +1914,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         entry_id = self._entry_id()
         for item in device.identifiers:
-            try:
-                domain, ident = item  # spec: 2-tuple (DOMAIN, identifier)
-            except (TypeError, ValueError):
-                if device.id not in self._warned_bad_identifier_devices:
-                    self._warned_bad_identifier_devices.add(device.id)
-                    _LOGGER.warning(
-                        "Device %s has a non-conforming identifier: %r "
-                        "(spec requires (DOMAIN, identifier) tuple); item ignored.",
-                        device.id,
-                        item,
-                    )
-                    self._diag.add_warning(
-                        code="malformed_device_identifier",
-                        context={
-                            "device_id": device.id,
-                            "device_name": self._device_display_name(device, ""),
-                            "offending_item": self._redact_text(repr(item)),
-                            "note": "Non-conforming identifier; ignored by parser.",
-                        },
-                    )
+            # Robust check: strict unpacking causes crashes with 3-tuple identifiers (e.g. 'hon')
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
                 continue
 
+            domain, ident = item
             if domain != DOMAIN or not isinstance(ident, str) or not ident:
                 continue
 
@@ -4122,6 +4126,129 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         return True
 
+    # ---------------------------- Semantic mappings ------------------------
+    @staticmethod
+    def _coerce_float(value: Any) -> float | None:
+        """Return a float representation or ``None`` when conversion fails."""
+
+        try:
+            coerced = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(coerced):
+            return None
+        return coerced
+
+    def _find_semantic_match(
+        self, raw_name: str, mapping: Mapping[str, dict[str, float]]
+    ) -> dict[str, float] | None:
+        """Return a semantic mapping entry using normalized matching."""
+
+        normalized_name = raw_name.casefold().strip()
+        if normalized_name.startswith("near "):
+            normalized_name = normalized_name[len("near ") :].strip()
+
+        normalized_mapping = {key.casefold(): value for key, value in mapping.items()}
+        return normalized_mapping.get(normalized_name)
+
+    def _apply_semantic_mapping(self, payload: dict[str, Any]) -> bool:
+        """Substitute coordinates using user-defined semantic mappings when available."""
+
+        semantic_name = payload.get("semantic_name")
+        if not isinstance(semantic_name, str) or not semantic_name.strip():
+            return False
+
+        # Skip replayed semantic hints to preserve debounce behaviour when mappings are absent.
+        if payload.get("is_replayed") is True or payload.get("replayed") is True:
+            return False
+
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            return False
+
+        raw_mappings = entry.options.get(OPT_SEMANTIC_LOCATIONS)
+        if not raw_mappings:
+            raw_mappings = entry.data.get(OPT_SEMANTIC_LOCATIONS)
+        if not isinstance(raw_mappings, Mapping):
+            return False
+
+        normalized: dict[str, dict[str, float]] = {}
+        for name, coords in raw_mappings.items():
+            if not isinstance(name, str) or not isinstance(coords, Mapping):
+                continue
+
+            latitude = self._coerce_float(coords.get("latitude"))
+            longitude = self._coerce_float(coords.get("longitude"))
+            if latitude is None or longitude is None:
+                continue
+
+            accuracy = self._coerce_float(coords.get("accuracy"))
+            if accuracy is None:
+                accuracy = 0.0
+
+            normalized[name.casefold()] = {
+                "latitude": latitude,
+                "longitude": longitude,
+                "accuracy": accuracy,
+            }
+
+        mapped = self._find_semantic_match(semantic_name, normalized)
+        if mapped is None:
+            return False
+
+        payload["latitude"] = mapped["latitude"]
+        payload["longitude"] = mapped["longitude"]
+        payload["accuracy"] = mapped["accuracy"]
+        payload["location_type"] = "trusted"
+
+        return True
+
+    def _record_semantic_label(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        device_id: str | None = None,
+    ) -> None:
+        """Track observed semantic labels for diagnostics and UX helpers."""
+
+        raw_name = payload.get("semantic_name")
+        if not isinstance(raw_name, str):
+            return
+
+        semantic_name = raw_name.strip()
+        if not semantic_name:
+            return
+
+        cache = getattr(self, "_semantic_label_cache", None)
+        if cache is None:
+            cache = {}
+            self._semantic_label_cache = cache
+
+        normalized = semantic_name.casefold()
+        now = time.time()
+        record = cache.get(normalized)
+        if record is None:
+            record = SemanticLabelRecord(
+                label=semantic_name, first_seen=now, last_seen=now
+            )
+            cache[normalized] = record
+        else:
+            record.last_seen = now
+
+        if device_id:
+            record.devices.add(device_id)
+
+    def get_observed_semantic_labels(self) -> list[SemanticLabelRecord]:
+        """Return a stable snapshot of observed semantic labels."""
+
+        cache = getattr(self, "_semantic_label_cache", None)
+        if not cache:
+            return []
+
+        snapshot = [record.copy() for record in cache.values()]
+        snapshot.sort(key=lambda item: item.label.casefold())
+        return snapshot
+
     # ---------------------------- Ignore helpers ----------------------------
     def _get_ignored_set(self) -> set[str]:
         """Return the set of device IDs the user chose to ignore (options-first).
@@ -4263,6 +4390,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
             if not fcm:
                 return False
+            fatal_error: str | None = getattr(fcm, "_fatal_error", None)
+            entry_id = self._entry_id()
+            fatal_by_entry = getattr(fcm, "_fatal_errors", None)
+            if isinstance(fatal_by_entry, Mapping) and entry_id:
+                fatal_error = fatal_by_entry.get(entry_id) or fatal_error
+            if isinstance(fatal_error, str) and fatal_error:
+                return False
             for attr in ("is_ready", "ready"):
                 val = getattr(fcm, attr, None)
                 if isinstance(val, bool):
@@ -4343,6 +4477,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             UpdateFailed: For other transient or unexpected errors.
         """
         try:
+            # Check for fatal FCM errors (for example, 404/401 during registration) to trigger re-auth
+            entry = self.config_entry
+            runtime = getattr(entry, "runtime_data", None)
+            fcm_receiver = getattr(runtime, "fcm_receiver", None)
+
+            fatal_error: str | None = None
+            if fcm_receiver is not None:
+                fatal_by_entry = getattr(fcm_receiver, "_fatal_errors", None)
+                entry_id = self._entry_id()
+
+                if isinstance(fatal_by_entry, Mapping) and entry_id:
+                    fatal_error = fatal_by_entry.get(entry_id)
+
+            if isinstance(fatal_error, str) and fatal_error:
+                self._set_auth_state(failed=True, reason=fatal_error)
+                raise ConfigEntryAuthFailed(fatal_error)
+
             # One-time wait for FCM on first run.
             if not self._startup_complete:
                 fcm_evt = getattr(self, "fcm_ready_event", None)
@@ -4547,6 +4698,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     can_ring = bool(dev.get("can_ring"))
                     slot = self._device_caps.setdefault(dev_id, {})
                     slot["can_ring"] = can_ring
+
+            # 2.2) Seed the location cache with list-provided coordinates when available
+            for dev in filtered_devices:
+                dev_id = dev["id"]
+                if dev_id in ignored:
+                    continue
+
+                lat = dev.get("latitude")
+                lon = dev.get("longitude")
+                if lat is None or lon is None:
+                    continue
+
+                if not self._normalize_coords(dev, device_label=dev_id):
+                    continue
+
+                cache_seed = dict(dev)
+
+                # Avoid poisoning the cache with explicit None accuracy values so
+                # stationary clamps do not overwrite fresher accuracy readings.
+                if cache_seed.get("accuracy") is None:
+                    cache_seed.pop("accuracy", None)
+
+                self.update_device_cache(dev_id, cache_seed)
 
             # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
             self._ensure_service_device_exists()
@@ -4779,10 +4953,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             )
                             continue
 
+                        self._record_semantic_label(location, device_id=dev_id)
+                        raw_semantic_name = (
+                            location.get("semantic_name")
+                            if isinstance(location.get("semantic_name"), str)
+                            else None
+                        )
+                        semantic_replaced = False
+
+                        cached_loc = self._device_location_data.get(dev_id)
+                        is_replay = False
+                        if isinstance(cached_loc, Mapping):
+                            new_ts = _normalize_epoch_seconds(location.get("last_seen"))
+                            old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+                            if (
+                                new_ts is not None
+                                and old_ts is not None
+                                and new_ts == old_ts
+                            ):
+                                is_replay = True
+
+                        location["is_replayed"] = is_replay
+                        mapping_applied = self._apply_semantic_mapping(location)
+
                         # --- Apply Google Home filter (keep parity with FCM push path) ---
                         # Consume coordinate substitution from the filter when needed.
                         semantic_name = location.get("semantic_name")
-                        if semantic_name and google_home_filter is not None:
+                        if (
+                            not mapping_applied
+                            and not is_replay
+                            and semantic_name
+                            and google_home_filter is not None
+                        ):
                             try:
                                 (
                                     should_filter,
@@ -4849,7 +5051,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                             )
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
+                                    semantic_replaced = True
+                        location.pop("is_replayed", None)
                         # ------------------------------------------------------------------
+
+                        if raw_semantic_name and not semantic_replaced:
+                            location["semantic_name"] = raw_semantic_name
 
                         # If we only got a semantic location, preserve previous coordinates.
                         if (
@@ -4961,8 +5168,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 )
 
                         # Apply type-aware cooldowns based on internal hint (if any).
+                        # Smart gating: apply the heavy cooldown only when the
+                        # coordinates were clamped (stationary). If the device
+                        # moved, skip the cooldown so the next poll arrives on
+                        # schedule.
                         report_hint = location.get("_report_hint")
-                        self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        was_stationary = False
+                        if isinstance(cached_loc, Mapping):
+                            was_stationary = (
+                                location.get("latitude")
+                                == cached_loc.get("latitude")
+                                and location.get("longitude")
+                                == cached_loc.get("longitude")
+                            )
+
+                        if was_stationary:
+                            self._apply_report_type_cooldown(dev_id, report_hint)
+                        else:
+                            _LOGGER.debug(
+                                "Skipping throttle cooldown for %s despite '%s' hint (movement detected)",
+                                dev_name,
+                                report_hint,
+                            )
 
                         # Drop internal hint before caching to avoid exposure
                         location.pop("_report_hint", None)
@@ -4977,20 +5205,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         self.push_updated([dev_id])
 
                     except TimeoutError as terr:
-                        _LOGGER.info(
-                            "Location request timed out for %s after %s seconds",
-                            dev_name,
-                            LOCATION_REQUEST_TIMEOUT_S,
-                        )
-                        self.increment_stat("timeouts")
-                        self._consecutive_timeouts += 1
-                        cycle_failed = True
-                        self.note_error(terr, where="poll_timeout", device=dev_name)
-                        if last_exception is None:
-                            last_exception = UpdateFailed(
-                                f"Location request timed out for {dev_name}"
+                        if self.is_fcm_connected:
+                            _LOGGER.warning(
+                                "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
+                                dev_name,
                             )
-                            last_exception.__cause__ = terr
+                            self.increment_stat("timeouts")
+                        else:
+                            _LOGGER.info(
+                                "Location request timed out for %s after %s seconds",
+                                dev_name,
+                                LOCATION_REQUEST_TIMEOUT_S,
+                            )
+                            self.increment_stat("timeouts")
+                            self._consecutive_timeouts += 1
+                            cycle_failed = True
+                            self.note_error(terr, where="poll_timeout", device=dev_name)
+                            if last_exception is None:
+                                last_exception = UpdateFailed(
+                                    f"Location request timed out for {dev_name}"
+                                )
+                                last_exception.__cause__ = terr
                     except SpotApiEmptyResponseError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -5041,7 +5276,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 if cycle_failed:
                     self._last_poll_result = "failed"
-                elif self._last_poll_result is None:
+                else:
                     self._last_poll_result = "success"
                 # Always publish the full snapshot so cached devices remain visible
                 ignored = self._get_ignored_set()
@@ -5241,6 +5476,41 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         except Exception as err:
             _LOGGER.debug("Failed to load statistics from cache: %s", err)
 
+        try:
+            sound_request_uuids = await self._cache.async_get_cached_value(
+                "sound_request_uuids"
+            )
+            if not isinstance(sound_request_uuids, dict):
+                _LOGGER.debug("No cached Play Sound UUIDs found; keeping current map")
+                return
+
+            loaded_sound_request_uuids = {
+                str(device_id): str(request_uuid)
+                for device_id, request_uuid in sound_request_uuids.items()
+                if isinstance(device_id, str) and isinstance(request_uuid, str)
+            }
+
+            if self._sound_request_uuids and not loaded_sound_request_uuids:
+                _LOGGER.debug(
+                    "Skipping cached empty Play Sound UUID map; runtime map already populated"
+                )
+                return
+
+            merged_sound_request_uuids = {
+                **loaded_sound_request_uuids,
+                **self._sound_request_uuids,
+            }
+            if merged_sound_request_uuids != self._sound_request_uuids:
+                self._sound_request_uuids = merged_sound_request_uuids
+                _LOGGER.debug(
+                    "Loaded Play Sound UUIDs from cache: %s", self._sound_request_uuids
+                )
+        except Exception as err:
+            _LOGGER.debug(
+                "Failed to load Play Sound UUIDs from cache; keeping current map: %s",
+                err,
+            )
+
     async def _async_save_stats(self) -> None:
         """Persist statistics to entry-scoped cache."""
         try:
@@ -5249,6 +5519,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
         except Exception as err:
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
+
+    async def _async_save_sound_uuids(self) -> None:
+        """Persist Play Sound request UUIDs to entry-scoped cache."""
+        try:
+            await self._cache.async_set_cached_value(
+                "sound_request_uuids", self._sound_request_uuids.copy()
+            )
+        except Exception as err:
+            _LOGGER.debug("Failed to save Play Sound UUIDs to cache: %s", err)
 
     async def _debounced_save_stats(self) -> None:
         """Debounce wrapper to coalesce frequent stat updates into a single write.
@@ -5437,6 +5716,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
 
+        self._record_semantic_label(slot, device_id=device_id)
+
+        cached_loc = self._device_location_data.get(device_id)
+        is_replay = False
+        if isinstance(cached_loc, Mapping):
+            new_ts = _normalize_epoch_seconds(slot.get("last_seen"))
+            old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+            if new_ts is not None and old_ts is not None and new_ts == old_ts:
+                is_replay = True
+
+        slot["is_replayed"] = is_replay
+        self._apply_semantic_mapping(slot)
+        slot.pop("is_replayed", None)
+
         # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
         # then drop the hint to keep internal-only.
         report_hint = slot.get("_report_hint")
@@ -5541,28 +5834,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return R * c
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
-        """Return True if the update carries meaningful new information.
+        """Return True when the incoming payload should update the cache.
 
-        This function acts as the primary gate to prevent redundant or low-value
-        updates from churning the state machine and recorder.
+        The gate records why a payload was accepted and favors freshness over
+        unnecessary drops:
 
-        Criteria (in order of evaluation):
-          1. No previous data exists for the device.
-          2. The `last_seen` timestamp of the new data is newer than the existing one.
-          3. If timestamps are identical, an update is significant if:
-             a) The position has moved more than `self._movement_threshold` meters, OR
-             b) The accuracy has improved by at least 20% (smaller radius is better), OR
-             c) The qualitative data has changed (source, status, or semantic name).
-
-        Notes:
-          * This replaces a simple "same last_seen == duplicate" heuristic with a more
-            intelligent assessment of data quality.
-          * Stale-guard: If a normalized `last_seen` is **older** than the existing one,
-            we drop it and reuse `invalid_ts_drop_count` to track this case to avoid
-            adding a new counter (see diagnostics & stats entity mapping).
-          * It is assumed that a staleness guard has already discarded updates where
-            `new_seen` is in the far past (< 2000) or beyond the accepted future drift
-            tolerance.
+        - Reject only invalid timestamps (pre-2000, future-dated, or older than
+          the cached entry) while tracking the drop reason.
+        - Treat a 30 % accuracy improvement (``<= 0.7`` of the previous
+          accuracy) as significant even without movement.
+        - Let qualitative metadata changes (status, semantic labels, battery
+          level, source markers) through so presence stays current.
+        - Consider movement significant when the great-circle distance exceeds
+          the dynamic error circle (``max(self._movement_threshold,
+          incoming_accuracy)``) and record the event in ``significant_move``.
+        - Clamp stationary updates: keep metadata and timestamps, restore cached
+          coordinates, and only stamp a stationary status marker when the
+          metadata itself has not changed. All clamped heartbeats increment
+          ``clamped_updates`` to avoid GPS jitter while keeping the sensor
+          fresh.
         """
         existing = self._device_location_data.get(device_id)
         if not existing:
@@ -5573,6 +5863,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if n_seen_norm is not None:
             if n_seen_norm < 946684800.0:  # < 2000-01-01
                 self.increment_stat("invalid_ts_drop_count")
+                self.increment_stat("drop_reason_invalid_ts")
                 return False
             if n_seen_norm > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
                 self.increment_stat("future_ts_drop_count")
@@ -5587,72 +5878,75 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             and n_seen_norm < e_seen_norm
         ):
             self.increment_stat("invalid_ts_drop_count")
+            self.increment_stat("drop_reason_invalid_ts")
             return False
 
-        if (
-            n_seen_norm is not None
-            and e_seen_norm is not None
-            and n_seen_norm > e_seen_norm
-        ):
-            return True
+        metadata_changed = (
+            new_data.get("status") != existing.get("status")
+            or new_data.get("source_label") != existing.get("source_label")
+            or new_data.get("is_own_report") != existing.get("is_own_report")
+            or new_data.get("semantic_name") != existing.get("semantic_name")
+            or new_data.get("battery_level") != existing.get("battery_level")
+        )
+
+        # Distance and accuracy based decisions (dynamic error circle)
+        n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
+        e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
+        n_acc = new_data.get("accuracy")
+        e_acc = existing.get("accuracy")
+
+        distance: float | None = None
+        if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
+            try:
+                e_lat_f = float(cast(float, e_lat))
+                e_lon_f = float(cast(float, e_lon))
+                n_lat_f = float(cast(float, n_lat))
+                n_lon_f = float(cast(float, n_lon))
+                distance = self._haversine_distance(e_lat_f, e_lon_f, n_lat_f, n_lon_f)
+            except Exception:
+                distance = None
+
+        movement_threshold = float(self._movement_threshold)
+        if isinstance(n_acc, (int, float)):
+            try:
+                n_acc_f = float(n_acc)
+                if math.isfinite(n_acc_f):
+                    movement_threshold = max(movement_threshold, n_acc_f)
+            except (TypeError, ValueError):
+                pass
 
         if (
-            n_seen_norm is not None
-            and e_seen_norm is not None
-            and n_seen_norm == e_seen_norm
+            isinstance(n_acc, (int, float))
+            and isinstance(e_acc, (int, float))
+            and math.isfinite(float(n_acc))
+            and math.isfinite(float(e_acc))
+            and float(n_acc) <= float(e_acc) * 0.7
         ):
-            n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
-            e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
-            if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
-                try:
-                    e_lat_f = float(cast(float, e_lat))
-                    e_lon_f = float(cast(float, e_lon))
-                    n_lat_f = float(cast(float, n_lat))
-                    n_lon_f = float(cast(float, n_lon))
-                    dist = self._haversine_distance(e_lat_f, e_lon_f, n_lat_f, n_lon_f)
-                    if dist > float(self._movement_threshold):
-                        return True
-                except Exception:
-                    # Ignore distance errors and continue checks.
-                    pass
-
-            n_acc = new_data.get("accuracy")
-            e_acc = existing.get("accuracy")
-            if isinstance(n_acc, (int, float)) and isinstance(e_acc, (int, float)):
-                try:
-                    if float(n_acc) < float(e_acc) * 0.8:  # >=20% better accuracy
-                        return True
-                except Exception:
-                    pass
-
-            n_alt = new_data.get("altitude")
-            e_alt = existing.get("altitude")
-            if n_alt is None or e_alt is None:
-                if n_alt != e_alt:
-                    return True
-            else:
-                try:
-                    n_alt_f = float(n_alt)
-                    e_alt_f = float(e_alt)
-                except (TypeError, ValueError):
-                    if n_alt != e_alt:
-                        return True
-                else:
-                    if not (math.isfinite(n_alt_f) and math.isfinite(e_alt_f)):
-                        if n_alt_f != e_alt_f:
-                            return True
-                    elif abs(n_alt_f - e_alt_f) >= _ALTITUDE_SIGNIFICANT_DELTA_M:
-                        return True
-
-        # Source or qualitative changes can still be valuable.
-        if new_data.get("is_own_report") != existing.get("is_own_report"):
-            return True
-        if new_data.get("status") != existing.get("status"):
-            return True
-        if new_data.get("semantic_name") != existing.get("semantic_name"):
+            # Accuracy jump: snap to the better fix even if distance is small.
+            self.increment_stat("significant_accuracy")
             return True
 
-        return False
+        if distance is not None and distance > movement_threshold:
+            # Significant move: accept and advance coordinates.
+            self.increment_stat("significant_move")
+            return True
+
+        # Stationary heartbeat: keep presence metadata while clamping position to
+        # avoid GPS jitter. We preserve timing/battery but revert coordinates to
+        # the cached values before committing the update.
+        if distance is not None:
+            for key in ("latitude", "longitude", "accuracy", "altitude"):
+                if key in existing:
+                    new_data[key] = existing[key]
+            if not metadata_changed:
+                new_data["status"] = "Stationary (Clamped)"
+            self.increment_stat("clamped_updates")
+            return True
+
+        if metadata_changed:
+            return True
+
+        return True
 
     def get_device_last_seen(self, device_id: str) -> datetime | None:
         """Return last_seen as timezone-aware datetime (UTC) if cached.
@@ -5733,9 +6027,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
-        self._sound_request_uuids.pop(device_id, None)
+        removed_uuid = self._sound_request_uuids.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
+
+        if removed_uuid is not None:
+            self.hass.async_create_task(self._async_save_sound_uuids())
         self._present_last_seen.pop(device_id, None)
         # Rebuild the cached snapshot without the purged device
         current_snapshot: list[dict[str, Any]] = []
@@ -6148,10 +6445,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if not location_data:
                 return {}
 
+            self._record_semantic_label(location_data, device_id=device_id)
+
+            cached_loc = self._device_location_data.get(device_id)
+            is_replay = False
+            if isinstance(cached_loc, Mapping):
+                new_ts = _normalize_epoch_seconds(location_data.get("last_seen"))
+                old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+                if new_ts is not None and old_ts is not None and new_ts == old_ts:
+                    is_replay = True
+
+            location_data["is_replayed"] = is_replay
+            mapping_applied = self._apply_semantic_mapping(location_data)
+
             # --- Parity with polling path: Google Home semantic spam filter --------
             # Consume coordinate substitution from the filter when needed.
             semantic_name = location_data.get("semantic_name")
-            if semantic_name and google_home_filter is not None:
+            if (
+                not mapping_applied
+                and not is_replay
+                and semantic_name
+                and google_home_filter is not None
+            ):
                 try:
                     (should_filter, replacement_attrs) = (
                         google_home_filter.should_filter_detection(
@@ -6209,6 +6524,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 )
                         # Clear semantic name so HA Core's zone engine determines the final state.
                         location_data["semantic_name"] = None
+            location_data.pop("is_replayed", None)
             # ----------------------------------------------------------------------
 
             # Preserve previous coordinates if only semantic location is provided.
@@ -6360,6 +6676,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 _LOGGER.debug(
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
+                await self._async_save_sound_uuids()
             if not ok:
                 self._note_push_transport_problem()
             # Success implies credentials worked
@@ -6426,7 +6743,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Success implies credentials worked
             self._set_auth_state(failed=False)
             if ok:
-                self._sound_request_uuids.pop(device_id, None)
+                removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
+                if removed_request_uuid is not None:
+                    await self._async_save_sound_uuids()
             return bool(ok)
         except ConfigEntryAuthFailed as auth_exc:
             self._set_auth_state(

@@ -18,7 +18,7 @@ DOMAIN: str = "googlefindmy"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
-INTEGRATION_VERSION: str = "1.7.0"
+INTEGRATION_VERSION: str = "1.7.0-2"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -104,6 +104,7 @@ OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str = "google_home_filter_keywords"
 OPT_MAP_VIEW_TOKEN_EXPIRATION: str = "map_view_token_expiration"
+OPT_SEMANTIC_LOCATIONS: str = "semantic_locations"
 OPT_CONTRIBUTOR_MODE: str = "contributor_mode"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
 OPT_DELETE_CACHES_ON_REMOVE: str = "delete_caches_on_remove"
@@ -121,6 +122,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_SEMANTIC_LOCATIONS,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE,
 )
@@ -147,8 +149,9 @@ LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 
 # Quality/logic thresholds
 DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disabled)
-DEFAULT_MOVEMENT_THRESHOLD: int = 50  # meters; used for future movement gating
+DEFAULT_MOVEMENT_THRESHOLD: int = 15  # meters; used for future movement gating
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
+DEFAULT_SEMANTIC_DETECTION_RADIUS: float = 50.0  # meters; soft floor for semantic locations
 
 # Location timestamp acceptance window
 MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S: float = 24 * 60 * 60  # 24 hours
@@ -191,6 +194,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_GOOGLE_HOME_FILTER_KEYWORDS: DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_SEMANTIC_LOCATIONS: {},
     OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE: DEFAULT_CONTRIBUTOR_MODE,
 }

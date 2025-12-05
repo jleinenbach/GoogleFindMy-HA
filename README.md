@@ -117,7 +117,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 - #️⃣ **Multi-Account Support**: Add multiple Find Hub Google accounts that show up separately
 - ❣️ **More to come!**
 
-The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.7.0 metadata.
+The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.7.0-2 metadata.
 
 >[!NOTE]
 >**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**

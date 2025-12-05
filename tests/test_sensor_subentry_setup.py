@@ -108,6 +108,7 @@ async def test_setup_iterates_sensor_subentries(stub_coordinator_factory: Any) -
     assert {
         entity.unique_id for entity, _ in added
     } == {
+        f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_semantic_labels",
         f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_background_updates",
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_last_seen",
     }
@@ -167,8 +168,8 @@ async def test_dispatcher_adds_new_tracker_subentries(stub_coordinator_factory: 
     configs = [config for _, config in added]
     assert configs.count(tracker_subentry.subentry_id) == 1
     assert configs.count(new_subentry.subentry_id) == 1
-    assert configs.count(service_subentry.subentry_id) == 1
-    assert len({entity.unique_id for entity, _ in added}) == 3
+    assert configs.count(service_subentry.subentry_id) == 2
+    assert len({entity.unique_id for entity, _ in added}) == 4
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
 
 
@@ -220,7 +221,7 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
     async_dispatcher_send(hass, signal, service_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    assert len(added) == initial_count == 2
+    assert len(added) == initial_count == 3
     assert {config for _, config in added} == {
         service_subentry.subentry_id,
         tracker_subentry.subentry_id,
@@ -270,6 +271,7 @@ async def test_hidden_tracker_sensors_skip_invisible_devices(
     assert {entity.unique_id for entity, _ in added} == {
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_visible-device_last_seen",
         f"{DOMAIN}_{entry.entry_id}_service_background_updates",
+        f"{DOMAIN}_{entry.entry_id}_service_semantic_labels",
     }
     config_by_unique_id = {entity.unique_id: config for entity, config in added}
     assert (

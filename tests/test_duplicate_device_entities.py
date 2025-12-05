@@ -110,6 +110,21 @@ def test_duplicate_devices_seed_only_once(
     assert len(tracker_added[0]) == 1
     assert tracker_added[0][0].device_id == "dup-device"
 
-    assert len(sensor_added) == 1
-    assert len(sensor_added[0]) == 1
-    assert sensor_added[0][0].device_id == "dup-device"
+    assert len(sensor_added) == 2
+
+    semantic_entities = [
+        entity
+        for batch in sensor_added
+        for entity in batch
+        if isinstance(entity, sensor.GoogleFindMySemanticLabelSensor)
+    ]
+    last_seen_entities = [
+        entity
+        for batch in sensor_added
+        for entity in batch
+        if isinstance(entity, sensor.GoogleFindMyLastSeenSensor)
+    ]
+
+    assert len(semantic_entities) == 1
+    assert len(last_seen_entities) == 1
+    assert last_seen_entities[0].device_id == "dup-device"
