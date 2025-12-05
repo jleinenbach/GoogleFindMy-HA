@@ -5141,8 +5141,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 )
 
                         # Apply type-aware cooldowns based on internal hint (if any).
+                        # Smart gating: apply the heavy cooldown only when the
+                        # coordinates were clamped (stationary). If the device
+                        # moved, skip the cooldown so the next poll arrives on
+                        # schedule.
                         report_hint = location.get("_report_hint")
-                        self._apply_report_type_cooldown(dev_id, report_hint)
+
+                        was_stationary = False
+                        if isinstance(cached_loc, Mapping):
+                            was_stationary = (
+                                location.get("latitude")
+                                == cached_loc.get("latitude")
+                                and location.get("longitude")
+                                == cached_loc.get("longitude")
+                            )
+
+                        if was_stationary:
+                            self._apply_report_type_cooldown(dev_id, report_hint)
+                        else:
+                            _LOGGER.debug(
+                                "Skipping throttle cooldown for %s despite '%s' hint (movement detected)",
+                                dev_name,
+                                report_hint,
+                            )
 
                         # Drop internal hint before caching to avoid exposure
                         location.pop("_report_hint", None)
