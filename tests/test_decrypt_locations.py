@@ -68,3 +68,85 @@ def test_async_decrypt_location_response_locations_allows_future_owner_timestamp
     assert entry["is_own_report"] is True
     assert entry["altitude"] == ALTITUDE_METERS
     assert entry["accuracy"] == ACCURACY_METERS
+
+
+def test_async_decrypt_location_response_locations_aligns_missing_network_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recent timestamps stay aligned when historic timestamps are missing."""
+
+    valid_location = DeviceUpdate_pb2.Location()
+    valid_location.latitude = int(40.0 * 1e7)
+    valid_location.longitude = int(-74.0 * 1e7)
+    valid_location.altitude = ALTITUDE_METERS
+
+    invalid_location = DeviceUpdate_pb2.Location()
+    invalid_location.latitude = int(91.0 * 1e7)  # Out of bounds → dropped
+    invalid_location.longitude = 0
+    invalid_location.altitude = ALTITUDE_METERS
+
+    def serialize_location(loc: DeviceUpdate_pb2.Location) -> bytes:
+        return loc.SerializeToString()
+
+    async def fake_identity_key(*_args, **_kwargs) -> bytes:
+        return b"\x01" * 32
+
+    async def fake_offload_aes(
+        _identity_key: bytes, encrypted_location: bytes
+    ) -> bytes:
+        if encrypted_location == b"recent":
+            return serialize_location(valid_location)
+        return serialize_location(invalid_location)
+
+    async def fake_offload_foreign(
+        _identity_key: bytes, encrypted_location: bytes, *_args: object, **_kwargs: object
+    ) -> bytes:
+        return await fake_offload_aes(_identity_key, encrypted_location)
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_: False)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+
+    reports = (
+        update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+    )
+
+    network_location = reports.networkLocations.add()
+    network_location.status = Common_pb2.Status.LAST_KNOWN
+    network_location.geoLocation.accuracy = ACCURACY_METERS
+    network_enc = network_location.geoLocation.encryptedReport
+    network_enc.publicKeyRandom = b""
+    network_enc.encryptedLocation = b"network"
+    network_enc.isOwnReport = False
+
+    recent_timestamp = 1_700_000_321
+    reports.recentLocationTimestamp.seconds = recent_timestamp
+    recent_location = reports.recentLocation
+    recent_location.SetInParent()
+    recent_location.status = Common_pb2.Status.LAST_KNOWN
+    recent_location.geoLocation.accuracy = ACCURACY_METERS
+    recent_enc = recent_location.geoLocation.encryptedReport
+    recent_enc.publicKeyRandom = b""
+    recent_enc.encryptedLocation = b"recent"
+    recent_enc.isOwnReport = True
+
+    result = asyncio.run(
+        decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["last_seen"] == recent_timestamp
+    assert entry["latitude"] == pytest.approx(40.0)
+    assert entry["longitude"] == pytest.approx(-74.0)
+    assert entry["is_own_report"] is True
