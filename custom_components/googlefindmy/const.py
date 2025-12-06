@@ -97,7 +97,6 @@ DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
 OPT_LOCATION_POLL_INTERVAL: str = "location_poll_interval"
 OPT_DEVICE_POLL_DELAY: str = "device_poll_delay"
 OPT_MIN_POLL_INTERVAL: str = "min_poll_interval"
-OPT_MIN_ACCURACY_THRESHOLD: str = "min_accuracy_threshold"
 OPT_MOVEMENT_THRESHOLD: str = "movement_threshold"
 OPT_ALLOW_HISTORY_FALLBACK: str = "allow_history_fallback"
 OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
@@ -115,7 +114,6 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MOVEMENT_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_ENABLE_STATS_ENTITIES,
@@ -148,7 +146,6 @@ LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 """Cooldown window (seconds) applied after a manual locate trigger."""
 
 # Quality/logic thresholds
-DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disabled)
 DEFAULT_MOVEMENT_THRESHOLD: int = 15  # meters; used for future movement gating
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
 DEFAULT_SEMANTIC_DETECTION_RADIUS: float = 50.0  # meters; soft floor for semantic locations
@@ -187,7 +184,6 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL: DEFAULT_MIN_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
     OPT_MOVEMENT_THRESHOLD: DEFAULT_MOVEMENT_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK: DEFAULT_ALLOW_HISTORY_FALLBACK,
     OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
@@ -331,12 +327,6 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "type": "int",
         "min": 30,
         "max": 3600,
-        "step": 1,
-    },
-    OPT_MIN_ACCURACY_THRESHOLD: {
-        "type": "int",
-        "min": 25,
-        "max": 500,
         "step": 1,
     },
     OPT_MOVEMENT_THRESHOLD: {
@@ -512,7 +502,6 @@ __all__ = [
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
     "OPT_MIN_POLL_INTERVAL",
-    "OPT_MIN_ACCURACY_THRESHOLD",
     "OPT_MOVEMENT_THRESHOLD",
     "OPT_ALLOW_HISTORY_FALLBACK",
     "OPT_ENABLE_STATS_ENTITIES",
@@ -527,7 +516,6 @@ __all__ = [
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",
     "LOCATE_COOLDOWN_S",
-    "DEFAULT_MIN_ACCURACY_THRESHOLD",
     "DEFAULT_MOVEMENT_THRESHOLD",
     "DEFAULT_ALLOW_HISTORY_FALLBACK",
     "DEFAULT_ENABLE_STATS_ENTITIES",

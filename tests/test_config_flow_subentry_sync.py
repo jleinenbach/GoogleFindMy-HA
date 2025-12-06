@@ -31,7 +31,6 @@ from custom_components.googlefindmy.const import (
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPT_SEMANTIC_LOCATIONS,
     SERVICE_FEATURE_PLATFORMS,
@@ -51,7 +50,6 @@ from tests.helpers.config_flow import (
 SCHEMA_VERSION = 2
 DEFAULT_LOCATION_POLL_INTERVAL = 900
 DEFAULT_DEVICE_POLL_DELAY = 8
-DEFAULT_MIN_ACCURACY = 75
 EXPECTED_CREATED_SUBENTRIES = 2
 
 
@@ -837,7 +835,6 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
         OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     }
     entry.options = {
-        OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY,
         OPT_OPTIONS_SCHEMA_VERSION: 1,
     }
 
@@ -861,7 +858,6 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
     options = entry.options
     assert options[OPT_LOCATION_POLL_INTERVAL] == DEFAULT_LOCATION_POLL_INTERVAL
     assert options[OPT_DEVICE_POLL_DELAY] == DEFAULT_DEVICE_POLL_DELAY
-    assert options[OPT_MIN_ACCURACY_THRESHOLD] == DEFAULT_MIN_ACCURACY
     assert options[OPT_OPTIONS_SCHEMA_VERSION] == SCHEMA_VERSION
     assert options[OPT_IGNORED_DEVICES] == {}
 

@@ -183,7 +183,6 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `location_poll_interval` | 300 | seconds | How often the integration runs a poll cycle for all devices. |
 | `device_poll_delay` | 5 | seconds | How much time to wait between polling devices during a poll cycle. |
 | `min_poll_interval` | 60 | seconds | Hard lower bound between poll cycles and the manual locate cooldown. |
-| `min_accuracy_threshold` | 100 | meters | Distance beyond which location data is rejected for recorder/logbook writes. |
 | `movement_threshold` | 50 | meters | Minimum distance change required before emitting a location update. |
 | `allow_history_fallback` | false | toggle | Falls back to Recorder history when no live device tracker state is available. |
 | `enable_stats_entities` | true | toggle | Exposes the "Google Find My Integration" statistics entity (polling status, counters, etc.). |

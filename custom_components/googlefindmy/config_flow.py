@@ -93,7 +93,6 @@ from .const import (
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_OPTIONS,
     DEFAULT_SEMANTIC_DETECTION_RADIUS,
     # Core domain & credential keys
@@ -106,7 +105,6 @@ from .const import (
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPT_SEMANTIC_LOCATIONS,
     OPTION_KEYS,
@@ -2997,9 +2995,6 @@ class ConfigFlow(
             vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(
-                vol.Coerce(int), vol.Range(min=25, max=500)
-            ),
             vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
         }
         if OPT_MOVEMENT_THRESHOLD is not None:
@@ -3019,7 +3014,6 @@ class ConfigFlow(
         defaults: dict[str, Any] = {
             OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
-            OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
             OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
         }
@@ -3404,7 +3398,6 @@ class ConfigFlow(
         for opt_key in (
             OPT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY,
-            OPT_MIN_ACCURACY_THRESHOLD,
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
             OPT_CONTRIBUTOR_MODE,
             OPT_MOVEMENT_THRESHOLD,
@@ -5239,9 +5232,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             OPT_DEVICE_POLL_DELAY: _get(
                 OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY
             ),
-            OPT_MIN_ACCURACY_THRESHOLD: _get(
-                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-            ),
             OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
                 OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             ),
@@ -5345,10 +5335,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         _register(
             vol.Optional(OPT_DEVICE_POLL_DELAY),
             vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
-        )
-        _register(
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD),
-            vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
         )
         _register(vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION), bool)
         _register(vol.Optional(OPT_DELETE_CACHES_ON_REMOVE), bool)

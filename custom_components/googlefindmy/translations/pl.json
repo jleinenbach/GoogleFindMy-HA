@@ -35,7 +35,6 @@
         "data": {
           "location_poll_interval": "Interwał odpytywania lokalizacji (s)",
           "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
-          "min_accuracy_threshold": "Minimalna dokładność (m)",
           "movement_threshold": "Próg ruchu (m)",
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
@@ -258,11 +257,10 @@
       },
       "settings": {
         "title": "Opcje",
-        "description": "Dostosuj ustawienia lokalizacji:\n• Interwał odpytywania lokalizacji: jak często pobierać pozycje (60–3600 sekund)\n• Opóźnienie między odpytywaniem urządzeń: odstęp między zapytaniami (1–60 sekund)\n• Minimalna dokładność: ignoruj pozycje gorsze niż ta wartość (25–500 metrów)\n• Próg ruchu: minimalny ruch wyzwalający aktualizację pozycji (10–200 metrów)\n\nFiltr Google Home:\n• Włącz, aby grupować wykrycia Google Home w strefie „Dom”\n• Słowa kluczowe wspierają dopasowania częściowe (oddzielone przecinkami)\n• Przykład: „nest” pasuje do „Kitchen Nest Mini”",
+        "description": "Dostosuj ustawienia lokalizacji:\n• Interwał odpytywania lokalizacji: jak często pobierać pozycje (60–3600 sekund)\n• Opóźnienie między odpytywaniem urządzeń: odstęp między zapytaniami (1–60 sekund)\n• Próg ruchu: minimalny ruch wyzwalający aktualizację pozycji (10–200 metrów)\n\nFiltr Google Home:\n• Włącz, aby grupować wykrycia Google Home w strefie „Dom”\n• Słowa kluczowe wspierają dopasowania częściowe (oddzielone przecinkami)\n• Przykład: „nest” pasuje do „Kitchen Nest Mini”",
         "data": {
           "location_poll_interval": "Interwał odpytywania lokalizacji (s)",
           "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
-          "min_accuracy_threshold": "Minimalna dokładność (m)",
           "movement_threshold": "Próg ruchu (m)",
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
@@ -586,11 +584,11 @@
       "stat_invalid_coords": {
         "name": "Nieprawidłowe współrzędne"
       },
-      "stat_low_quality_dropped": {
-        "name": "Odrzucono zbyt niską dokładność"
-      },
       "stat_non_significant_dropped": {
         "name": "Odrzucone nieistotne aktualizacje"
+      },
+      "stat_fused_updates": {
+        "name": "Fused location updates"
       }
     }
   },

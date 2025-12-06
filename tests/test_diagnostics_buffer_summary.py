@@ -18,7 +18,6 @@ from custom_components.googlefindmy.const import (
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MOVEMENT_THRESHOLD,
 )
 from tests.helpers import drain_loop
@@ -192,7 +191,6 @@ def test_diagnostics_merge_entry_data_and_options(
             OPT_GOOGLE_HOME_FILTER_ENABLED: False,
             OPT_GOOGLE_HOME_FILTER_KEYWORDS: "legacy",
             OPT_IGNORED_DEVICES: ["legacy-id"],
-            OPT_MIN_ACCURACY_THRESHOLD: 123,
             CONF_OAUTH_TOKEN: "secret-token",
         },
         options={
@@ -231,7 +229,6 @@ def test_diagnostics_merge_entry_data_and_options(
     config_summary = payload["config"]
     assert config_summary["location_poll_interval"] == 45
     assert config_summary["device_poll_delay"] == 10
-    assert config_summary["min_accuracy_threshold"] == 123
     assert config_summary["movement_threshold"] == 75
     assert config_summary["google_home_filter_enabled"] is True
     assert config_summary["enable_stats_entities"] is False
