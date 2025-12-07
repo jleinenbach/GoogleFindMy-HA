@@ -143,8 +143,6 @@ def test_refresh_normalizes_registry_allowlist(monkeypatch: pytest.MonkeyPatch) 
     coordinator.data = [{"id": canonical_id, "name": "Tracker One"}]
     coordinator._enabled_poll_device_ids = {canonical_id}
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 30
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120
@@ -227,8 +225,6 @@ def test_default_subentry_prefers_tracker_and_skips_service_manager_updates(
     coordinator.data = [{"id": "device-1", "name": "Tracker One"}]
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 30
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120

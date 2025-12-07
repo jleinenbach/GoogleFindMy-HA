@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
-          "min_accuracy_threshold": "Precisión mínima (m)",
-          "movement_threshold": "Umbral de movimiento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Palabras clave del filtro (separadas por comas)",
           "enable_stats_entities": "Crear entidades de estadísticas",
@@ -250,33 +248,31 @@
           "new_secrets_json": "Nuevo secrets.json (contenido completo)",
           "new_oauth_token": "Nuevo token OAuth",
           "new_google_email": "Correo de Google",
-          "subentry": "Feature group"
+          "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la sección [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver los flujos disponibles."
+          "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la sección [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver los flujos disponibles."
         }
       },
       "settings": {
         "title": "Opciones",
-        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo necesario para activar una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
+        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
         "data": {
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
-          "min_accuracy_threshold": "Precisión mínima (m)",
-          "movement_threshold": "Umbral de movimiento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Palabras clave del filtro (separadas por comas)",
           "enable_stats_entities": "Crear entidades de estadísticas",
           "delete_caches_on_remove": "Borrar cachés al eliminar la entrada",
           "map_view_token_expiration": "Activar caducidad del token de la vista de mapa",
           "contributor_mode": "Modo de contribución de ubicaciones",
-          "subentry": "Feature group"
+          "subentry": "Grupo de funciones"
         },
         "data_description": {
           "delete_caches_on_remove": "Borra los tokens almacenados en caché y los metadatos de los dispositivos cuando se elimina esta entrada.",
           "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan.",
           "contributor_mode": "Elige cómo contribuye tu dispositivo a la red de Google (Zonas de alto tránsito por defecto o Todas las zonas para aportes colaborativos).",
-          "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
+          "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
         }
       },
       "visibility": {
@@ -284,10 +280,10 @@
         "description": "Restaura dispositivos previamente ignorados para que vuelvan a ser visibles. Selecciona uno o varios dispositivos y guarda.",
         "data": {
           "unignore_devices": "Restaurar dispositivos",
-          "subentry": "Feature group"
+          "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "subentry": "Los dispositivos restaurados se asignan al grupo de funciones elegido. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para obtener orientación."
+          "subentry": "Los dispositivos restaurados se asignan al grupo de funciones elegido. Consulta [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para obtener orientación."
         }
       },
       "repairs": {
@@ -586,12 +582,9 @@
       "stat_invalid_coords": {
         "name": "Coordenadas no válidas"
       },
-      "stat_low_quality_dropped": {
-        "name": "Lecturas de baja precisión descartadas"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Actualizaciones no significativas descartadas"
-      }
+        "stat_fused_updates": {
+            "name": "Actualizaciones de ubicación fusionadas"
+        }
     }
   },
   "issues": {

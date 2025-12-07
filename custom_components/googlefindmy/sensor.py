@@ -139,16 +139,10 @@ STATS_DESCRIPTIONS: dict[str, SensorEntityDescription] = {
         icon="mdi:map-marker-alert",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
-    "low_quality_dropped": SensorEntityDescription(
-        key="low_quality_dropped",
-        translation_key="stat_low_quality_dropped",
-        icon="mdi:target",
-        state_class=SensorStateClass.TOTAL_INCREASING,
-    ),
-    "non_significant_dropped": SensorEntityDescription(
-        key="non_significant_dropped",
-        translation_key="stat_non_significant_dropped",
-        icon="mdi:filter-variant-remove",
+    "fused_updates": SensorEntityDescription(
+        key="fused_updates",
+        translation_key="stat_fused_updates",
+        icon="mdi:map-marker-path",
         state_class=SensorStateClass.TOTAL_INCREASING,
     ),
 }

@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
-          "min_accuracy_threshold": "Précision minimale (m)",
-          "movement_threshold": "Seuil de mouvement (m)",
           "google_home_filter_enabled": "Filtrer les appareils Google Home",
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
           "enable_stats_entities": "Créer des entités de statistiques",
@@ -250,33 +248,31 @@
           "new_secrets_json": "Nouveau secrets.json (contenu complet)",
           "new_oauth_token": "Nouveau jeton OAuth",
           "new_google_email": "Adresse e-mail Google",
-          "subentry": "Feature group"
+          "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour les différents parcours."
+          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour les différents parcours."
         }
       },
       "settings": {
         "title": "Options",
-        "description": "Ajuster les paramètres de localisation :\n• Intervalle d’interrogation de position : fréquence des requêtes de position (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes par appareil (1–60 secondes)\n• Précision minimale : ignorer les positions moins précises que cette valeur (25–500 mètres)\n• Seuil de mouvement : mouvement minimal déclenchant une mise à jour de la position (10–200 mètres)\n\nFiltre Google Home :\n• Activer pour associer les détections Google Home à la zone « Domicile »\n• Les mots-clés acceptent les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Ajuster les paramètres de localisation :\n• Intervalle d'interrogation de localisation : fréquence des interrogations (60–3600 secondes)\n• Délai entre interrogations d'appareils : intervalle entre les requêtes par appareil (1–60 secondes)\n\nFiltre Google Home :\n• Activer pour associer les détections des appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
           "location_poll_interval": "Intervalle d’interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
-          "min_accuracy_threshold": "Précision minimale (m)",
-          "movement_threshold": "Seuil de mouvement (m)",
           "google_home_filter_enabled": "Filtrer les appareils Google Home",
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
           "enable_stats_entities": "Créer des entités de statistiques",
           "delete_caches_on_remove": "Supprimer les caches lors de la suppression de l’entrée",
           "map_view_token_expiration": "Activer l’expiration du jeton de la vue carte",
           "contributor_mode": "Mode de contribution de localisation",
-          "subentry": "Feature group"
+          "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
           "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut les zones à forte affluence ou Toutes les zones pour une contribution participative).",
-          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
+          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
         }
       },
       "visibility": {
@@ -284,10 +280,10 @@
         "description": "Restaurez des appareils précédemment ignorés pour les rendre à nouveau visibles. Sélectionnez un ou plusieurs appareils puis enregistrez.",
         "data": {
           "unignore_devices": "Restaurer des appareils",
-          "subentry": "Feature group"
+          "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour obtenir des conseils."
+          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour obtenir des conseils."
         }
       },
       "repairs": {
@@ -586,12 +582,9 @@
       "stat_invalid_coords": {
         "name": "Coordonnées invalides"
       },
-      "stat_low_quality_dropped": {
-        "name": "Positions à faible précision écartées"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Mises à jour non significatives écartées"
-      }
+        "stat_fused_updates": {
+            "name": "Mises à jour de position fusionnées"
+        }
     }
   },
   "issues": {

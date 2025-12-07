@@ -93,7 +93,6 @@ from .const import (
     # Defaults
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_OPTIONS,
     DEFAULT_SEMANTIC_DETECTION_RADIUS,
     # Core domain & credential keys
@@ -106,7 +105,6 @@ from .const import (
     # Options (non-secret runtime settings)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPT_SEMANTIC_LOCATIONS,
     OPTION_KEYS,
@@ -709,16 +707,6 @@ else:
 # Standard discovery update info source exposed for helper-triggered updates.
 DISCOVERY_UPDATE_SOURCE = "discovery_update_info"
 LEGACY_DISCOVERY_UPDATE_SOURCE = "discovery_update"
-
-# --- Soft optional imports for additional options (keep the flow robust) ----------
-# If these constants are not present in your build, the fields are omitted.
-OPT_MOVEMENT_THRESHOLD: str | None
-DEFAULT_MOVEMENT_THRESHOLD: int | None
-try:
-    from .const import DEFAULT_MOVEMENT_THRESHOLD, OPT_MOVEMENT_THRESHOLD
-except Exception:  # noqa: BLE001
-    OPT_MOVEMENT_THRESHOLD = None
-    DEFAULT_MOVEMENT_THRESHOLD = None
 
 OPT_GOOGLE_HOME_FILTER_ENABLED: str | None
 OPT_GOOGLE_HOME_FILTER_KEYWORDS: str | None
@@ -2997,15 +2985,8 @@ class ConfigFlow(
             vol.Optional(OPT_DEVICE_POLL_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD): vol.All(
-                vol.Coerce(int), vol.Range(min=25, max=500)
-            ),
             vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION): bool,
         }
-        if OPT_MOVEMENT_THRESHOLD is not None:
-            schema_fields[vol.Optional(OPT_MOVEMENT_THRESHOLD)] = vol.All(
-                vol.Coerce(int), vol.Range(min=10, max=200)
-            )
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
             schema_fields[vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED)] = bool
         if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None:
@@ -3019,15 +3000,9 @@ class ConfigFlow(
         defaults: dict[str, Any] = {
             OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
-            OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
             OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
         }
-        if (
-            OPT_MOVEMENT_THRESHOLD is not None
-            and DEFAULT_MOVEMENT_THRESHOLD is not None
-        ):
-            defaults[OPT_MOVEMENT_THRESHOLD] = DEFAULT_MOVEMENT_THRESHOLD
         if (
             OPT_GOOGLE_HOME_FILTER_ENABLED is not None
             and DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None
@@ -3404,10 +3379,8 @@ class ConfigFlow(
         for opt_key in (
             OPT_LOCATION_POLL_INTERVAL,
             OPT_DEVICE_POLL_DELAY,
-            OPT_MIN_ACCURACY_THRESHOLD,
             OPT_MAP_VIEW_TOKEN_EXPIRATION,
             OPT_CONTRIBUTOR_MODE,
-            OPT_MOVEMENT_THRESHOLD,
             OPT_GOOGLE_HOME_FILTER_ENABLED,
             OPT_GOOGLE_HOME_FILTER_KEYWORDS,
             OPT_ENABLE_STATS_ENTITIES,
@@ -5239,9 +5212,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             OPT_DEVICE_POLL_DELAY: _get(
                 OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY
             ),
-            OPT_MIN_ACCURACY_THRESHOLD: _get(
-                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-            ),
             OPT_MAP_VIEW_TOKEN_EXPIRATION: _get(
                 OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
             ),
@@ -5250,13 +5220,6 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             ),
             OPT_CONTRIBUTOR_MODE: _get(OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE),
         }
-        if (
-            OPT_MOVEMENT_THRESHOLD is not None
-            and DEFAULT_MOVEMENT_THRESHOLD is not None
-        ):
-            current[OPT_MOVEMENT_THRESHOLD] = _get(
-                OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD
-            )
         if (
             OPT_GOOGLE_HOME_FILTER_ENABLED is not None
             and DEFAULT_GOOGLE_HOME_FILTER_ENABLED is not None
@@ -5346,17 +5309,8 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             vol.Optional(OPT_DEVICE_POLL_DELAY),
             vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
         )
-        _register(
-            vol.Optional(OPT_MIN_ACCURACY_THRESHOLD),
-            vol.All(vol.Coerce(int), vol.Range(min=25, max=500)),
-        )
         _register(vol.Optional(OPT_MAP_VIEW_TOKEN_EXPIRATION), bool)
         _register(vol.Optional(OPT_DELETE_CACHES_ON_REMOVE), bool)
-        if OPT_MOVEMENT_THRESHOLD is not None:
-            _register(
-                vol.Optional(OPT_MOVEMENT_THRESHOLD),
-                vol.All(vol.Coerce(int), vol.Range(min=10, max=200)),
-            )
         if OPT_GOOGLE_HOME_FILTER_ENABLED is not None:
             _register(vol.Optional(OPT_GOOGLE_HOME_FILTER_ENABLED), bool)
         if OPT_GOOGLE_HOME_FILTER_KEYWORDS is not None:

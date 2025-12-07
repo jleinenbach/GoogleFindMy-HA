@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
-          "min_accuracy_threshold": "Minimum accuracy (m)",
-          "movement_threshold": "Movement threshold (m)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
@@ -258,12 +256,10 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Minimum accuracy: Ignore locations with an accuracy worse than this value (25–500 meters)\n• Movement threshold: Minimum movement required to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
+        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
-          "min_accuracy_threshold": "Minimum accuracy (m)",
-          "movement_threshold": "Movement threshold (m)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
@@ -560,11 +556,11 @@
           "accuracy_m": {
             "name": "Accuracy (m)"
           },
-        "altitude_m": {
-          "name": "Altitude (m)"
+          "altitude_m": {
+            "name": "Altitude (m)"
+          }
         }
-      }
-    },
+      },
       "semantic_labels": {
         "name": "Semantic labels"
       },
@@ -586,11 +582,8 @@
       "stat_invalid_coords": {
         "name": "Invalid coordinates"
       },
-      "stat_low_quality_dropped": {
-        "name": "Low-accuracy dropped"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Non-significant updates dropped"
+      "stat_fused_updates": {
+        "name": "Fused location updates"
       }
     }
   },
