@@ -184,8 +184,6 @@ def _prepare_coordinator_baseline(
     coordinator.data = []
     coordinator._enabled_poll_device_ids = set()
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 30
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120

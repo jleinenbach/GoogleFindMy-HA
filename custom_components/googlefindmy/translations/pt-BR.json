@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Intervalo(s) de pesquisa de localização",
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
-          "min_accuracy_threshold": "Precisão mínima (m)",
-          "movement_threshold": "Limiar de movimento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
@@ -258,12 +256,10 @@
       },
       "settings": {
         "title": "Opções",
-        "description": "Ajuste as configurações de localização:\n",
+        "description": "Ajuste as configurações de localização:\n• Intervalo de verificação de localização: com que frequência consultar as localizações (60–3600 segundos)\n• Atraso entre verificações de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n\nFiltro do Google Home:\n• Ative para associar detecções de dispositivos Google Home à zona Casa\n• Palavras-chave aceitam correspondências parciais (separadas por vírgulas)\n• Exemplo: “nest” corresponde a “Kitchen Nest Mini”",
         "data": {
           "location_poll_interval": "Intervalo(s) de pesquisa de localização",
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
-          "min_accuracy_threshold": "Precisão mínima (m)",
-          "movement_threshold": "Limiar de movimento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
@@ -586,12 +582,9 @@
       "stat_invalid_coords": {
         "name": "Coordenadas inválidas"
       },
-      "stat_low_quality_dropped": {
-        "name": "Baixa precisão descartada"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Atualizações não significativas foram descartadas"
-      }
+        "stat_fused_updates": {
+            "name": "Atualizações de localização combinadas"
+        }
     }
   },
   "issues": {

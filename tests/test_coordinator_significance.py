@@ -14,7 +14,6 @@ def _make_coordinator(existing: dict[str, Any]) -> GoogleFindMyCoordinator:
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coordinator._device_location_data = {"device-1": dict(existing)}
-    coordinator._movement_threshold = 50.0
     coordinator._device_names = {}
     coordinator._device_update_history = {}
     coordinator.increment_stat = lambda *_args, **_kwargs: None
@@ -35,8 +34,56 @@ def _stat_recorder() -> tuple[dict[str, int], Callable[[str], None]]:
     return counts, _increment
 
 
+def _weighted_coordinates(
+    existing: dict[str, Any], incoming: dict[str, Any]
+) -> tuple[float, float]:
+    """Return the weighted fusion result used by the coordinator."""
+
+    w_old = 1 / (max(1.0, float(existing["accuracy"])) ** 2)
+    w_new = 1 / (max(1.0, float(incoming["accuracy"])) ** 2)
+    total = w_old + w_new
+
+    fused_lat = (existing["latitude"] * w_old + incoming["latitude"] * w_new) / total
+    fused_lon = (existing["longitude"] * w_old + incoming["longitude"] * w_new) / total
+    return fused_lat, fused_lon
+
+
+def test_stale_timestamp_is_rejected_before_merge() -> None:
+    """Out-of-order payloads must not regress cached coordinates."""
+
+    existing = {
+        "latitude": 37.4219999,
+        "longitude": -122.0840575,
+        "accuracy": 25.0,
+        "last_seen": 1_700_000_000,
+        "status": "coordinate",
+    }
+    coordinator = _make_coordinator(existing)
+    stat_counts, increment = _stat_recorder()
+    coordinator.increment_stat = increment
+
+    stale = {
+        "latitude": 37.4224,
+        "longitude": -122.085,
+        "accuracy": 30.0,
+        "last_seen": existing["last_seen"] - 120,
+        "status": "coordinate",
+    }
+
+    coordinator.update_device_cache("device-1", stale)
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["latitude"] == pytest.approx(existing["latitude"])
+    assert cached["longitude"] == pytest.approx(existing["longitude"])
+    assert cached["last_seen"] == pytest.approx(existing["last_seen"])
+    assert stat_counts == {
+        "invalid_ts_drop_count": 1,
+        "drop_reason_invalid_ts": 1,
+    }
+
+
 def test_same_timestamp_with_new_altitude_is_significant() -> None:
-    """Adding altitude to an otherwise identical payload should be significant."""
+    """Altitude-only updates fuse coordinates but refresh height."""
 
     existing = {
         "latitude": 37.4219999,
@@ -49,11 +96,16 @@ def test_same_timestamp_with_new_altitude_is_significant() -> None:
 
     new_data = {**existing, "altitude": 120.0}
 
-    assert coordinator._is_significant_update("device-1", new_data)
+    coordinator.update_device_cache("device-1", new_data)
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["altitude"] == pytest.approx(120.0)
+    assert cached["last_seen"] == pytest.approx(existing["last_seen"])
+    assert cached["status"] == "Fused (Weighted)"
 
 
 def test_same_timestamp_with_altitude_delta_is_significant() -> None:
-    """A material change in altitude should bypass the duplicate gate."""
+    """Altitude changes fuse while keeping timestamps stable."""
 
     existing = {
         "latitude": 37.4219999,
@@ -66,11 +118,16 @@ def test_same_timestamp_with_altitude_delta_is_significant() -> None:
 
     new_data = {**existing, "altitude": 126.5}
 
-    assert coordinator._is_significant_update("device-1", new_data)
+    coordinator.update_device_cache("device-1", new_data)
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["altitude"] == pytest.approx(126.5)
+    assert cached["last_seen"] == pytest.approx(existing["last_seen"])
+    assert cached["status"] == "Fused (Weighted)"
 
 
 def test_accuracy_gain_is_significant_even_when_stationary() -> None:
-    """A meaningful accuracy improvement should trigger an update without movement."""
+    """Accuracy-only gains fuse coordinates without suppressing movement."""
 
     existing = {
         "latitude": 52.52,
@@ -90,12 +147,21 @@ def test_accuracy_gain_is_significant_even_when_stationary() -> None:
         "last_seen": existing["last_seen"] + 15,
     }
 
-    assert coordinator._is_significant_update("device-1", new_data)
-    assert stat_counts.get("significant_accuracy") == 1
+    coordinator.update_device_cache("device-1", new_data)
+
+    cached = coordinator._device_location_data["device-1"]
+    fused_lat, fused_lon = _weighted_coordinates(existing, new_data)
+
+    assert cached["latitude"] == pytest.approx(fused_lat)
+    assert cached["longitude"] == pytest.approx(fused_lon)
+    assert cached["accuracy"] == pytest.approx(100.0)
+    assert cached["last_seen"] == pytest.approx(new_data["last_seen"])
+    assert cached["status"] == "Fused (Weighted)"
+    assert stat_counts == {"background_updates": 1, "fused_updates": 1}
 
 
-def test_stationary_update_clamps_coordinates_with_stable_metadata() -> None:
-    """Stationary payloads should clamp coordinates while advancing freshness markers."""
+def test_stationary_update_fuses_overlapping_coordinates() -> None:
+    """Sub-threshold movement fuses coordinates instead of clamping."""
 
     existing = {
         "latitude": 40.7128,
@@ -120,16 +186,18 @@ def test_stationary_update_clamps_coordinates_with_stable_metadata() -> None:
     coordinator.update_device_cache("device-1", new_payload)
 
     cached = coordinator._device_location_data["device-1"]
-    assert cached["latitude"] == pytest.approx(existing["latitude"])
-    assert cached["longitude"] == pytest.approx(existing["longitude"])
-    assert cached["accuracy"] == pytest.approx(existing["accuracy"])
+    fused_lat, fused_lon = _weighted_coordinates(existing, new_payload)
+
+    assert cached["latitude"] == pytest.approx(fused_lat)
+    assert cached["longitude"] == pytest.approx(fused_lon)
+    assert cached["accuracy"] == pytest.approx(115.0)
     assert cached["last_seen"] == pytest.approx(new_payload["last_seen"])
-    assert cached["status"] == "Stationary (Clamped)"
-    assert stat_counts.get("clamped_updates") == 1
+    assert cached["status"] == "Fused (Weighted)"
+    assert stat_counts == {"background_updates": 1, "fused_updates": 1}
 
 
-def test_stationary_metadata_change_preserves_new_status() -> None:
-    """Low-movement updates with new metadata keep the incoming status intact."""
+def test_stationary_metadata_change_fuses_coordinates() -> None:
+    """Low-movement updates fuse coordinates while refreshing metadata."""
 
     existing = {
         "latitude": 40.7128,
@@ -156,13 +224,15 @@ def test_stationary_metadata_change_preserves_new_status() -> None:
     coordinator.update_device_cache("device-1", new_payload)
 
     cached = coordinator._device_location_data["device-1"]
-    assert cached["latitude"] == pytest.approx(existing["latitude"])
-    assert cached["longitude"] == pytest.approx(existing["longitude"])
-    assert cached["accuracy"] == pytest.approx(existing["accuracy"])
+    fused_lat, fused_lon = _weighted_coordinates(existing, new_payload)
+
+    assert cached["latitude"] == pytest.approx(fused_lat)
+    assert cached["longitude"] == pytest.approx(fused_lon)
+    assert cached["accuracy"] == pytest.approx(115.0)
     assert cached["last_seen"] == pytest.approx(new_payload["last_seen"])
     assert cached["battery_level"] == pytest.approx(new_payload["battery_level"])
-    assert cached["status"] == "low_battery"
-    assert stat_counts.get("clamped_updates") == 1
+    assert cached["status"] == "Fused (Weighted)"
+    assert stat_counts == {"background_updates": 1, "fused_updates": 1}
 
 
 def test_update_cache_keeps_coordinates_when_semantic_refresh_arrives() -> None:

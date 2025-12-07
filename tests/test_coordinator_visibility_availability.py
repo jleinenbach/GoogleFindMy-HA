@@ -75,8 +75,6 @@ def _build_coordinator(
     coordinator.data = [{"id": device_id, "name": name}]
     coordinator._enabled_poll_device_ids = {device_id}
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 30
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120
@@ -159,8 +157,6 @@ def test_refresh_recovers_devices_from_empty_visible_list() -> None:
     coordinator.data = [{"id": "device-1", "name": "Device One"}]
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 30
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120

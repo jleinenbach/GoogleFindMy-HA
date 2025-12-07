@@ -824,8 +824,6 @@ def _prepare_coordinator_for_registry(
     coordinator.data = []
     coordinator._enabled_poll_device_ids = set()
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 5
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120
@@ -1839,8 +1837,6 @@ def test_service_device_defers_unknown_config_subentry(
             "location": coordinator.location_poll_interval,
             "minimum": coordinator.min_poll_interval,
             "device": coordinator.device_poll_delay,
-            "min_accuracy": coordinator._min_accuracy_threshold,
-            "movement": coordinator._movement_threshold,
         }
     )
     coordinator._subentry_metadata = {

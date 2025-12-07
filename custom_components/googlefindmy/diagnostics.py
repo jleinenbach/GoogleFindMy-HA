@@ -44,8 +44,6 @@ from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
-    DEFAULT_MOVEMENT_THRESHOLD,
     DOMAIN,
     OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
@@ -55,8 +53,6 @@ from .const import (
     # user-facing options (non-secret)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MOVEMENT_THRESHOLD,
 )
 from .ha_typing import callback
 
@@ -498,6 +494,7 @@ async def async_get_config_entry_diagnostics(
     ignored_raw = effective_config.get(OPT_IGNORED_DEVICES) or {}
 
     effective_config_for_diag = dict(effective_config)
+    effective_config_for_diag.pop("min_accuracy_threshold", None)
 
     # Coerce to handle legacy list[str] format gracefully
     if isinstance(ignored_raw, list):
@@ -532,16 +529,6 @@ async def async_get_config_entry_diagnostics(
         "device_poll_delay": _coerce_pos_int(
             effective_config.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
             DEFAULT_DEVICE_POLL_DELAY,
-        ),
-        "min_accuracy_threshold": _coerce_pos_int(
-            effective_config.get(
-                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-            ),
-            DEFAULT_MIN_ACCURACY_THRESHOLD,
-        ),
-        "movement_threshold": _coerce_pos_int(
-            effective_config.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD),
-            DEFAULT_MOVEMENT_THRESHOLD,
         ),
         # Feature toggles
         "google_home_filter_enabled": bool(
