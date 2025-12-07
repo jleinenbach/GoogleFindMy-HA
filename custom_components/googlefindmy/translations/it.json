@@ -35,7 +35,6 @@
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
-          "min_accuracy_threshold": "Accuratezza minima (m)",
           "movement_threshold": "Soglia di movimento (m)",
           "google_home_filter_enabled": "Filtra dispositivi Google Home",
           "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
@@ -258,11 +257,10 @@
       },
       "settings": {
         "title": "Opzioni",
-        "description": "Modifica le impostazioni di localizzazione:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Accuratezza minima: ignora posizioni peggiori di questo valore (25–500 metri)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per associare i rilevamenti Google Home alla zona ‘Casa’\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: ‘nest’ corrisponde a ‘Kitchen Nest Mini’",
+        "description": "Modifica le impostazioni di localizzazione:\n• Intervallo di polling posizione: frequenza di interrogazione delle posizioni (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Soglia di movimento: movimento minimo per generare un aggiornamento di posizione (10–200 metri)\n\nFiltro Google Home:\n• Abilita per associare i rilevamenti Google Home alla zona ‘Casa’\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: ‘nest’ corrisponde a ‘Kitchen Nest Mini’",
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
-          "min_accuracy_threshold": "Accuratezza minima (m)",
           "movement_threshold": "Soglia di movimento (m)",
           "google_home_filter_enabled": "Filtra dispositivi Google Home",
           "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
@@ -586,11 +584,11 @@
       "stat_invalid_coords": {
         "name": "Coordinate non valide"
       },
-      "stat_low_quality_dropped": {
-        "name": "Posizioni a bassa accuratezza scartate"
-      },
       "stat_non_significant_dropped": {
         "name": "Aggiornamenti non significativi scartati"
+      },
+      "stat_fused_updates": {
+        "name": "Fused location updates"
       }
     }
   },

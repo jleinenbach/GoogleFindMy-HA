@@ -121,7 +121,6 @@ from .const import (
     INTEGRATION_VERSION,
     ISSUE_AUTH_EXPIRED_KEY,
     LOCATION_REQUEST_TIMEOUT_S,
-    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     OPT_IGNORED_DEVICES,
     OPT_SEMANTIC_LOCATIONS,
     SERVICE_DEVICE_MANUFACTURER,
@@ -650,7 +649,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         location_poll_interval: int = 300,
         device_poll_delay: int = 5,
         min_poll_interval: int = DEFAULT_MIN_POLL_INTERVAL,
-        min_accuracy_threshold: int = 100,
         movement_threshold: int = 15,
         allow_history_fallback: bool = False,
         contributor_mode: str = DEFAULT_CONTRIBUTOR_MODE,
@@ -671,7 +669,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             location_poll_interval: The interval in seconds between polling cycles.
             device_poll_delay: The delay in seconds between polling individual devices.
             min_poll_interval: The minimum allowed interval between polling cycles.
-            min_accuracy_threshold: The minimum GPS accuracy in meters to accept a location.
             movement_threshold: Movement delta in meters for significance gating (default 15 m).
             allow_history_fallback: Whether to fall back to Recorder history for location.
             contributor_mode: Preferred Nova contributor mode ("high_traffic" or "in_all_areas").
@@ -714,9 +711,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self.min_poll_interval = int(
             min_poll_interval
         )  # hard lower bound between cycles
-        self._min_accuracy_threshold = int(
-            min_accuracy_threshold
-        )  # quality filter (meters)
         self._movement_threshold = int(
             movement_threshold
         )  # meters; used by significance gate
@@ -803,14 +797,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             "history_fallback_used": 0,  # times we had to fall back to Recorder history
             "timeouts": 0,  # request timeouts
             "invalid_coords": 0,  # coordinate validation failures
-            "low_quality_dropped": 0,  # dropped due to accuracy worse than threshold
             "invalid_ts_drop_count": 0,  # invalid or stale (< existing) timestamps
             "future_ts_drop_count": 0,  # timestamps too far in the future
             "non_significant_dropped": 0,  # drops by significance gate
             "drop_reason_invalid_ts": 0,  # invalid/stale timestamps (detail bucket)
-            "clamped_updates": 0,  # accepted but coordinates reverted to cache
             "significant_move": 0,  # accepted due to true movement
             "significant_accuracy": 0,  # accepted due to improved accuracy
+            "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
@@ -1334,7 +1327,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     "location": int(self.location_poll_interval),
                     "minimum": int(self.min_poll_interval),
                     "device": int(self.device_poll_delay),
-                    "min_accuracy": int(self._min_accuracy_threshold),
                     "movement": int(self._movement_threshold),
                 }
             )
@@ -5084,47 +5076,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             location.pop("_report_hint", None)
                             continue
 
-                        # Accuracy quality filter
-                        acc = location.get("accuracy")
-                        if (
-                            isinstance(self._min_accuracy_threshold, int)
-                            and self._min_accuracy_threshold > 0
-                            and isinstance(acc, (int, float))
-                            and acc > self._min_accuracy_threshold
-                        ):
-                            prev_location = self._device_location_data.get(dev_id)
-                            if isinstance(prev_location, dict):
-                                prev_lat = prev_location.get("latitude")
-                                prev_lon = prev_location.get("longitude")
-                                prev_acc = prev_location.get("accuracy")
-                            else:
-                                prev_lat = None
-                                prev_lon = None
-                                prev_acc = None
-
-                            if prev_lat is not None and prev_lon is not None:
-                                location = dict(location)
-                                _LOGGER.debug(
-                                    "Low accuracy (%sm); preserving previous coordinates for %s but updating timestamp.",
-                                    acc,
-                                    dev_name,
-                                )
-                                location["latitude"] = prev_lat
-                                location["longitude"] = prev_lon
-                                if prev_acc is not None:
-                                    location["accuracy"] = prev_acc
-                            else:
-                                _LOGGER.debug(
-                                    "Dropping low-quality fix for %s (accuracy=%sm > %sm)",
-                                    dev_name,
-                                    acc,
-                                    self._min_accuracy_threshold,
-                                )
-                                self.increment_stat("low_quality_dropped")
-                                # Strip any internal hint before dropping to avoid accidental exposure
-                                location.pop("_report_hint", None)
-                                continue
-
                         # Sanitize invariants + enrich fields (label, utc-string)
                         location = _sanitize_decoder_row(location)
 
@@ -5137,16 +5088,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         if location.get("source_label") == "crowdsourced":
                             self.increment_stat("crowd_sourced_updates")
 
-                        # Significance gate (replaces naive duplicate check)
-                        if not self._is_significant_update(dev_id, location):
-                            _LOGGER.debug(
-                                "Skipping non-significant update for %s (last_seen=%s)",
-                                dev_name,
-                                location.get("last_seen"),
-                            )
-                            self.increment_stat("non_significant_dropped")
-                            # Strip internal hint before dropping to avoid accidental exposure
-                            location.pop("_report_hint", None)
+                        if not self._apply_weighted_location_fusion(dev_id, location):
                             continue
 
                         # Age diagnostics (informational)
@@ -5699,8 +5641,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Internal rules:
         - Applies type-aware **poll** cooldowns based on an internal `_report_hint` (if present).
         - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
-        - Runs significance gating to prevent redundant cache churn. The cooldown still applies
-          even if the update is dropped as non-significant (server-friendly behaviour).
+        - Applies weighted fusion and semantic-anchor protection to stabilize coordinates
+          while still updating timestamps and metadata.
         """
         if not self._is_on_hass_loop():
             # Marshal entire update onto the HA loop to avoid cross-thread mutations.
@@ -5730,10 +5672,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._apply_semantic_mapping(slot)
         slot.pop("is_replayed", None)
 
-        # Apply type-aware **poll** cooldowns (if decrypt layer provided a hint),
-        # then drop the hint to keep internal-only.
         report_hint = slot.get("_report_hint")
-        self._apply_report_type_cooldown(device_id, report_hint)
+
+        if not self._apply_weighted_location_fusion(device_id, slot):
+            return
+
+        status = slot.get("status")
+        is_stationary_logic = (
+            status in ("Fused (Weighted)", "Stationary (at Anchor)")
+            or is_replay
+        )
+
+        if is_stationary_logic:
+            self._apply_report_type_cooldown(device_id, report_hint)
+        else:
+            _LOGGER.debug(
+                "Skipping throttle cooldown for %s despite '%s' hint (movement detected)",
+                device_id,
+                report_hint,
+            )
 
         # Track crowd-sourced updates when hint is present
         if report_hint:
@@ -5751,11 +5708,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if slot.get("source_label") == "crowdsourced":
             self.increment_stat("crowd_sourced_updates")
 
-        # Significance gate (prevents redundant churn while still respecting cooldowns)
-        if not self._is_significant_update(device_id, slot):
-            self.increment_stat("non_significant_dropped")
-            return
-
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
 
@@ -5772,6 +5724,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_location_data[device_id] = slot
         # Increment background updates to account for push/manual commits.
         self.increment_stat("background_updates")
+
+    def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
+        """Compatibility shim that delegates significance checks to fusion.
+
+        Legacy call sites expect this method to evaluate whether an incoming
+        payload merits cache updates. Weighted fusion now handles both
+        stabilization and semantic-anchor shielding, so this gate simply
+        delegates to the fusion engine and returns its decision without
+        reapplying any clamping logic.
+
+        Args:
+            device_id: Canonical device identifier.
+            new_data: The latest location payload to evaluate.
+
+        Returns:
+            ``True`` when the caller should accept the payload.
+        """
+
+        if not isinstance(new_data, dict):
+            return False
+
+        return self._apply_weighted_location_fusion(device_id, new_data)
 
     def _merge_with_existing_cache_row(
         self, device_id: str, incoming: dict[str, Any]
@@ -5833,119 +5807,98 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
         return R * c
 
-    def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
-        """Return True when the incoming payload should update the cache.
+    def _apply_weighted_location_fusion(
+        self, device_id: str, new_data: dict[str, Any]
+    ) -> bool:
+        """Fuse overlapping locations while honoring semantic anchors.
 
-        The gate records why a payload was accepted and favors freshness over
-        unnecessary drops:
+        The fusion pipeline keeps semantic locations authoritative and blends
+        overlapping sensor fixes to minimize jitter:
+        1. Cold starts accept any payload because there is no baseline.
+        2. Trusted (semantic) updates always win immediately.
+        3. When the cached location is trusted, overlapping sensor fixes snap
+           back to the anchor instead of drifting.
+        4. Standard sensor fixes are fused with inverse-square weighting when
+           their accuracy circles overlap; clear jumps simply pass through.
 
-        - Reject only invalid timestamps (pre-2000, future-dated, or older than
-          the cached entry) while tracking the drop reason.
-        - Treat a 30 % accuracy improvement (``<= 0.7`` of the previous
-          accuracy) as significant even without movement.
-        - Let qualitative metadata changes (status, semantic labels, battery
-          level, source markers) through so presence stays current.
-        - Consider movement significant when the great-circle distance exceeds
-          the dynamic error circle (``max(self._movement_threshold,
-          incoming_accuracy)``) and record the event in ``significant_move``.
-        - Clamp stationary updates: keep metadata and timestamps, restore cached
-          coordinates, and only stamp a stationary status marker when the
-          metadata itself has not changed. All clamped heartbeats increment
-          ``clamped_updates`` to avoid GPS jitter while keeping the sensor
-          fresh.
+        Returns True when the caller should continue processing the payload.
         """
+
         existing = self._device_location_data.get(device_id)
-        if not existing:
+        if not existing or existing.get("latitude") is None:
             return True
 
-        n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
-        # last_seen can be missing, do not drop, qualitative checks will still run
-        if n_seen_norm is not None:
-            if n_seen_norm < 946684800.0:  # < 2000-01-01
-                self.increment_stat("invalid_ts_drop_count")
-                self.increment_stat("drop_reason_invalid_ts")
-                return False
-            if n_seen_norm > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
-                self.increment_stat("future_ts_drop_count")
-                return False
-
-        e_seen_norm = _normalize_epoch_seconds(existing.get("last_seen"))
-
-        # Stale-guard: reuse invalid_ts_drop_count for "older than existing"
-        if (
-            n_seen_norm is not None
-            and e_seen_norm is not None
-            and n_seen_norm < e_seen_norm
-        ):
-            self.increment_stat("invalid_ts_drop_count")
-            self.increment_stat("drop_reason_invalid_ts")
-            return False
-
-        metadata_changed = (
-            new_data.get("status") != existing.get("status")
-            or new_data.get("source_label") != existing.get("source_label")
-            or new_data.get("is_own_report") != existing.get("is_own_report")
-            or new_data.get("semantic_name") != existing.get("semantic_name")
-            or new_data.get("battery_level") != existing.get("battery_level")
-        )
-
-        # Distance and accuracy based decisions (dynamic error circle)
-        n_lat, n_lon = new_data.get("latitude"), new_data.get("longitude")
-        e_lat, e_lon = existing.get("latitude"), existing.get("longitude")
-        n_acc = new_data.get("accuracy")
-        e_acc = existing.get("accuracy")
-
-        distance: float | None = None
-        if all(isinstance(v, (int, float)) for v in (n_lat, n_lon, e_lat, e_lon)):
-            try:
-                e_lat_f = float(cast(float, e_lat))
-                e_lon_f = float(cast(float, e_lon))
-                n_lat_f = float(cast(float, n_lat))
-                n_lon_f = float(cast(float, n_lon))
-                distance = self._haversine_distance(e_lat_f, e_lon_f, n_lat_f, n_lon_f)
-            except Exception:
-                distance = None
-
-        movement_threshold = float(self._movement_threshold)
-        if isinstance(n_acc, (int, float)):
-            try:
-                n_acc_f = float(n_acc)
-                if math.isfinite(n_acc_f):
-                    movement_threshold = max(movement_threshold, n_acc_f)
-            except (TypeError, ValueError):
-                pass
-
-        if (
-            isinstance(n_acc, (int, float))
-            and isinstance(e_acc, (int, float))
-            and math.isfinite(float(n_acc))
-            and math.isfinite(float(e_acc))
-            and float(n_acc) <= float(e_acc) * 0.7
-        ):
-            # Accuracy jump: snap to the better fix even if distance is small.
-            self.increment_stat("significant_accuracy")
+        new_lat = self._coerce_float(new_data.get("latitude"))
+        new_lon = self._coerce_float(new_data.get("longitude"))
+        if new_lat is None or new_lon is None:
             return True
 
-        if distance is not None and distance > movement_threshold:
-            # Significant move: accept and advance coordinates.
-            self.increment_stat("significant_move")
+        existing_lat = self._coerce_float(existing.get("latitude"))
+        existing_lon = self._coerce_float(existing.get("longitude"))
+        if existing_lat is None or existing_lon is None:
             return True
 
-        # Stationary heartbeat: keep presence metadata while clamping position to
-        # avoid GPS jitter. We preserve timing/battery but revert coordinates to
-        # the cached values before committing the update.
-        if distance is not None:
-            for key in ("latitude", "longitude", "accuracy", "altitude"):
-                if key in existing:
-                    new_data[key] = existing[key]
-            if not metadata_changed:
-                new_data["status"] = "Stationary (Clamped)"
-            self.increment_stat("clamped_updates")
+        existing_acc_raw = self._coerce_float(existing.get("accuracy"))
+        new_acc_raw = self._coerce_float(new_data.get("accuracy"))
+
+        def _safe_accuracy(value: float | None) -> float:
+            if value is None or not math.isfinite(value):
+                return 10000.0
+            if value < 0:
+                return 10000.0
+            return value
+
+        existing_acc = _safe_accuracy(existing_acc_raw)
+        new_acc = _safe_accuracy(new_acc_raw)
+
+        try:
+            dist = self._haversine_distance(existing_lat, existing_lon, new_lat, new_lon)
+        except Exception:
             return True
 
-        if metadata_changed:
+        radius_sum = existing_acc + new_acc
+
+        if new_data.get("location_type") == "trusted":
             return True
 
+        if existing.get("location_type") == "trusted":
+            if dist <= radius_sum:
+                new_data["latitude"] = existing_lat
+                new_data["longitude"] = existing_lon
+                if existing_acc_raw is not None:
+                    new_data["accuracy"] = existing_acc_raw
+                if existing.get("altitude") is not None:
+                    new_data["altitude"] = existing["altitude"]
+                new_data["location_type"] = "trusted"
+                new_data["status"] = "Stationary (at Anchor)"
+            return True
+
+        if dist > radius_sum:
+            return True
+
+        w_old = 1 / (max(1.0, existing_acc) ** 2)
+        w_new = 1 / (max(1.0, new_acc) ** 2)
+        total_w = w_old + w_new
+        if total_w == 0:
+            return True
+
+        lat_fused = (existing_lat * w_old + new_lat * w_new) / total_w
+        lon_fused = (existing_lon * w_old + new_lon * w_new) / total_w
+
+        new_data["latitude"] = lat_fused
+        new_data["longitude"] = lon_fused
+
+        best_accuracy: float | None
+        if existing_acc_raw is not None and new_acc_raw is not None:
+            best_accuracy = min(existing_acc_raw, new_acc_raw)
+        else:
+            best_accuracy = existing_acc_raw or new_acc_raw
+
+        if best_accuracy is not None:
+            new_data["accuracy"] = best_accuracy
+
+        new_data["status"] = "Fused (Weighted)"
+        self.increment_stat("fused_updates")
         return True
 
     def get_device_last_seen(self, device_id: str) -> datetime | None:
@@ -6283,7 +6236,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         location_poll_interval: int | None = None,
         device_poll_delay: int | None = None,
         min_poll_interval: int | None = None,
-        min_accuracy_threshold: int | None = None,
         movement_threshold: int | None = None,
         allow_history_fallback: bool | None = None,
         contributor_mode: str | None = None,
@@ -6299,7 +6251,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             location_poll_interval: The interval in seconds for location polling.
             device_poll_delay: The delay in seconds between polling devices.
             min_poll_interval: The minimum polling interval in seconds.
-            min_accuracy_threshold: The minimum accuracy in meters.
             movement_threshold: The spatial delta (meters) required to treat updates as significant.
             allow_history_fallback: Whether to allow falling back to Recorder history.
             contributor_mode: Updated contributor mode ("high_traffic" or "in_all_areas").
@@ -6331,14 +6282,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             except (TypeError, ValueError):
                 _LOGGER.warning(
                     "Ignoring invalid min_poll_interval=%r", min_poll_interval
-                )
-
-        if min_accuracy_threshold is not None:
-            try:
-                self._min_accuracy_threshold = max(0, int(min_accuracy_threshold))
-            except (TypeError, ValueError):
-                _LOGGER.warning(
-                    "Ignoring invalid min_accuracy_threshold=%r", min_accuracy_threshold
                 )
 
         if movement_threshold is not None:
@@ -6550,24 +6493,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     )
                 return {}
 
-            acc = location_data.get("accuracy")
-
-            # Accuracy quality filter
-            if (
-                isinstance(self._min_accuracy_threshold, int)
-                and self._min_accuracy_threshold > 0
-                and isinstance(acc, (int, float))
-                and float(acc) > float(self._min_accuracy_threshold)
-            ):
-                _LOGGER.debug(
-                    "Dropping low-quality fix for %s (accuracy=%sm > %sm)",
-                    name,
-                    acc,
-                    self._min_accuracy_threshold,
-                )
-                self.increment_stat("low_quality_dropped")
-                return {}
-
             # Prepare a copy for gating/cooldown application
             slot = dict(location_data)
             slot.setdefault("last_updated", time.time())
@@ -6588,11 +6513,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # Increment crowdsourced stats for manual locate as well (if applicable)
             if slot.get("source_label") == "crowdsourced":
                 self.increment_stat("crowd_sourced_updates")
-
-            # Significance gate also for manual locate to avoid churn.
-            if not self._is_significant_update(device_id, slot):
-                self.increment_stat("non_significant_dropped")
-                return {}
 
             # Commit to cache (update_device_cache ensures last_updated and stats)
             self.update_device_cache(device_id, slot)

@@ -63,7 +63,6 @@ def _base_coordinator(
     coordinator._last_poll_mono = 0.0
     coordinator._consecutive_timeouts = 0
     coordinator.location_poll_interval = 0
-    coordinator._min_accuracy_threshold = 0
     coordinator._movement_threshold = 0
     coordinator.data = []
     coordinator._last_device_list = []
@@ -177,7 +176,6 @@ def _push_coordinator(options: dict[str, Any]) -> GoogleFindMyCoordinator:
     coordinator._device_poll_cooldown_until = {}
     coordinator._present_last_seen = {}
     coordinator._semantic_label_cache = {}
-    coordinator._min_accuracy_threshold = 0
     coordinator._movement_threshold = 0
     return coordinator
 

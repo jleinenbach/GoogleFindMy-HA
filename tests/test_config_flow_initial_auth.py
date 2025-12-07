@@ -34,7 +34,6 @@ from custom_components.googlefindmy.const import (
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -140,7 +139,6 @@ def _prepare_reconfigure_flow(
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -730,7 +728,6 @@ def test_device_selection_creates_and_updates_subentry() -> None:
     first_input: dict[str, Any] = {
         OPT_LOCATION_POLL_INTERVAL: 300,
         OPT_DEVICE_POLL_DELAY: 5,
-        OPT_MIN_ACCURACY_THRESHOLD: 100,
         OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
         OPT_CONTRIBUTOR_MODE: config_flow.CONTRIBUTOR_MODE_IN_ALL_AREAS,
     }
@@ -1012,7 +1009,6 @@ async def test_async_step_reconfigure_awaits_reload(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1067,7 +1063,6 @@ async def test_async_step_reconfigure_defers_reload_and_logs_warning(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1143,7 +1138,6 @@ async def test_async_step_reconfigure_defers_reload_and_logs_exception(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1180,7 +1174,6 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -1281,7 +1274,6 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1321,7 +1313,6 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -1423,7 +1414,6 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1471,7 +1461,6 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -1589,7 +1578,6 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         {
             OPT_LOCATION_POLL_INTERVAL: 120,
             OPT_DEVICE_POLL_DELAY: 5,
-            OPT_MIN_ACCURACY_THRESHOLD: 90,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
         }
     )
