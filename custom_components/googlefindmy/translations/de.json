@@ -35,7 +35,6 @@
         "data": {
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
-          "min_accuracy_threshold": "Mindestgenauigkeit (m)",
           "movement_threshold": "Bewegungsschwelle (m)",
           "google_home_filter_enabled": "Google-Home-Geräte filtern",
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
@@ -258,11 +257,10 @@
       },
       "settings": {
         "title": "Optionen",
-        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden)\n• Mindestgenauigkeit: Positionen mit einer größeren Ungenauigkeit als dieser Wert werden ignoriert (25–500 Meter)\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter)\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der „Zuhause“-Zone zuzuordnen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: „nest“ passt zu „Küche Nest Mini“",
+        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden)\n• Bewegungsschwelle: Mindestbewegung, um eine Positionsaktualisierung auszulösen (10–200 Meter)\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der „Zuhause“-Zone zuzuordnen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: „nest“ passt zu „Küche Nest Mini“",
         "data": {
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
-          "min_accuracy_threshold": "Mindestgenauigkeit (m)",
           "movement_threshold": "Bewegungsschwelle (m)",
           "google_home_filter_enabled": "Google-Home-Geräte filtern",
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
@@ -586,11 +584,11 @@
       "stat_invalid_coords": {
         "name": "Ungültige Koordinaten"
       },
-      "stat_low_quality_dropped": {
-        "name": "Verworfen (geringe Genauigkeit)"
-      },
       "stat_non_significant_dropped": {
         "name": "Unwesentliche Aktualisierungen verworfen"
+      },
+      "stat_fused_updates": {
+        "name": "Fusionierte Standort-Updates"
       }
     }
   },
