@@ -340,6 +340,13 @@ def _row_source_label(row: dict[str, Any]) -> tuple[int, str]:
     Determine (rank, label) for the source of a report.
     Rank: 3=owner, 2=crowdsourced, 1=aggregated, 0=semantic/unknown
     Label: 'owner' | 'crowdsourced' | 'aggregated' | 'semantic/unknown'
+
+    Internal label mapping aligns with the protobuf Status enum and Google
+    Contribution Settings:
+    - 'crowdsourced' comes from Status.CROWDSOURCED (finder opted into
+      "with network in all areas").
+    - 'aggregated' comes from Status.AGGREGATED (finder opted into "with
+      network in high-traffic areas only").
     """
     is_own = bool(row.get("is_own_report"))
     status_code = row.get("status_code")

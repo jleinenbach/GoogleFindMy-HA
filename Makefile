@@ -62,13 +62,13 @@ clean-wheelhouse:
 
 install-ha-stubs:
 	@echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
-	@$(PYTHON) -m pip install --upgrade -r requirements-ha-stubs.txt
+	@$(PYTHON) -m pip install --upgrade -r custom_components/googlefindmy/requirements-ha-stubs.txt
 
 test-stubs:
 	@echo "[make test-stubs] Installing Home Assistant test dependencies"
-	@$(PYTHON) -m pip install --upgrade homeassistant pytest-homeassistant-custom-component
+	@$(PYTHON) -m pip install --upgrade -r custom_components/googlefindmy/requirements-ha-stubs.txt
 	@echo "[make test-stubs] Preloading optional integration drivers"
-	@$(PYTHON) -m pip install --upgrade -r custom_components/googlefindmy/requirements-dev.txt
+	@$(PYTHON) -m pip install --upgrade -c custom_components/googlefindmy/constraints-test-stubs.txt -r custom_components/googlefindmy/requirements-dev.txt
 
 test-deps:
 	@echo "[make test-deps] Installing stub and integration development dependencies"
@@ -91,7 +91,7 @@ bootstrap-base-deps: $(BOOTSTRAP_SENTINEL)
 $(BOOTSTRAP_SENTINEL):
 	@mkdir -p $(dir $(BOOTSTRAP_SENTINEL))
 	@echo "[make bootstrap-base-deps] Pre-installing Home Assistant base dependencies (including common runtime crypto/HTTP helpers)"
-	@$(PYTHON) -m pip install --upgrade $(BASE_BOOTSTRAP_PACKAGES)
+	@$(PYTHON) -m pip install --upgrade -c custom_components/googlefindmy/constraints-test-stubs.txt $(BASE_BOOTSTRAP_PACKAGES)
 	@touch $(BOOTSTRAP_SENTINEL)
 
 $(WHEELHOUSE_SENTINEL): $(DEV_REQUIREMENTS)

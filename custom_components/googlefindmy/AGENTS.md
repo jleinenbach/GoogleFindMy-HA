@@ -66,3 +66,14 @@ the import in a small getter and call it only from the executor-backed runtime p
 When adding a lazy import helper, **keep the corresponding `import_module` (or other loader) imported in the module** so static
 analysis tools like `ruff` retain full visibility into the call site. Dropping the import and relying solely on dynamic
 resolution causes undefined-name lint failures the next time the file is checked.
+
+### Network Status Codes & Privacy Mapping
+
+Use the proto/network label mapping below when interpreting report provenance or introducing new UI strings so contributor
+privacy semantics remain aligned with Google's contribution settings.
+
+| Proto Enum | Integration Label | Real-world Meaning |
+| --- | --- | --- |
+| `Status.CROWDSOURCED = 2` | `'crowdsourced'` | Location report from a finder contributing with network in **all areas** ("Contribution Settings: With network in all areas"). |
+| `Status.AGGREGATED = 3` | `'aggregated'` | Location report from a finder contributing with network in **high-traffic areas only** ("Contribution Settings: With network in high-traffic areas only"). |
+| `EncryptedReport.isOwnReport = true` or `Status.LAST_KNOWN = 1` | `'owner'` | Owner-sourced location report from the device itself. |

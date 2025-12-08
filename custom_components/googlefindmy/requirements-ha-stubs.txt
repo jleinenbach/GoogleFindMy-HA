@@ -1,0 +1,3 @@
+--constraint constraints-test-stubs.txt
+homeassistant
+pytest-homeassistant-custom-component

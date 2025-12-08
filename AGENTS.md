@@ -246,6 +246,7 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
 * **Connectivity probe:** Follow the [connectivity probe](#connectivity-probe) and capture the output before running tests.
 * **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
+* **Pinned stub constraints:** The stub versions are locked in `custom_components/googlefindmy/constraints-test-stubs.txt` to reduce resolver backtracking; reuse that constraint file when installing Home Assistant stubs outside the Makefile targets.
 * **DocToc preinstall:** Run `make bootstrap-doctoc` once per environment to install the DocToc dev dependency non-interactively (cached under `.npm-cache`); subsequent `make doctoc` calls reuse the installation to refresh the AGENTS.md table of contents.
 * **Strict mypy prep:** In a fresh environment, run `make test-stubs` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
 * **Coverage reminder:** After adjusting registry helper fallbacks, rerun `pytest --cov -q` to confirm coverage stays intact before committing.
