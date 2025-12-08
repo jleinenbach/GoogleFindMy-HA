@@ -1255,11 +1255,23 @@ class FcmReceiverHA:
         return True
 
     def _extract_canonic_id_from_response(self, hex_response: str) -> str | None:
-        """Extract canonical id via the decoder."""
+        """Extract canonical id via the decoder.
+
+        Handles the schema difference between Android devices (nested in phoneInformation)
+        and Spot/Tracker devices (direct canonicIds), as defined in DeviceUpdate.proto.
+        """
         try:
             device_update = decoder_module.parse_device_update_protobuf(hex_response)
             if device_update.HasField("deviceMetadata"):
-                ids = device_update.deviceMetadata.identifierInformation.canonicIds.canonicId
+                info = device_update.deviceMetadata.identifierInformation
+
+                # Aligns with ProtoDecoders.decoder.get_canonic_ids logic:
+                # type == 1 → Android devices store IDs under phoneInformation.canonicIds.
+                if info.type == 1:
+                    ids = info.phoneInformation.canonicIds.canonicId
+                else:
+                    ids = info.canonicIds.canonicId
+
                 if ids:
                     return ids[0].id
         except Exception as err:  # noqa: BLE001
