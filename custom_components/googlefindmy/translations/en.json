@@ -592,6 +592,10 @@
       "title": "Reauthentication required",
       "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
     },
+    "fcm_connection_stuck": {
+      "title": "FCM Push Connection Failed",
+      "description": "The background connection to Google is blocked.\n\n1. Is outgoing **TCP Port 5228** allowed in your firewall?\n2. If network is fine, try regenerating your `secrets.json` (credentials might be split/revoked)."
+    },
     "multiple_config_entries": {
       "title": "Multiple configuration entries detected",
       "description": "Google Find My Device now supports multiple configuration entries, one per Google account. If each entry targets a different account, no action is required. When the same account is added twice, Home Assistant creates a **Duplicate account entries** repair issue for the new entry so you can remove or re-enable the correct one."

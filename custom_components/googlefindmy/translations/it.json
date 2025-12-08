@@ -592,6 +592,10 @@
       "title": "È necessaria una nuova autenticazione",
       "description": "L’autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell’integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento."
     },
+    "fcm_connection_stuck": {
+      "title": "Connessione push FCM non riuscita",
+      "description": "La connessione in background a Google è bloccata.\n\n1. Il **porta TCP 5228** in uscita è consentito dal firewall?\n2. Se la rete è a posto, prova a rigenerare il tuo `secrets.json` (le credenziali potrebbero essere parziali/revocate)."
+    },
     "multiple_config_entries": {
       "title": "Rilevate più voci di configurazione",
       "description": "Google Find My Device ora supporta più voci di configurazione, una per ogni account Google. Se ogni voce utilizza un account diverso, non è necessaria alcuna azione. Quando lo stesso account viene aggiunto due volte, Home Assistant crea una riparazione **Voci di account duplicate** per la nuova voce così da poter rimuovere o riattivare quella corretta."
