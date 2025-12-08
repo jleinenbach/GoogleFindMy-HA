@@ -624,8 +624,15 @@ def get_devices_with_location(
                             )
                             or []
                         )
-            except Exception:
-                # Defensive: decryption issues must not break the whole list.
+            except Exception as err:
+                # Defensive: decryption issues must not break the whole list, but log
+                # the root cause so users can debug key or parsing mismatches.
+                _LOGGER.warning(
+                    "Failed to decrypt location for device '%s': %s",
+                    device_name or "<unknown>",
+                    err,
+                    exc_info=err,
+                )
                 location_candidates = []
 
         # If decryption yielded results, select the best one and keep normalized list.
