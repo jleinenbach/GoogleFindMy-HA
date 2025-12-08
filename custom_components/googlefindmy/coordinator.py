@@ -5653,6 +5653,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not fusion_preapplied and not self._apply_weighted_location_fusion(
             device_id, slot
         ):
+            _LOGGER.debug(
+                "Dropping cache update for %s: weighted fusion rejected payload", device_id
+            )
             return
 
         fused_applied = slot.pop("_fused_applied", False)
@@ -5697,6 +5700,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self.increment_stat("crowd_sourced_updates")
 
         if not self._is_significant_update(device_id, slot):
+            _LOGGER.debug(
+                "Dropping cache update for %s: update failed significance checks",
+                device_id,
+            )
             return
 
         # Ensure last_updated is present
@@ -5733,6 +5740,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
 
         if not isinstance(new_data, dict):
+            _LOGGER.debug(
+                "Rejecting update for %s: payload is not a dict", device_id
+            )
             return False
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
@@ -5740,9 +5750,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if n_seen_norm < 946684800.0:  # < 2000-01-01
                 self.increment_stat("invalid_ts_drop_count")
                 self.increment_stat("drop_reason_invalid_ts")
+                _LOGGER.debug(
+                    "Rejecting update for %s: timestamp too old (%s)",
+                    device_id,
+                    n_seen_norm,
+                )
                 return False
             if n_seen_norm > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
                 self.increment_stat("future_ts_drop_count")
+                _LOGGER.debug(
+                    "Rejecting update for %s: timestamp too far in future (%s)",
+                    device_id,
+                    n_seen_norm,
+                )
                 return False
 
         existing = self._device_location_data.get(device_id)
@@ -5757,6 +5777,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ):
             self.increment_stat("invalid_ts_drop_count")
             self.increment_stat("drop_reason_invalid_ts")
+            _LOGGER.debug(
+                "Rejecting update for %s: timestamp regressed (%s < %s)",
+                device_id,
+                n_seen_norm,
+                e_seen_norm,
+            )
             return False
 
         return True

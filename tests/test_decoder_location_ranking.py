@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
+
+import pytest
 
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
@@ -108,6 +111,37 @@ def test_decoder_promotes_newer_semantic_only_report() -> None:
     assert row["longitude"] == 13.405
     assert row["last_seen"] == 1_700_000_900.0
     assert row["semantic_name"] == "Gym"
+
+
+def test_decoder_logs_decryption_failures(caplog: pytest.LogCaptureFixture) -> None:
+    """Decryption errors surface as warnings instead of silently dropping context."""
+
+    devices_list = DeviceUpdate_pb2.DevicesList()
+    device = devices_list.deviceMetadata.add()
+    device.userDefinedDeviceName = "Tracker"
+    canonic = device.identifierInformation.canonicIds.canonicId.add()
+    canonic.id = "device-456"
+
+    reports = device.information.locationInformation.reports
+    reports.recentLocationAndNetworkLocations.recentLocation.semanticLocation.locationName = (
+        "seed"
+    )
+
+    with patch(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
+        side_effect=ValueError("boom"),
+    ), caplog.at_level(logging.WARNING):
+        rows = get_devices_with_location(
+            devices_list,
+            cache=cast("TokenCache", object()),
+        )
+
+    assert len(rows) == 1
+    assert rows[0]["device_id"] == "device-456"
+    assert any(
+        "Failed to decrypt location for device 'Tracker': boom" in message
+        for message in caplog.messages
+    )
 
 
 def test_semantic_report_outranks_older_coordinate_candidate() -> None:
