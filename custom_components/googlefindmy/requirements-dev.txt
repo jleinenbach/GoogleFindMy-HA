@@ -1,3 +1,5 @@
+# Pin Home Assistant stubs to avoid resolver churn during local bootstrap.
+-c constraints-test-stubs.txt
 -r requirements.txt
 # Hassfest runs exclusively in CI (.github/workflows/hassfest-auto-fix.yml);
 # please do not add a local wrapper or dependency for it here.
