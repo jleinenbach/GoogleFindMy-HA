@@ -311,7 +311,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                 return
 
             # Validate canonic_id matches what we requested
-            if response_canonic_id != canonic_device_id:
+            if response_canonic_id.lower() != canonic_device_id.lower():
                 _LOGGER.warning(
                     "FCM callback received data for %s, but we requested %s. Ignoring.",
                     response_canonic_id,
@@ -382,8 +382,8 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                         len(location_data),
                         name,
                     )
-                    # Attach canonic_id for validation after wait
-                    location_data[0]["canonic_id"] = response_canonic_id
+                    # Attach normalized canonic_id for validation after wait
+                    location_data[0]["canonic_id"] = response_canonic_id.lower()
                     ctx.data = location_data
                 else:
                     _LOGGER.warning(
@@ -688,7 +688,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 raise ctx.error
 
         data = ctx.data or []
-        if data and data[0].get("canonic_id") == canonic_device_id:
+        if data and data[0].get("canonic_id", "").lower() == canonic_device_id.lower():
             _LOGGER.info("Successfully received location data for %s", name)
             return data
         if not data:

@@ -43,6 +43,10 @@ running decryption in an executor without the surrounding context will cause mul
 Handle `StaleOwnerKeyError` from the decryptor by logging and skipping the update instead of crashing the pipeline so key
 rotation can proceed without interrupting other accounts.
 
+Normalize FCM canonic IDs before validation (for example, compare `response_canonic_id.lower()` to
+`canonic_device_id.lower()` and store the lowercase string on decrypted payloads) so tracker updates are not discarded due
+to server-provided hex casing differences.
+
 ### Hybrid Low-Accuracy Polling
 
 When a poll response fails the accuracy threshold, `coordinator.py` preserves the previous coordinates and accuracy but still
