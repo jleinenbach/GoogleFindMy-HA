@@ -311,7 +311,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                 return
 
             # Validate canonic_id matches what we requested
-            if response_canonic_id != canonic_device_id:
+            if response_canonic_id.lower() != canonic_device_id.lower():
                 _LOGGER.warning(
                     "FCM callback received data for %s, but we requested %s. Ignoring.",
                     response_canonic_id,
