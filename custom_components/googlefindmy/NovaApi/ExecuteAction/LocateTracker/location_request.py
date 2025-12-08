@@ -317,6 +317,8 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     response_canonic_id,
                     canonic_device_id,
                 )
+                ctx.data = cast(list[dict[str, Any]], [])
+                ctx.event.set()
                 return
 
             async def _decrypt_and_store() -> None:
