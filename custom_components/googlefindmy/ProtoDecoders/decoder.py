@@ -595,6 +595,19 @@ def get_devices_with_location(
                         "    -> locationInformation fields: %s", loc_fields
                     )
 
+            device_str = str(device)
+            unknown_lines = [
+                line
+                for line in device_str.splitlines()
+                if line.strip() and line.strip()[0].isdigit()
+            ]
+            if unknown_lines:
+                _LOGGER.debug(
+                    "Device '%s' has UNKNOWN FIELDS: \n%s",
+                    device_name,
+                    "\n".join(unknown_lines),
+                )
+
         # Try decryption ONCE per device; share across all its canonic IDs
         location_candidates: list[dict[str, Any]] = []
         if decrypt_location_response_locations is not None and cache is not None:
