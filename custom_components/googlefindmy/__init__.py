@@ -148,6 +148,7 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    DATA_EID_RESOLVER,
     DATA_SECRET_BUNDLE,
     DEFAULT_CONTRIBUTOR_MODE,
     DEFAULT_DELETE_CACHES_ON_REMOVE,
@@ -191,13 +192,6 @@ from .email import normalize_email, unique_account_id
 from .ha_typing import CloudDiscoveryRuntime, callback
 
 # Shared FCM provider (HA-managed singleton)
-from .NovaApi.ExecuteAction.LocateTracker.location_request import (
-    register_fcm_receiver_provider as loc_register_fcm_provider,
-)
-from .NovaApi.ExecuteAction.LocateTracker.location_request import (
-    unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
-)
-
 try:  # pragma: no cover - OperationNotAllowed introduced alongside HA subentry retries
     from homeassistant.config_entries import OperationNotAllowed as _OperationNotAllowed
 except ImportError:  # pragma: no cover - legacy Home Assistant builds
@@ -284,6 +278,9 @@ def get_proto_decoders() -> Mapping[ProtoDecoderModuleName, ModuleType]:
     for proto_name in _PROTO_DECODER_PATHS:
         _import_proto_decoder(proto_name)
     return _PROTO_DECODER_CACHE_PROXY
+
+
+from .eid_resolver import GoogleFindMyEIDResolver  # noqa: E402
 
 
 def __getattr__(name: str) -> Any:
@@ -420,6 +417,11 @@ else:
         RedactAccountForLogCallable,
         _runtime_imports_not_initialized,
     )
+
+loc_register_fcm_provider: Callable[
+    [Callable[[str | None], NovaFcmReceiverProtocol]], None
+] | None = None
+loc_unregister_fcm_provider: Callable[[], None] | None = None
 
 _RUNTIME_IMPORTS_LOADED = False
 _FCM_RECEIVER_CLASS: type[FcmReceiverHAType] | None = None
@@ -2308,6 +2310,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
 
     device_owner_index: dict[str, str]
     entries: dict[str, RuntimeData]
+    eid_resolver: GoogleFindMyEIDResolver
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
     fcm_receivers: dict[str, FcmReceiverHAType]
@@ -5369,11 +5372,26 @@ async def _async_acquire_shared_fcm(
 
             provider_fn: Callable[[str | None], FcmReceiverHAType] = provider
             if not providers_registered:
-                loc_register_fcm_provider(
-                    cast(
-                        Callable[[str | None], NovaFcmReceiverProtocol], provider_fn
+                global loc_register_fcm_provider, loc_unregister_fcm_provider
+                if loc_register_fcm_provider is None:
+                    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+                        register_fcm_receiver_provider as _loc_register_fcm_provider,
                     )
-                )
+
+                    loc_register_fcm_provider = _loc_register_fcm_provider
+                if loc_unregister_fcm_provider is None:
+                    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+                        unregister_fcm_receiver_provider as _loc_unregister_fcm_provider,
+                    )
+
+                    loc_unregister_fcm_provider = _loc_unregister_fcm_provider
+
+                if loc_register_fcm_provider is not None:
+                    loc_register_fcm_provider(
+                        cast(
+                            Callable[[str | None], NovaFcmReceiverProtocol], provider_fn
+                        )
+                    )
                 api_register_fcm_provider(
                     cast(
                         Callable[[str | None], ApiFcmReceiverProtocol], provider_fn
@@ -5413,8 +5431,17 @@ async def _async_release_shared_fcm(
 
         # Unregister providers first (consumers will see provider=None immediately)
         if not _get_fcm_receivers(bucket):
+            global loc_unregister_fcm_provider
+            if loc_unregister_fcm_provider is None:
+                from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+                    unregister_fcm_receiver_provider as _loc_unregister_fcm_provider,
+                )
+
+                loc_unregister_fcm_provider = _loc_unregister_fcm_provider
+
             try:
-                loc_unregister_fcm_provider()
+                if loc_unregister_fcm_provider is not None:
+                    loc_unregister_fcm_provider()
             except Exception:
                 pass
             try:
@@ -7257,6 +7284,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _register_instance(entry.entry_id, cache)
 
+    existing_resolver = domain_bucket.get(DATA_EID_RESOLVER)
+    if isinstance(existing_resolver, GoogleFindMyEIDResolver):
+        await existing_resolver.async_refresh()
+    else:
+        eid_resolver = GoogleFindMyEIDResolver(hass)
+        # Immediate refresh keeps BLE resolution available before the first
+        # boundary-aligned timer fires after startup/reload.
+        await eid_resolver.async_refresh()
+        # Resolver is shared for the entire domain so BLE scans can resolve
+        # devices across all loaded config entries via hass.data[DOMAIN][DATA_EID_RESOLVER].
+        domain_bucket[DATA_EID_RESOLVER] = eid_resolver
+
     parent_platforms_forwarded = bool(
         getattr(entry, "_gfm_parent_platforms_forwarded", False)
     )
@@ -7704,6 +7743,14 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         runtime_data.subentry_retry_handles.clear()
         runtime_data.subentry_retry_attempts.clear()
         _cleanup_cloud_discovery_runtime(runtime_data)
+
+    resolver = bucket.get(DATA_EID_RESOLVER)
+    if isinstance(resolver, GoogleFindMyEIDResolver):
+        if not entries_bucket:
+            resolver.stop()
+            bucket.pop(DATA_EID_RESOLVER, None)
+        else:
+            hass.async_create_task(resolver.async_refresh())
 
     subentries = _collect_entry_subentries(entry)
 
