@@ -14,12 +14,36 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class FMDNOwnerOperations:
+    """Owner-only key derivations defined by the FHN Accessory spec.
+
+    Per the FHN Accessory Specification v1.3 Authentication section, the
+    ephemeral identity key is the root material for three owner operations:
+    recovery, ring, and unwanted tracking protection. Each operation derives
+    an 8-byte key from ``SHA256(EIK || suffix_byte)`` where the suffix encodes
+    the operation being authorized.
+    """
+
     def __init__(self) -> None:
         self.recovery_key: bytes | None = None
         self.ringing_key: bytes | None = None
         self.tracking_key: bytes | None = None
 
     def generate_keys(self, identity_key: bytes) -> None:
+        """Derive owner operation keys per FHN Accessory Specification v1.3.
+
+        FHN Accessory Specification v1.3 — Authentication section:
+
+        * ``0x01`` suffix → recovery key = first 8 bytes of
+          ``SHA256(ephemeral identity key || 0x01)``.
+        * ``0x02`` suffix → ring key = first 8 bytes of
+          ``SHA256(ephemeral identity key || 0x02)``.
+        * ``0x03`` suffix → unwanted tracking protection key = first 8 bytes of
+          ``SHA256(ephemeral identity key || 0x03)``.
+
+        The suffix mapping and truncation above mirror the specification’s
+        terminology so the derived keys align with the authenticated operations
+        defined for owners.
+        """
         if not isinstance(identity_key, (bytes, bytearray, memoryview)):
             msg = (
                 "Identity key must be a bytes-like object, got "

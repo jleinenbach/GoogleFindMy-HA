@@ -42,7 +42,7 @@ For the quickest way to bootstrap Home Assistant test stubs before running `pyte
 - `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
 - `make wheelhouse` — pre-download the Home Assistant development dependencies into `.wheelhouse/` so subsequent virtual environment rebuilds reuse cached wheels instead of re-fetching from PyPI.
 - `make clean-wheelhouse` — delete `.wheelhouse/` (and any manifests or sentinels inside) when you want to prune cached wheels after a bootstrap run or before refreshing dependencies from scratch.
-- `make install-ha-stubs` — install the packages listed in `requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
+- `make install-ha-stubs` — install the packages listed in `custom_components/googlefindmy/requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
 - `make test-unload` — activate the managed virtual environment and run the focused parent-unload rollback regression (`tests/test_unload_subentry_cleanup.py`) so you can confirm the recovery guardrails without executing the entire suite.
 - `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
 - `python script/list_wheelhouse.py` — print a grouped index of cached wheels (optionally against `--manifest script/ssot_wheel_manifest.txt`) before running lengthy installs so you can confirm the cache satisfies the manifest without scrolling through pip logs. Pass `--allow-missing` to preview the formatter when `.wheelhouse/ssot` has not been generated yet.
@@ -52,7 +52,7 @@ For the quickest way to bootstrap Home Assistant test stubs before running `pyte
 
 The repository already ships a lightweight bootstrap for the real Home Assistant
 test stack. Run `make install-ha-stubs` from the project root to install
-`homeassistant` and `pytest-homeassistant-custom-component` into your current
+`homeassistant` and `pytest-homeassistant-custom-component` from `custom_components/googlefindmy/requirements-ha-stubs.txt` into your current
 Python environment without creating the `.venv` managed by other helpers. This
 is the quickest way to unblock `pytest` after cloning the repository or when a
 CI run reports missing Home Assistant packages.

@@ -23,7 +23,9 @@ message SemanticLocation {
 enum Status {
   SEMANTIC = 0;
   LAST_KNOWN = 1;
+  // Finders contributing "with network in all areas" (Contribution Settings: All Areas).
   CROWDSOURCED = 2;
+  // Finders contributing "with network in high-traffic areas only" (Contribution Settings: High Traffic Only).
   AGGREGATED = 3;
 }
 

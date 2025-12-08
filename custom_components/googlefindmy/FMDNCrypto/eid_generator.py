@@ -1,3 +1,5 @@
+"""Ephemeral identifier derivation helpers for the FHN Accessory spec."""
+
 from typing import cast
 
 from Cryptodome.Cipher import AES
@@ -15,6 +17,14 @@ _CURVE: CurveParametersProtocol = load_curve()
 
 
 def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
+    """Generate the advertised EID per FHN Accessory Specification v1.3.
+
+    The specification defines ``R = r * G`` (with ``r`` derived from the
+    pseudorandom construction in Table 10) as the public point; the beacon
+    advertises ``Rx`` as the ephemeral identifier for the current rotation
+    period. This helper preserves that flow: compute ``r``, multiply by the
+    curve generator, and emit the x coordinate.
+    """
     # Calculate r
     r = calculate_r(identity_key, timestamp)
 
@@ -28,6 +38,15 @@ def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
 
 
 def calculate_r(identity_key: bytes, timestamp: int) -> int:
+    """Compute the random scalar ``r`` per FHN Accessory Specification v1.3.
+
+    FHN Accessory Specification v1.3 - Table 10: Construction of a
+    pseudorandom number mandates the AES-ECB-256 input layout (``0xFF`` padding,
+    repeated timestamp blocks, and fixed rotation period exponent ``K = 10``)
+    used below. The byte construction ensures the encrypted block satisfies the
+    spec's requirements for producing the pseudorandom value that is later
+    reduced modulo the curve order to obtain ``r``.
+    """
     # ts_bytes is the timestamp in bytes, but the least K significant bits are set to 0
     ts_bytes = get_masked_timestamp(timestamp, K)
     identity_key_bytes = identity_key
@@ -59,6 +78,10 @@ def calculate_r(identity_key: bytes, timestamp: int) -> int:
 
 def get_masked_timestamp(timestamp: int, K: int) -> bytes:
     """Return the timestamp with the least-significant bits masked.
+
+    Table 10 requires clearing the lowest ``K`` bits of the beacon time counter
+    before encrypting the AES input block. This helper mirrors that requirement
+    so the pseudorandom number derives from the rotation-aligned timestamp.
 
     Args:
         timestamp: The original timestamp as an ``int``.
