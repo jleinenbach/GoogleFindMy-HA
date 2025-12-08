@@ -10,11 +10,14 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Mapping, Sequence
+from typing import Final, Literal
 
 # --------------------------------------------------------------------------------------
 # Core identifiers
 # --------------------------------------------------------------------------------------
 DOMAIN: str = "googlefindmy"
+# Shared hass.data key for the global EID resolver instance
+DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
