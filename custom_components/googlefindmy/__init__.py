@@ -148,6 +148,7 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    DATA_EID_RESOLVER,
     DATA_SECRET_BUNDLE,
     DEFAULT_CONTRIBUTOR_MODE,
     DEFAULT_DELETE_CACHES_ON_REMOVE,
@@ -187,6 +188,7 @@ from .const import (
 from .const import (
     CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
 )
+from .eid_resolver import GoogleFindMyEIDResolver
 from .email import normalize_email, unique_account_id
 from .ha_typing import CloudDiscoveryRuntime, callback
 
@@ -2308,6 +2310,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
 
     device_owner_index: dict[str, str]
     entries: dict[str, RuntimeData]
+    eid_resolver: GoogleFindMyEIDResolver
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
     fcm_receivers: dict[str, FcmReceiverHAType]
@@ -7257,6 +7260,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _register_instance(entry.entry_id, cache)
 
+    existing_resolver = domain_bucket.get(DATA_EID_RESOLVER)
+    if isinstance(existing_resolver, GoogleFindMyEIDResolver):
+        await existing_resolver.async_refresh()
+    else:
+        eid_resolver = GoogleFindMyEIDResolver(hass)
+        # Immediate refresh keeps BLE resolution available before the first
+        # boundary-aligned timer fires after startup/reload.
+        await eid_resolver.async_refresh()
+        # Resolver is shared for the entire domain so BLE scans can resolve
+        # devices across all loaded config entries via hass.data[DOMAIN][DATA_EID_RESOLVER].
+        domain_bucket[DATA_EID_RESOLVER] = eid_resolver
+
     parent_platforms_forwarded = bool(
         getattr(entry, "_gfm_parent_platforms_forwarded", False)
     )
@@ -7704,6 +7719,14 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         runtime_data.subentry_retry_handles.clear()
         runtime_data.subentry_retry_attempts.clear()
         _cleanup_cloud_discovery_runtime(runtime_data)
+
+    resolver = bucket.get(DATA_EID_RESOLVER)
+    if isinstance(resolver, GoogleFindMyEIDResolver):
+        if not entries_bucket:
+            resolver.stop()
+            bucket.pop(DATA_EID_RESOLVER, None)
+        else:
+            hass.async_create_task(resolver.async_refresh())
 
     subentries = _collect_entry_subentries(entry)
 

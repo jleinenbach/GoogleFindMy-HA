@@ -109,6 +109,7 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
+    DATA_EID_RESOLVER,
     DEFAULT_CONTRIBUTOR_MODE,
     # Core / options
     DEFAULT_MIN_POLL_INTERVAL,
@@ -623,6 +624,23 @@ class SemanticLabelRecord:
         """Return a shallow copy with a cloned device set."""
 
         return replace(self, devices=set(self.devices))
+
+
+@dataclass(slots=True)
+class DeviceIdentity:
+    """Stable identifier and key material for a tracker.
+
+    Attributes:
+        registry_id: Home Assistant device registry identifier for the tracker.
+        canonical_id: Namespaced device identifier used by the integration's API.
+        identity_key: Ephemeral identity key used to derive rotating EIDs.
+        config_entry_id: Parent config entry ID that owns the tracker.
+    """
+
+    registry_id: str
+    canonical_id: str
+    identity_key: bytes
+    config_entry_id: str | None = None
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -3004,6 +3022,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             len(present),
             len(enabled),
         )
+        self._schedule_eid_resolver_refresh()
 
     # --- NEW: Create/refresh DR entries for end devices (entry-scoped) -----
     def _ensure_registry_for_devices(
@@ -4241,6 +4260,130 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return snapshot
 
     # ---------------------------- Ignore helpers ----------------------------
+    @staticmethod
+    def _normalize_identity_key(raw: object) -> bytes | None:
+        """Normalize candidate identity key values into bytes."""
+
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+        if isinstance(raw, str):
+            try:
+                return bytes.fromhex(raw)
+            except ValueError:
+                # Silent failure: registry/API payloads are not always trustworthy.
+                return None
+        return None
+
+    def _schedule_eid_resolver_refresh(self) -> None:
+        """Refresh the global EID resolver when active device sets change."""
+
+        bucket = self.hass.data.get(DOMAIN)
+        if not isinstance(bucket, dict):
+            return
+
+        resolver = bucket.get(DATA_EID_RESOLVER)
+        refresh = getattr(resolver, "async_refresh", None)
+        if callable(refresh):
+            self.hass.async_create_task(refresh())
+
+    def get_active_device_identities(self) -> list[DeviceIdentity]:
+        """Return identity keys for enabled, non-ignored devices.
+
+        Devices disabled in the device registry or ignored via options are
+        excluded from the returned list. Only devices currently eligible for
+        polling (tracked in ``_enabled_poll_device_ids``) are considered for
+        EID resolution. The returned ``registry_id`` refers to the Home
+        Assistant Device Registry identifier for each tracker.
+        """
+
+        enabled_ids = set(self._enabled_poll_device_ids)
+        ignored = self._get_ignored_set()
+        device_ids = [dev_id for dev_id in enabled_ids if dev_id not in ignored]
+        if not device_ids:
+            return []
+
+        entry = self.config_entry
+        entry_id = entry.entry_id if entry is not None else None
+        registry_map: dict[str, tuple[str, bytes | None]] = {}
+        if entry is not None:
+            device_reg = dr.async_get(self.hass)
+            extract_identifier = getattr(self, "_extract_our_identifier", None)
+            for device in dr.async_entries_for_config_entry(device_reg, entry.entry_id):
+                if device.disabled_by is not None:
+                    continue
+
+                canonical_id: str | None = None
+                if callable(extract_identifier):
+                    canonical_id = extract_identifier(device)
+
+                if not canonical_id or canonical_id not in device_ids:
+                    continue
+
+                custom_fields = getattr(device, "custom_fields", None)
+                raw_identity = custom_fields.get("identity_key") if custom_fields else None
+                registry_map[canonical_id] = (
+                    device.id,
+                    self._normalize_identity_key(raw_identity),
+                )
+
+        data_identities: dict[str, bytes] = {}
+        device_data = getattr(self, "data", None)
+        if isinstance(device_data, Iterable):
+            for raw in device_data:
+                if not isinstance(raw, dict):
+                    continue
+                dev_id = raw.get("id")
+                if not isinstance(dev_id, str) or dev_id not in device_ids:
+                    continue
+                parsed = self._normalize_identity_key(
+                    raw.get("identity_key")
+                    or raw.get("identityKey")
+                    or raw.get("eik")
+                )
+                if parsed is not None:
+                    data_identities[dev_id] = parsed
+
+        cache = getattr(self, "_device_location_data", None)
+        cache_identities: dict[str, bytes] = {}
+        if isinstance(cache, dict):
+            for dev_id in device_ids:
+                payload = cache.get(dev_id)
+                if not isinstance(payload, dict):
+                    continue
+                parsed = self._normalize_identity_key(
+                    payload.get("identity_key")
+                    or payload.get("identityKey")
+                    or payload.get("eik")
+                )
+                if parsed is not None:
+                    cache_identities[dev_id] = parsed
+
+        identities: list[DeviceIdentity] = []
+        for canonical_id in device_ids:
+            registry_entry = registry_map.get(canonical_id)
+            if registry_entry is None:
+                continue
+
+            registry_id, registry_key = registry_entry
+            identity_key = registry_key
+            if identity_key is None:
+                identity_key = data_identities.get(canonical_id)
+            if identity_key is None:
+                identity_key = cache_identities.get(canonical_id)
+            if identity_key is None:
+                continue
+
+            identities.append(
+                DeviceIdentity(
+                    registry_id=registry_id,
+                    canonical_id=canonical_id,
+                    identity_key=identity_key,
+                    config_entry_id=entry_id,
+                )
+            )
+
+        return identities
+
     def _get_ignored_set(self) -> set[str]:
         """Return the set of device IDs the user chose to ignore (options-first).
 
@@ -5206,6 +5349,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     visible_devices, wall_now=time.time()
                 )
                 self.async_set_updated_data(end_snapshot)
+                self._schedule_eid_resolver_refresh()
                 if last_exception:
                     self.async_set_update_error(last_exception)
 
@@ -6346,6 +6490,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Settings adjustments may change per-subentry views
         self._refresh_subentry_index()
+        self._schedule_eid_resolver_refresh()
 
     def force_poll_due(self) -> None:
         """Force the next poll to be due immediately (no private access required externally)."""
