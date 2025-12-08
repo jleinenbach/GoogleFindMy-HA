@@ -68,6 +68,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from aiohttp import ClientError
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
@@ -148,6 +149,8 @@ type MutableJSONMapping = MutableMapping[str, Any]
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+
+_BACKOFF_WARNING_THRESHOLD_S = 1024.0
 
 
 async def _call_in_executor(
@@ -599,7 +602,7 @@ class FcmReceiverHA:
                     pc = await self._ensure_client_for_entry(entry_id, cache)
                     if not pc:
                         await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60.0)
+                        backoff = min(backoff * 2, 4096.0)
                         continue
 
                     try:
@@ -631,16 +634,38 @@ class FcmReceiverHA:
                             async with self._lock:
                                 self.pcs.pop(entry_id, None)
                         delay = backoff + random.uniform(0.1, 0.3) * backoff
-                        _LOGGER.info(
-                            "[entry=%s] Re-trying FCM registration in %.1fs",
-                            entry_id,
-                            delay,
-                        )
+                        is_warning_threshold = backoff >= _BACKOFF_WARNING_THRESHOLD_S
+                        if is_warning_threshold:
+                            _LOGGER.warning(
+                                "[entry=%s] FCM registration still failing after multiple attempts (next retry in %.1fs). "
+                                "Check Firewall (Port 5228) or Credentials.",
+                                entry_id,
+                                delay,
+                            )
+                            if self._hass:
+                                ir.async_create_issue(
+                                    self._hass,
+                                    DOMAIN,
+                                    f"fcm_stuck_{entry_id}",
+                                    is_fixable=False,
+                                    severity=ir.IssueSeverity.WARNING,
+                                    translation_key="fcm_connection_stuck",
+                                )
+                        else:
+                            _LOGGER.info(
+                                "[entry=%s] Re-trying FCM registration in %.1fs",
+                                entry_id,
+                                delay,
+                            )
                         await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 60.0)
+                        backoff = min(backoff * 2, 4096.0)
                         continue
 
                     # Telemetry (aggregate counters)
+                    if self._hass:
+                        ir.async_delete_issue(
+                            self._hass, DOMAIN, f"fcm_stuck_{entry_id}"
+                        )
                     self.last_start_monotonic = time.monotonic()
                     self.start_count += 1
 
@@ -736,7 +761,7 @@ class FcmReceiverHA:
                             "[entry=%s] Restarting FCM client in %.1fs", entry_id, delay
                         )
                         await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 60.0)
+                        backoff = min(backoff * 2, 4096.0)
             except asyncio.CancelledError:
                 _LOGGER.debug("[entry=%s] FCM supervisor cancelled", entry_id)
                 raise

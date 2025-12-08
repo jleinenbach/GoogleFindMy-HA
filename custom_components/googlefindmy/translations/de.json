@@ -592,6 +592,10 @@
       "title": "Erneute Anmeldung erforderlich",
       "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen."
     },
+    "fcm_connection_stuck": {
+      "title": "FCM Push-Verbindung fehlgeschlagen",
+      "description": "Die Hintergrundverbindung zu Google ist blockiert.\n\n1. Ist der ausgehende **TCP Port 5228** in Ihrer Firewall freigegeben?\n2. Falls das Netzwerk okay ist: Erneuern Sie bitte Ihre `secrets.json` (Token könnte teilweise ungültig sein)."
+    },
     "multiple_config_entries": {
       "title": "Mehrere Konfigurationseinträge erkannt",
       "description": "Google Find My Device unterstützt jetzt mehrere Konfigurationseinträge – jeweils einen pro Google-Konto. Wenn jede Instanz ein anderes Konto nutzt, ist keine Aktion erforderlich. Wird dasselbe Konto zweimal hinzugefügt, erstellt Home Assistant für den neuen Eintrag die Reparaturmeldung **Doppelte Kontoeinträge**, damit du den richtigen Eintrag entfernen oder wieder aktivieren kannst."
