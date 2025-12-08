@@ -5770,7 +5770,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return True
 
         e_seen_norm = _normalize_epoch_seconds(existing.get("last_seen"))
-        if ( 
+        if (
             n_seen_norm is not None
             and e_seen_norm is not None
             and n_seen_norm < e_seen_norm
