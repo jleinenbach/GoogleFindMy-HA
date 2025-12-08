@@ -592,6 +592,10 @@
       "title": "Wymagane ponowne uwierzytelnienie",
       "description": "Uwierzytelnienie Google Find My Device jest nieprawidłowe lub wygasło.\n\n**Wpis:** {entry_title}\n**Konto:** {email}\n\nNa karcie integracji wybierz **Skonfiguruj ponownie**, aby przejść proces ponownego logowania. Jeśli niedawno zmieniono hasło do Google lub cofnięto tokeny, musisz zalogować się tutaj ponownie, aby przywrócić działanie."
     },
+    "fcm_connection_stuck": {
+      "title": "Połączenie push FCM nie powiodło się",
+      "description": "Połączenie w tle z Google jest zablokowane.\n\n1. Czy wychodzący **port TCP 5228** jest dozwolony w zaporze?\n2. Jeśli sieć działa, spróbuj wygenerować ponownie plik `secrets.json` (poświadczenia mogły zostać częściowo cofnięte)."
+    },
     "multiple_config_entries": {
       "title": "Wykryto wiele wpisów konfiguracji",
       "description": "Google Find My Device obsługuje teraz wiele wpisów konfiguracji – po jednym na każde konto Google. Jeśli każdy wpis dotyczy innego konta, nie są wymagane żadne działania. Gdy to samo konto zostanie dodane dwukrotnie, Home Assistant tworzy naprawę **Zduplikowane wpisy kont** dla nowego wpisu, aby można było usunąć lub ponownie włączyć właściwy."

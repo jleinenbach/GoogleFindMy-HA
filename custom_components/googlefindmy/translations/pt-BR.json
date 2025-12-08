@@ -592,6 +592,10 @@
       "title": "Reautenticação necessária",
       "description": "A autenticação do Google Find My Device é inválida ou expirou para esta entrada.\n\n**Entrada:** {entry_title}\n**Conta:** {email}\n\nSelecione **Reconfigurar** no cartão da integração para entrar novamente. Se você alterou recentemente sua senha do Google ou revogou tokens, é necessário se autenticar novamente aqui para restaurar a funcionalidade."
     },
+    "fcm_connection_stuck": {
+      "title": "Falha na conexão push do FCM",
+      "description": "A conexão em segundo plano com o Google está bloqueada.\n\n1. A saída pelo **porta TCP 5228** está liberada no firewall?\n2. Se a rede estiver ok, tente gerar novamente o seu `secrets.json` (as credenciais podem estar fragmentadas/revocadas)."
+    },
     "multiple_config_entries": {
       "title": "Várias entradas de configuração detectadas",
       "description": "O Google Find My Device agora oferece suporte a várias entradas de configuração, uma por conta do Google. Se cada entrada tiver como alvo uma conta diferente, nenhuma ação é necessária. Quando a mesma conta é adicionada duas vezes, o Home Assistant cria um problema de reparação **Entradas de conta duplicadas** para a nova entrada, para que você possa remover ou reativar a correta."
