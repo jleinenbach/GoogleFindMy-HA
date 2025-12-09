@@ -18,6 +18,10 @@ from custom_components.googlefindmy import get_proto_decoder
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
+from custom_components.googlefindmy.FMDNCrypto.mcu_utils import (
+    flip_bits,
+    is_mcu_tracker,
+)
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     decrypt_aes_gcm,
     decrypt_eik,
@@ -28,15 +32,12 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypte
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     parse_device_update_protobuf,
 )
-from custom_components.googlefindmy.SpotApi.CreateBleDevice.config import (
-    mcu_fast_pair_model_id,
-)
-from custom_components.googlefindmy.SpotApi.CreateBleDevice.util import flip_bits
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
     async_get_eid_info,
 )
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    OwnerKeyInfo,
     async_get_owner_key,
 )
 from google.protobuf.message import DecodeError
@@ -137,11 +138,6 @@ def create_google_maps_link(latitude: float, longitude: float) -> str | None:
     return f"https://www.google.com/maps/search/?api=1&query={lat_f},{lon_f}"
 
 
-def is_mcu_tracker(device_registration: DeviceRegistration) -> bool:
-    """Return True if device appears to be our custom MCU tracker."""
-    return device_registration.fastPairModelId == mcu_fast_pair_model_id
-
-
 async def async_retrieve_identity_key(
     device_registration: DeviceRegistration,
     *,
@@ -179,12 +175,12 @@ async def async_retrieve_identity_key(
             "TokenCache instance is required to retrieve the tracker identity key."
         )
 
-    owner_key = await async_get_owner_key(cache=cache)
+    owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
 
     try:
         # CPU-heavy → do not block the event loop
         eik_bytes = await asyncio.to_thread(
-            decrypt_eik, owner_key, encrypted_identity_key
+            decrypt_eik, owner_key_info.key, encrypted_identity_key
         )
         # Strict sanity: EIK must be exactly 32 bytes
         if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:

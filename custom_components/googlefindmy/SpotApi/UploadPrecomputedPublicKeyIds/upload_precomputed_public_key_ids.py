@@ -10,8 +10,8 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     generate_eid,
 )
+from custom_components.googlefindmy.FMDNCrypto.mcu_utils import is_mcu_tracker
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-    is_mcu_tracker,
     retrieve_identity_key,
 )
 from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
