@@ -10,6 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.googlefindmy.Auth.username_provider import username_string
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    OwnerKeyInfo,
+)
 from tests.helpers import DummyCache
 
 
@@ -26,7 +29,7 @@ def test_async_retrieve_identity_key_threads_cache(
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
         owner_calls["owner_cache"] = cache
-        return b"\x01" * 32
+        return OwnerKeyInfo(key=b"\x01" * 32, version=1)
 
     async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
         owner_calls["eid_cache"] = cache
@@ -76,7 +79,7 @@ def test_async_retrieve_identity_key_error_uses_cache(
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
         caches["owner_cache"] = cache
-        return b"\x01" * 32
+        return OwnerKeyInfo(key=b"\x01" * 32, version=1)
 
     async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
         caches["eid_cache"] = cache
@@ -133,7 +136,7 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
         owner_calls.append(cache)
-        return b"\x01" * 32
+        return OwnerKeyInfo(key=b"\x01" * 32, version=1)
 
     async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
         eid_calls.append(cache)

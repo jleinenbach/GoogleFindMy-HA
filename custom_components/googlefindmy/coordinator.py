@@ -635,12 +635,18 @@ class DeviceIdentity:
         registry_id: Home Assistant device registry identifier for the tracker.
         canonical_id: Namespaced device identifier used by the integration's API.
         identity_key: Ephemeral identity key used to derive rotating EIDs.
+        encrypted_identity_key: Encrypted EIK blob (hex-decoded) for on-demand decryption.
+        owner_key_version: Version of the owner key used to encrypt the EIK.
+        device_type: SpotDeviceType enum value reported by the tracker, when known.
         config_entry_id: Parent config entry ID that owns the tracker.
     """
 
     registry_id: str
     canonical_id: str
-    identity_key: bytes
+    identity_key: bytes | None
+    encrypted_identity_key: bytes | None = None
+    owner_key_version: int | None = None
+    device_type: int | None = None
     config_entry_id: str | None = None
 
 
@@ -4303,6 +4309,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Assistant Device Registry identifier for each tracker.
         """
 
+        def _normalize_device_type(value: Any) -> int | None:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+            return None
+
         enabled_ids = set(self._enabled_poll_device_ids)
         ignored = self._get_ignored_set()
         device_ids = [dev_id for dev_id in enabled_ids if dev_id not in ignored]
@@ -4334,6 +4349,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
 
         data_identities: dict[str, bytes] = {}
+        data_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
+        data_device_types: dict[str, int | None] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
             for raw in device_data:
@@ -4350,8 +4367,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if parsed is not None:
                     data_identities[dev_id] = parsed
 
+                encrypted_identity = self._normalize_identity_key(
+                    raw.get("encrypted_identity_key")
+                    or raw.get("encryptedIdentityKey")
+                )
+                owner_key_version = raw.get("owner_key_version")
+                if isinstance(owner_key_version, str) and owner_key_version.isdigit():
+                    owner_key_version = int(owner_key_version)
+                elif not isinstance(owner_key_version, int):
+                    owner_key_version = None
+
+                if encrypted_identity is not None or owner_key_version is not None:
+                    data_encrypted[dev_id] = (encrypted_identity, owner_key_version)
+
+                device_type = _normalize_device_type(raw.get("device_type"))
+                if device_type is not None:
+                    data_device_types[dev_id] = device_type
+
         cache = getattr(self, "_device_location_data", None)
         cache_identities: dict[str, bytes] = {}
+        cache_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
+        cache_device_types: dict[str, int | None] = {}
         if isinstance(cache, dict):
             for dev_id in device_ids:
                 payload = cache.get(dev_id)
@@ -4365,6 +4401,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if parsed is not None:
                     cache_identities[dev_id] = parsed
 
+                encrypted_identity = self._normalize_identity_key(
+                    payload.get("encrypted_identity_key")
+                    or payload.get("encryptedIdentityKey")
+                )
+                owner_key_version = payload.get("owner_key_version")
+                if isinstance(owner_key_version, str) and owner_key_version.isdigit():
+                    owner_key_version = int(owner_key_version)
+                elif not isinstance(owner_key_version, int):
+                    owner_key_version = None
+
+                if encrypted_identity is not None or owner_key_version is not None:
+                    cache_encrypted[dev_id] = (encrypted_identity, owner_key_version)
+
+                device_type = _normalize_device_type(payload.get("device_type"))
+                if device_type is not None:
+                    cache_device_types[dev_id] = device_type
+
         identities: list[DeviceIdentity] = []
         for canonical_id in device_ids:
             registry_entry = registry_map.get(canonical_id)
@@ -4377,7 +4430,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 identity_key = data_identities.get(canonical_id)
             if identity_key is None:
                 identity_key = cache_identities.get(canonical_id)
-            if identity_key is None:
+
+            encrypted_identity_key, owner_key_version = data_encrypted.get(
+                canonical_id,
+                cache_encrypted.get(canonical_id, (None, None)),
+            )
+            device_type = data_device_types.get(
+                canonical_id, cache_device_types.get(canonical_id)
+            )
+
+            if identity_key is None and encrypted_identity_key is None:
                 continue
 
             identities.append(
@@ -4385,6 +4447,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     registry_id=registry_id,
                     canonical_id=canonical_id,
                     identity_key=identity_key,
+                    encrypted_identity_key=encrypted_identity_key,
+                    owner_key_version=owner_key_version,
+                    device_type=device_type,
                     config_entry_id=entry_id,
                 )
             )
