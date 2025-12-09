@@ -12,9 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -22,6 +22,20 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto.eid_generator import ROTATION_PERIOD, generate_eid
+from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
+from .KeyBackup.cloud_key_decryptor import decrypt_eik
+from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    OwnerKeyInfo,
+    async_get_owner_key,
+)
+
+if TYPE_CHECKING:
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache
+else:
+    try:
+        from custom_components.googlefindmy.Auth.token_cache import TokenCache
+    except Exception:  # pragma: no cover - optional type aid only
+        TokenCache = None
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,7 +127,7 @@ class GoogleFindMyEIDResolver:
     async def _refresh_cache(self) -> None:
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
 
-        identities: list[DeviceIdentity] = self._collect_device_secrets()
+        identities: list[DeviceIdentity] = await self._collect_device_secrets()
         lookup: dict[bytes, EIDMatch] = {}
         now = int(time.time())
         rotation_start = now - (now % ROTATION_PERIOD)
@@ -124,7 +138,7 @@ class GoogleFindMyEIDResolver:
         )
 
         for identity in identities:
-            if not identity.config_entry_id:
+            if not identity.config_entry_id or identity.identity_key is None:
                 continue
             for timestamp in windows:
                 try:
@@ -151,7 +165,7 @@ class GoogleFindMyEIDResolver:
             len(lookup),
         )
 
-    def _collect_device_secrets(self) -> list[DeviceIdentity]:
+    async def _collect_device_secrets(self) -> list[DeviceIdentity]:
         """Retrieve active tracker identities from all loaded coordinators."""
 
         bucket = self.hass.data.get(DOMAIN)
@@ -178,9 +192,93 @@ class GoogleFindMyEIDResolver:
             if coordinator is None:
                 continue
 
-            identities.extend(coordinator.get_active_device_identities())
+            identities.extend(
+                await self._normalize_identities(
+                    coordinator.get_active_device_identities(),
+                    cache=getattr(coordinator, "cache", None),
+                )
+            )
 
         return identities
+
+    async def _normalize_identities(
+        self,
+        identities: list[DeviceIdentity],
+        *,
+        cache: TokenCache | None,
+    ) -> list[DeviceIdentity]:
+        """Ensure each device identity has a usable plaintext key."""
+
+        normalized: list[DeviceIdentity] = []
+        for identity in identities:
+            if identity.identity_key is None:
+                decrypted = await self._try_decrypt_identity_key(identity, cache=cache)
+                if decrypted is None:
+                    continue
+                normalized.append(replace(identity, identity_key=decrypted))
+                continue
+
+            normalized.append(identity)
+
+        return normalized
+
+    async def _try_decrypt_identity_key(
+        self,
+        identity: DeviceIdentity,
+        *,
+        cache: TokenCache | None,
+    ) -> bytes | None:
+        """Decrypt encrypted identity key when owner key information is available."""
+
+        if (
+            cache is None
+            or identity.encrypted_identity_key is None
+            or not isinstance(identity.encrypted_identity_key, (bytes, bytearray))
+        ):
+            return None
+
+        encrypted_identity_key = bytes(identity.encrypted_identity_key)
+        if is_mcu_tracker(device_type=identity.device_type):
+            encrypted_identity_key = flip_bits(encrypted_identity_key, True)
+
+        try:
+            owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+        except Exception as err:  # noqa: BLE001 - defensive
+            _LOGGER.debug(
+                "Failed to retrieve owner key for %s: %s",
+                identity.canonical_id,
+                err,
+            )
+            return None
+
+        expected_version = identity.owner_key_version
+        cached_version = owner_key_info.version
+        if (
+            expected_version is not None
+            and cached_version is not None
+            and expected_version != cached_version
+        ):
+            _LOGGER.warning(
+                "Owner key version mismatch for %s: device=%s cache=%s",
+                identity.canonical_id,
+                expected_version,
+                cached_version,
+            )
+
+        try:
+            decrypted = await asyncio.to_thread(
+                decrypt_eik, owner_key_info.key, encrypted_identity_key
+            )
+        except Exception as err:  # noqa: BLE001 - defensive
+            _LOGGER.debug(
+                "Failed to decrypt identity key for %s (owner_key_version=%s): %s",
+                identity.canonical_id,
+                identity.owner_key_version,
+                err,
+            )
+            return None
+
+        return decrypted if isinstance(decrypted, (bytes, bytearray)) else None
 
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
         """Resolve a scanned EID to a Home Assistant device registry ID.

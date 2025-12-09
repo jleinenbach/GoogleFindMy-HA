@@ -235,6 +235,9 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "name",
     "id",
     "device_id",
+    "encrypted_identity_key",
+    "owner_key_version",
+    "device_type",
     "latitude",
     "longitude",
     "altitude",
@@ -259,6 +262,9 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "name": device_name,
         "id": canonic_id,
         "device_id": canonic_id,
+        "encrypted_identity_key": None,
+        "owner_key_version": None,
+        "device_type": None,
         "latitude": None,
         "longitude": None,
         "altitude": None,
@@ -610,6 +616,9 @@ def get_devices_with_location(
 
         # Try decryption ONCE per device; share across all its canonic IDs
         location_candidates: list[dict[str, Any]] = []
+        encrypted_identity_key = None
+        owner_key_version = None
+        device_type = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -648,6 +657,25 @@ def get_devices_with_location(
                 )
                 location_candidates = []
 
+        if device.HasField("information") and device.information.HasField(
+            "deviceRegistration"
+        ):
+            registration = device.information.deviceRegistration
+            encrypted_user_secrets = registration.encryptedUserSecrets
+
+            if encrypted_user_secrets.encryptedIdentityKey:
+                encrypted_identity_key = (
+                    encrypted_user_secrets.encryptedIdentityKey.hex()
+                )
+
+            if encrypted_user_secrets.HasField("ownerKeyVersion"):
+                owner_key_version = encrypted_user_secrets.ownerKeyVersion
+
+            if registration.HasField("deviceTypeInformation") and (
+                registration.deviceTypeInformation.HasField("deviceType")
+            ):
+                device_type = registration.deviceTypeInformation.deviceType
+
         # If decryption yielded results, select the best one and keep normalized list.
         if location_candidates:
             best, normed = _select_best_location(location_candidates)
@@ -663,6 +691,9 @@ def get_devices_with_location(
                 continue
 
             row = _build_device_stub(device_name, cid)
+            row["encrypted_identity_key"] = encrypted_identity_key
+            row["owner_key_version"] = owner_key_version
+            row["device_type"] = device_type
 
             if best:
                 # best already normalized by selection; merge only known keys
