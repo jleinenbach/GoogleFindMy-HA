@@ -179,12 +179,12 @@ async def async_retrieve_identity_key(
             "TokenCache instance is required to retrieve the tracker identity key."
         )
 
-    owner_key = await async_get_owner_key(cache=cache)
+    owner_key_info = await async_get_owner_key(cache=cache)
 
     try:
         # CPU-heavy → do not block the event loop
         eik_bytes = await asyncio.to_thread(
-            decrypt_eik, owner_key, encrypted_identity_key
+            decrypt_eik, owner_key_info.key, encrypted_identity_key
         )
         # Strict sanity: EIK must be exactly 32 bytes
         if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:
