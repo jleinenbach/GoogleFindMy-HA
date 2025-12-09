@@ -235,6 +235,7 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "name",
     "id",
     "device_id",
+    "identity_key",
     "latitude",
     "longitude",
     "altitude",
@@ -259,6 +260,7 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "name": device_name,
         "id": canonic_id,
         "device_id": canonic_id,
+        "identity_key": None,
         "latitude": None,
         "longitude": None,
         "altitude": None,
@@ -610,6 +612,7 @@ def get_devices_with_location(
 
         # Try decryption ONCE per device; share across all its canonic IDs
         location_candidates: list[dict[str, Any]] = []
+        identity_key = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -648,6 +651,12 @@ def get_devices_with_location(
                 )
                 location_candidates = []
 
+        if device.HasField("information") and device.information.HasField(
+            "deviceRegistration"
+        ):
+            if device.information.deviceRegistration.key:
+                identity_key = device.information.deviceRegistration.key.hex()
+
         # If decryption yielded results, select the best one and keep normalized list.
         if location_candidates:
             best, normed = _select_best_location(location_candidates)
@@ -663,6 +672,7 @@ def get_devices_with_location(
                 continue
 
             row = _build_device_stub(device_name, cid)
+            row["identity_key"] = identity_key
 
             if best:
                 # best already normalized by selection; merge only known keys
