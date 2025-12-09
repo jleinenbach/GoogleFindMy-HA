@@ -21,3 +21,7 @@ Use the checked-in proto sources (`custom_components/googlefindmy/ProtoDecoders/
 3. Verify the generated `.pyi` stubs keep `Message = _message.Message` and subclass `Message` directly before committing changes.
 
 If the upstream proto schema changes, update the mirrored definitions under `custom_components/googlefindmy/ProtoDecoders/*.proto` first so regenerations remain reproducible from source control.
+
+## Proto3 scalar presence reminder
+
+Proto3 **non-optional scalar fields do not support `HasField`**. Access them directly and rely on their default values (for example, `0` for integers) instead of calling presence checks that raise `ValueError`.

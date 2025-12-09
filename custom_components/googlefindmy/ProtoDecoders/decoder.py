@@ -668,8 +668,9 @@ def get_devices_with_location(
                     encrypted_user_secrets.encryptedIdentityKey.hex()
                 )
 
-            if encrypted_user_secrets.HasField("ownerKeyVersion"):
-                owner_key_version = encrypted_user_secrets.ownerKeyVersion
+            # NOTE: In Proto3, non-optional scalar fields (int32) do not support
+            # HasField(). Accessing them directly returns 0 if unset.
+            owner_key_version = encrypted_user_secrets.ownerKeyVersion
 
             if registration.HasField("deviceTypeInformation") and (
                 registration.deviceTypeInformation.HasField("deviceType")
