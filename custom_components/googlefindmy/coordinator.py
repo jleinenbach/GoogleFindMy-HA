@@ -4342,6 +4342,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not device_ids:
             return []
 
+        allowed_raw_ids = {did.split(":")[-1] for did in device_ids}
+
         entry = self.config_entry
         entry_id = entry.entry_id if entry is not None else None
         registry_map: dict[str, tuple[str, bytes | None]] = {}
@@ -4383,7 +4385,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if not isinstance(raw, dict):
                     continue
                 dev_id = raw.get("id")
-                if not isinstance(dev_id, str) or dev_id not in device_ids:
+                if not isinstance(dev_id, str) or dev_id not in allowed_raw_ids:
                     continue
 
                 last_raw_keys[dev_id] = list(raw.keys())
@@ -4429,7 +4431,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if not isinstance(raw, dict):
                     continue
                 dev_id = raw.get("id")
-                if not isinstance(dev_id, str) or dev_id not in device_ids:
+                if not isinstance(dev_id, str) or dev_id not in allowed_raw_ids:
                     continue
                 raw_data_keys[dev_id] = list(raw.keys())
                 parsed = self._normalize_identity_key(
@@ -4470,7 +4472,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_fast_pair_model_ids: dict[str, str | None] = {}
         cache_data_keys: dict[str, list[str]] = {}
         if isinstance(cache, dict):
-            for dev_id in device_ids:
+            for dev_id in allowed_raw_ids:
                 payload = cache.get(dev_id)
                 if not isinstance(payload, dict):
                     continue
@@ -4509,36 +4511,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         identities: list[DeviceIdentity] = []
         for canonical_id in device_ids:
+            lookup_id = canonical_id.split(":")[-1]
             registry_entry = registry_map.get(canonical_id)
             if registry_entry is None:
                 continue
 
             registry_id, registry_key = registry_entry
-            identity_key = last_identities.get(canonical_id)
+            identity_key = last_identities.get(lookup_id)
             if identity_key is None:
                 identity_key = registry_key
             if identity_key is None:
-                identity_key = data_identities.get(canonical_id)
+                identity_key = data_identities.get(lookup_id)
             if identity_key is None:
-                identity_key = cache_identities.get(canonical_id)
+                identity_key = cache_identities.get(lookup_id)
 
             encrypted_identity_key, owner_key_version = last_encrypted.get(
-                canonical_id,
+                lookup_id,
                 data_encrypted.get(
-                    canonical_id, cache_encrypted.get(canonical_id, (None, None))
+                    lookup_id, cache_encrypted.get(lookup_id, (None, None))
                 ),
             )
             device_type = last_device_types.get(
-                canonical_id,
-                data_device_types.get(
-                    canonical_id, cache_device_types.get(canonical_id)
-                ),
+                lookup_id,
+                data_device_types.get(lookup_id, cache_device_types.get(lookup_id)),
             )
 
             fast_pair_model_id = last_fast_pair_model_ids.get(
-                canonical_id,
+                lookup_id,
                 data_fast_pair_model_ids.get(
-                    canonical_id, cache_fast_pair_model_ids.get(canonical_id)
+                    lookup_id, cache_fast_pair_model_ids.get(lookup_id)
                 ),
             )
 
@@ -4546,9 +4547,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 _LOGGER.debug(
                     "Device %s skipped: No identity key found (Data: %s)",
                     canonical_id,
-                    last_raw_keys.get(canonical_id)
-                    or raw_data_keys.get(canonical_id)
-                    or cache_data_keys.get(canonical_id)
+                    last_raw_keys.get(lookup_id)
+                    or raw_data_keys.get(lookup_id)
+                    or cache_data_keys.get(lookup_id)
                     or [],
                 )
                 continue
