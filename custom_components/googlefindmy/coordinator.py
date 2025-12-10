@@ -6081,11 +6081,51 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not existing:
             return incoming
 
-        merged = dict(existing)
-        merged.update(incoming)
-
         existing_seen = _normalize_epoch_seconds(existing.get("last_seen"))
         incoming_seen = _normalize_epoch_seconds(incoming.get("last_seen"))
+        existing_rank = existing.get("source_rank")
+        incoming_rank = incoming.get("source_rank")
+
+        location_fields = {
+            "latitude",
+            "longitude",
+            "accuracy",
+            "altitude",
+            "status",
+            "source_label",
+            "source_rank",
+            "is_own_report",
+            "last_seen",
+            "last_seen_utc",
+        }
+
+        allow_location_update = True
+        if existing_seen is not None and incoming_seen is not None:
+            if incoming_seen < existing_seen:
+                allow_location_update = False
+            elif incoming_seen == existing_seen and (
+                existing_rank is not None
+                and (
+                    incoming_rank is None
+                    or existing_rank > incoming_rank
+                )
+            ):
+                allow_location_update = False
+        elif existing_seen is not None and incoming_seen is None:
+            allow_location_update = False
+        elif existing_seen is None and incoming_seen is None and (
+            existing_rank is not None
+            and (incoming_rank is None or existing_rank > incoming_rank)
+        ):
+            allow_location_update = False
+
+        merged = dict(existing)
+        if allow_location_update:
+            merged.update(incoming)
+        else:
+            merged.update({
+                key: value for key, value in incoming.items() if key not in location_fields
+            })
 
         # Keep monotonic last_seen timestamps when payloads arrive without a newer value.
         if existing_seen is not None and (
