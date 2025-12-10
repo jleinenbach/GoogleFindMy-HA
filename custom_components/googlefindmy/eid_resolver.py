@@ -128,6 +128,9 @@ class GoogleFindMyEIDResolver:
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
 
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
+        _LOGGER.debug(
+            "Resolver received %d identities from coordinator", len(identities)
+        )
         lookup: dict[bytes, EIDMatch] = {}
         now = int(time.time())
         rotation_start = now - (now % ROTATION_PERIOD)
@@ -212,8 +215,17 @@ class GoogleFindMyEIDResolver:
         normalized: list[DeviceIdentity] = []
         for identity in identities:
             if identity.identity_key is None:
+                _LOGGER.debug(
+                    "Attempting to decrypt key for %s (Type: %s)",
+                    identity.canonical_id,
+                    identity.device_type,
+                )
                 decrypted = await self._try_decrypt_identity_key(identity, cache=cache)
                 if decrypted is None:
+                    _LOGGER.debug(
+                        "Decryption returned None for %s - skipping",
+                        identity.canonical_id,
+                    )
                     continue
                 normalized.append(replace(identity, identity_key=decrypted))
                 continue

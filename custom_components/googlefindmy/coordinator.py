@@ -4319,6 +4319,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return None
 
         enabled_ids = set(self._enabled_poll_device_ids)
+        _LOGGER.debug(
+            "Collecting EID identities for %d polling-enabled devices...",
+            len(enabled_ids),
+        )
         ignored = self._get_ignored_set()
         device_ids = [dev_id for dev_id in enabled_ids if dev_id not in ignored]
         if not device_ids:
@@ -4338,7 +4342,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if callable(extract_identifier):
                     canonical_id = extract_identifier(device)
 
-                if not canonical_id or canonical_id not in device_ids:
+                if not canonical_id:
+                    _LOGGER.debug(
+                        "Device registry entry %s skipped: No canonical identifier", device.id
+                    )
+                    continue
+
+                if canonical_id not in device_ids:
                     continue
 
                 custom_fields = getattr(device, "custom_fields", None)
@@ -4351,6 +4361,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         data_identities: dict[str, bytes] = {}
         data_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         data_device_types: dict[str, int | None] = {}
+        raw_data_keys: dict[str, list[str]] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
             for raw in device_data:
@@ -4359,6 +4370,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 dev_id = raw.get("id")
                 if not isinstance(dev_id, str) or dev_id not in device_ids:
                     continue
+                raw_data_keys[dev_id] = list(raw.keys())
                 parsed = self._normalize_identity_key(
                     raw.get("identity_key")
                     or raw.get("identityKey")
@@ -4388,11 +4400,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_identities: dict[str, bytes] = {}
         cache_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         cache_device_types: dict[str, int | None] = {}
+        cache_data_keys: dict[str, list[str]] = {}
         if isinstance(cache, dict):
             for dev_id in device_ids:
                 payload = cache.get(dev_id)
                 if not isinstance(payload, dict):
                     continue
+                cache_data_keys[dev_id] = list(payload.keys())
                 parsed = self._normalize_identity_key(
                     payload.get("identity_key")
                     or payload.get("identityKey")
@@ -4440,6 +4454,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
 
             if identity_key is None and encrypted_identity_key is None:
+                _LOGGER.debug(
+                    "Device %s skipped: No identity key found (Data: %s)",
+                    canonical_id,
+                    raw_data_keys.get(canonical_id)
+                    or cache_data_keys.get(canonical_id)
+                    or [],
+                )
                 continue
 
             identities.append(
@@ -4454,6 +4475,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
             )
 
+        _LOGGER.debug("Returning %d identities to resolver", len(identities))
         return identities
 
     def _get_ignored_set(self) -> set[str]:
