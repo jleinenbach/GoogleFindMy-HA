@@ -4358,6 +4358,45 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     self._normalize_identity_key(raw_identity),
                 )
 
+        last_device_list = getattr(self, "_last_device_list", None)
+        last_identities: dict[str, bytes] = {}
+        last_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
+        last_device_types: dict[str, int | None] = {}
+        last_raw_keys: dict[str, list[str]] = {}
+        if isinstance(last_device_list, Iterable):
+            for raw in last_device_list:
+                if not isinstance(raw, dict):
+                    continue
+                dev_id = raw.get("id")
+                if not isinstance(dev_id, str) or dev_id not in device_ids:
+                    continue
+
+                last_raw_keys[dev_id] = list(raw.keys())
+                parsed = self._normalize_identity_key(
+                    raw.get("identity_key")
+                    or raw.get("identityKey")
+                    or raw.get("eik")
+                )
+                if parsed is not None:
+                    last_identities[dev_id] = parsed
+
+                encrypted_identity = self._normalize_identity_key(
+                    raw.get("encrypted_identity_key")
+                    or raw.get("encryptedIdentityKey")
+                )
+                owner_key_version = raw.get("owner_key_version")
+                if isinstance(owner_key_version, str) and owner_key_version.isdigit():
+                    owner_key_version = int(owner_key_version)
+                elif not isinstance(owner_key_version, int):
+                    owner_key_version = None
+
+                if encrypted_identity is not None or owner_key_version is not None:
+                    last_encrypted[dev_id] = (encrypted_identity, owner_key_version)
+
+                device_type = _normalize_device_type(raw.get("device_type"))
+                if device_type is not None:
+                    last_device_types[dev_id] = device_type
+
         data_identities: dict[str, bytes] = {}
         data_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         data_device_types: dict[str, int | None] = {}
@@ -4439,25 +4478,33 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 continue
 
             registry_id, registry_key = registry_entry
-            identity_key = registry_key
+            identity_key = last_identities.get(canonical_id)
+            if identity_key is None:
+                identity_key = registry_key
             if identity_key is None:
                 identity_key = data_identities.get(canonical_id)
             if identity_key is None:
                 identity_key = cache_identities.get(canonical_id)
 
-            encrypted_identity_key, owner_key_version = data_encrypted.get(
+            encrypted_identity_key, owner_key_version = last_encrypted.get(
                 canonical_id,
-                cache_encrypted.get(canonical_id, (None, None)),
+                data_encrypted.get(
+                    canonical_id, cache_encrypted.get(canonical_id, (None, None))
+                ),
             )
-            device_type = data_device_types.get(
-                canonical_id, cache_device_types.get(canonical_id)
+            device_type = last_device_types.get(
+                canonical_id,
+                data_device_types.get(
+                    canonical_id, cache_device_types.get(canonical_id)
+                ),
             )
 
             if identity_key is None and encrypted_identity_key is None:
                 _LOGGER.debug(
                     "Device %s skipped: No identity key found (Data: %s)",
                     canonical_id,
-                    raw_data_keys.get(canonical_id)
+                    last_raw_keys.get(canonical_id)
+                    or raw_data_keys.get(canonical_id)
                     or cache_data_keys.get(canonical_id)
                     or [],
                 )
