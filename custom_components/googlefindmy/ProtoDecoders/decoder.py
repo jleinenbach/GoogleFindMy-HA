@@ -220,6 +220,11 @@ def get_canonic_ids(
         for canonic_id in canonic_ids:
             cid = getattr(canonic_id, "id", None)
             if isinstance(cid, str) and cid:
+                _LOGGER.warning(
+                    "DEBUG ID extraction: Found ID '%s' for device '%s'",
+                    cid,
+                    device_name,
+                )
                 result.append((device_name, cid))
     return result
 
@@ -689,7 +694,12 @@ def get_devices_with_location(
 
         # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
         if not encrypted_identity_key:
-            _LOGGER.warning("DEBUG STRUCTURE: Key missing for '%s'", device_name)
+            ids_str = ", ".join(
+                [str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids]
+            )
+            _LOGGER.warning(
+                "DEBUG STRUCTURE: Missing Key for '%s' (IDs: %s)", device_name, ids_str
+            )
 
             # Level 1
             fields = [f.name for f, _ in device.ListFields()]
