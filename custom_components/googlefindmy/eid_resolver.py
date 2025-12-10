@@ -52,6 +52,8 @@ class EIDMatch(NamedTuple):
     device_id: str
     config_entry_id: str
     canonical_id: str
+    time_offset: int
+    is_reversed: bool
 
 
 @dataclass(slots=True)
@@ -69,6 +71,8 @@ class GoogleFindMyEIDResolver:
 
     hass: HomeAssistant
     _lookup: dict[bytes, EIDMatch] = field(init=False, default_factory=dict)
+    _known_offsets: dict[str, int] = field(default_factory=dict)
+    _known_endianness: dict[str, bool] = field(default_factory=dict)
     _unsub_interval: CALLBACK_TYPE | None = field(init=False, default=None)
     _unsub_alignment: CALLBACK_TYPE | None = field(init=False, default=None)
     _refresh_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
@@ -134,12 +138,6 @@ class GoogleFindMyEIDResolver:
         )
         lookup: dict[bytes, EIDMatch] = {}
         now = int(time.time())
-        rotation_start = now - (now % ROTATION_PERIOD)
-        windows = (
-            rotation_start,
-            max(0, rotation_start - ROTATION_PERIOD),
-            rotation_start + ROTATION_PERIOD,
-        )
 
         for identity in identities:
             if not identity.config_entry_id or identity.identity_key is None:
@@ -149,30 +147,77 @@ class GoogleFindMyEIDResolver:
                 device_type=identity.device_type,
                 fast_pair_model_id=identity.fast_pair_model_id,
             )
-            for timestamp in windows:
-                try:
-                    eid = generate_eid(identity.identity_key, timestamp)
-                except Exception as err:  # noqa: BLE001 - defensive guard
-                    _LOGGER.debug(
-                        "Failed to generate EID for %s at %s: %s",
-                        identity.canonical_id,
-                        timestamp,
-                        err,
-                    )
+            known_offset = self._known_offsets.get(identity.registry_id)
+            known_endianness = self._known_endianness.get(identity.registry_id, False)
+            target_time = now if known_offset is None else now + known_offset
+            rotation_start = target_time - (target_time % ROTATION_PERIOD)
+            window_range: range
+
+            if known_offset is None:
+                window_range = range(-90, 91)
+            else:
+                window_range = range(0, 1)
+
+            for offset in window_range:
+                timestamp = rotation_start + (offset * ROTATION_PERIOD)
+                if timestamp < 0:
                     continue
 
-                lookup[eid] = EIDMatch(
-                    device_id=identity.registry_id,
-                    config_entry_id=identity.config_entry_id,
-                    canonical_id=identity.canonical_id,
-                )
-                _LOGGER.debug(
-                    "Precalculated EID for %s (MCU=%s, ModelID=%s): %s",
-                    identity.registry_id,
-                    mcu_tracker,
-                    identity.fast_pair_model_id,
-                    eid.hex(),
-                )
+                if known_offset is not None:
+                    windows: tuple[int, ...] = (
+                        timestamp,
+                        max(0, timestamp - ROTATION_PERIOD),
+                        timestamp + ROTATION_PERIOD,
+                    )
+                else:
+                    windows = (timestamp,)
+
+                for window_timestamp in windows:
+                    try:
+                        eid = generate_eid(identity.identity_key, window_timestamp)
+                    except Exception as err:  # noqa: BLE001 - defensive guard
+                        _LOGGER.debug(
+                            "Failed to generate EID for %s at %s: %s",
+                            identity.canonical_id,
+                            window_timestamp,
+                            err,
+                        )
+                        continue
+
+                    time_offset = window_timestamp - now
+                    is_reversed = known_offset is not None and known_endianness
+                    if known_offset is None:
+                        lookup[eid] = EIDMatch(
+                            device_id=identity.registry_id,
+                            config_entry_id=identity.config_entry_id,
+                            canonical_id=identity.canonical_id,
+                            time_offset=time_offset,
+                            is_reversed=False,
+                        )
+                        lookup[eid[::-1]] = EIDMatch(
+                            device_id=identity.registry_id,
+                            config_entry_id=identity.config_entry_id,
+                            canonical_id=identity.canonical_id,
+                            time_offset=time_offset,
+                            is_reversed=True,
+                        )
+                    else:
+                        eid_bytes = eid[::-1] if is_reversed else eid
+                        lookup[eid_bytes] = EIDMatch(
+                            device_id=identity.registry_id,
+                            config_entry_id=identity.config_entry_id,
+                            canonical_id=identity.canonical_id,
+                            time_offset=time_offset,
+                            is_reversed=is_reversed,
+                        )
+
+                    _LOGGER.debug(
+                        "Precalculated EID for %s (MCU=%s, ModelID=%s): %s",
+                        identity.registry_id,
+                        mcu_tracker,
+                        identity.fast_pair_model_id,
+                        eid.hex(),
+                    )
 
         self._lookup = lookup
         _LOGGER.debug(
@@ -355,21 +400,30 @@ class GoogleFindMyEIDResolver:
         """
 
         match = self._lookup.get(eid_bytes)
-        if match is not None:
-            # Intentionally avoid logging raw EID bytes for privacy; only the
-            # registry device identifier is included.
-            _LOGGER.debug("Resolved EID to device %s", match.device_id)
-            return match
+        if match is None:
+            match = self._lookup.get(eid_bytes[::-1])
 
-        match_reverse = self._lookup.get(eid_bytes[::-1])
-        if match_reverse is not None:
-            _LOGGER.debug(
-                "Resolved EID (Reverse Byte Order) to device %s",
-                match_reverse.device_id,
+        if match is None:
+            return None
+
+        previous_offset = self._known_offsets.get(match.device_id)
+        previous_endianness = self._known_endianness.get(match.device_id)
+
+        if (
+            previous_offset != match.time_offset
+            or previous_endianness != match.is_reversed
+        ):
+            _LOGGER.info(
+                "Locked on to device %s! Applying Time Offset: %ss, Reverse: %s",
+                match.device_id,
+                match.time_offset,
+                match.is_reversed,
             )
-            return match_reverse
 
-        return None
+        self._known_offsets[match.device_id] = match.time_offset
+        self._known_endianness[match.device_id] = match.is_reversed
+        _LOGGER.debug("Resolved EID to device %s", match.device_id)
+        return match
 
     def get_resolved_eid(self, eid_bytes: bytes) -> str | None:
         """Backward compatible convenience wrapper for resolve_eid.

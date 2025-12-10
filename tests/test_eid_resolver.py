@@ -153,23 +153,28 @@ async def test_resolver_refreshes_all_rotation_windows(monkeypatch: pytest.Monke
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = hass
     resolver._lookup = {}
+    resolver._known_offsets = {}
+    resolver._known_endianness = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
 
     await resolver._refresh_cache()
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    assert set(recorded_timestamps) == {
-        rotation_start,
-        max(0, rotation_start - ROTATION_PERIOD),
-        rotation_start + ROTATION_PERIOD,
-    }
+    earliest_timestamp = max(0, rotation_start - (ROTATION_PERIOD * 90))
+    latest_timestamp = rotation_start + (ROTATION_PERIOD * 90)
+    assert min(recorded_timestamps) == earliest_timestamp
+    assert max(recorded_timestamps) == latest_timestamp
+    expected_windows = ((latest_timestamp - earliest_timestamp) // ROTATION_PERIOD) + 1
+    assert len(recorded_timestamps) == expected_windows
 
     expected_eid = f"{identity.identity_key.hex()}-{rotation_start}".encode()
     match = resolver.resolve_eid(expected_eid)
     assert match is not None
     assert match.device_id == "registry-4"
     assert match.canonical_id == "device-1"
+    assert expected_eid[::-1] in resolver._lookup
+    assert len(resolver._lookup) == len(recorded_timestamps) * 2
     assert resolver.get_resolved_eid(expected_eid) == "registry-4"
     assert resolver.resolve_eid(b"unknown") is None
     assert resolver.get_resolved_eid(b"unknown") is None
@@ -217,6 +222,8 @@ async def test_resolver_aggregates_multiple_entries(monkeypatch: pytest.MonkeyPa
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = hass
     resolver._lookup = {}
+    resolver._known_offsets = {}
+    resolver._known_endianness = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -258,6 +265,8 @@ async def test_resolver_excludes_disabled_or_ignored_devices(monkeypatch: pytest
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = hass
     resolver._lookup = {}
+    resolver._known_offsets = {}
+    resolver._known_endianness = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -301,6 +310,8 @@ async def test_concurrent_refresh_requests_are_serialized(monkeypatch: pytest.Mo
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = hass
     resolver._lookup = {}
+    resolver._known_offsets = {}
+    resolver._known_endianness = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -311,4 +322,71 @@ async def test_concurrent_refresh_requests_are_serialized(monkeypatch: pytest.Mo
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
     expected_eid = f"{identity.identity_key.hex()}-{rotation_start}".encode()
     assert expected_eid in resolver._lookup
+
+
+@pytest.mark.asyncio
+async def test_resolver_learns_offsets_and_endianness(monkeypatch: pytest.MonkeyPatch) -> None:
+    base_time = ROTATION_PERIOD * 200
+    current_time = base_time
+    generated: list[int] = []
+
+    def _fake_time() -> int:
+        return current_time
+
+    def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
+        generated.append(timestamp)
+        return f"{key.hex()}-{timestamp}".encode()
+
+    monkeypatch.setattr(resolver_module.time, "time", _fake_time)
+    monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
+
+    identity = DeviceIdentity(
+        registry_id="registry-learn",
+        canonical_id="canonical-learn",
+        identity_key=b"\x0b",
+        config_entry_id="entry-learn",
+    )
+
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
+    hass = _StubHass({DOMAIN: {"entries": {"entry-learn": SimpleNamespace(coordinator=coordinator)}}})
+
+    resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+    resolver.hass = hass
+    resolver._lookup = {}
+    resolver._known_offsets = {}
+    resolver._known_endianness = {}
+    resolver._unsub_interval = None
+    resolver._unsub_alignment = None
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+
+    await resolver._refresh_cache()
+
+    rotation_start = base_time - (base_time % ROTATION_PERIOD)
+    assert len(generated) == 181
+    target_timestamp = rotation_start + (ROTATION_PERIOD * 2)
+    expected_eid = f"{identity.identity_key.hex()}-{target_timestamp}".encode()
+    assert expected_eid in resolver._lookup
+
+    match = resolver.resolve_eid(expected_eid[::-1])
+    assert match is not None
+    assert match.is_reversed is True
+    assert resolver._known_endianness[identity.registry_id] is True
+    assert resolver._known_offsets[identity.registry_id] == target_timestamp - base_time
+
+    generated.clear()
+    resolver._lookup = {}
+    current_time = base_time + ROTATION_PERIOD
+
+    await resolver._refresh_cache()
+
+    target_rotation = current_time + resolver._known_offsets[identity.registry_id]
+    target_rotation -= target_rotation % ROTATION_PERIOD
+    assert set(generated) == {
+        target_rotation,
+        max(0, target_rotation - ROTATION_PERIOD),
+        target_rotation + ROTATION_PERIOD,
+    }
+    assert len(resolver._lookup) == 3
+    assert all(match.is_reversed for match in resolver._lookup.values())
 
