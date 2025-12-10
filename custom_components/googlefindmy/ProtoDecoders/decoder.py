@@ -672,9 +672,7 @@ def get_devices_with_location(
             # HasField(). Accessing them directly returns 0 if unset.
             owner_key_version = encrypted_user_secrets.ownerKeyVersion
 
-            if registration.HasField("deviceTypeInformation") and (
-                registration.deviceTypeInformation.HasField("deviceType")
-            ):
+            if registration.HasField("deviceTypeInformation"):
                 device_type = registration.deviceTypeInformation.deviceType
 
         # If decryption yielded results, select the best one and keep normalized list.
