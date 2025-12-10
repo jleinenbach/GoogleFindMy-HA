@@ -639,6 +639,7 @@ class DeviceIdentity:
         owner_key_version: Version of the owner key used to encrypt the EIK.
         device_type: SpotDeviceType enum value reported by the tracker, when known.
         config_entry_id: Parent config entry ID that owns the tracker.
+        fast_pair_model_id: Fast Pair model identifier advertised by the tracker.
     """
 
     registry_id: str
@@ -648,6 +649,7 @@ class DeviceIdentity:
     owner_key_version: int | None = None
     device_type: int | None = None
     config_entry_id: str | None = None
+    fast_pair_model_id: str | None = None
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -4318,6 +4320,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return int(value)
             return None
 
+        def _normalize_fast_pair_model_id(value: Any) -> str | None:
+            if isinstance(value, str):
+                trimmed = value.strip()
+                return trimmed or None
+            if isinstance(value, (bytes, bytearray)):
+                try:
+                    decoded = value.decode().strip()
+                except UnicodeDecodeError:
+                    decoded = value.hex()
+                return decoded or None
+            return None
+
         enabled_ids = set(self._enabled_poll_device_ids)
         _LOGGER.debug(
             "Collecting EID identities for %d polling-enabled devices...",
@@ -4362,6 +4376,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         last_identities: dict[str, bytes] = {}
         last_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         last_device_types: dict[str, int | None] = {}
+        last_fast_pair_model_ids: dict[str, str | None] = {}
         last_raw_keys: dict[str, list[str]] = {}
         if isinstance(last_device_list, Iterable):
             for raw in last_device_list:
@@ -4397,9 +4412,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if device_type is not None:
                     last_device_types[dev_id] = device_type
 
+                fast_pair_model_id = _normalize_fast_pair_model_id(
+                    raw.get("fast_pair_model_id") or raw.get("fastPairModelId")
+                )
+                if fast_pair_model_id is not None:
+                    last_fast_pair_model_ids[dev_id] = fast_pair_model_id
+
         data_identities: dict[str, bytes] = {}
         data_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         data_device_types: dict[str, int | None] = {}
+        data_fast_pair_model_ids: dict[str, str | None] = {}
         raw_data_keys: dict[str, list[str]] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
@@ -4435,10 +4457,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if device_type is not None:
                     data_device_types[dev_id] = device_type
 
+                fast_pair_model_id = _normalize_fast_pair_model_id(
+                    raw.get("fast_pair_model_id") or raw.get("fastPairModelId")
+                )
+                if fast_pair_model_id is not None:
+                    data_fast_pair_model_ids[dev_id] = fast_pair_model_id
+
         cache = getattr(self, "_device_location_data", None)
         cache_identities: dict[str, bytes] = {}
         cache_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         cache_device_types: dict[str, int | None] = {}
+        cache_fast_pair_model_ids: dict[str, str | None] = {}
         cache_data_keys: dict[str, list[str]] = {}
         if isinstance(cache, dict):
             for dev_id in device_ids:
@@ -4471,6 +4500,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if device_type is not None:
                     cache_device_types[dev_id] = device_type
 
+                fast_pair_model_id = _normalize_fast_pair_model_id(
+                    payload.get("fast_pair_model_id")
+                    or payload.get("fastPairModelId")
+                )
+                if fast_pair_model_id is not None:
+                    cache_fast_pair_model_ids[dev_id] = fast_pair_model_id
+
         identities: list[DeviceIdentity] = []
         for canonical_id in device_ids:
             registry_entry = registry_map.get(canonical_id)
@@ -4499,6 +4535,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 ),
             )
 
+            fast_pair_model_id = last_fast_pair_model_ids.get(
+                canonical_id,
+                data_fast_pair_model_ids.get(
+                    canonical_id, cache_fast_pair_model_ids.get(canonical_id)
+                ),
+            )
+
             if identity_key is None and encrypted_identity_key is None:
                 _LOGGER.debug(
                     "Device %s skipped: No identity key found (Data: %s)",
@@ -4519,6 +4562,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     owner_key_version=owner_key_version,
                     device_type=device_type,
                     config_entry_id=entry_id,
+                    fast_pair_model_id=fast_pair_model_id,
                 )
             )
 

@@ -238,6 +238,7 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "encrypted_identity_key",
     "owner_key_version",
     "device_type",
+    "fast_pair_model_id",
     "latitude",
     "longitude",
     "altitude",
@@ -265,6 +266,7 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "encrypted_identity_key": None,
         "owner_key_version": None,
         "device_type": None,
+        "fast_pair_model_id": None,
         "latitude": None,
         "longitude": None,
         "altitude": None,
@@ -619,6 +621,7 @@ def get_devices_with_location(
         encrypted_identity_key = None
         owner_key_version = None
         device_type = None
+        fast_pair_model_id: str | None = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -675,6 +678,15 @@ def get_devices_with_location(
             if registration.HasField("deviceTypeInformation"):
                 device_type = registration.deviceTypeInformation.deviceType
 
+            raw_fast_pair_model_id = getattr(registration, "fastPairModelId", None)
+            if isinstance(raw_fast_pair_model_id, str):
+                fast_pair_model_id = raw_fast_pair_model_id or None
+            elif isinstance(raw_fast_pair_model_id, (bytes, bytearray)):
+                try:
+                    fast_pair_model_id = raw_fast_pair_model_id.decode() or None
+                except UnicodeDecodeError:
+                    fast_pair_model_id = raw_fast_pair_model_id.hex()
+
         # If decryption yielded results, select the best one and keep normalized list.
         if location_candidates:
             best, normed = _select_best_location(location_candidates)
@@ -693,6 +705,7 @@ def get_devices_with_location(
             row["encrypted_identity_key"] = encrypted_identity_key
             row["owner_key_version"] = owner_key_version
             row["device_type"] = device_type
+            row["fast_pair_model_id"] = fast_pair_model_id
 
             if best:
                 # best already normalized by selection; merge only known keys

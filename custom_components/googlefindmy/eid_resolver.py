@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
+from cryptography.exceptions import InvalidTag
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
@@ -144,7 +145,10 @@ class GoogleFindMyEIDResolver:
             if not identity.config_entry_id or identity.identity_key is None:
                 continue
 
-            mcu_tracker = is_mcu_tracker(device_type=identity.device_type)
+            mcu_tracker = is_mcu_tracker(
+                device_type=identity.device_type,
+                fast_pair_model_id=identity.fast_pair_model_id,
+            )
             for timestamp in windows:
                 try:
                     eid = generate_eid(identity.identity_key, timestamp)
@@ -163,9 +167,10 @@ class GoogleFindMyEIDResolver:
                     canonical_id=identity.canonical_id,
                 )
                 _LOGGER.debug(
-                    "Precalculated EID for %s (MCU=%s): %s",
+                    "Precalculated EID for %s (MCU=%s, ModelID=%s): %s",
                     identity.registry_id,
                     mcu_tracker,
+                    identity.fast_pair_model_id,
                     eid.hex(),
                 )
 
@@ -257,10 +262,6 @@ class GoogleFindMyEIDResolver:
         ):
             return None
 
-        encrypted_identity_key = bytes(identity.encrypted_identity_key)
-        if is_mcu_tracker(device_type=identity.device_type):
-            encrypted_identity_key = flip_bits(encrypted_identity_key, True)
-
         try:
             owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
         except Exception as err:  # noqa: BLE001 - defensive
@@ -293,20 +294,51 @@ class GoogleFindMyEIDResolver:
                     err,
                 )
 
-        try:
-            decrypted = await asyncio.to_thread(
-                decrypt_eik, owner_key_info.key, encrypted_identity_key
-            )
-        except Exception as err:  # noqa: BLE001 - defensive
-            _LOGGER.debug(
-                "Failed to decrypt identity key for %s (owner_key_version=%s): %s",
-                identity.canonical_id,
-                identity.owner_key_version,
-                err,
-            )
-            return None
+        encrypted_identity_key = bytes(identity.encrypted_identity_key)
 
-        return decrypted if isinstance(decrypted, (bytes, bytearray)) else None
+        suggested_mcu = is_mcu_tracker(
+            device_type=identity.device_type,
+            fast_pair_model_id=identity.fast_pair_model_id,
+        )
+        candidates = [suggested_mcu, not suggested_mcu]
+
+        for flip_mcu in candidates:
+            candidate_key = (
+                flip_bits(encrypted_identity_key, True) if flip_mcu else encrypted_identity_key
+            )
+
+            try:
+                decrypted = await asyncio.to_thread(
+                    decrypt_eik, owner_key_info.key, candidate_key
+                )
+            except InvalidTag as err:
+                _LOGGER.debug(
+                    "Identity key decrypt failed for %s with flip=%s: %s",
+                    identity.canonical_id,
+                    flip_mcu,
+                    err,
+                )
+                continue
+            except Exception as err:  # noqa: BLE001 - defensive
+                _LOGGER.debug(
+                    "Failed to decrypt identity key for %s (owner_key_version=%s, flip=%s): %s",
+                    identity.canonical_id,
+                    identity.owner_key_version,
+                    flip_mcu,
+                    err,
+                )
+                continue
+
+            if isinstance(decrypted, (bytes, bytearray)):
+                return bytes(decrypted)
+
+            _LOGGER.debug(
+                "Decryption returned non-bytes result for %s (flip=%s)",
+                identity.canonical_id,
+                flip_mcu,
+            )
+
+        return None
 
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
         """Resolve a scanned EID to a Home Assistant device registry ID.
