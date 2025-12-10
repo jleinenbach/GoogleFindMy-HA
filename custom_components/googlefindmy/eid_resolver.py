@@ -143,6 +143,8 @@ class GoogleFindMyEIDResolver:
         for identity in identities:
             if not identity.config_entry_id or identity.identity_key is None:
                 continue
+
+            mcu_tracker = is_mcu_tracker(device_type=identity.device_type)
             for timestamp in windows:
                 try:
                     eid = generate_eid(identity.identity_key, timestamp)
@@ -159,6 +161,12 @@ class GoogleFindMyEIDResolver:
                     device_id=identity.registry_id,
                     config_entry_id=identity.config_entry_id,
                     canonical_id=identity.canonical_id,
+                )
+                _LOGGER.debug(
+                    "Precalculated EID for %s (MCU=%s): %s",
+                    identity.registry_id,
+                    mcu_tracker,
+                    eid.hex(),
                 )
 
         self._lookup = lookup
