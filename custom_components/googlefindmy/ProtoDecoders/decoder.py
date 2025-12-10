@@ -687,6 +687,33 @@ def get_devices_with_location(
                 except UnicodeDecodeError:
                     fast_pair_model_id = raw_fast_pair_model_id.hex()
 
+        # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
+        if not encrypted_identity_key:
+            _LOGGER.warning("DEBUG STRUCTURE: Key missing for '%s'", device_name)
+
+            # Level 1
+            fields = [f.name for f, _ in device.ListFields()]
+            _LOGGER.warning(" -> Device fields: %s", fields)
+
+            if device.HasField("information"):
+                info = device.information
+                _LOGGER.warning(" -> Info fields: %s", [f.name for f, _ in info.ListFields()])
+
+                if info.HasField("deviceRegistration"):
+                    reg = info.deviceRegistration
+                    _LOGGER.warning(
+                        " -> Registration fields: %s",
+                        [f.name for f, _ in reg.ListFields()],
+                    )
+
+                    if reg.HasField("encryptedUserSecrets"):
+                        sec = reg.encryptedUserSecrets
+                        _LOGGER.warning(
+                            " -> Secrets fields: %s",
+                            [f.name for f, _ in sec.ListFields()],
+                        )
+        # ------------------------------------
+
         # If decryption yielded results, select the best one and keep normalized list.
         if location_candidates:
             best, normed = _select_best_location(location_candidates)
