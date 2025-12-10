@@ -5474,6 +5474,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             "is_own_report": None,
             "semantic_name": None,
             "battery_level": None,
+            "identity_key": device_dict.get("identity_key"),
+            "encrypted_identity_key": device_dict.get("encrypted_identity_key"),
+            "owner_key_version": device_dict.get("owner_key_version"),
+            "device_type": device_dict.get("device_type"),
         }
 
     def _update_entry_from_cache(self, entry: dict[str, Any], wall_now: float) -> bool:
