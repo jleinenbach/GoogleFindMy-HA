@@ -359,7 +359,17 @@ class GoogleFindMyEIDResolver:
             # Intentionally avoid logging raw EID bytes for privacy; only the
             # registry device identifier is included.
             _LOGGER.debug("Resolved EID to device %s", match.device_id)
-        return match
+            return match
+
+        match_reverse = self._lookup.get(eid_bytes[::-1])
+        if match_reverse is not None:
+            _LOGGER.debug(
+                "Resolved EID (Reverse Byte Order) to device %s",
+                match_reverse.device_id,
+            )
+            return match_reverse
+
+        return None
 
     def get_resolved_eid(self, eid_bytes: bytes) -> str | None:
         """Backward compatible convenience wrapper for resolve_eid.
