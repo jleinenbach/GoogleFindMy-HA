@@ -396,8 +396,16 @@ class GoogleFindMyEIDResolver:
         prefer a ``device_id`` string or ``None``.
 
         EIDs are not logged to avoid leaking hardware identifiers in debug
-        output.
+        output during normal operation. A temporary warning-level probe log at
+        the start of this method prints the scanned EID for troubleshooting
+        cache mismatches.
         """
+
+        _LOGGER.warning(
+            "RESOLVER PROBE: Checking EID %s (Len: %d)",
+            eid_bytes.hex(),
+            len(eid_bytes),
+        )
 
         match = self._lookup.get(eid_bytes)
         if match is None:
