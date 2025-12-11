@@ -40,6 +40,9 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
+EID_LENGTH = 20
+RAW_HEADER_LENGTH = 1
+
 
 class EIDMatch(NamedTuple):
     """Resolved mapping between an EID and a Home Assistant device.
@@ -398,7 +401,9 @@ class GoogleFindMyEIDResolver:
         EIDs are not logged to avoid leaking hardware identifiers in debug
         output during normal operation. A temporary warning-level probe log at
         the start of this method prints the scanned EID for troubleshooting
-        cache mismatches.
+        cache mismatches. Incoming BLE payloads may include framing bytes and
+        telemetry appended to the 20-byte EID; the resolver normalizes the
+        payload before checking the lookup table.
         """
 
         _LOGGER.warning(
@@ -407,9 +412,24 @@ class GoogleFindMyEIDResolver:
             len(eid_bytes),
         )
 
-        match = self._lookup.get(eid_bytes)
+        if len(eid_bytes) < EID_LENGTH:
+            return None
+
+        if len(eid_bytes) > EID_LENGTH:
+            lookup_key = eid_bytes[
+                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + EID_LENGTH
+            ]
+            _LOGGER.debug(
+                "Sliced raw payload %s to EID candidate %s",
+                eid_bytes.hex(),
+                lookup_key.hex(),
+            )
+        else:
+            lookup_key = eid_bytes
+
+        match = self._lookup.get(lookup_key)
         if match is None:
-            match = self._lookup.get(eid_bytes[::-1])
+            match = self._lookup.get(lookup_key[::-1])
 
         if match is None:
             return None
