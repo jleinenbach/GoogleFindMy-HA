@@ -146,10 +146,6 @@ class GoogleFindMyEIDResolver:
             if not identity.config_entry_id or identity.identity_key is None:
                 continue
 
-            mcu_tracker = is_mcu_tracker(
-                device_type=identity.device_type,
-                fast_pair_model_id=identity.fast_pair_model_id,
-            )
             known_offset = self._known_offsets.get(identity.registry_id)
             known_endianness = self._known_endianness.get(identity.registry_id, False)
             target_time = now if known_offset is None else now + known_offset
@@ -213,14 +209,6 @@ class GoogleFindMyEIDResolver:
                             time_offset=time_offset,
                             is_reversed=is_reversed,
                         )
-
-                    _LOGGER.debug(
-                        "Precalculated EID for %s (MCU=%s, ModelID=%s): %s",
-                        identity.registry_id,
-                        mcu_tracker,
-                        identity.fast_pair_model_id,
-                        eid.hex(),
-                    )
 
         self._lookup = lookup
         _LOGGER.debug(
@@ -406,12 +394,6 @@ class GoogleFindMyEIDResolver:
         payload before checking the lookup table.
         """
 
-        _LOGGER.warning(
-            "RESOLVER PROBE: Checking EID %s (Len: %d)",
-            eid_bytes.hex(),
-            len(eid_bytes),
-        )
-
         if len(eid_bytes) < EID_LENGTH:
             return None
 
@@ -419,13 +401,14 @@ class GoogleFindMyEIDResolver:
             lookup_key = eid_bytes[
                 RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + EID_LENGTH
             ]
-            _LOGGER.debug(
-                "Sliced raw payload %s to EID candidate %s",
-                eid_bytes.hex(),
-                lookup_key.hex(),
-            )
         else:
             lookup_key = eid_bytes
+
+        _LOGGER.debug(
+            "RESOLVER PROBE: Checking Sliced EID %s (Original Len: %d)",
+            lookup_key.hex(),
+            len(eid_bytes),
+        )
 
         match = self._lookup.get(lookup_key)
         if match is None:
@@ -447,6 +430,13 @@ class GoogleFindMyEIDResolver:
                 match.time_offset,
                 match.is_reversed,
             )
+
+        _LOGGER.info(
+            "MATCH FOUND: EID %s belongs to device %s (Time Offset: %s)",
+            lookup_key.hex(),
+            match.device_id,
+            match.time_offset,
+        )
 
         self._known_offsets[match.device_id] = match.time_offset
         self._known_endianness[match.device_id] = match.is_reversed
