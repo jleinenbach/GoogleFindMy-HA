@@ -4286,7 +4286,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     def _schedule_eid_resolver_refresh(self) -> None:
         """Refresh the global EID resolver when active device sets change."""
 
-        hass_data = getattr(self.hass, "data", None)
+        hass = getattr(self, "hass", None)
+        hass_data = getattr(hass, "data", None)
         if not isinstance(hass_data, dict):
             return
 
@@ -6085,7 +6086,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self.increment_stat("background_updates")
 
         if resolver_refresh_needed:
+            self._reset_resolver_offset(device_id)
             self._schedule_eid_resolver_refresh()
+
+    def _reset_resolver_offset(self, device_id: str) -> None:
+        """Clear resolver offsets when identity keys rotate."""
+
+        hass = getattr(self, "hass", None)
+        hass_data = getattr(hass, "data", None)
+        if not isinstance(hass_data, dict):
+            return
+
+        bucket = hass_data.get(DOMAIN)
+        if not isinstance(bucket, dict):
+            return
+
+        resolver = bucket.get(DATA_EID_RESOLVER)
+        reset = getattr(resolver, "reset_device_offset", None)
+        if callable(reset):
+            reset(device_id)
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
         """Validate temporal ordering before committing cache updates.

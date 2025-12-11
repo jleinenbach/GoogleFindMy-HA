@@ -132,7 +132,7 @@ class GoogleFindMyEIDResolver:
                 self._pending_refresh = False
                 await self._refresh_cache()
 
-    async def _refresh_cache(self) -> None:
+    async def _refresh_cache(self) -> None:  # noqa: PLR0912 - iterative window search
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
 
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
@@ -142,15 +142,25 @@ class GoogleFindMyEIDResolver:
         lookup: dict[bytes, EIDMatch] = {}
         now = int(time.time())
 
+        first_identity_id: str | None = None
+
         for identity in identities:
             if not identity.config_entry_id or identity.identity_key is None:
                 continue
+
+            if first_identity_id is None:
+                first_identity_id = identity.canonical_id
 
             known_offset = self._known_offsets.get(identity.registry_id)
             known_endianness = self._known_endianness.get(identity.registry_id, False)
             target_time = now if known_offset is None else now + known_offset
             rotation_start = target_time - (target_time % ROTATION_PERIOD)
             window_range: range
+            should_log_debug_dump = identity.canonical_id.endswith("d329") or (
+                first_identity_id is not None
+                and identity.canonical_id == first_identity_id
+            )
+            debug_dump_logged = False
 
             if known_offset is None:
                 window_range = range(-90, 91)
@@ -209,6 +219,17 @@ class GoogleFindMyEIDResolver:
                             time_offset=time_offset,
                             is_reversed=is_reversed,
                         )
+
+                    if should_log_debug_dump and not debug_dump_logged:
+                        key_snippet = identity.identity_key.hex()[:6]
+                        _LOGGER.info(
+                            "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
+                            identity.canonical_id,
+                            key_snippet,
+                            window_timestamp,
+                            eid.hex(),
+                        )
+                        debug_dump_logged = True
 
         self._lookup = lookup
         _LOGGER.debug(
@@ -387,9 +408,9 @@ class GoogleFindMyEIDResolver:
         prefer a ``device_id`` string or ``None``.
 
         EIDs are not logged to avoid leaking hardware identifiers in debug
-        output during normal operation. A temporary warning-level probe log at
-        the start of this method prints the scanned EID for troubleshooting
-        cache mismatches. Incoming BLE payloads may include framing bytes and
+        output during normal operation. A debug-level probe log at the start of
+        this method prints the scanned EID for troubleshooting cache
+        mismatches. Incoming BLE payloads may include framing bytes and
         telemetry appended to the 20-byte EID; the resolver normalizes the
         payload before checking the lookup table.
         """
@@ -442,6 +463,12 @@ class GoogleFindMyEIDResolver:
         self._known_endianness[match.device_id] = match.is_reversed
         _LOGGER.debug("Resolved EID to device %s", match.device_id)
         return match
+
+    def reset_device_offset(self, device_id: str) -> None:
+        """Clear cached time offset and endianness for a device."""
+
+        self._known_offsets.pop(device_id, None)
+        self._known_endianness.pop(device_id, None)
 
     def get_resolved_eid(self, eid_bytes: bytes) -> str | None:
         """Backward compatible convenience wrapper for resolve_eid.
