@@ -235,6 +235,73 @@ def test_stationary_metadata_change_fuses_coordinates() -> None:
     assert stat_counts == {"background_updates": 1, "fused_updates": 1}
 
 
+def test_identity_key_delta_triggers_resolver_refresh() -> None:
+    """FCM-provided identity key updates must refresh the resolver cache."""
+
+    existing = {
+        "latitude": 40.0,
+        "longitude": -75.0,
+        "accuracy": 20.0,
+        "last_seen": 1_700_000_000.0,
+        "encrypted_identity_key": b"old",
+        "owner_key_version": 1,
+    }
+    coordinator = _make_coordinator(existing)
+
+    refresh_calls: list[str] = []
+    coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append(
+        "refresh"
+    )
+
+    incoming = {
+        "latitude": existing["latitude"] + 0.0002,
+        "longitude": existing["longitude"] + 0.0002,
+        "accuracy": 10.0,
+        "last_seen": existing["last_seen"] + 60,
+        "encrypted_identity_key": b"new",
+        "owner_key_version": 2,
+    }
+
+    coordinator.update_device_cache("device-1", incoming)
+
+    cached = coordinator._device_location_data["device-1"]
+    assert cached["encrypted_identity_key"] == b"new"
+    assert cached["owner_key_version"] == 2
+    assert refresh_calls == ["refresh"]
+
+
+def test_identity_key_stability_skips_resolver_refresh() -> None:
+    """Repeated identity key payloads should not retrigger resolver work."""
+
+    existing = {
+        "latitude": 41.0,
+        "longitude": -76.0,
+        "accuracy": 15.0,
+        "last_seen": 1_700_000_000.0,
+        "encrypted_identity_key": b"stable",
+        "owner_key_version": 3,
+    }
+    coordinator = _make_coordinator(existing)
+
+    refresh_calls: list[str] = []
+    coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append(
+        "refresh"
+    )
+
+    incoming = {
+        "latitude": existing["latitude"],
+        "longitude": existing["longitude"],
+        "accuracy": 12.0,
+        "last_seen": existing["last_seen"] + 90,
+        "encrypted_identity_key": b"stable",
+        "owner_key_version": 3,
+    }
+
+    coordinator.update_device_cache("device-1", incoming)
+
+    assert refresh_calls == []
+
+
 def test_update_cache_keeps_coordinates_when_semantic_refresh_arrives() -> None:
     """Semantic-only updates must not drop cached coordinates for a device."""
 
