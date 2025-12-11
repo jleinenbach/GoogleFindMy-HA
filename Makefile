@@ -1,4 +1,4 @@
-.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse test-deps translation-check
+.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse test-deps translation-check test-cov
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -121,3 +121,7 @@ test-ha: $(VENV)/bin/activate
 test-unload: $(VENV)/bin/activate
 	@echo "[make test-unload] Running parent unload rollback regression suite"
 	@. $(VENV)/bin/activate && pytest -q $(PYTEST_ARGS) tests/test_unload_subentry_cleanup.py
+
+test-cov:
+	@echo "[make test-cov] Running pytest -q --cov with PYTHONPATH=. to load sitecustomize"
+	@bash -o pipefail -c "PYTHONPATH=. $(PYTHON) -m pytest -q --cov $(PYTEST_COV_FLAGS) $(PYTEST_ARGS) 2>&1 | tee pytest_output.log"
