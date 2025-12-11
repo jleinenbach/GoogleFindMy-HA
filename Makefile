@@ -110,11 +110,13 @@ $(VENV)/bin/activate: $(DEV_REQUIREMENTS) $(WHEELHOUSE_SENTINEL) $(BOOTSTRAP_SEN
 	@$(VENV)/bin/pip install --find-links=$(WHEELHOUSE) -r $(DEV_REQUIREMENTS)
 	@touch $(VENV)/bin/activate
 
+# Use `make test-ha` when you need the full virtualenv + wheelhouse parity that mirrors CI's smoke path; use `make test-cov` for a quicker
+# coverage run against the current interpreter with `PYTHONPATH=.` (which auto-loads `sitecustomize.py`).
 test-ha: $(VENV)/bin/activate
 	@echo "[make test-ha] Running targeted Home Assistant regression smoke tests"
 	@. $(VENV)/bin/activate && pytest $(PYTEST_ARGS) \
-		tests/test_entity_recovery_manager.py \
-		tests/test_homeassistant_callback_stub_helper.py
+			tests/test_entity_recovery_manager.py \
+			tests/test_homeassistant_callback_stub_helper.py
 	@echo "[make test-ha] Executing full-suite coverage run (see pytest_output.log for details)"
 	@bash -o pipefail -c ". $(VENV)/bin/activate && pytest -q --cov $(PYTEST_COV_FLAGS) $${PYTEST_ARGS:+$${PYTEST_ARGS} } 2>&1 | tee pytest_output.log"
 
