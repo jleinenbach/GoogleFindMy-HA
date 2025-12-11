@@ -6036,6 +6036,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return
 
+        resolver_refresh_needed = False
+        incoming_eik = slot.get("encrypted_identity_key")
+        incoming_owner_key_version = slot.get("owner_key_version")
+
+        if incoming_eik is not None or incoming_owner_key_version is not None:
+            cached_eik = None
+            cached_owner_key_version = None
+            if isinstance(cached_loc, Mapping):
+                cached_eik = cached_loc.get("encrypted_identity_key")
+                cached_owner_key_version = cached_loc.get("owner_key_version")
+
+            if (
+                cached_eik != incoming_eik
+                or cached_owner_key_version != incoming_owner_key_version
+            ):
+                resolver_refresh_needed = True
+                _LOGGER.info(
+                    (
+                        "Identity key update detected for %s (ownerKeyVersion=%s); "
+                        "scheduling EID resolver refresh."
+                    ),
+                    device_id,
+                    incoming_owner_key_version,
+                )
+
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
 
@@ -6052,6 +6077,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._device_location_data[device_id] = slot
         # Increment background updates to account for push/manual commits.
         self.increment_stat("background_updates")
+
+        if resolver_refresh_needed:
+            self._schedule_eid_resolver_refresh()
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
         """Validate temporal ordering before committing cache updates.

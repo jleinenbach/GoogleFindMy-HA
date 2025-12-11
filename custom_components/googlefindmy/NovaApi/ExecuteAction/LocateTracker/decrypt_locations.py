@@ -455,6 +455,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         _LOGGER.error("Device registration metadata missing or invalid: %s", exc)
         raise
 
+    encrypted_user_secrets = device_registration.encryptedUserSecrets
+    raw_encrypted_identity_key = bytes(
+        getattr(encrypted_user_secrets, "encryptedIdentityKey", b"")
+    )
+    raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
+
     identity_key = await async_retrieve_identity_key(device_registration, cache=cache)
 
     try:
@@ -583,6 +589,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "status_code": int(loc.status),
                     "is_own_report": False,
                     "semantic_name": loc.name,
+                    "encrypted_identity_key": raw_encrypted_identity_key,
+                    "owner_key_version": raw_owner_key_version,
                 }
                 # Internal hint helps the coordinator schedule throttling-aware cooldowns.
                 if report_hint:
@@ -632,6 +640,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "status_code": int(loc.status),
                     "is_own_report": loc.is_own_report,
                     "semantic_name": None,
+                    "encrypted_identity_key": raw_encrypted_identity_key,
+                    "owner_key_version": raw_owner_key_version,
                 }
                 if report_hint:
                     payload["_report_hint"] = report_hint

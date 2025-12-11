@@ -166,9 +166,11 @@ jobs:
           mypy --install-types --non-interactive --strict -p tests
 
       - name: Run pytest with coverage
+        env:
+          PYTHONPATH: .
         run: |
           set -o pipefail
-          pytest -q --cov 2>&1 | tee pytest_output.log
+          python -m pytest -q --cov 2>&1 | tee pytest_output.log
 
       - name: Write short summary to GitHub Step Summary
         if: always()
