@@ -462,6 +462,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
 
     identity_key = await async_retrieve_identity_key(device_registration, cache=cache)
+    identity_key_bytes = bytes(identity_key) if identity_key is not None else None
 
     try:
         locations_proto = device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
@@ -591,7 +592,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "semantic_name": loc.name,
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
-                    "identity_key": identity_key,
+                    "identity_key": identity_key_bytes,
                 }
                 # Internal hint helps the coordinator schedule throttling-aware cooldowns.
                 if report_hint:
@@ -643,7 +644,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "semantic_name": None,
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
-                    "identity_key": identity_key,
+                    "identity_key": identity_key_bytes,
                 }
                 if report_hint:
                     payload["_report_hint"] = report_hint

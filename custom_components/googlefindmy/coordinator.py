@@ -4335,7 +4335,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         T = TypeVar("T")
 
-        def _lookup(key: str, *sources: Mapping[str, T]) -> T | None:
+        def _lookup_prio(key: str, *sources: Mapping[str, T]) -> T | None:
+            """Return the first matching value across ordered sources."""
+
             for source in sources:
                 if key in source:
                     return source[key]
@@ -4526,28 +4528,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 continue
 
             registry_id, registry_key = registry_entry
-            identity_key = _lookup(lookup_id, cache_identities, last_identities)
+
+            identity_key = _lookup_prio(
+                lookup_id, cache_identities, data_identities, last_identities
+            )
             if identity_key is None:
                 identity_key = registry_key
-            if identity_key is None:
-                identity_key = _lookup(lookup_id, data_identities)
 
-            encrypted_identity_tuple = _lookup(
-                lookup_id, cache_encrypted, last_encrypted, data_encrypted
+            encrypted_identity_tuple = _lookup_prio(
+                lookup_id, cache_encrypted, data_encrypted, last_encrypted
             )
             encrypted_identity_key, owner_key_version = encrypted_identity_tuple or (
                 None,
                 None,
             )
-            device_type = _lookup(
-                lookup_id, cache_device_types, last_device_types, data_device_types
+            device_type = _lookup_prio(
+                lookup_id, cache_device_types, data_device_types, last_device_types
             )
 
-            fast_pair_model_id = _lookup(
+            fast_pair_model_id = _lookup_prio(
                 lookup_id,
                 cache_fast_pair_model_ids,
-                last_fast_pair_model_ids,
                 data_fast_pair_model_ids,
+                last_fast_pair_model_ids,
             )
 
             if identity_key is None and encrypted_identity_key is None:
@@ -6044,29 +6047,53 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         resolver_refresh_needed = False
-        incoming_eik = slot.get("encrypted_identity_key")
+
+        cached_identity_key = None
+        if isinstance(cached_loc, Mapping):
+            cached_identity_key = self._normalize_identity_key(
+                cached_loc.get("identity_key")
+            )
+
+        incoming_identity_key = self._normalize_identity_key(slot.get("identity_key"))
+        if incoming_identity_key is not None:
+            slot["identity_key"] = incoming_identity_key
+
+        incoming_eik = self._normalize_identity_key(slot.get("encrypted_identity_key"))
+        if incoming_eik is not None:
+            slot["encrypted_identity_key"] = incoming_eik
+
         incoming_owner_key_version = slot.get("owner_key_version")
 
-        if incoming_eik is not None or incoming_owner_key_version is not None:
-            cached_eik = None
-            cached_owner_key_version = None
-            if isinstance(cached_loc, Mapping):
-                cached_eik = cached_loc.get("encrypted_identity_key")
-                cached_owner_key_version = cached_loc.get("owner_key_version")
+        identity_changed = (
+            incoming_identity_key is not None
+            and incoming_identity_key != cached_identity_key
+        )
 
-            if (
-                cached_eik != incoming_eik
-                or cached_owner_key_version != incoming_owner_key_version
-            ):
-                resolver_refresh_needed = True
-                _LOGGER.info(
-                    (
-                        "Identity key update detected for %s (ownerKeyVersion=%s); "
-                        "scheduling EID resolver refresh."
-                    ),
-                    device_id,
-                    incoming_owner_key_version,
-                )
+        cached_eik = None
+        cached_owner_key_version = None
+        if isinstance(cached_loc, Mapping):
+            cached_eik = self._normalize_identity_key(
+                cached_loc.get("encrypted_identity_key")
+            )
+            cached_owner_key_version = cached_loc.get("owner_key_version")
+
+        encrypted_changed = False
+        if incoming_eik is not None or incoming_owner_key_version is not None:
+            encrypted_changed = (
+                incoming_eik != cached_eik
+                or incoming_owner_key_version != cached_owner_key_version
+            )
+
+        if identity_changed or encrypted_changed:
+            resolver_refresh_needed = True
+            _LOGGER.info(
+                (
+                    "Identity key update detected for %s "
+                    "(ownerKeyVersion=%s); scheduling EID resolver refresh."
+                ),
+                device_id,
+                incoming_owner_key_version,
+            )
 
         # Ensure last_updated is present
         slot.setdefault("last_updated", time.time())
@@ -6090,9 +6117,32 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._schedule_eid_resolver_refresh()
 
     def _reset_resolver_offset(self, device_id: str) -> None:
-        """Clear resolver offsets when identity keys rotate."""
+        """Clear resolver offsets using registry IDs when identity keys rotate."""
 
         hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+
+        registry_id: str | None = None
+        entry_id = self._entry_id()
+
+        dev_reg = dr.async_get(hass)
+        if entry_id and dev_reg:
+            identifiers = {
+                (DOMAIN, f"{entry_id}:{device_id}"),
+                (DOMAIN, device_id),
+            }
+            device = dev_reg.async_get_device(identifiers=identifiers)
+            if device:
+                registry_id = device.id
+
+        if not registry_id:
+            _LOGGER.debug(
+                "Could not resolve Registry ID for canonical %s; skipping offset reset.",
+                device_id,
+            )
+            return
+
         hass_data = getattr(hass, "data", None)
         if not isinstance(hass_data, dict):
             return
@@ -6102,9 +6152,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         resolver = bucket.get(DATA_EID_RESOLVER)
+        if resolver is None:
+            return
+
         reset = getattr(resolver, "reset_device_offset", None)
         if callable(reset):
-            reset(device_id)
+            _LOGGER.debug(
+                "Triggering resolver offset reset for %s (Registry ID: %s)",
+                device_id,
+                registry_id,
+            )
+            reset(registry_id)
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
         """Validate temporal ordering before committing cache updates.
