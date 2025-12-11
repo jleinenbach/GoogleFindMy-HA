@@ -1388,7 +1388,7 @@ def _stub_homeassistant() -> None:
 
     event_module = ModuleType("homeassistant.helpers.event")
 
-    async def _async_call_later(
+    def _async_call_later(
         *_args, **_kwargs
     ):  # pragma: no cover - stubbed behaviour
         return None
