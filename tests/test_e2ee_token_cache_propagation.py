@@ -60,7 +60,7 @@ def test_async_retrieve_identity_key_threads_cache(
         decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
 
-    assert result == b"\x02" * 32
+    assert result == [b"\x02" * 32]
     assert owner_calls["owner_cache"] is cache
     # Success path does not consult async_get_eid_info; ensure no unexpected call
     assert "eid_cache" not in owner_calls
@@ -181,7 +181,7 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
         decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
 
-    assert result == b"\xAA" * 32
+    assert result == [b"\xAA" * 32]
     assert cache.values.get("owner_key_user@example.com") is None
     assert owner_calls == [cache, cache]
     assert eid_calls == [cache]

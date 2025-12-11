@@ -44,7 +44,7 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
             )
 
             try:
-                identity_key = retrieve_identity_key(
+                identity_keys = retrieve_identity_key(
                     device.information.deviceRegistration
                 )
             except RuntimeError as exc:
@@ -54,10 +54,16 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
                     f"{exc}"
                 )
                 return
+            if not identity_keys:
+                print(
+                    "[UploadPrecomputedPublicKeyIds] No identity key candidates derived; "
+                    "skipping upload."
+                )
+                continue
             start_timestamp = int(time.time() - hours_to_seconds(3))
 
             next_eids = get_next_eids(
-                identity_key,
+                identity_keys[0],
                 new_truncated_ids.pairDate,
                 start_timestamp,
                 duration_seconds=max_truncated_eid_seconds_server,

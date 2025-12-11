@@ -89,8 +89,8 @@ async def test_decrypted_key_reaches_coordinator_cache(
     common_stub = SimpleNamespace(Status=_StatusEnum)
     device_update_stub = SimpleNamespace(Location=lambda: SimpleNamespace(ParseFromString=lambda *_a, **_kw: None))
 
-    async def _stub_async_retrieve_identity_key(*_args: Any, **_kwargs: Any) -> bytes:
-        return identity_key
+    async def _stub_async_retrieve_identity_key(*_args: Any, **_kwargs: Any) -> list[bytes]:
+        return [identity_key]
 
     monkeypatch.setattr(decrypt_module, "_get_common_pb2", lambda: common_stub)
     monkeypatch.setattr(decrypt_module, "_get_device_update_pb2", lambda: device_update_stub)

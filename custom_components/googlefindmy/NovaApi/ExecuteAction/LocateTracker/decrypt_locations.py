@@ -4,6 +4,7 @@
 #
 from __future__ import annotations
 
+# ruff: noqa: PLR0912, PLR0915
 import asyncio
 import datetime
 import hashlib
@@ -143,13 +144,13 @@ async def async_retrieve_identity_key(
     *,
     cache: TokenCache,
     _retry: bool = True,
-) -> bytes:
+) -> list[bytes]:  # noqa: PLR0912, PLR0915
     """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
 
     Flow (async-first, HA-friendly):
-    - Apply MCU bit-flip quirk to the encrypted EIK blob.
+    - Try both MCU bit-flip states to derive candidate keys.
     - Obtain owner key (async).
-    - Decrypt EIK (CPU-bound → offload to thread).
+    - Decrypt each candidate EIK (CPU-bound → offload to thread).
     - Strictly validate length to avoid silent misuse downstream.
 
     Args:
@@ -162,13 +163,9 @@ async def async_retrieve_identity_key(
         SpotApiEmptyResponseError: propagated if EID info trailers-only response indicates auth/session issue.
         RuntimeError: if the TokenCache is missing (multi-account safety guard).
     """
-    is_mcu = is_mcu_tracker(device_registration)
     encrypted_user_secrets = device_registration.encryptedUserSecrets
 
-    encrypted_identity_key = flip_bits(
-        encrypted_user_secrets.encryptedIdentityKey,
-        is_mcu,
-    )
+    raw_encrypted_identity_key = encrypted_user_secrets.encryptedIdentityKey
 
     if cache is None:
         raise RuntimeError(
@@ -176,106 +173,119 @@ async def async_retrieve_identity_key(
         )
 
     owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+    candidates: list[bytes] = []
+    decrypt_errors: list[Exception] = []
 
-    try:
-        # CPU-heavy → do not block the event loop
-        eik_bytes = await asyncio.to_thread(
-            decrypt_eik, owner_key_info.key, encrypted_identity_key
-        )
-        # Strict sanity: EIK must be exactly 32 bytes
-        if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:
-            raise DecryptionError(
-                f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes)."
-            )
-        return bytes(eik_bytes)
-    except Exception as e:
-        current_owner_key_version = None
+    for do_flip in (False, True):
+        flipped_blob = flip_bits(raw_encrypted_identity_key, do_flip)
         try:
-            e2ee_data = await async_get_eid_info(cache=cache)
-            current_owner_key_version = (
-                e2ee_data.encryptedOwnerKeyAndMetadata.ownerKeyVersion
+            # CPU-heavy → do not block the event loop
+            eik_bytes = await asyncio.to_thread(
+                decrypt_eik, owner_key_info.key, flipped_blob
             )
-            _LOGGER.debug(
-                "E2EE metadata: current ownerKeyVersion=%s", current_owner_key_version
-            )
-        except SpotApiEmptyResponseError:
-            _LOGGER.error(
-                "Failed to decrypt identity key due to empty trailers-only EID info response "
-                "(authentication/session). Please re-authenticate and retry."
-            )
-            raise
-        except Exception as meta_exc:  # best-effort diagnostics
-            _LOGGER.warning(
-                "Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc
-            )
-
-        old_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
-        if (
-            current_owner_key_version is not None
-            and old_ver is not None
-            and old_ver < current_owner_key_version
-        ):
-            if _retry:
-                username = None
-                cache_key = None
-                try:
-                    username = await cache.get(username_string)
-                except Exception as cache_exc:
-                    _LOGGER.debug(
-                        "Failed to resolve username from cache before clearing owner key: %s",
-                        cache_exc,
-                    )
-
-                if isinstance(username, str) and username:
-                    cache_key = f"owner_key_{username}"
-
-                _LOGGER.info(
-                    "Owner key version mismatch (tracker=%s, current=%s); %s and retrying once.",
-                    old_ver,
-                    current_owner_key_version,
-                    "clearing cached owner key" if cache_key else "retrying with fresh owner key",
+            if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:
+                raise DecryptionError(
+                    f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes)."
                 )
 
-                if cache_key:
-                    try:
-                        await cache.set(cache_key, None)
-                    except Exception as cache_exc:
-                        _LOGGER.warning(
-                            "Failed to clear cached owner key '%s': %s", cache_key, cache_exc
-                        )
+            key_bytes = bytes(eik_bytes)
+            if key_bytes not in candidates:
+                candidates.append(key_bytes)
+        except Exception as exc:  # Capture and continue to try the other flip state
+            decrypt_errors.append(exc)
 
-                return await async_retrieve_identity_key(
-                    device_registration,
-                    cache=cache,
-                    _retry=False,
+    if candidates and not decrypt_errors:
+        return candidates
+
+    current_owner_key_version = None
+    try:
+        e2ee_data = await async_get_eid_info(cache=cache)
+        current_owner_key_version = (
+            e2ee_data.encryptedOwnerKeyAndMetadata.ownerKeyVersion
+        )
+        _LOGGER.debug(
+            "E2EE metadata: current ownerKeyVersion=%s", current_owner_key_version
+        )
+    except SpotApiEmptyResponseError:
+        _LOGGER.error(
+            "Failed to decrypt identity key due to empty trailers-only EID info response "
+            "(authentication/session). Please re-authenticate and retry."
+        )
+        raise
+    except Exception as meta_exc:  # best-effort diagnostics
+        _LOGGER.warning(
+            "Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc
+        )
+
+    old_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
+    last_exc = decrypt_errors[-1] if decrypt_errors else None
+    if (
+        current_owner_key_version is not None
+        and old_ver is not None
+        and old_ver < current_owner_key_version
+    ):
+        if _retry:
+            username = None
+            cache_key = None
+            try:
+                username = await cache.get(username_string)
+            except Exception as cache_exc:
+                _LOGGER.debug(
+                    "Failed to resolve username from cache before clearing owner key: %s",
+                    cache_exc,
                 )
 
-            _LOGGER.error(
-                "Owner key version mismatch: tracker=%s, current=%s. "
-                "This typically occurs after resetting E2EE data. "
-                "The tracker cannot be decrypted anymore; remove it in the Find My Device app.",
+            if isinstance(username, str) and username:
+                cache_key = f"owner_key_{username}"
+
+            _LOGGER.info(
+                "Owner key version mismatch (tracker=%s, current=%s); %s and retrying once.",
                 old_ver,
                 current_owner_key_version,
+                "clearing cached owner key" if cache_key else "retrying with fresh owner key",
             )
-            raise StaleOwnerKeyError(
-                "Tracker was encrypted with a stale owner key version."
-            ) from e
+
+            if cache_key:
+                try:
+                    # TokenCache clears entries when the value is set to None
+                    await cache.set(cache_key, None)
+                except Exception as cache_exc:
+                    _LOGGER.debug("Failed to clear cached owner key: %s", cache_exc)
+
+            return await async_retrieve_identity_key(
+                device_registration,
+                cache=cache,
+                _retry=False,
+            )
 
         _LOGGER.error(
-            "Failed to decrypt identity key (owner key version %s vs. current %s). "
-            "If you recently reset E2EE data, re-authenticate or recreate keys. "
-            "If the issue persists, clear the integration secrets to force a fresh key derivation.",
+            "Owner key version mismatch: tracker=%s, current=%s. "
+            "This typically occurs after resetting E2EE data. "
+            "The tracker cannot be decrypted anymore; remove it in the Find My Device app.",
             old_ver,
             current_owner_key_version,
         )
-        raise DecryptionError("Identity key decryption failed.") from e
+        raise StaleOwnerKeyError(
+            "Tracker was encrypted with a stale owner key version."
+        ) from last_exc
 
+    if candidates:
+        return candidates
+
+    _LOGGER.error(
+        "Failed to decrypt identity key (owner key version %s vs. current %s). "
+        "If you recently reset E2EE data, re-authenticate or recreate keys. "
+        "If the issue persists, clear the integration secrets to force a fresh key derivation.",
+        old_ver,
+        current_owner_key_version,
+    )
+    raise DecryptionError("Identity key decryption failed.") from last_exc
 
 def retrieve_identity_key(
     device_registration: DeviceRegistration,
     *,
     cache: TokenCache | None = None,
-) -> bytes:
+) -> list[bytes]:
     """Legacy synchronous facade removed in favor of the async API."""
 
     raise RuntimeError(
@@ -461,8 +471,15 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     )
     raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
 
-    identity_key = await async_retrieve_identity_key(device_registration, cache=cache)
+    identity_key_candidates = await async_retrieve_identity_key(
+        device_registration, cache=cache
+    )
+    identity_key = identity_key_candidates[0] if identity_key_candidates else None
     identity_key_bytes = bytes(identity_key) if identity_key is not None else None
+    identity_key_candidate_bytes = [bytes(candidate) for candidate in identity_key_candidates]
+
+    if identity_key is None:
+        raise DecryptionError("Identity key derivation returned no candidates.")
 
     try:
         locations_proto = device_update_protobuf.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
@@ -593,6 +610,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
                     "identity_key": identity_key_bytes,
+                    "identity_key_candidates": identity_key_candidate_bytes,
                 }
                 # Internal hint helps the coordinator schedule throttling-aware cooldowns.
                 if report_hint:
@@ -645,6 +663,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
                     "identity_key": identity_key_bytes,
+                    "identity_key_candidates": identity_key_candidate_bytes,
                 }
                 if report_hint:
                     payload["_report_hint"] = report_hint

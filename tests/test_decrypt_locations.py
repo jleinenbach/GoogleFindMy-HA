@@ -30,8 +30,8 @@ def test_async_decrypt_location_response_locations_allows_future_owner_timestamp
     location_proto.altitude = 1337
     location_bytes = location_proto.SerializeToString()
 
-    async def fake_identity_key(*_args, **_kwargs) -> bytes:
-        return b"\x42" * 32
+    async def fake_identity_key(*_args, **_kwargs) -> list[bytes]:
+        return [b"\x42" * 32]
 
     async def fake_offload(*_args, **_kwargs) -> bytes:
         return location_bytes
@@ -88,8 +88,8 @@ def test_async_decrypt_location_response_locations_aligns_missing_network_timest
     def serialize_location(loc: DeviceUpdate_pb2.Location) -> bytes:
         return loc.SerializeToString()
 
-    async def fake_identity_key(*_args, **_kwargs) -> bytes:
-        return b"\x01" * 32
+    async def fake_identity_key(*_args, **_kwargs) -> list[bytes]:
+        return [b"\x01" * 32]
 
     async def fake_offload_aes(
         _identity_key: bytes, encrypted_location: bytes
