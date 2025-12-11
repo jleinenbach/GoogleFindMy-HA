@@ -9,6 +9,7 @@ import asyncio
 import datetime
 import logging
 import random
+import ssl
 from email.utils import parsedate_to_datetime
 from typing import cast
 
@@ -69,6 +70,13 @@ _SPOT_MAX_RETRIES = 3
 _SPOT_INITIAL_BACKOFF_S = 1.0
 _SPOT_BACKOFF_FACTOR = 2.0
 _SPOT_MAX_RETRY_AFTER_S = 60.0
+
+
+# Preload the SSL context at import time so certifi's CA bundle is loaded outside the
+# event loop. httpx will reuse this context for every async client, avoiding blocking
+# `load_verify_locations` calls once Home Assistant has started.
+_SPOT_SSL_CONTEXT = httpx.create_ssl_context()
+_SPOT_SSL_CONTEXT.options |= ssl.OP_NO_COMPRESSION
 
 
 def _compute_delay(attempt: int, retry_after: str | None) -> float:
@@ -241,7 +249,9 @@ async def async_spot_request(
     retries_used = 0
     aas_reset_once = False
 
-    async with httpx.AsyncClient(http2=True, timeout=30.0) as client:
+    async with httpx.AsyncClient(
+        http2=True, timeout=30.0, verify=_SPOT_SSL_CONTEXT
+    ) as client:
         while True:
             attempt = retries_used + 1
             prefer_adm = (
