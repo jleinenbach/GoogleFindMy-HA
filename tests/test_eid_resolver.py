@@ -7,8 +7,19 @@ import custom_components.googlefindmy.coordinator as coordinator_module
 import custom_components.googlefindmy.eid_resolver as resolver_module
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.coordinator import DeviceIdentity
-from custom_components.googlefindmy.eid_resolver import GoogleFindMyEIDResolver
+from custom_components.googlefindmy.eid_resolver import (
+    EID_LENGTH,
+    GoogleFindMyEIDResolver,
+)
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import ROTATION_PERIOD
+
+
+def _fixed_length_eid(key: bytes, timestamp: int) -> bytes:
+    """Generate a deterministic 20-byte EID for test fixtures."""
+
+    ts_bytes = timestamp.to_bytes(8, "big", signed=False)
+    seed = key + ts_bytes
+    return seed.ljust(EID_LENGTH, b"\x00")[:EID_LENGTH]
 
 
 class _StubDevice:
@@ -135,7 +146,7 @@ async def test_resolver_refreshes_all_rotation_windows(monkeypatch: pytest.Monke
 
     def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
         recorded_timestamps.append(timestamp)
-        return f"{key.hex()}-{timestamp}".encode()
+        return _fixed_length_eid(key, timestamp)
 
     monkeypatch.setattr(resolver_module.time, "time", _fake_time)
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
@@ -168,7 +179,7 @@ async def test_resolver_refreshes_all_rotation_windows(monkeypatch: pytest.Monke
     expected_windows = ((latest_timestamp - earliest_timestamp) // ROTATION_PERIOD) + 1
     assert len(recorded_timestamps) == expected_windows
 
-    expected_eid = f"{identity.identity_key.hex()}-{rotation_start}".encode()
+    expected_eid = _fixed_length_eid(identity.identity_key, rotation_start)
     match = resolver.resolve_eid(expected_eid)
     assert match is not None
     assert match.device_id == "registry-4"
@@ -188,7 +199,7 @@ async def test_resolver_aggregates_multiple_entries(monkeypatch: pytest.MonkeyPa
         return base_time
 
     def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
-        return f"{key.hex()}-{timestamp}".encode()
+        return _fixed_length_eid(key, timestamp)
 
     monkeypatch.setattr(resolver_module.time, "time", _fake_time)
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
@@ -232,8 +243,8 @@ async def test_resolver_aggregates_multiple_entries(monkeypatch: pytest.MonkeyPa
     await resolver._refresh_cache()
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    eid_one = f"{identity_one.identity_key.hex()}-{rotation_start}".encode()
-    eid_two = f"{identity_two.identity_key.hex()}-{rotation_start}".encode()
+    eid_one = _fixed_length_eid(identity_one.identity_key, rotation_start)
+    eid_two = _fixed_length_eid(identity_two.identity_key, rotation_start)
 
     assert resolver.resolve_eid(eid_one).config_entry_id == "entry-a"
     assert resolver.resolve_eid(eid_two).config_entry_id == "entry-b"
@@ -288,7 +299,7 @@ async def test_concurrent_refresh_requests_are_serialized(monkeypatch: pytest.Mo
         await asyncio.sleep(0)
 
     def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
-        return f"{key.hex()}-{timestamp}".encode()
+        return _fixed_length_eid(key, timestamp)
 
     monkeypatch.setattr(resolver_module.time, "time", _fake_time)
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
@@ -320,7 +331,7 @@ async def test_concurrent_refresh_requests_are_serialized(monkeypatch: pytest.Mo
     await asyncio.gather(resolver.async_refresh(), resolver.async_refresh(), resolver.async_refresh())
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    expected_eid = f"{identity.identity_key.hex()}-{rotation_start}".encode()
+    expected_eid = _fixed_length_eid(identity.identity_key, rotation_start)
     assert expected_eid in resolver._lookup
 
 
@@ -335,7 +346,7 @@ async def test_resolver_learns_offsets_and_endianness(monkeypatch: pytest.Monkey
 
     def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
         generated.append(timestamp)
-        return f"{key.hex()}-{timestamp}".encode()
+        return _fixed_length_eid(key, timestamp)
 
     monkeypatch.setattr(resolver_module.time, "time", _fake_time)
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
@@ -365,7 +376,7 @@ async def test_resolver_learns_offsets_and_endianness(monkeypatch: pytest.Monkey
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
     assert len(generated) == 181
     target_timestamp = rotation_start + (ROTATION_PERIOD * 2)
-    expected_eid = f"{identity.identity_key.hex()}-{target_timestamp}".encode()
+    expected_eid = _fixed_length_eid(identity.identity_key, target_timestamp)
     assert expected_eid in resolver._lookup
 
     match = resolver.resolve_eid(expected_eid[::-1])
