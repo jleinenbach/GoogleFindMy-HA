@@ -4283,6 +4283,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return None
         return None
 
+    @staticmethod
+    def _normalize_identity_key_candidates(raw: object) -> list[bytes]:
+        """Normalize collections of candidate identity keys."""
+
+        if raw is None:
+            return []
+        if isinstance(raw, (bytes, bytearray, str)):
+            one = GoogleFindMyCoordinator._normalize_identity_key(raw)
+            return [one] if one is not None else []
+        if isinstance(raw, Iterable) and not isinstance(raw, (str, bytes, bytearray)):
+            out: list[bytes] = []
+            for item in raw:
+                key = GoogleFindMyCoordinator._normalize_identity_key(item)
+                if key is not None and key not in out:
+                    out.append(key)
+            return out
+        return []
+
     def _schedule_eid_resolver_refresh(self) -> None:
         """Refresh the global EID resolver when active device sets change."""
 
@@ -4391,6 +4409,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         last_device_types: dict[str, int | None] = {}
         last_fast_pair_model_ids: dict[str, str | None] = {}
         last_raw_keys: dict[str, list[str]] = {}
+        last_identity_candidates: dict[str, list[bytes]] = {}
         if isinstance(last_device_list, Iterable):
             for raw in last_device_list:
                 if not isinstance(raw, dict):
@@ -4407,6 +4426,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 if parsed is not None:
                     last_identities[dev_id] = parsed
+
+                candidate_list = self._normalize_identity_key_candidates(
+                    raw.get("identity_key_candidates")
+                    or raw.get("identityKeyCandidates")
+                )
+                if candidate_list:
+                    last_identity_candidates[dev_id] = candidate_list
 
                 encrypted_identity = self._normalize_identity_key(
                     raw.get("encrypted_identity_key")
@@ -4436,6 +4462,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         data_device_types: dict[str, int | None] = {}
         data_fast_pair_model_ids: dict[str, str | None] = {}
         raw_data_keys: dict[str, list[str]] = {}
+        data_identity_candidates: dict[str, list[bytes]] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
             for raw in device_data:
@@ -4452,6 +4479,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 if parsed is not None:
                     data_identities[dev_id] = parsed
+
+                candidate_list = self._normalize_identity_key_candidates(
+                    raw.get("identity_key_candidates")
+                    or raw.get("identityKeyCandidates")
+                )
+                if candidate_list:
+                    data_identity_candidates[dev_id] = candidate_list
 
                 encrypted_identity = self._normalize_identity_key(
                     raw.get("encrypted_identity_key")
@@ -4482,6 +4516,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_device_types: dict[str, int | None] = {}
         cache_fast_pair_model_ids: dict[str, str | None] = {}
         cache_data_keys: dict[str, list[str]] = {}
+        cache_identity_candidates: dict[str, list[bytes]] = {}
         if isinstance(cache, dict):
             for dev_id in allowed_raw_ids:
                 payload = cache.get(dev_id)
@@ -4495,6 +4530,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 if parsed is not None:
                     cache_identities[dev_id] = parsed
+
+                candidate_list = self._normalize_identity_key_candidates(
+                    payload.get("identity_key_candidates")
+                    or payload.get("identityKeyCandidates")
+                )
+                if candidate_list:
+                    cache_identity_candidates[dev_id] = candidate_list
 
                 encrypted_identity = self._normalize_identity_key(
                     payload.get("encrypted_identity_key")
@@ -4535,6 +4577,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if identity_key is None:
                 identity_key = registry_key
 
+            identity_candidates = _lookup_prio(
+                lookup_id,
+                cache_identity_candidates,
+                data_identity_candidates,
+                last_identity_candidates,
+            )
+            if identity_candidates is None:
+                identity_candidates = []
+
             encrypted_identity_tuple = _lookup_prio(
                 lookup_id, cache_encrypted, data_encrypted, last_encrypted
             )
@@ -4553,7 +4604,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 last_fast_pair_model_ids,
             )
 
-            if identity_key is None and encrypted_identity_key is None:
+            if not identity_candidates and identity_key is not None:
+                identity_candidates = [identity_key]
+            elif not identity_candidates and registry_key is not None:
+                identity_candidates = [registry_key]
+
+            normalized_candidates: list[bytes] = []
+            for candidate in identity_candidates:
+                normalized = self._normalize_identity_key(candidate)
+                if normalized is not None and normalized not in normalized_candidates:
+                    normalized_candidates.append(normalized)
+
+            if not normalized_candidates and encrypted_identity_key is None:
                 _LOGGER.debug(
                     "Device %s skipped: No identity key found (Data: %s)",
                     canonical_id,
@@ -4564,18 +4626,33 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 continue
 
-            identities.append(
-                DeviceIdentity(
-                    registry_id=registry_id,
-                    canonical_id=canonical_id,
-                    identity_key=identity_key,
-                    encrypted_identity_key=encrypted_identity_key,
-                    owner_key_version=owner_key_version,
-                    device_type=device_type,
-                    config_entry_id=entry_id,
-                    fast_pair_model_id=fast_pair_model_id,
+            if normalized_candidates:
+                for candidate in normalized_candidates:
+                    identities.append(
+                        DeviceIdentity(
+                            registry_id=registry_id,
+                            canonical_id=canonical_id,
+                            identity_key=candidate,
+                            encrypted_identity_key=encrypted_identity_key,
+                            owner_key_version=owner_key_version,
+                            device_type=device_type,
+                            config_entry_id=entry_id,
+                            fast_pair_model_id=fast_pair_model_id,
+                        )
+                    )
+            else:
+                identities.append(
+                    DeviceIdentity(
+                        registry_id=registry_id,
+                        canonical_id=canonical_id,
+                        identity_key=None,
+                        encrypted_identity_key=encrypted_identity_key,
+                        owner_key_version=owner_key_version,
+                        device_type=device_type,
+                        config_entry_id=entry_id,
+                        fast_pair_model_id=fast_pair_model_id,
+                    )
                 )
-            )
 
         _LOGGER.debug("Returning %d identities to resolver", len(identities))
         return identities
