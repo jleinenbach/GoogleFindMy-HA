@@ -42,6 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 
 EID_LENGTH = 20
 RAW_HEADER_LENGTH = 1
+FMDN_FRAME_TYPE = 0x40
 
 
 class EIDMatch(NamedTuple):
@@ -400,6 +401,12 @@ class GoogleFindMyEIDResolver:
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
         """Resolve a scanned EID to a Home Assistant device registry ID.
 
+        Only Find My Device Network (FMDN) advertising frames (Frame Type
+        ``0x40``) are considered when the payload includes framing/telemetry;
+        the resolver slices the header and trailing bytes to isolate the
+        20-byte EID before lookup. Legacy callers that already provide a
+        20-byte EID bypass the framing filter.
+
         Returns the matching :class:`EIDMatch` when the identifier was
         precomputed for a known tracker; otherwise returns ``None``. The
         ``device_id`` in the returned mapping corresponds to the Home
@@ -409,21 +416,23 @@ class GoogleFindMyEIDResolver:
 
         EIDs are not logged to avoid leaking hardware identifiers in debug
         output during normal operation. A debug-level probe log at the start of
-        this method prints the scanned EID for troubleshooting cache
-        mismatches. Incoming BLE payloads may include framing bytes and
-        telemetry appended to the 20-byte EID; the resolver normalizes the
-        payload before checking the lookup table.
+        this method prints the sliced EID for troubleshooting cache
+        mismatches.
         """
 
-        if len(eid_bytes) < EID_LENGTH:
+        lookup_key: bytes | None
+
+        if len(eid_bytes) == EID_LENGTH:
+            lookup_key = eid_bytes
+        elif len(eid_bytes) > EID_LENGTH:
+            if eid_bytes[0] != FMDN_FRAME_TYPE:
+                return None
+            lookup_key = eid_bytes[1 : 1 + EID_LENGTH]
+        else:
             return None
 
-        if len(eid_bytes) > EID_LENGTH:
-            lookup_key = eid_bytes[
-                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + EID_LENGTH
-            ]
-        else:
-            lookup_key = eid_bytes
+        if len(lookup_key) != EID_LENGTH:
+            return None
 
         _LOGGER.debug(
             "RESOLVER PROBE: Checking Sliced EID %s (Original Len: %d)",
