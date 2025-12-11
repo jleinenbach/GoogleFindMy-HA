@@ -67,7 +67,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -4332,6 +4332,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return decoded or None
             return None
 
+        T = TypeVar("T")
+
+        def _lookup(key: str, *sources: Mapping[str, T]) -> T | None:
+            for source in sources:
+                if key in source:
+                    return source[key]
+            return None
+
         enabled_ids = set(self._enabled_poll_device_ids)
         _LOGGER.debug(
             "Collecting EID identities for %d polling-enabled devices...",
@@ -4517,30 +4525,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 continue
 
             registry_id, registry_key = registry_entry
-            identity_key = last_identities.get(lookup_id)
+            identity_key = _lookup(lookup_id, cache_identities, last_identities)
             if identity_key is None:
                 identity_key = registry_key
             if identity_key is None:
-                identity_key = data_identities.get(lookup_id)
-            if identity_key is None:
-                identity_key = cache_identities.get(lookup_id)
+                identity_key = _lookup(lookup_id, data_identities)
 
-            encrypted_identity_key, owner_key_version = last_encrypted.get(
-                lookup_id,
-                data_encrypted.get(
-                    lookup_id, cache_encrypted.get(lookup_id, (None, None))
-                ),
+            encrypted_identity_tuple = _lookup(
+                lookup_id, cache_encrypted, last_encrypted, data_encrypted
             )
-            device_type = last_device_types.get(
-                lookup_id,
-                data_device_types.get(lookup_id, cache_device_types.get(lookup_id)),
+            encrypted_identity_key, owner_key_version = encrypted_identity_tuple or (
+                None,
+                None,
+            )
+            device_type = _lookup(
+                lookup_id, cache_device_types, last_device_types, data_device_types
             )
 
-            fast_pair_model_id = last_fast_pair_model_ids.get(
+            fast_pair_model_id = _lookup(
                 lookup_id,
-                data_fast_pair_model_ids.get(
-                    lookup_id, cache_fast_pair_model_ids.get(lookup_id)
-                ),
+                cache_fast_pair_model_ids,
+                last_fast_pair_model_ids,
+                data_fast_pair_model_ids,
             )
 
             if identity_key is None and encrypted_identity_key is None:
