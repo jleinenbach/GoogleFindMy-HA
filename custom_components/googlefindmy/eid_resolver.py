@@ -14,6 +14,7 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidTag
@@ -22,7 +23,18 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
-from .FMDNCrypto.eid_generator import ROTATION_PERIOD, generate_eid, generate_eid_p256
+from .FMDNCrypto.eid_generator import (
+    EIK_LENGTH,
+    LEGACY_EID_LENGTH,
+    ROTATION_PERIOD,
+    EidCandidate,
+)
+from .FMDNCrypto.eid_generator import (
+    generate_eid as _legacy_generate_eid,
+)
+from .FMDNCrypto.eid_generator import (
+    generate_eid_p256 as _modern_generate_eid,
+)
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
 from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
@@ -38,11 +50,82 @@ else:
     except Exception:  # pragma: no cover - optional type aid only
         TokenCache = None
 
+generate_eid = _legacy_generate_eid
+generate_eid_p256 = _modern_generate_eid
+
 _LOGGER = logging.getLogger(__name__)
 
-EID_LENGTH = 20
+EID_LENGTH = LEGACY_EID_LENGTH
 RAW_HEADER_LENGTH = 1
 FMDN_FRAME_TYPE = 0x40
+
+
+def iter_rotation_windows(
+    target_time: int,
+    *,
+    rotation_period: int,
+    window_range: range,
+    include_neighbors: bool,
+) -> tuple[int, ...]:
+    """Return rotation-aligned timestamps for cache population.
+
+    This helper aligns ``target_time`` to the rotation boundary and walks the
+    provided ``window_range`` to build candidate windows. When
+    ``include_neighbors`` is True, each aligned window is expanded to include
+    the immediately previous and next rotation boundaries so cached lookups can
+    tolerate known drift offsets.
+    """
+
+    rotation_start = target_time - (target_time % rotation_period)
+    windows: list[int] = []
+
+    for offset in window_range:
+        timestamp = rotation_start + (offset * rotation_period)
+        if timestamp < 0:
+            continue
+
+        if include_neighbors:
+            previous_window = max(0, timestamp - rotation_period)
+            next_window = timestamp + rotation_period
+            windows.extend((timestamp, previous_window, next_window))
+        else:
+            windows.append(timestamp)
+
+    return tuple(dict.fromkeys(windows))
+
+
+def _normalize_identity_key(identity_key: bytes) -> bytes:
+    """Return a fixed-length identity key for candidate generation."""
+
+    if len(identity_key) == EIK_LENGTH:
+        return identity_key
+    if len(identity_key) < EIK_LENGTH:
+        return identity_key.ljust(EIK_LENGTH, b"\x00")
+    return identity_key[:EIK_LENGTH]
+
+
+@lru_cache(maxsize=512)
+def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
+    """Return cached EID candidates for an identity key and window timestamp."""
+
+    legacy_eid = generate_eid(identity_key, timestamp)
+    candidates: list[EidCandidate] = [
+        EidCandidate(name="legacy_secp160r1_rx20", eid=legacy_eid)
+    ]
+
+    if len(identity_key) == EIK_LENGTH:
+        normalized_key = _normalize_identity_key(identity_key)
+        modern_eid = generate_eid_p256(normalized_key, timestamp)
+        modern_truncated = modern_eid[:LEGACY_EID_LENGTH]
+
+        candidates.extend(
+            (
+                EidCandidate(name="modern_p256_x32", eid=modern_eid),
+                EidCandidate(name="modern_p256_truncated_rx20", eid=modern_truncated),
+            )
+        )
+
+    return tuple(candidates)
 
 
 class EIDMatch(NamedTuple):
@@ -136,6 +219,9 @@ class GoogleFindMyEIDResolver:
     async def _refresh_cache(self) -> None:  # noqa: PLR0912, PLR0915 - iterative window search
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
 
+        cache_clear = getattr(_cached_candidates, "cache_clear", None)
+        if callable(cache_clear):
+            cache_clear()
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
         _LOGGER.debug(
             "Resolver received %d identities from coordinator", len(identities)
@@ -163,6 +249,7 @@ class GoogleFindMyEIDResolver:
 
             config_entry_id = identity.config_entry_id
             registry_id = identity.registry_id
+            identity_key_bytes = bytes(identity.identity_key)
 
             known_offset = self._known_offsets.get(identity.registry_id)
             known_endianness = self._known_endianness.get(identity.registry_id, False)
@@ -179,31 +266,9 @@ class GoogleFindMyEIDResolver:
             else:
                 window_range = range(0, 1)
 
-            def _iter_windows(rotation_period: int) -> tuple[int, ...]:
-                rotation_start = target_time - (target_time % rotation_period)
-                windows: list[int] = []
-
-                for offset in window_range:
-                    timestamp = rotation_start + (offset * rotation_period)
-                    if timestamp < 0:
-                        continue
-
-                    if known_offset is not None:
-                        raw_candidates: tuple[int, ...] = (
-                            timestamp,
-                            max(0, timestamp - rotation_period),
-                            timestamp + rotation_period,
-                        )
-                    else:
-                        raw_candidates = (timestamp,)
-
-                    for candidate in raw_candidates:
-                        if candidate >= 0:
-                            windows.append(candidate)
-
-                return tuple(dict.fromkeys(windows))
-
-            def _register_match(eid: bytes, time_offset: int, is_reversed: bool) -> None:
+            def _register_match(
+                eid: bytes, time_offset: int, is_reversed: bool
+            ) -> None:
                 match = EIDMatch(
                     device_id=registry_id,
                     config_entry_id=config_entry_id,
@@ -215,7 +280,9 @@ class GoogleFindMyEIDResolver:
                 if existing is None or abs(time_offset) < abs(existing.time_offset):
                     lookup[eid] = match
 
-            def _store_candidates(eid: bytes, time_offset: int, is_reversed: bool) -> None:
+            def _store_candidates(
+                eid: bytes, time_offset: int, is_reversed: bool
+            ) -> None:
                 if known_offset is None:
                     _register_match(eid, time_offset, False)
                     _register_match(eid[::-1], time_offset, True)
@@ -224,65 +291,43 @@ class GoogleFindMyEIDResolver:
                     _register_match(eid_bytes, time_offset, is_reversed)
 
             is_reversed = known_offset is not None and known_endianness
-            rotation_windows = _iter_windows(ROTATION_PERIOD)
+            rotation_windows = iter_rotation_windows(
+                target_time,
+                rotation_period=ROTATION_PERIOD,
+                window_range=window_range,
+                include_neighbors=known_offset is not None,
+            )
 
             for window_timestamp in rotation_windows:
                 time_offset = window_timestamp - now
 
                 try:
-                    legacy_eid = generate_eid(identity.identity_key, window_timestamp)
-                except Exception as err:  # noqa: BLE001 - defensive guard
-                    _LOGGER.debug(
-                        "Failed to generate legacy EID for %s at %s: %s",
-                        identity.canonical_id,
-                        window_timestamp,
-                        err,
-                    )
-                else:
-                    _store_candidates(legacy_eid, time_offset, is_reversed)
-
-                    if should_log_debug_dump and not debug_dump_logged:
-                        key_snippet = identity.identity_key.hex()[:6]
-                        _LOGGER.info(
-                            "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
-                            identity.canonical_id,
-                            key_snippet,
-                            window_timestamp,
-                            legacy_eid.hex(),
-                        )
-                        debug_dump_logged = True
-
-                try:
-                    modern_eid_full = generate_eid_p256(
-                        identity.identity_key,
-                        window_timestamp,
+                    candidates = _cached_candidates(
+                        identity_key_bytes, window_timestamp
                     )
                 except Exception as err:  # noqa: BLE001 - defensive guard
                     _LOGGER.debug(
-                        "Failed to generate modern EID for %s at %s: %s",
+                        "Failed to generate EID candidates for %s at %s: %s",
                         identity.canonical_id,
                         window_timestamp,
                         err,
                     )
                     continue
 
-                modern_candidates: tuple[bytes, ...] = (
-                    modern_eid_full,
-                    modern_eid_full[:EID_LENGTH],
-                )
-                for modern_eid in modern_candidates:
-                    _store_candidates(modern_eid, time_offset, is_reversed)
+                for candidate in candidates:
+                    _store_candidates(candidate.eid, time_offset, is_reversed)
 
-                if should_log_debug_dump and not debug_dump_logged:
-                    key_snippet = identity.identity_key.hex()[:6]
-                    _LOGGER.info(
-                        "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
-                        identity.canonical_id,
-                        key_snippet,
-                        window_timestamp,
-                        modern_eid_full.hex(),
-                    )
-                    debug_dump_logged = True
+                    if should_log_debug_dump and not debug_dump_logged:
+                        key_snippet = identity_key_bytes.hex()[:6]
+                        _LOGGER.info(
+                            "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s Variant=%s EID=%s",
+                            identity.canonical_id,
+                            key_snippet,
+                            window_timestamp,
+                            candidate.name,
+                            candidate.eid.hex(),
+                        )
+                        debug_dump_logged = True
 
         self._lookup = lookup
         _LOGGER.debug(
@@ -414,7 +459,9 @@ class GoogleFindMyEIDResolver:
 
         for flip_mcu in candidates:
             candidate_key = (
-                flip_bits(encrypted_identity_key, True) if flip_mcu else encrypted_identity_key
+                flip_bits(encrypted_identity_key, True)
+                if flip_mcu
+                else encrypted_identity_key
             )
 
             try:
@@ -566,10 +613,11 @@ class GoogleFindMyEIDResolver:
             except Exception as err:  # pragma: no cover - defensive
                 _LOGGER.debug("Failed to cancel refresh interval: %s", err)
         self._lookup.clear()
+
+
 @runtime_checkable
 class _IdentityProvider(Protocol):
     """Interface for coordinator-like objects that expose device identities."""
 
     def get_active_device_identities(self) -> list[DeviceIdentity]:
         """Return eligible device identities for EID resolution."""
-

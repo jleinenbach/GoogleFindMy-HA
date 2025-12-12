@@ -64,6 +64,7 @@ from .ProtoDecoders.decoder import (
     get_devices_with_location,
     parse_device_list_protobuf,
 )
+from .SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1075,6 +1076,9 @@ class GoogleFindMyAPI:
                 return best
             _LOGGER.debug("API v3.0 Async: No location data for %s", device_name)
             return {}
+
+        except SpotAuthPermanentError:
+            raise
 
         except NovaAuthError as err:
             # Explicit mapping for upstream auth failure (token expired/invalid)

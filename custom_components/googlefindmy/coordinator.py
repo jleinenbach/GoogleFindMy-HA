@@ -147,6 +147,7 @@ from .ha_typing import DataUpdateCoordinator, callback
 from .SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
+from .SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -5558,6 +5559,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                     f"Location request timed out for {dev_name}"
                                 )
                                 last_exception.__cause__ = terr
+                    except SpotAuthPermanentError as auth_err:
+                        _LOGGER.warning(
+                            "Authentication failed for %s; triggering reauth flow.",
+                            dev_name,
+                        )
+                        self._set_auth_state(
+                            failed=True,
+                            reason=f"Auth failed during poll for {dev_name}: session invalid",
+                        )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        auth_exc = ConfigEntryAuthFailed(
+                            "Google session invalid; re-authentication required"
+                        )
+                        last_exception = auth_exc
+                        raise auth_exc from auth_err
                     except SpotApiEmptyResponseError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -7139,6 +7157,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             self.push_updated([device_id])
             return location_data or {}
+        except SpotAuthPermanentError as auth_err:
+            self._set_auth_state(
+                failed=True,
+                reason=f"Auth failed during manual locate: {auth_err}",
+            )
+            entry = getattr(self, "config_entry", None)
+            reauth_started = False
+            if entry is not None:
+                try:
+                    await entry.async_start_reauth(self.hass)
+                    reauth_started = True
+                except Exception as reauth_err:  # pragma: no cover - defensive
+                    _LOGGER.debug(
+                        "Failed to start reauth flow after manual locate auth error: %s",
+                        reauth_err,
+                    )
+            message = (
+                "Authentication for Google Find My Device expired; "
+                "re-authentication has been started."
+                if reauth_started
+                else "Authentication for Google Find My Device expired; please re-authenticate."
+            )
+            raise HomeAssistantError(message) from auth_err
         except ConfigEntryAuthFailed as auth_exc:
             # Mark error and request a refresh; no need to re-raise here for manual action.
             self._set_auth_state(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -112,43 +113,36 @@ def test_async_spot_request_forwards_cache_to_picker(
         recorded["pick_prefer_adm"] = prefer_adm
         return ("spot-token", "spot", "user@example.com")
 
-    class DummyResponse:
-        def __init__(self) -> None:
-            self.status_code = 200
-            self.content = b"\x00\x00\x00\x00\x00"
-            self.headers: dict[str, str] = {}
-
-    class DummyClient:
-        def __init__(self, *args, **kwargs) -> None:
-            recorded["client_kwargs"] = kwargs
-
-        async def __aenter__(self) -> DummyClient:
+    class DummyStream:
+        async def __aenter__(self) -> DummyStream:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
             return None
 
-        async def post(
-            self, url: str, *, headers=None, content=None, **_kwargs: Any
-        ) -> DummyResponse:
-            recorded["post_url"] = url
-            recorded["post_headers"] = headers
-            recorded["post_content"] = content
-            return DummyResponse()
+        async def send_message(self, message: bytes, end: bool = True) -> None:
+            recorded["sent_message"] = message
+            recorded["sent_end"] = end
+
+        async def recv_message(self) -> bytes:
+            return b"decoded"
+
+    class DummyMethod:
+        def __init__(self, channel: object, method_path: str, *_args: object) -> None:
+            recorded["channel"] = channel
+            recorded["method_path"] = method_path
+
+        def open(self, *, metadata=None, timeout: float | None = None):  # noqa: D401
+            recorded["metadata"] = metadata
+            recorded["timeout"] = timeout
+            return DummyStream()
 
     monkeypatch.setattr(
         spot_module, "_pick_auth_token_async", fake_pick_auth_token_async
     )
-    monkeypatch.setattr(spot_module.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(spot_module, "UnaryUnaryMethod", DummyMethod)
     monkeypatch.setattr(
-        spot_module.GrpcParser,
-        "construct_grpc",
-        staticmethod(lambda payload: payload),
-    )
-    monkeypatch.setattr(
-        spot_module.GrpcParser,
-        "extract_grpc_payload",
-        staticmethod(lambda data: b"decoded"),
+        spot_module.SPOT_GRPC_TRANSPORT, "get_channel", AsyncMock(return_value="chan")
     )
 
     result = asyncio.run(
@@ -158,9 +152,12 @@ def test_async_spot_request_forwards_cache_to_picker(
     assert result == b"decoded"
     assert recorded["pick_cache"] is cache
     assert recorded["pick_prefer_adm"] is False
-    assert recorded["post_headers"]["Authorization"] == "Bearer spot-token"
-    assert recorded["post_content"] == b"payload"
-    assert recorded["client_kwargs"].get("http2") is True
+    assert recorded["channel"] == "chan"
+    assert recorded["method_path"] == "/google.internal.spot.v1.SpotService/Scope"
+    assert ("authorization", "Bearer spot-token") in recorded["metadata"]
+    assert recorded["sent_message"] == b"payload"
+    assert recorded["sent_end"] is True
+    assert recorded["timeout"] == pytest.approx(30.0)
 
 
 def test_invalidate_token_async_requires_cache() -> None:
