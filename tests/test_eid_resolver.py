@@ -447,9 +447,14 @@ async def test_resolver_populates_modern_and_legacy_eids(
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
     legacy_eid = _fake_generate_eid(identity.identity_key, rotation_start)
-    modern_eid = _fake_generate_eid_p256(identity.identity_key, rotation_start)[:20]
+    modern_rotation_start = base_time - (
+        base_time % resolver_module.MODERN_ROTATION_PERIOD
+    )
+    modern_eid = _fake_generate_eid_p256(identity.identity_key, modern_rotation_start)[
+        :20
+    ]
 
-    assert len(resolver._lookup) == 6
+    assert len(resolver._lookup) == 5
     assert resolver.resolve_eid(legacy_eid).device_id == identity.registry_id
     match = resolver.resolve_eid(modern_eid)
     assert match is not None

@@ -1,7 +1,7 @@
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import generate_eid_p256
 
 EXPECTED_X_COORDINATE = bytes.fromhex(
-    "f17b297f9fb1246139ad5de464c9044b2846f0964cc7b2a11be9942ff0a5c2c4"
+    "7410de6210529ba183a70ec0fd11beee18de9f806bd8903e52771cd00fc22f19"
 )
 
 

@@ -80,7 +80,7 @@ def generate_eid_p256(
         0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
     )
     seed_int: int = int.from_bytes(seed_bytes, byteorder="big")
-    private_scalar: int = (seed_int % (n - 1)) + 1
+    private_scalar: int = seed_int % n
 
     curve = ec.SECP256R1()
     private_key = ec.derive_private_key(private_scalar, curve, default_backend())
