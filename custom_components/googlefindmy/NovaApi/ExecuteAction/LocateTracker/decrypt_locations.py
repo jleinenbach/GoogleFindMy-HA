@@ -76,6 +76,8 @@ _MAX_REPORTS: int = 500
 
 # Strict length of Ephemeral Identity Key (bytes). Paper and ecosystem practice expect 32 bytes.
 _EIK_LEN: int = 32
+# Heuristic threshold suggesting encryptedUserSecrets holds structured data rather than a raw key blob.
+_SECRETS_STRUCT_LEN_THRESHOLD: int = 48
 
 
 def _get_common_pb2() -> Any:
@@ -466,9 +468,94 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         raise
 
     encrypted_user_secrets = device_registration.encryptedUserSecrets
-    raw_encrypted_identity_key = bytes(
-        getattr(encrypted_user_secrets, "encryptedIdentityKey", b"")
-    )
+    try:
+        raw_encrypted_identity_key = getattr(
+            encrypted_user_secrets, "encryptedIdentityKey", b""
+        )
+        serialized_length = None
+        secrets_blob: bytes | None = None
+        try:
+            secrets_blob = encrypted_user_secrets.SerializeToString()
+            serialized_length = len(secrets_blob)
+        except Exception as serialize_exc:  # pragma: no cover - diagnostics only
+            _LOGGER.debug(
+                "Failed to serialize encryptedUserSecrets for length check: %s",
+                serialize_exc,
+            )
+
+        _LOGGER.warning(
+            "[DIAG-SECRETS] Structure Analysis:\n"
+            "  - DeviceReg String: %s\n"
+            "  - Secrets Container Type: %s\n"
+            "  - Secrets Serialized Length: %s bytes\n"
+            "  - EncryptedIdentityKey Length: %s bytes\n"
+            "  - EncryptedIdentityKey Type: %s\n"
+            "  - EncryptedIdentityKey Hex: %s",
+            device_registration,
+            type(encrypted_user_secrets),
+            serialized_length if serialized_length is not None else "Unknown",
+            len(raw_encrypted_identity_key)
+            if raw_encrypted_identity_key
+            else "None",
+            type(raw_encrypted_identity_key),
+            raw_encrypted_identity_key.hex()
+            if raw_encrypted_identity_key
+            else "None",
+        )
+
+        if (
+            serialized_length is not None
+            and serialized_length > _SECRETS_STRUCT_LEN_THRESHOLD
+        ):
+            _LOGGER.warning(
+                "[DIAG-ALERT] encryptedUserSecrets serialized length is %d bytes (> %d)."
+                " This suggests a wrapped/structured payload instead of a raw key.",
+                serialized_length,
+                _SECRETS_STRUCT_LEN_THRESHOLD,
+            )
+
+        if raw_encrypted_identity_key and len(raw_encrypted_identity_key) != _EIK_LEN:
+            _LOGGER.warning(
+                "[DIAG-ALERT] Key length is %d (expected %d for raw EIK)."
+                " This suggests wrapping/encryption!",
+                len(raw_encrypted_identity_key),
+                _EIK_LEN,
+            )
+
+        if raw_encrypted_identity_key and len(raw_encrypted_identity_key) > _EIK_LEN:
+            _LOGGER.warning(
+                "[DIAG-ALERT] Key length %d bytes exceeds expected raw EIK length (%d)."
+                " Probable wrapped key container or HKDF-required envelope.",
+                len(raw_encrypted_identity_key),
+                _EIK_LEN,
+            )
+
+        if secrets_blob is not None and raw_encrypted_identity_key:
+            if raw_encrypted_identity_key in secrets_blob:
+                offset = secrets_blob.find(raw_encrypted_identity_key)
+                prefix_start = max(0, offset - 10)
+                prefix_bytes = secrets_blob[prefix_start:offset]
+                suffix_start = offset + len(raw_encrypted_identity_key)
+                suffix_bytes = secrets_blob[suffix_start : suffix_start + 10]
+                _LOGGER.warning(
+                    "[DIAG-SECRETS-BYTE-SCAN] Cloud key located inside encryptedUserSecrets at offset %d."
+                    " Prefix (%d bytes): %s | Suffix (%d bytes): %s",
+                    offset,
+                    len(prefix_bytes),
+                    prefix_bytes.hex(),
+                    len(suffix_bytes),
+                    suffix_bytes.hex(),
+                )
+            else:
+                _LOGGER.warning(
+                    "[DIAG-SECRETS-BYTE-SCAN] Cloud key NOT found inside encryptedUserSecrets blob."
+                    " This suggests the blob holds a distinct container or wrapped value."
+                )
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        _LOGGER.warning("[DIAG-ERROR] Failed to inspect secrets: %s", exc)
+        raw_encrypted_identity_key = b""
+
+    raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
     raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
 
     identity_key_candidates = await async_retrieve_identity_key(
