@@ -22,7 +22,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
-from .FMDNCrypto.eid_generator import ROTATION_PERIOD, generate_eid
+from .FMDNCrypto.eid_generator import ROTATION_PERIOD, generate_eid, generate_eid_p256
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
 from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
@@ -133,7 +133,7 @@ class GoogleFindMyEIDResolver:
                 self._pending_refresh = False
                 await self._refresh_cache()
 
-    async def _refresh_cache(self) -> None:  # noqa: PLR0912 - iterative window search
+    async def _refresh_cache(self) -> None:  # noqa: PLR0912, PLR0915 - iterative window search
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
 
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
@@ -183,54 +183,74 @@ class GoogleFindMyEIDResolver:
                     windows = (timestamp,)
 
                 for window_timestamp in windows:
+                    candidates: list[bytes] = []
+
                     try:
-                        eid = generate_eid(identity.identity_key, window_timestamp)
+                        candidates.append(
+                            generate_eid(identity.identity_key, window_timestamp)
+                        )
                     except Exception as err:  # noqa: BLE001 - defensive guard
                         _LOGGER.debug(
-                            "Failed to generate EID for %s at %s: %s",
+                            "Failed to generate legacy EID for %s at %s: %s",
                             identity.canonical_id,
                             window_timestamp,
                             err,
                         )
-                        continue
+
+                    try:
+                        modern_eid_full = generate_eid_p256(
+                            identity.identity_key,
+                            window_timestamp,
+                            rotation_period=3600,
+                        )
+                        if modern_eid_full:
+                            candidates.append(modern_eid_full[:20])
+                    except Exception as err:  # noqa: BLE001 - defensive guard
+                        _LOGGER.debug(
+                            "Failed to generate modern EID for %s at %s: %s",
+                            identity.canonical_id,
+                            window_timestamp,
+                            err,
+                        )
 
                     time_offset = window_timestamp - now
                     is_reversed = known_offset is not None and known_endianness
-                    if known_offset is None:
-                        lookup[eid] = EIDMatch(
-                            device_id=identity.registry_id,
-                            config_entry_id=identity.config_entry_id,
-                            canonical_id=identity.canonical_id,
-                            time_offset=time_offset,
-                            is_reversed=False,
-                        )
-                        lookup[eid[::-1]] = EIDMatch(
-                            device_id=identity.registry_id,
-                            config_entry_id=identity.config_entry_id,
-                            canonical_id=identity.canonical_id,
-                            time_offset=time_offset,
-                            is_reversed=True,
-                        )
-                    else:
-                        eid_bytes = eid[::-1] if is_reversed else eid
-                        lookup[eid_bytes] = EIDMatch(
-                            device_id=identity.registry_id,
-                            config_entry_id=identity.config_entry_id,
-                            canonical_id=identity.canonical_id,
-                            time_offset=time_offset,
-                            is_reversed=is_reversed,
-                        )
+                    for eid in candidates:
+                        if known_offset is None:
+                            lookup[eid] = EIDMatch(
+                                device_id=identity.registry_id,
+                                config_entry_id=identity.config_entry_id,
+                                canonical_id=identity.canonical_id,
+                                time_offset=time_offset,
+                                is_reversed=False,
+                            )
+                            lookup[eid[::-1]] = EIDMatch(
+                                device_id=identity.registry_id,
+                                config_entry_id=identity.config_entry_id,
+                                canonical_id=identity.canonical_id,
+                                time_offset=time_offset,
+                                is_reversed=True,
+                            )
+                        else:
+                            eid_bytes = eid[::-1] if is_reversed else eid
+                            lookup[eid_bytes] = EIDMatch(
+                                device_id=identity.registry_id,
+                                config_entry_id=identity.config_entry_id,
+                                canonical_id=identity.canonical_id,
+                                time_offset=time_offset,
+                                is_reversed=is_reversed,
+                            )
 
-                    if should_log_debug_dump and not debug_dump_logged:
-                        key_snippet = identity.identity_key.hex()[:6]
-                        _LOGGER.info(
-                            "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
-                            identity.canonical_id,
-                            key_snippet,
-                            window_timestamp,
-                            eid.hex(),
-                        )
-                        debug_dump_logged = True
+                        if should_log_debug_dump and not debug_dump_logged:
+                            key_snippet = identity.identity_key.hex()[:6]
+                            _LOGGER.info(
+                                "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
+                                identity.canonical_id,
+                                key_snippet,
+                                window_timestamp,
+                                eid.hex(),
+                            )
+                            debug_dump_logged = True
 
         self._lookup = lookup
         _LOGGER.debug(

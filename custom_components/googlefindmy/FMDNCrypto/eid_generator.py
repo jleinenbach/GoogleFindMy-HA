@@ -1,8 +1,15 @@
 """Ephemeral identifier derivation helpers for the FHN Accessory spec."""
 
+from __future__ import annotations
+
+import logging
+import struct
 from typing import cast
 
 from Cryptodome.Cipher import AES
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
@@ -13,7 +20,10 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
 # Constants
 K = 10
 ROTATION_PERIOD = 1024  # 2^K seconds
+EIK_LENGTH = 32
 _CURVE: CurveParametersProtocol = load_curve()
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
@@ -35,6 +45,50 @@ def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
 
     # Return the x coordinate of R as the EID
     return cast(bytes, R.x().to_bytes(20, "big"))
+
+
+def generate_eid_p256(
+    identity_key: bytes, timestamp: int, rotation_period: int = 3600
+) -> bytes:
+    """Generate a modern (NIST P-256) EID per DULT guidance.
+
+    The Device Unserialized Locator Tag (DULT) spec quantizes time into
+    rotation windows (commonly one hour) and derives an ephemeral scalar by
+    encrypting the padded window counter with AES-256-ECB using the Ephemeral
+    Identity Key (EIK). The scalar is reduced modulo the P-256 order before
+    computing the public point. This helper returns the x coordinate of that
+    point so callers may truncate it to the advertisement payload length.
+    """
+
+    if len(identity_key) != EIK_LENGTH:
+        _LOGGER.debug("P-256 EID generation skipped: invalid EIK length %d", len(identity_key))
+        return b""
+
+    time_counter: int = int(timestamp // rotation_period)
+
+    input_block = struct.pack(
+        ">12sI",
+        b"\x00" * 12,
+        time_counter,
+    )
+
+    cipher = Cipher(algorithms.AES(identity_key), modes.ECB(), backend=default_backend())
+    encryptor = cipher.encryptor()
+    seed_bytes = encryptor.update(input_block) + encryptor.finalize()
+
+    n: int = (
+        0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+    )
+    seed_int: int = int.from_bytes(seed_bytes, byteorder="big")
+    private_scalar: int = (seed_int % (n - 1)) + 1
+
+    curve = ec.SECP256R1()
+    private_key = ec.derive_private_key(private_scalar, curve, default_backend())
+    public_key = private_key.public_key()
+
+    public_numbers = public_key.public_numbers()
+    x_bytes = public_numbers.x.to_bytes(32, byteorder="big")
+    return x_bytes
 
 
 def calculate_r(identity_key: bytes, timestamp: int) -> int:
