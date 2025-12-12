@@ -22,7 +22,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
-from .FMDNCrypto.eid_generator import ROTATION_PERIOD, generate_eid
+from .FMDNCrypto.eid_generator import ROTATION_PERIOD, generate_eid, generate_eid_p256
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
 from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
@@ -133,7 +133,7 @@ class GoogleFindMyEIDResolver:
                 self._pending_refresh = False
                 await self._refresh_cache()
 
-    async def _refresh_cache(self) -> None:  # noqa: PLR0912 - iterative window search
+    async def _refresh_cache(self) -> None:  # noqa: PLR0912, PLR0915 - iterative window search
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
 
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
@@ -146,16 +146,27 @@ class GoogleFindMyEIDResolver:
         first_identity_id: str | None = None
 
         for identity in identities:
-            if not identity.config_entry_id or identity.identity_key is None:
+            if (
+                not identity.config_entry_id
+                or identity.identity_key is None
+                or identity.registry_id is None
+            ):
+                _LOGGER.debug(
+                    "Skipping identity with missing data (entry=%s, registry=%s)",
+                    identity.config_entry_id,
+                    identity.registry_id,
+                )
                 continue
 
             if first_identity_id is None:
                 first_identity_id = identity.canonical_id
 
+            config_entry_id = identity.config_entry_id
+            registry_id = identity.registry_id
+
             known_offset = self._known_offsets.get(identity.registry_id)
             known_endianness = self._known_endianness.get(identity.registry_id, False)
             target_time = now if known_offset is None else now + known_offset
-            rotation_start = target_time - (target_time % ROTATION_PERIOD)
             window_range: range
             should_log_debug_dump = identity.canonical_id.endswith("d329") or (
                 first_identity_id is not None
@@ -168,58 +179,67 @@ class GoogleFindMyEIDResolver:
             else:
                 window_range = range(0, 1)
 
-            for offset in window_range:
-                timestamp = rotation_start + (offset * ROTATION_PERIOD)
-                if timestamp < 0:
-                    continue
+            def _iter_windows(rotation_period: int) -> tuple[int, ...]:
+                rotation_start = target_time - (target_time % rotation_period)
+                windows: list[int] = []
 
-                if known_offset is not None:
-                    windows: tuple[int, ...] = (
-                        timestamp,
-                        max(0, timestamp - ROTATION_PERIOD),
-                        timestamp + ROTATION_PERIOD,
-                    )
-                else:
-                    windows = (timestamp,)
-
-                for window_timestamp in windows:
-                    try:
-                        eid = generate_eid(identity.identity_key, window_timestamp)
-                    except Exception as err:  # noqa: BLE001 - defensive guard
-                        _LOGGER.debug(
-                            "Failed to generate EID for %s at %s: %s",
-                            identity.canonical_id,
-                            window_timestamp,
-                            err,
-                        )
+                for offset in window_range:
+                    timestamp = rotation_start + (offset * rotation_period)
+                    if timestamp < 0:
                         continue
 
-                    time_offset = window_timestamp - now
-                    is_reversed = known_offset is not None and known_endianness
-                    if known_offset is None:
-                        lookup[eid] = EIDMatch(
-                            device_id=identity.registry_id,
-                            config_entry_id=identity.config_entry_id,
-                            canonical_id=identity.canonical_id,
-                            time_offset=time_offset,
-                            is_reversed=False,
-                        )
-                        lookup[eid[::-1]] = EIDMatch(
-                            device_id=identity.registry_id,
-                            config_entry_id=identity.config_entry_id,
-                            canonical_id=identity.canonical_id,
-                            time_offset=time_offset,
-                            is_reversed=True,
+                    if known_offset is not None:
+                        raw_candidates: tuple[int, ...] = (
+                            timestamp,
+                            max(0, timestamp - rotation_period),
+                            timestamp + rotation_period,
                         )
                     else:
-                        eid_bytes = eid[::-1] if is_reversed else eid
-                        lookup[eid_bytes] = EIDMatch(
-                            device_id=identity.registry_id,
-                            config_entry_id=identity.config_entry_id,
-                            canonical_id=identity.canonical_id,
-                            time_offset=time_offset,
-                            is_reversed=is_reversed,
-                        )
+                        raw_candidates = (timestamp,)
+
+                    for candidate in raw_candidates:
+                        if candidate >= 0:
+                            windows.append(candidate)
+
+                return tuple(dict.fromkeys(windows))
+
+            def _register_match(eid: bytes, time_offset: int, is_reversed: bool) -> None:
+                match = EIDMatch(
+                    device_id=registry_id,
+                    config_entry_id=config_entry_id,
+                    canonical_id=identity.canonical_id,
+                    time_offset=time_offset,
+                    is_reversed=is_reversed,
+                )
+                existing = lookup.get(eid)
+                if existing is None or abs(time_offset) < abs(existing.time_offset):
+                    lookup[eid] = match
+
+            def _store_candidates(eid: bytes, time_offset: int, is_reversed: bool) -> None:
+                if known_offset is None:
+                    _register_match(eid, time_offset, False)
+                    _register_match(eid[::-1], time_offset, True)
+                else:
+                    eid_bytes = eid[::-1] if is_reversed else eid
+                    _register_match(eid_bytes, time_offset, is_reversed)
+
+            is_reversed = known_offset is not None and known_endianness
+            rotation_windows = _iter_windows(ROTATION_PERIOD)
+
+            for window_timestamp in rotation_windows:
+                time_offset = window_timestamp - now
+
+                try:
+                    legacy_eid = generate_eid(identity.identity_key, window_timestamp)
+                except Exception as err:  # noqa: BLE001 - defensive guard
+                    _LOGGER.debug(
+                        "Failed to generate legacy EID for %s at %s: %s",
+                        identity.canonical_id,
+                        window_timestamp,
+                        err,
+                    )
+                else:
+                    _store_candidates(legacy_eid, time_offset, is_reversed)
 
                     if should_log_debug_dump and not debug_dump_logged:
                         key_snippet = identity.identity_key.hex()[:6]
@@ -228,9 +248,41 @@ class GoogleFindMyEIDResolver:
                             identity.canonical_id,
                             key_snippet,
                             window_timestamp,
-                            eid.hex(),
+                            legacy_eid.hex(),
                         )
                         debug_dump_logged = True
+
+                try:
+                    modern_eid_full = generate_eid_p256(
+                        identity.identity_key,
+                        window_timestamp,
+                    )
+                except Exception as err:  # noqa: BLE001 - defensive guard
+                    _LOGGER.debug(
+                        "Failed to generate modern EID for %s at %s: %s",
+                        identity.canonical_id,
+                        window_timestamp,
+                        err,
+                    )
+                    continue
+
+                modern_candidates: tuple[bytes, ...] = (
+                    modern_eid_full,
+                    modern_eid_full[:EID_LENGTH],
+                )
+                for modern_eid in modern_candidates:
+                    _store_candidates(modern_eid, time_offset, is_reversed)
+
+                if should_log_debug_dump and not debug_dump_logged:
+                    key_snippet = identity.identity_key.hex()[:6]
+                    _LOGGER.info(
+                        "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
+                        identity.canonical_id,
+                        key_snippet,
+                        window_timestamp,
+                        modern_eid_full.hex(),
+                    )
+                    debug_dump_logged = True
 
         self._lookup = lookup
         _LOGGER.debug(
@@ -422,7 +474,7 @@ class GoogleFindMyEIDResolver:
 
         lookup_key: bytes | None
 
-        if len(eid_bytes) == EID_LENGTH:
+        if len(eid_bytes) in (EID_LENGTH, 32):
             lookup_key = eid_bytes
         elif len(eid_bytes) > EID_LENGTH:
             if eid_bytes[0] != FMDN_FRAME_TYPE:
@@ -431,7 +483,7 @@ class GoogleFindMyEIDResolver:
         else:
             return None
 
-        if len(lookup_key) != EID_LENGTH:
+        if len(lookup_key) not in (EID_LENGTH, 32):
             return None
 
         _LOGGER.debug(

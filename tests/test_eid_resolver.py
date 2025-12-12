@@ -401,3 +401,61 @@ async def test_resolver_learns_offsets_and_endianness(monkeypatch: pytest.Monkey
     assert len(resolver._lookup) == 3
     assert all(match.is_reversed for match in resolver._lookup.values())
 
+
+@pytest.mark.asyncio
+async def test_resolver_populates_modern_and_legacy_eids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_time = ROTATION_PERIOD * 2
+
+    def _fake_time() -> int:
+        return base_time
+
+    def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
+        return (timestamp.to_bytes(8, "big") * 3)[:EID_LENGTH]
+
+    def _fake_generate_eid_p256(
+        key: bytes, timestamp: int
+    ) -> bytes:
+        return (b"m" + timestamp.to_bytes(8, "big") * 4)[:32]
+
+    monkeypatch.setattr(resolver_module.time, "time", _fake_time)
+    monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
+    monkeypatch.setattr(resolver_module, "generate_eid_p256", _fake_generate_eid_p256)
+
+    identity = DeviceIdentity(
+        registry_id="registry-modern",
+        canonical_id="canonical-modern",
+        identity_key=b"\x01" * 32,
+        config_entry_id="entry-modern",
+    )
+
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
+    hass = _StubHass({DOMAIN: {"entries": {"entry-modern": SimpleNamespace(coordinator=coordinator)}}})
+
+    resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+    resolver.hass = hass
+    resolver._lookup = {}
+    resolver._known_offsets = {identity.registry_id: 0}
+    resolver._known_endianness = {}
+    resolver._unsub_interval = None
+    resolver._unsub_alignment = None
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+
+    await resolver._refresh_cache()
+
+    rotation_start = base_time - (base_time % ROTATION_PERIOD)
+    legacy_eid = _fake_generate_eid(identity.identity_key, rotation_start)
+    modern_eid_full = _fake_generate_eid_p256(identity.identity_key, rotation_start)
+    modern_eid_truncated = modern_eid_full[:resolver_module.EID_LENGTH]
+
+    assert len(resolver._lookup) == 9
+    assert resolver.resolve_eid(legacy_eid).device_id == identity.registry_id
+    assert (
+        resolver.resolve_eid(modern_eid_full).device_id == identity.registry_id
+    )
+    match = resolver.resolve_eid(modern_eid_truncated)
+    assert match is not None
+    assert match.device_id == identity.registry_id
+
