@@ -12,6 +12,10 @@ child directory overrides it.
 | Runtime lifecycle patterns, platform forwarding, and subentry helpers (**entity lifecycle requirements live here**) | [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md) |
 | Typing reminders, stub imports, and strict mypy expectations | [`agents/typing_guidance/AGENTS.md`](agents/typing_guidance/AGENTS.md) |
 
+### SPOT/gRPC client reminder
+
+When reusing a shared `httpx` SSL context for SPOT/gRPC traffic, **enable HTTP/2 on the context** so ALPN advertises `h2` and gRPC requests avoid HTTP/1.1 downgrades.
+
 ## Cross-reference index
 
 * [`tests/AGENTS.md`](../../tests/AGENTS.md) — Discovery and reconfigure test stubs, including the lightweight `ConfigEntry` doubles referenced across the topical guides above.
