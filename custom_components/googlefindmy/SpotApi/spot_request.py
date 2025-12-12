@@ -4,8 +4,10 @@ import asyncio
 import logging
 import random
 import socket
-from collections.abc import Iterable
+from collections.abc import Collection
+from typing import Any, cast
 
+import grpclib.client as grpclib_client
 import grpclib.exceptions
 from grpclib.client import UnaryUnaryMethod
 from grpclib.const import Status
@@ -32,6 +34,7 @@ _SPOT_MAX_RETRIES = 3
 _SPOT_INITIAL_BACKOFF_S = 1.0
 _SPOT_BACKOFF_FACTOR = 2.0
 _USER_AGENT = "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT"
+cast(Any, grpclib_client).USER_AGENT = _USER_AGENT
 _async_sleep = asyncio.sleep
 
 
@@ -163,10 +166,7 @@ async def async_spot_request(
                 continue
             raise SpotAuthPermanentError("AAS token invalid after refresh.") from err
 
-        metadata: Iterable[tuple[str, str]] = (
-            ("authorization", f"Bearer {token}"),
-            ("user-agent", _USER_AGENT),
-        )
+        metadata: Collection[tuple[str, str]] = (("authorization", f"Bearer {token}"),)
         channel = await active_transport.get_channel()
         method = UnaryUnaryMethod(channel, method_path, bytes, bytes)
 
@@ -243,3 +243,9 @@ async def async_spot_request(
             raise SpotTrailersOnlyError("OK status but empty reply payload.")
 
         return reply_bytes
+
+
+def spot_request(*_args: object, **_kwargs: object) -> bytes:
+    """Deprecated sync shim preserved for legacy call sites."""
+
+    raise RuntimeError("spot_request is no longer synchronous; use async_spot_request with cache=")

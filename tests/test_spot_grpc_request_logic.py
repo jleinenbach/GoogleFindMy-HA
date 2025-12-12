@@ -4,6 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 from unittest.mock import AsyncMock
 
+import grpclib.client as grpclib_client
 import grpclib.exceptions
 import pytest
 from grpclib.const import Status
@@ -101,10 +102,8 @@ async def test_metadata_contains_authorization_and_user_agent(
     assert result == b"ok"
     assert metadata_seen
     metadata_map = {k: v for k, v in metadata_seen[0]}
-    assert metadata_map == {
-        "authorization": "Bearer token",
-        "user-agent": spot_request_module._USER_AGENT,
-    }
+    assert metadata_map == {"authorization": "Bearer token"}
+    assert grpclib_client.USER_AGENT == spot_request_module._USER_AGENT
 
 
 @pytest.mark.asyncio

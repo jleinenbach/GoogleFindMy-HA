@@ -31,7 +31,7 @@ class RawCodec(CodecBase):
     strict servers accept it without a "+proto" suffix.
     """
 
-    __content_subtype__: str | None = ""
+    __content_subtype__: str = "proto"
 
     @property
     def content_type(self) -> str:

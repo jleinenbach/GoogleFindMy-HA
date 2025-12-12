@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import grpclib.client as grpclib_client
 import grpclib.exceptions
 import pytest
 from grpclib.const import Status
@@ -119,11 +120,11 @@ async def test_spot_request_metadata_excludes_gzip(monkeypatch: pytest.MonkeyPat
     metadata = dict(stub_method.last_metadata)
     assert "grpc-accept-encoding" not in metadata
     assert metadata.get("authorization") == "Bearer spot-token"
-    assert metadata.get("user-agent") == spot_request_module._USER_AGENT, (
+    assert set(metadata) == {"authorization"}
+    assert grpclib_client.USER_AGENT == spot_request_module._USER_AGENT, (
         "SPOT requires a Google Mobile Services User-Agent; removing it causes Google "
         "to reject or reroute requests."
     )
-    assert set(metadata) == {"authorization", "user-agent"}
 
 
 @pytest.fixture(autouse=True)
