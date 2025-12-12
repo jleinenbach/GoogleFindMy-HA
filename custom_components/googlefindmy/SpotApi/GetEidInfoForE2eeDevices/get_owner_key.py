@@ -52,6 +52,7 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
     SpotApiEmptyResponseError,
     async_get_eid_info,
 )
+from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 from custom_components.googlefindmy.typing_utils import (
     run_in_executor as _run_in_executor,
 )
@@ -151,12 +152,15 @@ async def _retrieve_owner_key(
         SpotApiEmptyResponseError: If SPOT returns an empty/trailers-only body.
         RuntimeError: If required fields/keys are missing or invalid.
     """
-    # 1) EID info (allow async getter injection)
     if eid_info_getter is not None:
         eid_info = await eid_info_getter()
     else:
         try:
             eid_info = await async_get_eid_info(cache=cache)
+        except SpotAuthPermanentError as exc:
+            raise ConfigEntryAuthFailed(
+                "Owner key retrieval failed: Google session invalid; re-authentication required."
+            ) from exc
         except SpotApiEmptyResponseError:
             _LOGGER.error(
                 "Owner key retrieval failed: SPOT returned empty/trailers-only body for "
@@ -164,7 +168,6 @@ async def _retrieve_owner_key(
             )
             raise
 
-    # 2) Shared key (allow async getter injection)
     if shared_key_getter is not None:
         shared_key: Any = await shared_key_getter()
     else:
@@ -173,7 +176,6 @@ async def _retrieve_owner_key(
     if not isinstance(shared_key, (bytes, bytearray)) or not shared_key:
         raise RuntimeError("Shared key is missing or empty; cannot decrypt owner key")
 
-    # 3) Guards for presence and non-empty encrypted owner key
     metadata = getattr(eid_info, "encryptedOwnerKeyAndMetadata", None)
     if metadata is None:
         raise RuntimeError("Missing 'encryptedOwnerKeyAndMetadata' in eid_info")
@@ -187,7 +189,6 @@ async def _retrieve_owner_key(
             "Missing or empty 'encryptedOwnerKey' in eid_info.encryptedOwnerKeyAndMetadata"
         )
 
-    # 4) Crypto is CPU-bound -> run in executor
     owner_key: Any = await _run_in_executor(
         decrypt_owner_key, shared_key, encrypted_owner_key
     )

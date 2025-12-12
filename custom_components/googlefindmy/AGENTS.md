@@ -14,7 +14,7 @@ child directory overrides it.
 
 ### SPOT/gRPC client reminder
 
-When reusing a shared `httpx` SSL context for SPOT/gRPC traffic, **enable HTTP/2 on the context** so ALPN advertises `h2` and gRPC requests avoid HTTP/1.1 downgrades.
+When reusing the shared grpclib transport (`SpotGrpcTransport`), keep SSL context creation lazy and ensure ALPN includes `h2`. The transport helper already sets the protocol list and should be closed on unload so new channels negotiate HTTP/2 cleanly.
 
 ## Cross-reference index
 

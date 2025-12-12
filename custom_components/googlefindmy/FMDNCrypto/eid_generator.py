@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
+from dataclasses import dataclass
+from typing import Final, cast
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -15,30 +16,31 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
 )
 
 # Constants
-K = 10
-ROTATION_PERIOD = 1024  # 2^K seconds
-EIK_LENGTH = 32
+K: Final[int] = 10
+ROTATION_PERIOD: Final[int] = 1024
+EIK_LENGTH: Final[int] = 32
+LEGACY_EID_LENGTH: Final[int] = 20
 _CURVE: CurveParametersProtocol = load_curve()
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _prf_table10(identity_key: bytes, timestamp: int, k: int = K) -> bytes:
-    """Derive the 32-byte Table 10 pseudorandom output.
+@dataclass(frozen=True, slots=True)
+class EidCandidate:
+    """Ephemeral identifier variant produced for a time window."""
 
-    FHN Accessory Specification v1.3 — Table 10 defines the 32-byte AES-256-ECB
-    input buffer used to generate the ephemeral scalar. The layout is:
+    name: str
+    eid: bytes
 
-    * ``0xFF`` repeated for 11 bytes
-    * ``K`` (rotation exponent)
-    * ``ts_bytes`` (timestamp with the lowest ``K`` bits masked)
-    * ``0x00`` repeated for 11 bytes
-    * ``K`` again
-    * the same ``ts_bytes``
 
-    This helper mirrors that exact construction and encrypts the entire buffer
-    with AES-256-ECB to produce the 32-byte seed shared by both legacy and
-    modern EID derivations.
+def build_table10_block(timestamp: int, k: int = K) -> bytes:
+    """Build the Table 10 AES-256-ECB input block for the masked timestamp.
+
+    FHN Accessory Specification v1.3 Table 10 defines the 32-byte buffer layout
+    for the pseudorandom seed: 11 bytes of 0xFF, the rotation exponent ``K``,
+    the masked timestamp, 11 bytes of 0x00, ``K`` again, and the same masked
+    timestamp. This helper materializes that structure for reuse in tests and
+    encryption routines.
     """
 
     ts_bytes = get_masked_timestamp(timestamp, k)
@@ -51,9 +53,17 @@ def _prf_table10(identity_key: bytes, timestamp: int, k: int = K) -> bytes:
     data[27] = k
     data[28:32] = ts_bytes
 
+    return bytes(data)
+
+
+def _prf_table10(identity_key: bytes, timestamp: int, k: int = K) -> bytes:
+    """Derive the 32-byte Table 10 pseudorandom output from the masked timestamp."""
+
+    block = build_table10_block(timestamp, k)
+
     cipher = Cipher(algorithms.AES(identity_key), modes.ECB())
     encryptor = cipher.encryptor()
-    return encryptor.update(bytes(data)) + encryptor.finalize()
+    return encryptor.update(block) + encryptor.finalize()
 
 
 def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
@@ -74,7 +84,8 @@ def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
     R = r * generator
 
     # Return the x coordinate of R as the EID
-    return cast(bytes, R.x().to_bytes(20, "big"))
+    x_coord: bytes = cast(bytes, R.x().to_bytes(LEGACY_EID_LENGTH, "big"))
+    return x_coord
 
 
 def generate_eid_p256(identity_key: bytes, timestamp: int) -> bytes:
@@ -108,6 +119,25 @@ def generate_eid_p256(identity_key: bytes, timestamp: int) -> bytes:
     public_numbers = public_key.public_numbers()
     x_bytes = public_numbers.x.to_bytes(32, byteorder="big")
     return x_bytes
+
+
+def generate_eid_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
+    """Return legacy and modern EID candidates for the masked rotation window."""
+
+    if len(identity_key) != EIK_LENGTH:
+        raise ValueError(
+            f"Ephemeral Identity Key must be {EIK_LENGTH} bytes; got {len(identity_key)}"
+        )
+
+    legacy_eid = generate_eid(identity_key, timestamp)
+    modern_eid = generate_eid_p256(identity_key, timestamp)
+    modern_truncated = modern_eid[:LEGACY_EID_LENGTH]
+
+    return (
+        EidCandidate(name="legacy_secp160r1_rx20", eid=legacy_eid),
+        EidCandidate(name="modern_p256_x32", eid=modern_eid),
+        EidCandidate(name="modern_p256_trunc20", eid=modern_truncated),
+    )
 
 
 def calculate_r(identity_key: bytes, timestamp: int) -> int:

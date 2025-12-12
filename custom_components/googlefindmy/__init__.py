@@ -190,6 +190,7 @@ from .const import (
 )
 from .email import normalize_email, unique_account_id
 from .ha_typing import CloudDiscoveryRuntime, callback
+from .SpotApi.spot_grpc_transport import SPOT_GRPC_TRANSPORT
 
 # Shared FCM provider (HA-managed singleton)
 try:  # pragma: no cover - OperationNotAllowed introduced alongside HA subentry retries
@@ -7715,6 +7716,20 @@ async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> b
     return unload_success
 
 
+async def _maybe_close_spot_transport(entries_bucket: dict[str, RuntimeData]) -> None:
+    """
+    Close the shared SPOT transport when the integration has no active entries.
+
+    Validated by tests/test_spot_transport_lifecycle.py::test_close_only_when_bucket_empty
+    and tests/test_spot_transport_lifecycle.py::test_close_skipped_when_entries_remain.
+    """
+
+    if entries_bucket:
+        return
+
+    await SPOT_GRPC_TRANSPORT.async_close()
+
+
 async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """Unload a parent entry by unloading children and cleaning up resources."""
 
@@ -8024,6 +8039,11 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         except Exception as err:
             _LOGGER.debug("Owner-index cleanup failed: %s", err)
 
+        try:
+            await _maybe_close_spot_transport(entries_bucket)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("SPOT transport close during parent unload raised: %s", err)
+
         if hasattr(entry, "runtime_data"):
             with suppress(Exception):
                 setattr(entry, "runtime_data", None)
@@ -8150,6 +8170,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                     await result
             except Exception:
                 pass
+
+    if not entries_bucket:
+        try:
+            await _maybe_close_spot_transport(entries_bucket)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug(
+                "SPOT transport close during async_remove_entry raised: %s", err
+            )
 
     if hasattr(entry, "runtime_data"):
         try:

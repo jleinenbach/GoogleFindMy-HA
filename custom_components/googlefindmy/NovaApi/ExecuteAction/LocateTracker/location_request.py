@@ -46,6 +46,7 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
+from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -356,6 +357,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     StaleOwnerKeyError,
                     DecryptionError,
                     SpotApiEmptyResponseError,
+                    SpotAuthPermanentError,
                 ) as err:
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
@@ -692,6 +694,8 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         if ctx.error:
             if isinstance(ctx.error, SpotApiEmptyResponseError):
                 raise ctx.error
+            if isinstance(ctx.error, SpotAuthPermanentError):
+                raise ctx.error
 
         data = ctx.data or []
         if data and data[0].get("canonic_id", "").lower() == canonic_device_id.lower():
@@ -708,6 +712,8 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
     except asyncio.CancelledError:
         _LOGGER.info("Location request cancelled for %s", name)
+        raise
+    except SpotAuthPermanentError:
         raise
     except SpotApiEmptyResponseError:
         # Bubble up auth failures so the coordinator can trigger reauth.
