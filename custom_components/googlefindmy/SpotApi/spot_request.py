@@ -74,8 +74,11 @@ _SPOT_MAX_RETRY_AFTER_S = 60.0
 
 # Preload the SSL context at import time so certifi's CA bundle is loaded outside the
 # event loop. httpx will reuse this context for every async client, avoiding blocking
-# `load_verify_locations` calls once Home Assistant has started.
-_SPOT_SSL_CONTEXT = httpx.create_ssl_context(http2=True)
+# `load_verify_locations` calls once Home Assistant has started. Manually enable
+# HTTP/2 ALPN to keep SPOT gRPC traffic on h2 without relying on the optional
+# `http2` parameter (missing from the current type stubs).
+_SPOT_SSL_CONTEXT = httpx.create_ssl_context()
+_SPOT_SSL_CONTEXT.set_alpn_protocols(["h2", "http/1.1"])
 _SPOT_SSL_CONTEXT.options |= ssl.OP_NO_COMPRESSION
 
 
