@@ -415,7 +415,7 @@ async def test_resolver_populates_modern_and_legacy_eids(
         return (timestamp.to_bytes(8, "big") * 3)[:EID_LENGTH]
 
     def _fake_generate_eid_p256(
-        key: bytes, timestamp: int, rotation_period: int = 3600
+        key: bytes, timestamp: int
     ) -> bytes:
         return (b"m" + timestamp.to_bytes(8, "big") * 4)[:32]
 
@@ -447,16 +447,15 @@ async def test_resolver_populates_modern_and_legacy_eids(
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
     legacy_eid = _fake_generate_eid(identity.identity_key, rotation_start)
-    modern_rotation_start = base_time - (
-        base_time % resolver_module.MODERN_ROTATION_PERIOD
-    )
-    modern_eid = _fake_generate_eid_p256(identity.identity_key, modern_rotation_start)[
-        :20
-    ]
+    modern_eid_full = _fake_generate_eid_p256(identity.identity_key, rotation_start)
+    modern_eid_truncated = modern_eid_full[:resolver_module.EID_LENGTH]
 
-    assert len(resolver._lookup) == 5
+    assert len(resolver._lookup) == 9
     assert resolver.resolve_eid(legacy_eid).device_id == identity.registry_id
-    match = resolver.resolve_eid(modern_eid)
+    assert (
+        resolver.resolve_eid(modern_eid_full).device_id == identity.registry_id
+    )
+    match = resolver.resolve_eid(modern_eid_truncated)
     assert match is not None
     assert match.device_id == identity.registry_id
 

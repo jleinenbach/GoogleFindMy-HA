@@ -43,7 +43,6 @@ _LOGGER = logging.getLogger(__name__)
 EID_LENGTH = 20
 RAW_HEADER_LENGTH = 1
 FMDN_FRAME_TYPE = 0x40
-MODERN_ROTATION_PERIOD = 3600
 
 
 class EIDMatch(NamedTuple):
@@ -147,14 +146,21 @@ class GoogleFindMyEIDResolver:
         first_identity_id: str | None = None
 
         for identity in identities:
-            if not identity.config_entry_id or identity.identity_key is None:
+            if (
+                not identity.config_entry_id
+                or identity.identity_key is None
+                or identity.registry_id is None
+            ):
+                _LOGGER.debug(
+                    "Skipping identity with missing data (entry=%s, registry=%s)",
+                    identity.config_entry_id,
+                    identity.registry_id,
+                )
                 continue
 
             if first_identity_id is None:
                 first_identity_id = identity.canonical_id
 
-            assert identity.config_entry_id is not None
-            assert identity.registry_id is not None
             config_entry_id = identity.config_entry_id
             registry_id = identity.registry_id
 
@@ -218,10 +224,11 @@ class GoogleFindMyEIDResolver:
                     _register_match(eid_bytes, time_offset, is_reversed)
 
             is_reversed = known_offset is not None and known_endianness
-            legacy_windows = _iter_windows(ROTATION_PERIOD)
-            modern_windows = _iter_windows(MODERN_ROTATION_PERIOD)
+            rotation_windows = _iter_windows(ROTATION_PERIOD)
 
-            for window_timestamp in legacy_windows:
+            for window_timestamp in rotation_windows:
+                time_offset = window_timestamp - now
+
                 try:
                     legacy_eid = generate_eid(identity.identity_key, window_timestamp)
                 except Exception as err:  # noqa: BLE001 - defensive guard
@@ -231,28 +238,24 @@ class GoogleFindMyEIDResolver:
                         window_timestamp,
                         err,
                     )
-                    continue
+                else:
+                    _store_candidates(legacy_eid, time_offset, is_reversed)
 
-                time_offset = window_timestamp - now
-                _store_candidates(legacy_eid, time_offset, is_reversed)
+                    if should_log_debug_dump and not debug_dump_logged:
+                        key_snippet = identity.identity_key.hex()[:6]
+                        _LOGGER.info(
+                            "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
+                            identity.canonical_id,
+                            key_snippet,
+                            window_timestamp,
+                            legacy_eid.hex(),
+                        )
+                        debug_dump_logged = True
 
-                if should_log_debug_dump and not debug_dump_logged:
-                    key_snippet = identity.identity_key.hex()[:6]
-                    _LOGGER.info(
-                        "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s GeneratedEID=%s",
-                        identity.canonical_id,
-                        key_snippet,
-                        window_timestamp,
-                        legacy_eid.hex(),
-                    )
-                    debug_dump_logged = True
-
-            for window_timestamp in modern_windows:
                 try:
                     modern_eid_full = generate_eid_p256(
                         identity.identity_key,
                         window_timestamp,
-                        rotation_period=MODERN_ROTATION_PERIOD,
                     )
                 except Exception as err:  # noqa: BLE001 - defensive guard
                     _LOGGER.debug(
@@ -263,12 +266,12 @@ class GoogleFindMyEIDResolver:
                     )
                     continue
 
-                if not modern_eid_full:
-                    continue
-
-                modern_eid = modern_eid_full[:EID_LENGTH]
-                time_offset = window_timestamp - now
-                _store_candidates(modern_eid, time_offset, is_reversed)
+                modern_candidates: tuple[bytes, ...] = (
+                    modern_eid_full,
+                    modern_eid_full[:EID_LENGTH],
+                )
+                for modern_eid in modern_candidates:
+                    _store_candidates(modern_eid, time_offset, is_reversed)
 
                 if should_log_debug_dump and not debug_dump_logged:
                     key_snippet = identity.identity_key.hex()[:6]
@@ -277,7 +280,7 @@ class GoogleFindMyEIDResolver:
                         identity.canonical_id,
                         key_snippet,
                         window_timestamp,
-                        modern_eid.hex(),
+                        modern_eid_full.hex(),
                     )
                     debug_dump_logged = True
 
@@ -471,7 +474,7 @@ class GoogleFindMyEIDResolver:
 
         lookup_key: bytes | None
 
-        if len(eid_bytes) == EID_LENGTH:
+        if len(eid_bytes) in (EID_LENGTH, 32):
             lookup_key = eid_bytes
         elif len(eid_bytes) > EID_LENGTH:
             if eid_bytes[0] != FMDN_FRAME_TYPE:
@@ -480,7 +483,7 @@ class GoogleFindMyEIDResolver:
         else:
             return None
 
-        if len(lookup_key) != EID_LENGTH:
+        if len(lookup_key) not in (EID_LENGTH, 32):
             return None
 
         _LOGGER.debug(
