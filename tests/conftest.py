@@ -16,6 +16,37 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+import pytest_socket
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Allow sockets globally and register asyncio markers for coroutine tests."""
+
+    pytest_socket.enable_socket()
+    config.option.disable_socket = False
+    config.option.allow_unix_socket = True
+    config.option.allow_host = ["127.0.0.1", "::1", "localhost"]
+    config.addinivalue_line(
+        "markers",
+        "asyncio: execute the coroutine test using an isolated event loop",
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def enable_real_sockets() -> Iterable[None]:
+    """Allow socket usage across the test session for network-marked tests."""
+
+    pytest_socket.enable_socket()
+    pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
+    yield
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Re-enable sockets after other plugins run setup hooks."""
+
+    pytest_socket.enable_socket()
+    pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
 
 from tests.helpers import (
     install_homeassistant_core_callback_stub,
@@ -434,15 +465,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     except ValueError:
         # Another plugin already registered the option; reuse it.
         return
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Register the asyncio marker for coroutine-based tests."""
-
-    config.addinivalue_line(
-        "markers",
-        "asyncio: execute the coroutine test using an isolated event loop",
-    )
 
 
 @pytest.hookimpl(tryfirst=True)
