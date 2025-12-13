@@ -12,13 +12,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
-from typing import TYPE_CHECKING, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 
 from .const import DOMAIN
@@ -37,6 +40,7 @@ from .FMDNCrypto.eid_generator import (
 )
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
+from .KeyBackup.shared_key_retrieval import async_get_shared_key
 from .SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
     async_get_owner_key,
@@ -58,6 +62,36 @@ _LOGGER = logging.getLogger(__name__)
 EID_LENGTH = LEGACY_EID_LENGTH
 RAW_HEADER_LENGTH = 1
 FMDN_FRAME_TYPE = 0x40
+MODERN_EID_LENGTH = 32
+NARROW_SCAN_RANGE = range(-3, 4)
+LOCK_CUSTOM_FIELD = "eid_timebase_lock"
+
+
+class TimebaseLabel:
+    """Timebase candidates used when generating EID windows."""
+
+    ABSOLUTE = "ABSOLUTE"
+    REL_PAIR = "REL_PAIR"
+    REL_SECRETS = "REL_SECRETS"
+
+
+@dataclass(slots=True, frozen=True)
+class _TimebaseCandidate:
+    """Candidate clock anchor used during EID generation."""
+
+    label: str
+    reference_time: int
+    anchor_epoch: int | None
+
+
+@dataclass(slots=True)
+class _TimebaseLock:
+    """Winning timebase metadata captured after a successful lock-on."""
+
+    label: str
+    anchor_epoch: int | None
+    rotation_timestamp: int
+    offset: int
 
 
 def iter_rotation_windows(
@@ -104,6 +138,137 @@ def _normalize_identity_key(identity_key: bytes) -> bytes:
     return identity_key[:EIK_LENGTH]
 
 
+def _coerce_int(value: Any) -> int | None:
+    """Return a best-effort integer conversion for optional payloads."""
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] | None:
+    """Return a parsed lock payload from registry custom fields when present."""
+
+    label_raw = raw.get("label")
+    rotation_raw = raw.get("rotation_timestamp")
+    offset_raw = raw.get("time_offset")
+    anchor_raw = raw.get("anchor_epoch")
+
+    try:
+        label = str(label_raw)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    rotation_timestamp = _coerce_int(rotation_raw)
+    offset = _coerce_int(offset_raw) or 0
+    anchor_epoch = _coerce_int(anchor_raw)
+
+    is_reversed = bool(raw.get("is_reversed", False))
+
+    if rotation_timestamp is None:
+        return None
+
+    return _TimebaseLock(
+        label=label,
+        anchor_epoch=anchor_epoch,
+        rotation_timestamp=rotation_timestamp,
+        offset=offset,
+    ), is_reversed
+
+
+def _iter_debug_timebases(anchors: Any, *, now: int) -> list[_TimebaseCandidate]:
+    """Parse optional debug anchors into timebase candidates.
+
+    The resolver tolerates a handful of shapes when the server returns anchor
+    diagnostics. Known shapes include a mapping with an ``anchors`` list of
+    dicts or a single mapping containing ``anchor_epoch``/``time_offset``
+    fields. Unknown shapes are ignored while still being preserved in
+    diagnostics so future adjustments can refine the parsing strategy.
+    """
+
+    if isinstance(anchors, Mapping):
+        candidates: list[_TimebaseCandidate] = []
+        hint_list: Iterable[Any]
+        raw_anchors = anchors.get("anchors")
+        if isinstance(raw_anchors, Iterable) and not isinstance(
+            raw_anchors, (str, bytes, bytearray)
+        ):
+            hint_list = raw_anchors
+        else:
+            hint_list = [anchors]
+
+        for raw in hint_list:
+            if not isinstance(raw, Mapping):
+                continue
+
+            anchor_epoch_raw = (
+                raw.get("anchor_epoch") or raw.get("epoch") or raw.get("timestamp")
+            )
+            anchor_epoch = _coerce_int(anchor_epoch_raw)
+            if anchor_epoch is None:
+                continue
+
+            offset_raw = raw.get("time_offset") or raw.get("offset") or raw.get("delta")
+            offset_seconds = _coerce_int(offset_raw) or 0
+
+            label = str(raw.get("label") or "REL_DEBUG")
+            reference_time = now - anchor_epoch + offset_seconds
+            candidates.append(
+                _TimebaseCandidate(
+                    label=label,
+                    reference_time=reference_time,
+                    anchor_epoch=anchor_epoch + offset_seconds,
+                )
+            )
+
+        return candidates
+
+    return []
+
+
+def _build_timebase_candidates(
+    identity: DeviceIdentity, *, now: int
+) -> list[_TimebaseCandidate]:
+    """Return candidate timebases derived from identity anchors."""
+
+    candidates: list[_TimebaseCandidate] = [
+        _TimebaseCandidate(
+            TimebaseLabel.ABSOLUTE, reference_time=now, anchor_epoch=None
+        )
+    ]
+
+    if identity.pair_date is not None:
+        reference = now - identity.pair_date
+        candidates.append(
+            _TimebaseCandidate(
+                TimebaseLabel.REL_PAIR,
+                reference_time=reference,
+                anchor_epoch=identity.pair_date,
+            )
+        )
+
+    if identity.secrets_creation_date is not None:
+        reference = now - identity.secrets_creation_date
+        candidates.append(
+            _TimebaseCandidate(
+                TimebaseLabel.REL_SECRETS,
+                reference_time=reference,
+                anchor_epoch=identity.secrets_creation_date,
+            )
+        )
+
+    if identity.time_anchors_debug is not None:
+        candidates.extend(_iter_debug_timebases(identity.time_anchors_debug, now=now))
+
+    unique: dict[tuple[str, int, int | None], _TimebaseCandidate] = {}
+    for candidate in candidates:
+        unique[(candidate.label, candidate.reference_time, candidate.anchor_epoch)] = (
+            candidate
+        )
+    return list(unique.values())
+
+
 @lru_cache(maxsize=512)
 def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
     """Return cached EID candidates for an identity key and window timestamp."""
@@ -143,6 +308,13 @@ class EIDMatch(NamedTuple):
     is_reversed: bool
 
 
+class IdentityKeyDecryptionResult(NamedTuple):
+    """Result from attempting to decrypt a device identity key."""
+
+    key: bytes | None
+    metadata: dict[str, Any]
+
+
 @dataclass(slots=True)
 class GoogleFindMyEIDResolver:
     """Resolver that precalculates rotating EIDs for known trackers.
@@ -158,8 +330,14 @@ class GoogleFindMyEIDResolver:
 
     hass: HomeAssistant
     _lookup: dict[bytes, EIDMatch] = field(init=False, default_factory=dict)
+    _lookup_metadata: dict[bytes, dict[str, Any]] = field(
+        init=False, default_factory=dict
+    )
     _known_offsets: dict[str, int] = field(default_factory=dict)
     _known_endianness: dict[str, bool] = field(default_factory=dict)
+    _decryption_status: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _known_timebases: dict[str, _TimebaseLock] = field(default_factory=dict)
+    _persisted_locks: dict[str, dict[str, Any]] = field(default_factory=dict)
     _unsub_interval: CALLBACK_TYPE | None = field(init=False, default=None)
     _unsub_alignment: CALLBACK_TYPE | None = field(init=False, default=None)
     _refresh_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
@@ -222,12 +400,55 @@ class GoogleFindMyEIDResolver:
         cache_clear = getattr(_cached_candidates, "cache_clear", None)
         if callable(cache_clear):
             cache_clear()
+        if not hasattr(self, "_known_timebases"):
+            self._known_timebases = {}
+        if not hasattr(self, "_lookup_metadata"):
+            self._lookup_metadata = {}
+        if not hasattr(self, "_decryption_status"):
+            self._decryption_status = {}
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
         _LOGGER.debug(
             "Resolver received %d identities from coordinator", len(identities)
         )
         lookup: dict[bytes, EIDMatch] = {}
+        lookup_metadata: dict[bytes, dict[str, Any]] = {}
         now = int(time.time())
+
+        try:
+            device_reg = dr.async_get(self.hass)
+        except Exception:  # pragma: no cover - defensive stub fallback
+            device_reg = None
+
+        if device_reg is not None:
+            for identity in identities:
+                registry_id = identity.registry_id
+                if not registry_id:
+                    continue
+
+                if (
+                    registry_id in self._known_timebases
+                    and registry_id in self._persisted_locks
+                ):
+                    continue
+
+                entry = device_reg.async_get(registry_id)
+                custom_fields = getattr(entry, "custom_fields", None) if entry else None
+                if not isinstance(custom_fields, Mapping):
+                    continue
+
+                lock_payload = custom_fields.get(LOCK_CUSTOM_FIELD)
+                if not isinstance(lock_payload, Mapping):
+                    continue
+
+                parsed = _parse_persisted_lock(lock_payload)
+                if parsed is None:
+                    continue
+
+                persisted_lock, is_reversed = parsed
+                self._known_timebases.setdefault(registry_id, persisted_lock)
+                self._known_offsets.setdefault(registry_id, persisted_lock.offset)
+                self._known_endianness.setdefault(registry_id, is_reversed)
+                self._persisted_locks[registry_id] = dict(lock_payload)
 
         first_identity_id: str | None = None
 
@@ -251,85 +472,201 @@ class GoogleFindMyEIDResolver:
             registry_id = identity.registry_id
             identity_key_bytes = bytes(identity.identity_key)
 
-            known_offset = self._known_offsets.get(identity.registry_id)
-            known_endianness = self._known_endianness.get(identity.registry_id, False)
-            target_time = now if known_offset is None else now + known_offset
-            window_range: range
+            active_lock: _TimebaseLock | None = self._known_timebases.get(registry_id)
+            known_offset = (
+                active_lock.offset
+                if active_lock is not None
+                else self._known_offsets.get(registry_id)
+            )
+            known_endianness = self._known_endianness.get(registry_id, False)
+            search_offset = known_offset
+            if (
+                search_offset is None
+                and active_lock is not None
+                and active_lock.rotation_timestamp is not None
+            ):
+                rotations_since_lock = round(
+                    (now - active_lock.rotation_timestamp) / ROTATION_PERIOD
+                )
+                aligned_rotation = active_lock.rotation_timestamp + (
+                    rotations_since_lock * ROTATION_PERIOD
+                )
+                search_offset = aligned_rotation - now
+            if active_lock is not None and active_lock.label == TimebaseLabel.REL_PAIR:
+                search_offset = 0
+            base_candidates = _build_timebase_candidates(identity, now=now)
+            timebase_candidates = [
+                c
+                for c in base_candidates
+                if active_lock and c.label == active_lock.label
+            ] or base_candidates
+            requested_timebases = {candidate.label for candidate in timebase_candidates}
+            recorded_timebases: set[str] = set()
             should_log_debug_dump = identity.canonical_id.endswith("d329") or (
                 first_identity_id is not None
                 and identity.canonical_id == first_identity_id
             )
             debug_dump_logged = False
 
-            if known_offset is None:
-                window_range = range(-90, 91)
-            else:
-                window_range = range(0, 1)
+            status = self._decryption_status.get(identity.canonical_id, {})
+            skip_deep_scan = False
+            if status:
+                skip_deep_scan = status.get("status") not in {
+                    "decrypted",
+                    "wrapped_decrypted",
+                }
 
-            def _register_match(
-                eid: bytes, time_offset: int, is_reversed: bool
+            def _register_with_metadata(
+                eid_value: bytes, reversed_flag: bool, metadata_payload: dict[str, Any]
             ) -> None:
                 match = EIDMatch(
                     device_id=registry_id,
                     config_entry_id=config_entry_id,
                     canonical_id=identity.canonical_id,
-                    time_offset=time_offset,
-                    is_reversed=is_reversed,
+                    time_offset=metadata_payload["time_offset"],
+                    is_reversed=reversed_flag,
                 )
-                existing = lookup.get(eid)
-                if existing is None or abs(time_offset) < abs(existing.time_offset):
-                    lookup[eid] = match
+                existing = lookup.get(eid_value)
+                should_force = (
+                    metadata_payload.get("timebase") == TimebaseLabel.REL_PAIR
+                    and TimebaseLabel.REL_PAIR not in recorded_timebases
+                )
+                if (
+                    should_force
+                    or existing is None
+                    or abs(match.time_offset) < abs(existing.time_offset)
+                ):
+                    lookup[eid_value] = match
+                    lookup_metadata[eid_value] = {
+                        **metadata_payload,
+                        "is_reversed": reversed_flag,
+                    }
+                    recorded_timebases.add(str(metadata_payload.get("timebase")))
 
-            def _store_candidates(
-                eid: bytes, time_offset: int, is_reversed: bool
-            ) -> None:
-                if known_offset is None:
-                    _register_match(eid, time_offset, False)
-                    _register_match(eid[::-1], time_offset, True)
+            for candidate in timebase_candidates:
+                passes: list[tuple[range, bool]]
+                if search_offset is not None:
+                    passes = [(range(0, 1), True)]
                 else:
-                    eid_bytes = eid[::-1] if is_reversed else eid
-                    _register_match(eid_bytes, time_offset, is_reversed)
+                    passes = [(NARROW_SCAN_RANGE, False)]
+                    if not skip_deep_scan:
+                        passes.append((range(-90, 91), False))
 
-            is_reversed = known_offset is not None and known_endianness
-            rotation_windows = iter_rotation_windows(
-                target_time,
-                rotation_period=ROTATION_PERIOD,
-                window_range=window_range,
-                include_neighbors=known_offset is not None,
-            )
+                for window_range, include_neighbors in passes:
+                    if search_offset is not None:
+                        target_time = max(0, now + search_offset)
+                    elif active_lock is not None:
+                        target_time = active_lock.rotation_timestamp
+                    else:
+                        target_time = candidate.reference_time
 
-            for window_timestamp in rotation_windows:
-                time_offset = window_timestamp - now
-
-                try:
-                    candidates = _cached_candidates(
-                        identity_key_bytes, window_timestamp
+                    is_reversed = search_offset is not None and known_endianness
+                    rotation_windows = iter_rotation_windows(
+                        target_time,
+                        rotation_period=ROTATION_PERIOD,
+                        window_range=window_range,
+                        include_neighbors=include_neighbors,
                     )
-                except Exception as err:  # noqa: BLE001 - defensive guard
-                    _LOGGER.debug(
-                        "Failed to generate EID candidates for %s at %s: %s",
-                        identity.canonical_id,
-                        window_timestamp,
-                        err,
+
+                    for window_timestamp in rotation_windows:
+                        time_offset = window_timestamp - now
+
+                        try:
+                            candidates = _cached_candidates(
+                                identity_key_bytes, window_timestamp
+                            )
+                        except Exception as err:  # noqa: BLE001 - defensive guard
+                            _LOGGER.debug(
+                                "Failed to generate EID candidates for %s at %s: %s",
+                                identity.canonical_id,
+                                window_timestamp,
+                                err,
+                            )
+                            continue
+
+                        for eid_candidate in candidates:
+                            metadata = {
+                                "timebase": candidate.label,
+                                "anchor_epoch": candidate.anchor_epoch,
+                                "rotation_timestamp": window_timestamp,
+                                "time_offset": time_offset,
+                            }
+
+                            if known_offset is None:
+                                _register_with_metadata(
+                                    eid_candidate.eid, False, metadata
+                                )
+                                _register_with_metadata(
+                                    eid_candidate.eid[::-1], True, metadata
+                                )
+                            else:
+                                eid_bytes = (
+                                    eid_candidate.eid[::-1]
+                                    if is_reversed
+                                    else eid_candidate.eid
+                                )
+                                _register_with_metadata(
+                                    eid_bytes, is_reversed, metadata
+                                )
+
+                            if should_log_debug_dump and not debug_dump_logged:
+                                key_snippet = identity_key_bytes.hex()[:6]
+                                _LOGGER.info(
+                                    "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s Variant=%s EID=%s",
+                                    identity.canonical_id,
+                                    key_snippet,
+                                    window_timestamp,
+                                    eid_candidate.name,
+                                    eid_candidate.eid.hex(),
+                                )
+                                debug_dump_logged = True
+
+            if (
+                TimebaseLabel.REL_PAIR in requested_timebases
+                and TimebaseLabel.REL_PAIR not in recorded_timebases
+            ):
+                rel_candidate = next(
+                    (
+                        candidate
+                        for candidate in timebase_candidates
+                        if candidate.label == TimebaseLabel.REL_PAIR
+                    ),
+                    None,
+                )
+                if rel_candidate is not None:
+                    fallback_rotation = max(
+                        0,
+                        rel_candidate.reference_time
+                        - (rel_candidate.reference_time % ROTATION_PERIOD),
                     )
-                    continue
-
-                for candidate in candidates:
-                    _store_candidates(candidate.eid, time_offset, is_reversed)
-
-                    if should_log_debug_dump and not debug_dump_logged:
-                        key_snippet = identity_key_bytes.hex()[:6]
-                        _LOGGER.info(
-                            "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s Variant=%s EID=%s",
-                            identity.canonical_id,
-                            key_snippet,
-                            window_timestamp,
-                            candidate.name,
-                            candidate.eid.hex(),
+                    try:
+                        fallback_candidates = _cached_candidates(
+                            identity_key_bytes, fallback_rotation
                         )
-                        debug_dump_logged = True
+                    except Exception as err:  # noqa: BLE001 - defensive guard
+                        _LOGGER.debug(
+                            "Failed to generate fallback REL_PAIR candidates for %s: %s",
+                            identity.canonical_id,
+                            err,
+                        )
+                    else:
+                        for eid_candidate in fallback_candidates[:1]:
+                            fallback_metadata = {
+                                "timebase": TimebaseLabel.REL_PAIR,
+                                "anchor_epoch": rel_candidate.anchor_epoch,
+                                "rotation_timestamp": fallback_rotation,
+                                "time_offset": fallback_rotation - now,
+                            }
+                            _register_with_metadata(
+                                eid_candidate.eid, False, fallback_metadata
+                            )
+                            _register_with_metadata(
+                                eid_candidate.eid[::-1], True, fallback_metadata
+                            )
+                            break
 
         self._lookup = lookup
+        self._lookup_metadata = lookup_metadata
         _LOGGER.debug(
             "Refreshed EID cache for %d devices (%d cached EIDs)",
             len(identities),
@@ -388,35 +725,47 @@ class GoogleFindMyEIDResolver:
                     identity.canonical_id,
                     identity.device_type,
                 )
-                decrypted = await self._try_decrypt_identity_key(identity, cache=cache)
-                if decrypted is None:
+                result = await self._try_decrypt_identity_key(identity, cache=cache)
+                self._decryption_status[identity.canonical_id] = result.metadata
+                if result.key is None:
                     _LOGGER.debug(
-                        "Decryption returned None for %s - skipping",
+                        "Decryption returned None for %s - skipping (status=%s)",
                         identity.canonical_id,
+                        result.metadata.get("status"),
                     )
                     continue
-                normalized.append(replace(identity, identity_key=decrypted))
+                normalized.append(replace(identity, identity_key=result.key))
                 continue
 
             normalized.append(identity)
 
         return normalized
 
-    async def _try_decrypt_identity_key(
+    async def _try_decrypt_identity_key(  # noqa: PLR0912 - branching for decryption attempts
         self,
         identity: DeviceIdentity,
         *,
         cache: TokenCache | None,
-    ) -> bytes | None:
-        """Decrypt encrypted identity key when owner key information is available."""
+    ) -> IdentityKeyDecryptionResult:
+        """Decrypt encrypted identity key when owner/shared key material is available."""
 
         if (
             cache is None
             or identity.encrypted_identity_key is None
             or not isinstance(identity.encrypted_identity_key, (bytes, bytearray))
         ):
-            return None
+            return IdentityKeyDecryptionResult(
+                None,
+                {
+                    "status": "skipped",
+                    "reason": "missing_cache_or_ciphertext",
+                },
+            )
 
+        metadata: dict[str, Any] = {
+            "status": "pending",
+            "ciphertext_length": len(identity.encrypted_identity_key),
+        }
         try:
             owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
         except Exception as err:  # noqa: BLE001 - defensive
@@ -425,7 +774,10 @@ class GoogleFindMyEIDResolver:
                 identity.canonical_id,
                 err,
             )
-            return None
+            return IdentityKeyDecryptionResult(
+                None,
+                {**metadata, "status": "failed", "reason": "owner_key_unavailable"},
+            )
 
         expected_version = identity.owner_key_version
         if (
@@ -449,6 +801,18 @@ class GoogleFindMyEIDResolver:
                     err,
                 )
 
+        key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
+        try:
+            shared_key = await async_get_shared_key(cache=cache)
+        except Exception as err:  # noqa: BLE001 - defensive
+            _LOGGER.debug(
+                "Shared key unavailable for %s: %s", identity.canonical_id, err
+            )
+        else:
+            key_sources.append(("shared", shared_key))
+
+        metadata["key_sources"] = [source for source, _ in key_sources]
+
         encrypted_identity_key = bytes(identity.encrypted_identity_key)
 
         suggested_mcu = is_mcu_tracker(
@@ -457,54 +821,219 @@ class GoogleFindMyEIDResolver:
         )
         candidates = [suggested_mcu, not suggested_mcu]
 
-        for flip_mcu in candidates:
-            candidate_key = (
-                flip_bits(encrypted_identity_key, True)
-                if flip_mcu
-                else encrypted_identity_key
-            )
+        wrapped_failure: IdentityKeyDecryptionResult | None = None
+        gcm_result = self._unwrap_aes_gcm_identity_key(
+            identity=identity,
+            encrypted_identity_key=encrypted_identity_key,
+            key_sources=key_sources,
+            metadata=metadata,
+        )
+        if gcm_result is not None:
+            if gcm_result.key is not None:
+                return gcm_result
+            wrapped_failure = gcm_result
 
-            try:
-                decrypted = await asyncio.to_thread(
-                    decrypt_eik, owner_key_info.key, candidate_key
+        for key_source, wrapping_key in key_sources:
+            for flip_mcu in candidates:
+                candidate_key = (
+                    flip_bits(encrypted_identity_key, True)
+                    if flip_mcu
+                    else encrypted_identity_key
                 )
-            except InvalidTag as err:
+
+                try:
+                    decrypted = await asyncio.to_thread(
+                        decrypt_eik, wrapping_key, candidate_key
+                    )
+                except InvalidTag as err:
+                    _LOGGER.debug(
+                        "Identity key decrypt failed for %s with flip=%s (source=%s): %s",
+                        identity.canonical_id,
+                        flip_mcu,
+                        key_source,
+                        err,
+                    )
+                    continue
+                except Exception as err:  # noqa: BLE001 - defensive
+                    _LOGGER.debug(
+                        "Failed to decrypt identity key for %s (owner_key_version=%s, flip=%s, source=%s): %s",
+                        identity.canonical_id,
+                        identity.owner_key_version,
+                        flip_mcu,
+                        key_source,
+                        err,
+                    )
+                    continue
+
+                if isinstance(decrypted, (bytes, bytearray)):
+                    return IdentityKeyDecryptionResult(
+                        bytes(decrypted),
+                        {
+                            **metadata,
+                            "status": "decrypted",
+                            "mode": "owner_key",  # compatibility alias
+                            "key_source": key_source,
+                            "flip_mcu": flip_mcu,
+                        },
+                    )
+
                 _LOGGER.debug(
-                    "Identity key decrypt failed for %s with flip=%s: %s",
+                    "Decryption returned non-bytes result for %s (flip=%s, source=%s)",
                     identity.canonical_id,
                     flip_mcu,
-                    err,
+                    key_source,
                 )
-                continue
+
+        if wrapped_failure is not None:
+            return wrapped_failure
+
+        return IdentityKeyDecryptionResult(
+            None,
+            {**metadata, "status": "failed", "mode": "owner_key"},
+        )
+
+    def _unwrap_aes_gcm_identity_key(
+        self,
+        *,
+        identity: DeviceIdentity,
+        encrypted_identity_key: bytes,
+        key_sources: list[tuple[str, bytes]],
+        metadata: dict[str, Any],
+    ) -> IdentityKeyDecryptionResult | None:
+        """Attempt AES-GCM unwrapping of structured identity key blobs."""
+
+        expected_length = 60  # 12-byte nonce + 32-byte ciphertext + 16-byte tag
+        if len(encrypted_identity_key) != expected_length:
+            return None
+
+        nonce_length = 12
+        tag_length = 16
+        ciphertext_length = expected_length - (nonce_length + tag_length)
+        if ciphertext_length <= 0:
+            return IdentityKeyDecryptionResult(
+                None,
+                {
+                    **metadata,
+                    "status": "wrapped_failed",
+                    "mode": "aesgcm_envelope",
+                    "reason": "invalid_lengths",
+                },
+            )
+
+        aad_candidates: list[tuple[str, bytes]] = [("empty", b"")]
+        if identity.registry_id:
+            aad_candidates.append(
+                ("registry_id", identity.registry_id.encode("utf-8", "ignore"))
+            )
+        if identity.canonical_id and identity.canonical_id != identity.registry_id:
+            aad_candidates.append(
+                (
+                    "canonical_id",
+                    identity.canonical_id.encode("utf-8", "ignore"),
+                )
+            )
+
+        cipher_variants = [
+            (False, encrypted_identity_key),
+            (True, flip_bits(encrypted_identity_key, True)),
+        ]
+
+        for key_source, key_bytes in key_sources:
+            try:
+                aesgcm = AESGCM(key_bytes)
             except Exception as err:  # noqa: BLE001 - defensive
                 _LOGGER.debug(
-                    "Failed to decrypt identity key for %s (owner_key_version=%s, flip=%s): %s",
+                    "Unable to initialize AESGCM for %s (source=%s): %s",
                     identity.canonical_id,
-                    identity.owner_key_version,
-                    flip_mcu,
+                    key_source,
                     err,
                 )
                 continue
 
-            if isinstance(decrypted, (bytes, bytearray)):
-                return bytes(decrypted)
+            for flip_mcu, ciphertext_blob in cipher_variants:
+                nonce = ciphertext_blob[:nonce_length]
+                ciphertext = ciphertext_blob[nonce_length:-tag_length]
+                tag = ciphertext_blob[-tag_length:]
+                payload = ciphertext + tag
 
-            _LOGGER.debug(
-                "Decryption returned non-bytes result for %s (flip=%s)",
-                identity.canonical_id,
-                flip_mcu,
-            )
+                for aad_label, aad in aad_candidates:
+                    try:
+                        plaintext = aesgcm.decrypt(nonce, payload, aad)
+                    except InvalidTag as err:
+                        _LOGGER.debug(
+                            "AES-GCM unwrap failed for %s (source=%s, flip=%s, aad=%s): %s",
+                            identity.canonical_id,
+                            key_source,
+                            flip_mcu,
+                            aad_label,
+                            err,
+                        )
+                        continue
+                    except Exception as err:  # noqa: BLE001 - defensive
+                        _LOGGER.debug(
+                            "AES-GCM unwrap error for %s (source=%s, flip=%s, aad=%s): %s",
+                            identity.canonical_id,
+                            key_source,
+                            flip_mcu,
+                            aad_label,
+                            err,
+                        )
+                        continue
 
-        return None
+                    if len(plaintext) != EIK_LENGTH:
+                        _LOGGER.debug(
+                            "AES-GCM unwrap produced unexpected length for %s (source=%s, flip=%s, aad=%s, length=%s)",
+                            identity.canonical_id,
+                            key_source,
+                            flip_mcu,
+                            aad_label,
+                            len(plaintext),
+                        )
+                        continue
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
+                    _LOGGER.debug(
+                        "AES-GCM unwrap succeeded for %s (source=%s, flip=%s, aad=%s)",
+                        identity.canonical_id,
+                        key_source,
+                        flip_mcu,
+                        aad_label,
+                    )
+                    return IdentityKeyDecryptionResult(
+                        plaintext,
+                        {
+                            **metadata,
+                            "status": "decrypted",
+                            "mode": "aesgcm_envelope",
+                            "key_source": key_source,
+                            "aad_label": aad_label,
+                            "flip_mcu": flip_mcu,
+                            "nonce_length": nonce_length,
+                            "tag_length": tag_length,
+                        },
+                    )
+
+        return IdentityKeyDecryptionResult(
+            None,
+            {
+                **metadata,
+                "status": "wrapped_failed",
+                "mode": "aesgcm_envelope",
+                "aad_candidates": [label for label, _ in aad_candidates],
+                "key_sources": [source for source, _ in key_sources],
+                "nonce_length": nonce_length,
+                "tag_length": tag_length,
+            },
+        )
+
+    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0912, PLR0915
         """Resolve a scanned EID to a Home Assistant device registry ID.
 
         Only Find My Device Network (FMDN) advertising frames (Frame Type
         ``0x40``) are considered when the payload includes framing/telemetry;
         the resolver slices the header and trailing bytes to isolate the
         20-byte EID before lookup. Legacy callers that already provide a
-        20-byte EID bypass the framing filter.
+        20-byte EID bypass the framing filter, while unexpected lengths are
+        rejected with a debug log to aid frame parsing investigations.
 
         Returns the matching :class:`EIDMatch` when the identifier was
         precomputed for a known tracker; otherwise returns ``None``. The
@@ -520,17 +1049,24 @@ class GoogleFindMyEIDResolver:
         """
 
         lookup_key: bytes | None
+        eid_length = len(eid_bytes)
 
-        if len(eid_bytes) in (EID_LENGTH, 32):
+        if eid_length == EID_LENGTH:
             lookup_key = eid_bytes
-        elif len(eid_bytes) > EID_LENGTH:
+        elif eid_length == MODERN_EID_LENGTH:
+            lookup_key = eid_bytes
+        elif eid_length >= EID_LENGTH + 1:
             if eid_bytes[0] != FMDN_FRAME_TYPE:
+                _LOGGER.debug(
+                    "RESOLVER PROBE: Unexpected frame type for %d-byte payload",
+                    eid_length,
+                )
                 return None
             lookup_key = eid_bytes[1 : 1 + EID_LENGTH]
         else:
-            return None
-
-        if len(lookup_key) not in (EID_LENGTH, 32):
+            _LOGGER.debug(
+                "RESOLVER PROBE: Unexpected EID length received (length=%d)", eid_length
+            )
             return None
 
         _LOGGER.debug(
@@ -546,17 +1082,57 @@ class GoogleFindMyEIDResolver:
         if match is None:
             return None
 
+        metadata: dict[str, Any] | None = None
+        lookup_metadata = getattr(self, "_lookup_metadata", None)
+        if isinstance(lookup_metadata, dict):
+            metadata = lookup_metadata.get(lookup_key)
+            if metadata is None:
+                metadata = lookup_metadata.get(lookup_key[::-1])
+
         previous_offset = self._known_offsets.get(match.device_id)
         previous_endianness = self._known_endianness.get(match.device_id)
 
-        if (
-            previous_offset != match.time_offset
-            or previous_endianness != match.is_reversed
-        ):
+        if metadata is not None:
+            anchor_epoch = metadata.get("anchor_epoch")
+            rotation_ts_raw = metadata.get("rotation_timestamp")
+            timebase_label = str(metadata.get("timebase", TimebaseLabel.ABSOLUTE))
+            offset_override = metadata.get("time_offset", match.time_offset)
+            if rotation_ts_raw is None:
+                rotation_timestamp = None
+            else:
+                try:
+                    rotation_timestamp = int(rotation_ts_raw)
+                except (TypeError, ValueError):
+                    rotation_timestamp = None
+            try:
+                anchor_ts = int(anchor_epoch) if anchor_epoch is not None else None
+            except (TypeError, ValueError):
+                anchor_ts = None
+            try:
+                offset_value = int(offset_override)
+            except (TypeError, ValueError):
+                offset_value = match.time_offset
+            if rotation_timestamp is not None:
+                self._known_timebases[match.device_id] = _TimebaseLock(
+                    label=timebase_label,
+                    anchor_epoch=anchor_ts,
+                    rotation_timestamp=rotation_timestamp,
+                    offset=offset_value,
+                )
+
+        if metadata is not None:
+            try:
+                chosen_offset = int(metadata.get("time_offset", match.time_offset))
+            except (TypeError, ValueError):
+                chosen_offset = match.time_offset
+        else:
+            chosen_offset = match.time_offset
+
+        if previous_offset != chosen_offset or previous_endianness != match.is_reversed:
             _LOGGER.info(
                 "Locked on to device %s! Applying Time Offset: %ss, Reverse: %s",
                 match.device_id,
-                match.time_offset,
+                chosen_offset,
                 match.is_reversed,
             )
 
@@ -564,11 +1140,12 @@ class GoogleFindMyEIDResolver:
             "MATCH FOUND: EID %s belongs to device %s (Time Offset: %s)",
             lookup_key.hex(),
             match.device_id,
-            match.time_offset,
+            chosen_offset,
         )
 
-        self._known_offsets[match.device_id] = match.time_offset
+        self._known_offsets[match.device_id] = chosen_offset
         self._known_endianness[match.device_id] = match.is_reversed
+        self._schedule_lock_persistence(match, metadata)
         _LOGGER.debug("Resolved EID to device %s", match.device_id)
         return match
 
@@ -577,6 +1154,64 @@ class GoogleFindMyEIDResolver:
 
         self._known_offsets.pop(device_id, None)
         self._known_endianness.pop(device_id, None)
+
+    def _schedule_lock_persistence(
+        self, match: EIDMatch, metadata: dict[str, Any] | None
+    ) -> None:
+        """Persist lock metadata for restart resilience."""
+
+        if metadata is None:
+            return
+
+        rotation_raw = metadata.get("rotation_timestamp")
+        timebase_label = metadata.get("timebase")
+        anchor_raw = metadata.get("anchor_epoch")
+        if not hasattr(self, "_persisted_locks"):
+            self._persisted_locks = {}
+        if rotation_raw is None:
+            return
+        try:
+            rotation_timestamp = int(rotation_raw)
+        except (TypeError, ValueError):
+            return
+
+        try:
+            time_offset = int(metadata.get("time_offset", 0))
+        except (TypeError, ValueError):
+            time_offset = 0
+
+        try:
+            anchor_epoch = int(anchor_raw) if anchor_raw is not None else None
+        except (TypeError, ValueError):
+            anchor_epoch = None
+
+        lock_payload = {
+            "label": timebase_label,
+            "anchor_epoch": anchor_epoch,
+            "rotation_timestamp": rotation_timestamp,
+            "time_offset": time_offset,
+            "is_reversed": match.is_reversed,
+        }
+
+        if self._persisted_locks.get(match.device_id) == lock_payload:
+            return
+
+        async def _async_store() -> None:
+            device_reg = dr.async_get(self.hass)
+            entry = device_reg.async_get(match.device_id)
+            if entry is None:
+                return
+
+            custom_fields = dict(getattr(entry, "custom_fields", {}) or {})
+            custom_fields[LOCK_CUSTOM_FIELD] = lock_payload
+            device_reg.async_update_device(match.device_id, custom_fields=custom_fields)
+            self._persisted_locks[match.device_id] = lock_payload
+
+        create_task = getattr(self.hass, "async_create_task", asyncio.create_task)
+        try:
+            create_task(_async_store())
+        except Exception:  # pragma: no cover - defensive
+            asyncio.create_task(_async_store())
 
     def get_resolved_eid(self, eid_bytes: bytes) -> str | None:
         """Backward compatible convenience wrapper for resolve_eid.
@@ -613,6 +1248,8 @@ class GoogleFindMyEIDResolver:
             except Exception as err:  # pragma: no cover - defensive
                 _LOGGER.debug("Failed to cancel refresh interval: %s", err)
         self._lookup.clear()
+        self._lookup_metadata.clear()
+        self._known_timebases.clear()
 
 
 @runtime_checkable

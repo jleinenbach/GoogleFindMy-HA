@@ -17,10 +17,15 @@
     - [Quickstart checks (fast path before `pytest -q`)](#quickstart-checks-fast-path-before-pytest--q)
     - [Cleanup shortcuts](#cleanup-shortcuts)
     - [Module invocation primer](#module-invocation-primer)
+    - [Shared pip cache for stub installs](#shared-pip-cache-for-stub-installs)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
   - [Home Assistant version & dependencies](#home-assistant-version--dependencies)
   - [Maintenance mode](#maintenance-mode)
     - [Config subentry maintenance helper](#config-subentry-maintenance-helper)
+  - [Key material and resolver hypotheses](#key-material-and-resolver-hypotheses)
+    - [Where key material comes from](#where-key-material-comes-from)
+    - [Wrapped EIK hypothesis](#wrapped-eik-hypothesis)
+    - [Timebase hypotheses](#timebase-hypotheses)
   - [2) Roles (right-sized)](#2-roles-right-sized)
     - [2.1 Contributor (implementation) — **accountable for features/fixes/refactors**](#21-contributor-implementation--accountable-for-featuresfixesrefactors)
     - [2.2 Reviewer (maintainer/agent) — **accountable for correctness**](#22-reviewer-maintaineragent--accountable-for-correctness)
@@ -284,6 +289,10 @@ Some developer tools register entry points inside isolated Python environments t
 
 Prefer the executable name when it is available; fall back to the module form whenever onboarding, switching interpreters, or recovering from environment churn.
 
+### Shared pip cache for stub installs
+
+* Export `PIP_CACHE_DIR=/workspace/.cache/pip` (or reuse the default `~/.cache/pip`) before invoking `make test-stubs` so wheel downloads persist across sessions. Reusing the same cache keeps the Home Assistant and pytest stub installs fast and avoids repeated dependency fetches in fresh shells.
+
 ---
 
 ## 1) What must be in **every** PR (lean checklist)
@@ -369,6 +378,24 @@ Prefer the executable name when it is available; fall back to the module form wh
 
 * `custom_components/googlefindmy/__init__.py::ConfigEntrySubEntryManager._deduplicate_subentries()` removes redundant config subentries while preserving a single canonical group/member pair. Call it when migrations or recovery paths encounter Home Assistant's `AbortFlow("already_configured")` errors to converge on a stable state before retrying updates.
 * The helper is **idempotent** and refreshes the manager's internal `_managed` mapping after cleanup. Avoid creating new subentries inside the helper; it only removes duplicates reported by Home Assistant.
+
+---
+
+## Key material and resolver hypotheses
+
+### Where key material comes from
+
+* The integration stores the uploaded secret bundle under `DATA_SECRET_BUNDLE` on the config entry; it originates from the user's `secrets.json` input.
+* Owner key derivation runs through the Spot API helper and is exposed at runtime via `async_get_owner_key(token_cache)`; the helper records the bytes and version in the entry-scoped token cache.
+* Shared-key retrieval is handled by `async_get_shared_key(cache=token_cache)`, which normalizes the value and stores it in the same entry-scoped cache under the canonical `shared_key` key (falling back to migrated per-user keys when present).
+
+### Wrapped EIK hypothesis
+
+* Some trackers appear to return a 60-byte encrypted identity key envelope shaped as `nonce(12) + ciphertext(32) + tag(16)`; AES-GCM verification on that layout rejects invalid tags so unwrap attempts do not misclassify random blobs as valid identity keys.
+
+### Timebase hypotheses
+
+* Resolver scans currently seed three candidates: `ABSOLUTE` (wall-clock), `REL_PAIR` (pair-date anchored), and `REL_SECRETS` (secrets-creation anchored). Once a candidate yields a match, the resolver caches the winning epoch/offset per device to lock onto that timebase and narrow future rotation windows.
 
 ---
 
