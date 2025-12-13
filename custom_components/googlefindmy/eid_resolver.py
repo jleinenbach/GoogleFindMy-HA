@@ -147,6 +147,25 @@ def _coerce_int(value: Any) -> int | None:
         return None
 
 
+def _mask_u32(value: int) -> int:
+    """Return a 32-bit counter value aligned with tracker expectations."""
+
+    return value & 0xFFFFFFFF
+
+
+def _clamp_and_mask_u32(delta_seconds: int) -> int:
+    """Clamp negative deltas to zero before masking to uint32.
+
+    Masking before clamping would wrap negatives into large positive values,
+    which corrupts candidate windows.
+    """
+
+    if delta_seconds <= 0:
+        return 0
+
+    return _mask_u32(delta_seconds)
+
+
 def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] | None:
     """Return a parsed lock payload from registry custom fields when present."""
 
@@ -213,7 +232,7 @@ def _iter_debug_timebases(anchors: Any, *, now: int) -> list[_TimebaseCandidate]
             offset_seconds = _coerce_int(offset_raw) or 0
 
             label = str(raw.get("label") or "REL_DEBUG")
-            reference_time = now - anchor_epoch + offset_seconds
+            reference_time = _clamp_and_mask_u32(now - anchor_epoch + offset_seconds)
             candidates.append(
                 _TimebaseCandidate(
                     label=label,
@@ -227,36 +246,78 @@ def _iter_debug_timebases(anchors: Any, *, now: int) -> list[_TimebaseCandidate]
     return []
 
 
-def _build_timebase_candidates(
+def _compute_provisioning_counter(
     identity: DeviceIdentity, *, now: int
+) -> tuple[int, str | None, int | None]:
+    """Return the provisioning counter used as ``ts_bytes`` for EID derivation.
+
+    The EID PRF expects ``ts_bytes`` to represent **seconds since provisioning**
+    instead of Unix time. We derive the counter from pairing or secrets
+    creation anchors when available and mask to 32 bits to match tracker-side
+    rollover behavior.
+    """
+
+    anchor_candidates = [
+        ("pair_date_unix", identity.pair_date_unix or identity.pair_date),
+        (
+            "secrets_creation_date_unix",
+            identity.secrets_creation_date_unix or identity.secrets_creation_date,
+        ),
+    ]
+
+    for label, anchor in anchor_candidates:
+        anchor_value = _coerce_int(anchor)
+        if anchor_value is None:
+            continue
+
+        counter = _clamp_and_mask_u32(now - anchor_value)
+        return counter, label, anchor_value
+
+    return _mask_u32(now), None, None
+
+
+def _build_timebase_candidates(
+    identity: DeviceIdentity,
+    *,
+    now: int,
+    provisioning_counter: int,
+    primary_anchor_epoch: int | None,
 ) -> list[_TimebaseCandidate]:
     """Return candidate timebases derived from identity anchors."""
 
+    def _build_candidate(
+        label: str, anchor_value: int | None
+    ) -> _TimebaseCandidate | None:
+        if anchor_value is None:
+            return None
+
+        reference = _clamp_and_mask_u32(now - anchor_value)
+        return _TimebaseCandidate(
+            label=label,
+            reference_time=reference,
+            anchor_epoch=anchor_value,
+        )
+
     candidates: list[_TimebaseCandidate] = [
         _TimebaseCandidate(
-            TimebaseLabel.ABSOLUTE, reference_time=now, anchor_epoch=None
+            TimebaseLabel.ABSOLUTE,
+            reference_time=provisioning_counter,
+            anchor_epoch=primary_anchor_epoch,
         )
     ]
 
-    if identity.pair_date is not None:
-        reference = now - identity.pair_date
-        candidates.append(
-            _TimebaseCandidate(
-                TimebaseLabel.REL_PAIR,
-                reference_time=reference,
-                anchor_epoch=identity.pair_date,
-            )
-        )
+    pair_candidate = _build_candidate(
+        TimebaseLabel.REL_PAIR, identity.pair_date_unix or identity.pair_date
+    )
+    if pair_candidate is not None:
+        candidates.append(pair_candidate)
 
-    if identity.secrets_creation_date is not None:
-        reference = now - identity.secrets_creation_date
-        candidates.append(
-            _TimebaseCandidate(
-                TimebaseLabel.REL_SECRETS,
-                reference_time=reference,
-                anchor_epoch=identity.secrets_creation_date,
-            )
-        )
+    secrets_candidate = _build_candidate(
+        TimebaseLabel.REL_SECRETS,
+        identity.secrets_creation_date_unix or identity.secrets_creation_date,
+    )
+    if secrets_candidate is not None:
+        candidates.append(secrets_candidate)
 
     if identity.time_anchors_debug is not None:
         candidates.extend(_iter_debug_timebases(identity.time_anchors_debug, now=now))
@@ -271,7 +332,11 @@ def _build_timebase_candidates(
 
 @lru_cache(maxsize=512)
 def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
-    """Return cached EID candidates for an identity key and window timestamp."""
+    """Return cached EID candidates for an identity key and window timestamp.
+
+    ``timestamp`` must be the provisioning counter (seconds since pairing), not
+    Unix time, to mirror the tracker-side EID PRF input.
+    """
 
     legacy_eid = generate_eid(identity_key, timestamp)
     candidates: list[EidCandidate] = [
@@ -350,8 +415,8 @@ class GoogleFindMyEIDResolver:
     def _start_alignment_timer(self) -> None:
         """Schedule the first refresh on the next rotation boundary."""
 
-        now = int(time.time())
-        seconds_until_boundary = ROTATION_PERIOD - (now % ROTATION_PERIOD)
+        now_unix = int(time.time())
+        seconds_until_boundary = ROTATION_PERIOD - (now_unix % ROTATION_PERIOD)
         delay = seconds_until_boundary or ROTATION_PERIOD
         self._unsub_alignment = async_call_later(
             self.hass, delay, self._handle_alignment_refresh
@@ -412,7 +477,7 @@ class GoogleFindMyEIDResolver:
         )
         lookup: dict[bytes, EIDMatch] = {}
         lookup_metadata: dict[bytes, dict[str, Any]] = {}
-        now = int(time.time())
+        now_unix = int(time.time())
 
         try:
             device_reg = dr.async_get(self.hass)
@@ -472,6 +537,43 @@ class GoogleFindMyEIDResolver:
             registry_id = identity.registry_id
             identity_key_bytes = bytes(identity.identity_key)
 
+            provisioning_counter, anchor_label, anchor_epoch = (
+                _compute_provisioning_counter(identity, now=now_unix)
+            )
+            base_counter = provisioning_counter & ~(ROTATION_PERIOD - 1)
+
+            unix_rotation = now_unix - (now_unix % ROTATION_PERIOD)
+            bases: list[tuple[str, int, int | None, bool, int]] = [
+                ("unix", now_unix, None, True, unix_rotation)
+            ]
+
+            if anchor_label is not None and anchor_epoch is not None:
+                bases.append(
+                    (
+                        f"counter:{anchor_label}",
+                        provisioning_counter,
+                        anchor_epoch,
+                        False,
+                        base_counter,
+                    )
+                )
+
+            _LOGGER.debug(
+                "EID cache anchor: device=%s key_len=%d anchor=%s counter=%d base_counter=%d bases=%s",
+                identity.canonical_id,
+                len(identity_key_bytes),
+                anchor_label or "unknown",
+                provisioning_counter,
+                base_counter,
+                [(b[0], b[1], b[4]) for b in bases],
+            )
+
+            if anchor_label is None:
+                _LOGGER.warning(
+                    "Cannot compute provisioning counter reliably for %s",
+                    identity.canonical_id,
+                )
+
             active_lock: _TimebaseLock | None = self._known_timebases.get(registry_id)
             known_offset = (
                 active_lock.offset
@@ -479,29 +581,25 @@ class GoogleFindMyEIDResolver:
                 else self._known_offsets.get(registry_id)
             )
             known_endianness = self._known_endianness.get(registry_id, False)
-            search_offset = known_offset
+            base_search_offset = known_offset
             if (
-                search_offset is None
+                base_search_offset is None
                 and active_lock is not None
                 and active_lock.rotation_timestamp is not None
             ):
                 rotations_since_lock = round(
-                    (now - active_lock.rotation_timestamp) / ROTATION_PERIOD
+                    (now_unix - active_lock.rotation_timestamp) / ROTATION_PERIOD
                 )
                 aligned_rotation = active_lock.rotation_timestamp + (
                     rotations_since_lock * ROTATION_PERIOD
                 )
-                search_offset = aligned_rotation - now
+                base_search_offset = aligned_rotation - now_unix
             if active_lock is not None and active_lock.label == TimebaseLabel.REL_PAIR:
-                search_offset = 0
-            base_candidates = _build_timebase_candidates(identity, now=now)
-            timebase_candidates = [
-                c
-                for c in base_candidates
-                if active_lock and c.label == active_lock.label
-            ] or base_candidates
-            requested_timebases = {candidate.label for candidate in timebase_candidates}
+                base_search_offset = 0
+
+            requested_timebases: set[str] = set()
             recorded_timebases: set[str] = set()
+            rel_candidates: list[_TimebaseCandidate] = []
             should_log_debug_dump = identity.canonical_id.endswith("d329") or (
                 first_identity_id is not None
                 and identity.canonical_id == first_identity_id
@@ -543,96 +641,147 @@ class GoogleFindMyEIDResolver:
                     }
                     recorded_timebases.add(str(metadata_payload.get("timebase")))
 
-            for candidate in timebase_candidates:
-                passes: list[tuple[range, bool]]
-                if search_offset is not None:
-                    passes = [(range(0, 1), True)]
-                else:
-                    passes = [(NARROW_SCAN_RANGE, False)]
-                    if not skip_deep_scan:
-                        passes.append((range(-90, 91), False))
-
-                for window_range, include_neighbors in passes:
-                    if search_offset is not None:
-                        target_time = max(0, now + search_offset)
-                    elif active_lock is not None:
-                        target_time = active_lock.rotation_timestamp
-                    else:
-                        target_time = candidate.reference_time
-
-                    is_reversed = search_offset is not None and known_endianness
-                    rotation_windows = iter_rotation_windows(
-                        target_time,
-                        rotation_period=ROTATION_PERIOD,
-                        window_range=window_range,
-                        include_neighbors=include_neighbors,
+            for basis_label, basis_now, basis_anchor, lock_ok, basis_rotation in bases:
+                base_candidates = _build_timebase_candidates(
+                    identity,
+                    now=now_unix,
+                    provisioning_counter=basis_rotation,
+                    primary_anchor_epoch=(
+                        basis_anchor if basis_label != "unix" else anchor_epoch
                     )
+                    if anchor_label
+                    else None,
+                )
 
-                    for window_timestamp in rotation_windows:
-                        time_offset = window_timestamp - now
+                timebase_candidates = (
+                    [
+                        candidate
+                        for candidate in base_candidates
+                        if active_lock and candidate.label == active_lock.label
+                    ]
+                    if lock_ok and active_lock is not None
+                    else base_candidates
+                )
 
-                        try:
-                            candidates = _cached_candidates(
-                                identity_key_bytes, window_timestamp
+                requested_timebases.update(
+                    candidate.label for candidate in timebase_candidates
+                )
+
+                for candidate in timebase_candidates:
+                    if candidate.label == TimebaseLabel.REL_PAIR:
+                        rel_candidates.append(candidate)
+
+                    passes: list[tuple[range, bool]]
+                    if base_search_offset is not None and lock_ok:
+                        passes = [(range(0, 1), True)]
+                    else:
+                        passes = [(NARROW_SCAN_RANGE, False)]
+                        if not skip_deep_scan:
+                            passes.append((range(-90, 91), False))
+
+                    for window_range, include_neighbors in passes:
+                        local_search_offset = base_search_offset if lock_ok else None
+                        if (
+                            lock_ok
+                            and local_search_offset is None
+                            and active_lock is not None
+                            and active_lock.rotation_timestamp is not None
+                        ):
+                            rotations_since_lock = round(
+                                (basis_now - active_lock.rotation_timestamp)
+                                / ROTATION_PERIOD
                             )
-                        except Exception as err:  # noqa: BLE001 - defensive guard
-                            _LOGGER.debug(
-                                "Failed to generate EID candidates for %s at %s: %s",
-                                identity.canonical_id,
-                                window_timestamp,
-                                err,
+                            aligned_rotation = active_lock.rotation_timestamp + (
+                                rotations_since_lock * ROTATION_PERIOD
                             )
-                            continue
+                            local_search_offset = aligned_rotation - basis_now
 
-                        for eid_candidate in candidates:
-                            metadata = {
-                                "timebase": candidate.label,
-                                "anchor_epoch": candidate.anchor_epoch,
-                                "rotation_timestamp": window_timestamp,
-                                "time_offset": time_offset,
-                            }
+                        if local_search_offset is not None and lock_ok:
+                            target_time = max(0, basis_now + local_search_offset)
+                        elif lock_ok and active_lock is not None:
+                            target_time = active_lock.rotation_timestamp
+                        else:
+                            target_time = candidate.reference_time
 
-                            if known_offset is None:
-                                _register_with_metadata(
-                                    eid_candidate.eid, False, metadata
-                                )
-                                _register_with_metadata(
-                                    eid_candidate.eid[::-1], True, metadata
-                                )
-                            else:
-                                eid_bytes = (
-                                    eid_candidate.eid[::-1]
-                                    if is_reversed
-                                    else eid_candidate.eid
-                                )
-                                _register_with_metadata(
-                                    eid_bytes, is_reversed, metadata
-                                )
+                        is_reversed = (
+                            local_search_offset is not None
+                            and lock_ok
+                            and known_endianness
+                        )
+                        rotation_windows = iter_rotation_windows(
+                            target_time,
+                            rotation_period=ROTATION_PERIOD,
+                            window_range=window_range,
+                            include_neighbors=include_neighbors,
+                        )
 
-                            if should_log_debug_dump and not debug_dump_logged:
-                                key_snippet = identity_key_bytes.hex()[:6]
-                                _LOGGER.info(
-                                    "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s Variant=%s EID=%s",
+                        for window_timestamp in rotation_windows:
+                            time_offset = window_timestamp - basis_now
+
+                            try:
+                                candidates = _cached_candidates(
+                                    identity_key_bytes, window_timestamp
+                                )
+                            except Exception as err:  # noqa: BLE001 - defensive guard
+                                _LOGGER.debug(
+                                    "Failed to generate EID candidates (%s) for %s at %s: %s",
+                                    basis_label,
                                     identity.canonical_id,
-                                    key_snippet,
                                     window_timestamp,
-                                    eid_candidate.name,
-                                    eid_candidate.eid.hex(),
+                                    err,
                                 )
-                                debug_dump_logged = True
+                                continue
+
+                            for eid_candidate in candidates:
+                                metadata = {
+                                    "timebase": candidate.label,
+                                    "anchor_epoch": candidate.anchor_epoch,
+                                    "rotation_timestamp": window_timestamp,
+                                    "time_offset": time_offset,
+                                    "timestamp_basis": basis_label,
+                                }
+
+                                local_known_offset = known_offset if lock_ok else None
+                                if local_known_offset is None:
+                                    _register_with_metadata(
+                                        eid_candidate.eid, False, metadata
+                                    )
+                                    _register_with_metadata(
+                                        eid_candidate.eid[::-1], True, metadata
+                                    )
+                                else:
+                                    eid_bytes = (
+                                        eid_candidate.eid[::-1]
+                                        if is_reversed
+                                        else eid_candidate.eid
+                                    )
+                                    shifted = time_offset + local_known_offset
+                                    metadata = {
+                                        **metadata,
+                                        "time_offset": shifted,
+                                        "known_offset": local_known_offset,
+                                    }
+                                    _register_with_metadata(
+                                        eid_bytes, is_reversed, metadata
+                                    )
+
+                                if should_log_debug_dump and not debug_dump_logged:
+                                    key_snippet = identity_key_bytes.hex()[:6]
+                                    _LOGGER.info(
+                                        "DEBUG DUMP: Device=%s KeyStart=%s... TS=%s Variant=%s EID=%s",
+                                        identity.canonical_id,
+                                        key_snippet,
+                                        window_timestamp,
+                                        eid_candidate.name,
+                                        eid_candidate.eid.hex(),
+                                    )
+                                    debug_dump_logged = True
 
             if (
                 TimebaseLabel.REL_PAIR in requested_timebases
                 and TimebaseLabel.REL_PAIR not in recorded_timebases
             ):
-                rel_candidate = next(
-                    (
-                        candidate
-                        for candidate in timebase_candidates
-                        if candidate.label == TimebaseLabel.REL_PAIR
-                    ),
-                    None,
-                )
+                rel_candidate = next((candidate for candidate in rel_candidates), None)
                 if rel_candidate is not None:
                     fallback_rotation = max(
                         0,
@@ -655,7 +804,9 @@ class GoogleFindMyEIDResolver:
                                 "timebase": TimebaseLabel.REL_PAIR,
                                 "anchor_epoch": rel_candidate.anchor_epoch,
                                 "rotation_timestamp": fallback_rotation,
-                                "time_offset": fallback_rotation - now,
+                                "time_offset": fallback_rotation - base_counter,
+                                "timestamp_basis": anchor_label
+                                and f"counter:{anchor_label}",
                             }
                             _register_with_metadata(
                                 eid_candidate.eid, False, fallback_metadata

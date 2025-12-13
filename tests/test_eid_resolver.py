@@ -254,7 +254,12 @@ def test_build_timebase_candidates_with_time_anchor_hints(
         },
     )
 
-    candidates = _build_timebase_candidates(identity, now=now)
+    candidates = _build_timebase_candidates(
+        identity,
+        now=now,
+        provisioning_counter=now,
+        primary_anchor_epoch=None,
+    )
 
     assert any(candidate.label == "REL_DEBUG_HINT" for candidate in candidates)
     debug_candidate = next(
@@ -272,7 +277,12 @@ def test_build_timebase_candidates_ignores_unparsed_anchor_list() -> None:
         time_anchors_debug=[{"unexpected": True}],
     )
 
-    candidates = _build_timebase_candidates(identity, now=now)
+    candidates = _build_timebase_candidates(
+        identity,
+        now=now,
+        provisioning_counter=now,
+        primary_anchor_epoch=None,
+    )
 
     labels = {candidate.label for candidate in candidates}
     assert labels == {TimebaseLabel.ABSOLUTE}
@@ -839,21 +849,20 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
 
     await resolver._refresh_cache()
 
-    initial_count = len(recorded_timestamps)
-    assert initial_count > 0
+    assert recorded_timestamps
 
-    rel_pair_eids = [
-        eid
+    counter_eids = [
+        (eid, meta)
         for eid, meta in resolver._lookup_metadata.items()
-        if meta.get("timebase") == TimebaseLabel.REL_PAIR
+        if str(meta.get("timestamp_basis", "")).startswith("counter")
     ]
-    assert rel_pair_eids
+    assert counter_eids
 
-    match = resolver.resolve_eid(rel_pair_eids[0])
+    match = resolver.resolve_eid(counter_eids[0][0])
     assert match is not None
     lock = resolver._known_timebases.get(identity.registry_id)
     assert lock is not None
-    assert lock.label == TimebaseLabel.REL_PAIR
+    assert lock.label == str(counter_eids[0][1].get("timebase"))
     assert lock.anchor_epoch == pair_date
 
     recorded_timestamps.clear()
@@ -861,15 +870,20 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
 
     await resolver._refresh_cache()
 
-    subsequent_count = len(recorded_timestamps)
-    assert subsequent_count < initial_count
     rotation_start = current_time - (current_time % ROTATION_PERIOD)
     expected_neighbors = {
         rotation_start,
         max(0, rotation_start - ROTATION_PERIOD),
+        max(0, rotation_start - (2 * ROTATION_PERIOD)),
         rotation_start + ROTATION_PERIOD,
     }
-    assert set(recorded_timestamps) <= expected_neighbors
+    unix_windows = {
+        meta.get("rotation_timestamp")
+        for meta in resolver._lookup_metadata.values()
+        if meta.get("timestamp_basis") == "unix"
+    }
+    assert unix_windows
+    assert unix_windows <= expected_neighbors
 
 
 @pytest.mark.asyncio

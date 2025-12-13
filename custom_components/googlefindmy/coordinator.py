@@ -661,7 +661,9 @@ class DeviceIdentity:
     config_entry_id: str | None = None
     fast_pair_model_id: str | None = None
     pair_date: int | None = None
+    pair_date_unix: int | None = None
     secrets_creation_date: int | None = None
+    secrets_creation_date_unix: int | None = None
     time_anchors_debug: Any | None = None
 
 
@@ -4520,7 +4522,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         entry_id = entry.entry_id if entry is not None else None
         registry_map: dict[str, tuple[str, bytes | None]] = {}
         registry_pair_dates: dict[str, int] = {}
+        registry_pair_dates_unix: dict[str, int] = {}
         registry_secrets_creation_dates: dict[str, int] = {}
+        registry_secrets_creation_dates_unix: dict[str, int] = {}
         registry_time_anchors_debug: dict[str, Any] = {}
         if entry is not None:
             device_reg = dr.async_get(self.hass)
@@ -4556,6 +4560,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     pair_date = _extract_pair_date(custom_fields)
                     if pair_date is not None:
                         registry_pair_dates[canonical_id] = pair_date
+                        normalized = _normalize_timestamp(pair_date)
+                        if normalized is not None:
+                            registry_pair_dates_unix[canonical_id] = normalized
 
                     secrets_creation_date = _extract_secrets_creation_date(
                         custom_fields
@@ -4564,6 +4571,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         registry_secrets_creation_dates[canonical_id] = (
                             secrets_creation_date
                         )
+                        normalized = _normalize_timestamp(secrets_creation_date)
+                        if normalized is not None:
+                            registry_secrets_creation_dates_unix[canonical_id] = (
+                                normalized
+                            )
 
                     anchors_debug = _extract_time_anchors_debug(custom_fields)
                     if anchors_debug is not None:
@@ -4577,7 +4589,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         last_raw_keys: dict[str, list[str]] = {}
         last_identity_candidates: dict[str, list[bytes]] = {}
         last_pair_dates: dict[str, int] = {}
+        last_pair_dates_unix: dict[str, int] = {}
         last_secrets_creation_dates: dict[str, int] = {}
+        last_secrets_creation_dates_unix: dict[str, int] = {}
         last_time_anchors_debug: dict[str, Any] = {}
         if isinstance(last_device_list, Iterable):
             for raw in last_device_list:
@@ -4626,10 +4640,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 pair_date = _extract_pair_date(raw)
                 if pair_date is not None:
                     last_pair_dates[dev_id] = pair_date
+                    normalized = _normalize_timestamp(pair_date)
+                    if normalized is not None:
+                        last_pair_dates_unix[dev_id] = normalized
 
                 secrets_creation_date = _extract_secrets_creation_date(raw)
                 if secrets_creation_date is not None:
                     last_secrets_creation_dates[dev_id] = secrets_creation_date
+                    normalized = _normalize_timestamp(secrets_creation_date)
+                    if normalized is not None:
+                        last_secrets_creation_dates_unix[dev_id] = normalized
 
                 anchors_debug = _extract_time_anchors_debug(raw)
                 if anchors_debug is not None:
@@ -4642,7 +4662,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         raw_data_keys: dict[str, list[str]] = {}
         data_identity_candidates: dict[str, list[bytes]] = {}
         data_pair_dates: dict[str, int] = {}
+        data_pair_dates_unix: dict[str, int] = {}
         data_secrets_creation_dates: dict[str, int] = {}
+        data_secrets_creation_dates_unix: dict[str, int] = {}
         data_time_anchors_debug: dict[str, Any] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
@@ -4691,10 +4713,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 pair_date = _extract_pair_date(raw)
                 if pair_date is not None:
                     data_pair_dates[dev_id] = pair_date
+                    normalized = _normalize_timestamp(pair_date)
+                    if normalized is not None:
+                        data_pair_dates_unix[dev_id] = normalized
 
                 secrets_creation_date = _extract_secrets_creation_date(raw)
                 if secrets_creation_date is not None:
                     data_secrets_creation_dates[dev_id] = secrets_creation_date
+                    normalized = _normalize_timestamp(secrets_creation_date)
+                    if normalized is not None:
+                        data_secrets_creation_dates_unix[dev_id] = normalized
 
                 anchors_debug = _extract_time_anchors_debug(raw)
                 if anchors_debug is not None:
@@ -4708,7 +4736,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_data_keys: dict[str, list[str]] = {}
         cache_identity_candidates: dict[str, list[bytes]] = {}
         cache_pair_dates: dict[str, int] = {}
+        cache_pair_dates_unix: dict[str, int] = {}
         cache_secrets_creation_dates: dict[str, int] = {}
+        cache_secrets_creation_dates_unix: dict[str, int] = {}
         cache_time_anchors_debug: dict[str, Any] = {}
         if isinstance(cache, dict):
             for dev_id in allowed_raw_ids:
@@ -4757,10 +4787,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 pair_date = _extract_pair_date(payload)
                 if pair_date is not None:
                     cache_pair_dates[dev_id] = pair_date
+                    normalized = _normalize_timestamp(pair_date)
+                    if normalized is not None:
+                        cache_pair_dates_unix[dev_id] = normalized
 
                 secrets_creation_date = _extract_secrets_creation_date(payload)
                 if secrets_creation_date is not None:
                     cache_secrets_creation_dates[dev_id] = secrets_creation_date
+                    normalized = _normalize_timestamp(secrets_creation_date)
+                    if normalized is not None:
+                        cache_secrets_creation_dates_unix[dev_id] = normalized
 
                 anchors_debug = _extract_time_anchors_debug(payload)
                 if anchors_debug is not None:
@@ -4816,12 +4852,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 last_pair_dates,
             )
 
+            pair_date_unix = _lookup_prio(
+                lookup_id,
+                registry_pair_dates_unix,
+                cache_pair_dates_unix,
+                data_pair_dates_unix,
+                last_pair_dates_unix,
+            )
+
             secrets_creation_date = _lookup_prio(
                 lookup_id,
                 registry_secrets_creation_dates,
                 cache_secrets_creation_dates,
                 data_secrets_creation_dates,
                 last_secrets_creation_dates,
+            )
+
+            secrets_creation_date_unix = _lookup_prio(
+                lookup_id,
+                registry_secrets_creation_dates_unix,
+                cache_secrets_creation_dates_unix,
+                data_secrets_creation_dates_unix,
+                last_secrets_creation_dates_unix,
             )
 
             anchors_debug = _lookup_prio(
@@ -4839,9 +4891,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             normalized_candidates: list[bytes] = []
             for candidate in identity_candidates:
-                normalized = self._normalize_identity_key(candidate)
-                if normalized is not None and normalized not in normalized_candidates:
-                    normalized_candidates.append(normalized)
+                normalized_key = self._normalize_identity_key(candidate)
+                if (
+                    normalized_key is not None
+                    and normalized_key not in normalized_candidates
+                ):
+                    normalized_candidates.append(normalized_key)
 
             if not normalized_candidates and encrypted_identity_key is None:
                 _LOGGER.debug(
@@ -4867,7 +4922,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             config_entry_id=entry_id,
                             fast_pair_model_id=fast_pair_model_id,
                             pair_date=pair_date,
+                            pair_date_unix=pair_date_unix,
                             secrets_creation_date=secrets_creation_date,
+                            secrets_creation_date_unix=secrets_creation_date_unix,
                             time_anchors_debug=anchors_debug,
                         )
                     )
@@ -4883,7 +4940,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         config_entry_id=entry_id,
                         fast_pair_model_id=fast_pair_model_id,
                         pair_date=pair_date,
+                        pair_date_unix=pair_date_unix,
                         secrets_creation_date=secrets_creation_date,
+                        secrets_creation_date_unix=secrets_creation_date_unix,
                         time_anchors_debug=anchors_debug,
                     )
                 )
