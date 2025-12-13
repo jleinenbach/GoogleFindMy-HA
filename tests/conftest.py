@@ -16,6 +16,38 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+import pytest_socket
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Allow sockets globally and register asyncio markers for coroutine tests."""
+
+    pytest_socket.enable_socket()
+    config.option.disable_socket = False
+    config.option.allow_unix_socket = True
+    config.option.allow_host = ["127.0.0.1", "::1", "localhost"]
+    config.addinivalue_line(
+        "markers",
+        "asyncio: execute the coroutine test using an isolated event loop",
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def enable_real_sockets() -> Iterable[None]:
+    """Allow socket usage across the test session for network-marked tests."""
+
+    pytest_socket.enable_socket()
+    pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
+    yield
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Re-enable sockets after other plugins run setup hooks."""
+
+    pytest_socket.enable_socket()
+    pytest_socket.socket_allow_hosts(["127.0.0.1", "::1", "localhost"])
+
 
 from tests.helpers import (
     install_homeassistant_core_callback_stub,
@@ -69,6 +101,7 @@ def disable_http_server() -> Iterable[None]:
     ):
         yield
 
+
 _CONST_MODULE = load_googlefindmy_const_module()
 _SERVICE_DEVICE_NAME: str = getattr(
     _CONST_MODULE, "SERVICE_DEVICE_NAME", "Google Find My Integration"
@@ -82,9 +115,7 @@ _SERVICE_DEVICE_MANUFACTURER: str = getattr(
 _SERVICE_DEVICE_TRANSLATION_KEY: str = getattr(
     _CONST_MODULE, "SERVICE_DEVICE_TRANSLATION_KEY", "google_find_hub_service"
 )
-_INTEGRATION_VERSION: str = getattr(
-    _CONST_MODULE, "INTEGRATION_VERSION", "0.0.0"
-)
+_INTEGRATION_VERSION: str = getattr(_CONST_MODULE, "INTEGRATION_VERSION", "0.0.0")
 _SERVICE_DEVICE_IDENTIFIER: Callable[[str], tuple[str, str]] = getattr(
     _CONST_MODULE, "service_device_identifier"
 )
@@ -309,7 +340,9 @@ def deterministic_config_subentry_id(
     def _assign(entry: Any, platform: str, candidate: str | None, **kwargs: Any) -> str:
         known_ids = kwargs.get("known_ids")
         if isinstance(known_ids, Iterable):
-            known_ids = [value for value in known_ids if isinstance(value, str) and value]
+            known_ids = [
+                value for value in known_ids if isinstance(value, str) and value
+            ]
         else:
             known_ids = []
 
@@ -409,6 +442,7 @@ def subentry_support(monkeypatch: pytest.MonkeyPatch):
     toggle.as_modern()
     return toggle
 
+
 # Ensure the package root is importable without installing the package.
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -434,15 +468,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     except ValueError:
         # Another plugin already registered the option; reuse it.
         return
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Register the asyncio marker for coroutine-based tests."""
-
-    config.addinivalue_line(
-        "markers",
-        "asyncio: execute the coroutine test using an isolated event loop",
-    )
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -494,9 +519,7 @@ def _stub_homeassistant() -> None:
     config_entries.SOURCE_RECONFIGURE = "reconfigure"
 
     install_config_entries_stubs(config_entries)
-    ConfigEntryAuthFailed = getattr(
-        config_entries, "ConfigEntryAuthFailed", Exception
-    )
+    ConfigEntryAuthFailed = getattr(config_entries, "ConfigEntryAuthFailed", Exception)
     sys.modules["homeassistant.config_entries"] = config_entries
 
     try:
@@ -615,9 +638,7 @@ def _stub_homeassistant() -> None:
             domain = self.domain if isinstance(self.domain, str) else ""
             if domain == "googlefindmy":
                 try:
-                    return importlib.import_module(
-                        f"custom_components.{domain}"
-                    )
+                    return importlib.import_module(f"custom_components.{domain}")
                 except ModuleNotFoundError:
                     return SimpleNamespace(__name__=domain)
 
@@ -642,7 +663,9 @@ def _stub_homeassistant() -> None:
     class Event(SimpleNamespace):
         """Minimal Event stub carrying type and data payload."""
 
-        def __init__(self, event_type: str, data: Mapping[str, Any] | None = None) -> None:
+        def __init__(
+            self, event_type: str, data: Mapping[str, Any] | None = None
+        ) -> None:
             super().__init__(event_type=event_type, data=data or {})
 
     class HomeAssistant:  # minimal HomeAssistant placeholder
@@ -679,7 +702,9 @@ def _stub_homeassistant() -> None:
             if domain_fragment and key_fragment:
                 derived_message = f"{domain_fragment}:{key_fragment}"
             else:
-                derived_message = key_fragment or domain_fragment or "Service validation error"
+                derived_message = (
+                    key_fragment or domain_fragment or "Service validation error"
+                )
 
             if args:
                 super().__init__(*args)
@@ -731,7 +756,9 @@ def _stub_homeassistant() -> None:
     def frame_set_up(hass: Any) -> None:
         frame_module._configured_instances.append(hass)
 
-    def frame_report(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - optional stub
+    def frame_report(
+        *args: Any, **kwargs: Any
+    ) -> None:  # pragma: no cover - optional stub
         return None
 
     frame_module.set_up = frame_set_up
@@ -763,9 +790,7 @@ def _stub_homeassistant() -> None:
     sys.modules["homeassistant.helpers.entity"] = entity_module
     setattr(helpers_pkg, "entity", entity_module)
 
-    entity_component_module = ModuleType(
-        "homeassistant.helpers.entity_component"
-    )
+    entity_component_module = ModuleType("homeassistant.helpers.entity_component")
     entity_component_module.split_entity_id = split_entity_id
     sys.modules["homeassistant.helpers.entity_component"] = entity_component_module
     setattr(helpers_pkg, "entity_component", entity_component_module)
@@ -806,7 +831,9 @@ def _stub_homeassistant() -> None:
         async def async_restore_entity_added(self, *_args: Any, **_kwargs: Any) -> None:
             return None
 
-        async def async_restore_entity_removed(self, *_args: Any, **_kwargs: Any) -> None:
+        async def async_restore_entity_removed(
+            self, *_args: Any, **_kwargs: Any
+        ) -> None:
             return None
 
     restore_state_module.RestoreEntity = RestoreEntity
@@ -825,6 +852,7 @@ def _stub_homeassistant() -> None:
     issue_registry_module.IssueSeverity = SimpleNamespace(ERROR="error", INFO="info")
 
     if not hasattr(issue_registry_module, "IssueRegistryStore"):
+
         class IssueRegistryStore:  # pragma: no cover - storage shim
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 self.data: dict[str, Any] | None = None
@@ -901,11 +929,14 @@ def _stub_homeassistant() -> None:
         def report(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - no-op
             return None
 
-        def report_usage(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover - no-op
+        def report_usage(
+            self, *args: Any, **kwargs: Any
+        ) -> None:  # pragma: no cover - no-op
             return None
 
         def __getattr__(self, name: str) -> Any:
             if name.startswith("async_set_up") or name.startswith("async_setup"):
+
                 async def _async_proxy(hass: Any | None) -> None:
                     result = self.async_set_up(hass)
                     if inspect.isawaitable(result):
@@ -914,6 +945,7 @@ def _stub_homeassistant() -> None:
                 return _async_proxy
 
             if name.startswith("set_up") and name != "set_up":
+
                 def _setup_proxy(hass: Any | None) -> None:
                     self.set_up(hass)
 
@@ -924,7 +956,9 @@ def _stub_homeassistant() -> None:
     frame_helper = _FrameHelper()
 
     def frame_set_up(*args: Any, **kwargs: Any) -> None:
-        frame_helper.set_up(kwargs.get("hass") if "hass" in kwargs else (args[0] if args else None))
+        frame_helper.set_up(
+            kwargs.get("hass") if "hass" in kwargs else (args[0] if args else None)
+        )
 
     async def frame_async_set_up(*args: Any, **kwargs: Any) -> None:
         result = frame_helper.async_set_up(
@@ -951,12 +985,14 @@ def _stub_homeassistant() -> None:
     device_registry_module.EVENT_DEVICE_REGISTRY_UPDATED = "device_registry_updated"
 
     if not hasattr(device_registry_module, "DeviceEntryType"):
+
         class DeviceEntryType:  # noqa: D401 - stub enum container
             SERVICE = "service"
 
         device_registry_module.DeviceEntryType = DeviceEntryType
 
     if not hasattr(device_registry_module, "DeviceRegistryStore"):
+
         class DeviceRegistryStore:  # pragma: no cover - storage shim
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 self.data: dict[str, Any] | None = None
@@ -1172,9 +1208,7 @@ def _stub_homeassistant() -> None:
                     device.config_entries = set()
                     device.config_entries_subentries.clear()
                 else:
-                    entries = set(
-                        getattr(device, "config_entries", set()) or set()
-                    )
+                    entries = set(getattr(device, "config_entries", set()) or set())
                     entries.add(cast(str, add_config_entry_id))
                     device.config_entries = entries
                 updates["add_config_entry_id"] = cast(str | None, add_config_entry_id)
@@ -1197,14 +1231,19 @@ def _stub_homeassistant() -> None:
                 effective_subentry = None
             if effective_subentry is not _MISSING:
                 target_entries: set[str] = set()
-                if add_config_entry_id is not _MISSING and add_config_entry_id is not None:
+                if (
+                    add_config_entry_id is not _MISSING
+                    and add_config_entry_id is not None
+                ):
                     target_entries.add(cast(str, add_config_entry_id))
                 elif config_entry_id is not _MISSING and config_entry_id is not None:
                     target_entries.add(cast(str, config_entry_id))
                 if not target_entries:
                     target_entries.update(device.config_entries)
                 for entry_id in target_entries:
-                    bucket = device.config_entries_subentries.setdefault(entry_id, set())
+                    bucket = device.config_entries_subentries.setdefault(
+                        entry_id, set()
+                    )
                     bucket.clear()
                     bucket.add(cast(str | None, effective_subentry))
                     device._sync_config_subentry_id(entry_id)
@@ -1297,6 +1336,7 @@ def _stub_homeassistant() -> None:
 
     aiohttp_client_module = ModuleType("homeassistant.helpers.aiohttp_client")
     aiohttp_client_module.async_get_clientsession = lambda hass: None
+
     async def _stub_async_make_resolver(*_args, **_kwargs):
         return None
 
@@ -1374,7 +1414,9 @@ def _stub_homeassistant() -> None:
         def async_write_ha_state(self) -> None:  # pragma: no cover - stub behaviour
             return None
 
-        async def async_added_to_hass(self) -> None:  # pragma: no cover - stub behaviour
+        async def async_added_to_hass(
+            self,
+        ) -> None:  # pragma: no cover - stub behaviour
             return None
 
         def __class_getitem__(cls, _item):  # pragma: no cover - typing compatibility
@@ -1388,15 +1430,17 @@ def _stub_homeassistant() -> None:
 
     event_module = ModuleType("homeassistant.helpers.event")
 
-    def _async_call_later(
-        *_args, **_kwargs
-    ):  # pragma: no cover - stubbed behaviour
+    def _async_call_later(*_args, **_kwargs):  # pragma: no cover - stubbed behaviour
         return None
 
     event_module.async_call_later = _async_call_later
 
     def _async_track_time_interval(
-        hass: Any, action: Callable[[Any], Any], _interval: timedelta, *_args: Any, **_kwargs: Any
+        hass: Any,
+        action: Callable[[Any], Any],
+        _interval: timedelta,
+        *_args: Any,
+        **_kwargs: Any,
     ) -> Callable[[], None]:
         del hass, action, _interval, _args, _kwargs
         return lambda: None
@@ -1413,6 +1457,7 @@ def _stub_homeassistant() -> None:
     entity_registry_module = sys.modules["homeassistant.helpers.entity_registry"]
 
     if not hasattr(entity_registry_module, "EntityRegistryStore"):
+
         class EntityRegistryStore:  # pragma: no cover - storage shim
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 self.data: dict[str, Any] | None = None
@@ -1730,7 +1775,9 @@ def fixture_manifest(integration_root: Path) -> dict[str, object]:
 def fixture_coordinator_teardown_defaults() -> Callable[[Any], None]:
     """Populate coordinator teardown attributes with safe defaults."""
 
-    def _apply(coordinator: Any, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+    def _apply(
+        coordinator: Any, *, loop: asyncio.AbstractEventLoop | None = None
+    ) -> None:
         if getattr(coordinator, "_dr_unsub", None) is None:
             coordinator._dr_unsub = lambda: None
         if getattr(coordinator, "_short_retry_cancel", None) is None:
@@ -1768,12 +1815,15 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
         subentry_key: str = TRACKER_SUBENTRY_KEY,
         service_subentry_key: str = SERVICE_SUBENTRY_KEY,
         metadata_for_feature: Mapping[str, str] | None = None,
-        snapshot_callback: Callable[[str | None, str | None], Iterable[dict[str, Any]]] | None = None,
+        snapshot_callback: Callable[[str | None, str | None], Iterable[dict[str, Any]]]
+        | None = None,
         init_hook: Callable[..., None] | None = None,
         methods: Mapping[str, Callable[..., Any]] | None = None,
         extra_attributes: Mapping[str, Any] | None = None,
     ) -> type[Any]:
-        base_data = list(data) if data is not None else [{"id": "device-1", "name": "Device"}]
+        base_data = (
+            list(data) if data is not None else [{"id": "device-1", "name": "Device"}]
+        )
         base_stats = dict(stats or {"background_updates": 1})
         base_performance = dict(performance_metrics or {})
         feature_map = dict(metadata_for_feature or {})
@@ -1811,7 +1861,9 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 if init_hook is not None:
                     init_hook(self, hass=hass, cache=cache, kwargs=kwargs)
 
-            def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+            def async_add_listener(
+                self, listener: Callable[[], None]
+            ) -> Callable[[], None]:
                 self._listeners.append(listener)
                 return lambda: None
 
@@ -1834,13 +1886,19 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
             async def async_shutdown(self) -> None:
                 return None
 
-            async def async_request_refresh(self) -> None:  # pragma: no cover - optional
+            async def async_request_refresh(
+                self,
+            ) -> None:  # pragma: no cover - optional
                 return None
 
-            def async_set_updated_data(self, _data: Any) -> None:  # pragma: no cover - optional
+            def async_set_updated_data(
+                self, _data: Any
+            ) -> None:  # pragma: no cover - optional
                 return None
 
-            def push_updated(self, _ids: list[str]) -> None:  # pragma: no cover - optional
+            def push_updated(
+                self, _ids: list[str]
+            ) -> None:  # pragma: no cover - optional
                 return None
 
             def purge_device(self, device_id: str) -> None:
@@ -1874,7 +1932,9 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 """Mirror the coordinator visibility wait helper."""
 
                 manager = getattr(self, "subentry_manager", None)
-                wait_visible = getattr(manager, "async_wait_visible_device_updates", None)
+                wait_visible = getattr(
+                    manager, "async_wait_visible_device_updates", None
+                )
                 if callable(wait_visible):
                     await wait_visible()
 
@@ -1942,6 +2002,8 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
         return _CoordinatorStub
 
     return _factory
+
+
 _stub_homeassistant()
 
 

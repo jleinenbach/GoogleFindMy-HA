@@ -508,7 +508,9 @@ class _RecorderHistoryProxy:
     def __getattr__(self, name: str) -> Any:  # pragma: no cover - proxy passthrough
         return getattr(self._load(), name)
 
-    def __setattr__(self, name: str, value: Any) -> None:  # pragma: no cover - proxy passthrough
+    def __setattr__(
+        self, name: str, value: Any
+    ) -> None:  # pragma: no cover - proxy passthrough
         if name == "_module":
             super().__setattr__(name, value)
             return
@@ -641,6 +643,13 @@ class DeviceIdentity:
         device_type: SpotDeviceType enum value reported by the tracker, when known.
         config_entry_id: Parent config entry ID that owns the tracker.
         fast_pair_model_id: Fast Pair model identifier advertised by the tracker.
+        pair_date: Hypothesized tracker pairing epoch (seconds) derived from registrations
+            or cached secrets; treated as advisory when reconciling EID timelines.
+        secrets_creation_date: Creation time for the encrypted user secrets bundle, if
+            present; surfaced for debugging because the exact server-side semantics are
+            not yet confirmed.
+        time_anchors_debug: Optional debug payload with server-provided anchor hints used
+            to reason about EID drift; shape may vary and is forwarded best-effort.
     """
 
     registry_id: str
@@ -651,6 +660,9 @@ class DeviceIdentity:
     device_type: int | None = None
     config_entry_id: str | None = None
     fast_pair_model_id: str | None = None
+    pair_date: int | None = None
+    secrets_creation_date: int | None = None
+    time_anchors_debug: Any | None = None
 
 
 class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
@@ -1970,9 +1982,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         try:
             return call(**kwargs)
         except TypeError as err:
-            if not self._device_registry_kwargs_need_legacy_retry(
-                call, err, kwargs
-            ):
+            if not self._device_registry_kwargs_need_legacy_retry(call, err, kwargs):
                 raise
 
             legacy_kwargs = self._device_registry_build_legacy_kwargs(kwargs)
@@ -1984,7 +1994,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return call(**legacy_kwargs)
         except (UnknownEntry, UnknownSubEntry) as err:
             kwarg_name = self._device_registry_config_subentry_kwarg_name(call)
-            if kwarg_name == "add_config_subentry_id" or "config_subentry_id" not in kwargs:
+            if (
+                kwarg_name == "add_config_subentry_id"
+                or "config_subentry_id" not in kwargs
+            ):
                 raise
             _LOGGER.debug(
                 "Device registry call %s rejected config_subentry_id (%s); retrying without it",
@@ -2220,7 +2233,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if isinstance(entry_id, str) and entry_id:
                 stable_default = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-subentry"
 
-            if stable_default is not None and service_config_subentry_id == stable_default:
+            if (
+                stable_default is not None
+                and service_config_subentry_id == stable_default
+            ):
                 _LOGGER.debug(
                     "[%s] Applying stable default service config_subentry_id %s (registry not ready)",
                     entry.entry_id,
@@ -4328,7 +4344,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         excluded from the returned list. Only devices currently eligible for
         polling (tracked in ``_enabled_poll_device_ids``) are considered for
         EID resolution. The returned ``registry_id`` refers to the Home
-        Assistant Device Registry identifier for each tracker.
+        Assistant Device Registry identifier for each tracker. Pairing and
+        secrets-creation timestamps are forwarded when available to help the
+        resolver reason about EID rotation windows, but the integration treats
+        them as hypotheses because Google has not documented the server-side
+        semantics. Any debug time anchor hints present in cached payloads are
+        also forwarded best-effort for diagnostics.
         """
 
         def _normalize_device_type(value: Any) -> int | None:
@@ -4362,6 +4383,127 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     return source[key]
             return None
 
+        def _normalize_timestamp(value: Any) -> int | None:
+            """Return epoch seconds from ints/strings or Timestamp-like mappings."""
+
+            ts = _normalize_epoch_seconds(value)
+            if ts is not None:
+                return int(ts)
+
+            if isinstance(value, Mapping):
+                seconds = _normalize_epoch_seconds(value.get("seconds"))
+                nanos_raw = value.get("nanos") or value.get("nsec")
+                nanos = None
+                try:
+                    if nanos_raw is not None:
+                        nanos = float(nanos_raw) / 1_000_000_000
+                except (TypeError, ValueError):
+                    nanos = None
+
+                if seconds is None and nanos is None:
+                    return None
+
+                ts = seconds or 0.0
+                if nanos:
+                    ts += nanos
+                return int(ts)
+
+            return None
+
+        def _extract_timestamp_from_keys(
+            payload: Mapping[str, Any] | None, *keys: str
+        ) -> int | None:
+            if not isinstance(payload, Mapping):
+                return None
+
+            for key in keys:
+                if key in payload:
+                    ts = _normalize_timestamp(payload.get(key))
+                    if ts is not None:
+                        return ts
+            return None
+
+        def _extract_pair_date(payload: Mapping[str, Any] | None) -> int | None:
+            """Return best-effort pairDate from various payload shapes."""
+
+            if not isinstance(payload, Mapping):
+                return None
+
+            direct = _extract_timestamp_from_keys(
+                payload, "pair_date", "pairDate", "pairingDate"
+            )
+            if direct is not None:
+                return direct
+
+            registration = payload.get("deviceRegistration") or payload.get(
+                "device_registration"
+            )
+            if isinstance(registration, Mapping):
+                nested = _extract_pair_date(registration)
+                if nested is not None:
+                    return nested
+
+            information = payload.get("information")
+            if isinstance(information, Mapping):
+                nested = _extract_pair_date(information)
+                if nested is not None:
+                    return nested
+
+            return None
+
+        def _extract_secrets_creation_date(
+            payload: Mapping[str, Any] | None,
+        ) -> int | None:
+            """Return best-effort creation time for encrypted secrets bundles."""
+
+            if not isinstance(payload, Mapping):
+                return None
+
+            direct = _extract_timestamp_from_keys(
+                payload, "secrets_creation_date", "creation_date", "creationDate"
+            )
+            if direct is not None:
+                return direct
+
+            encrypted = payload.get("encrypted_user_secrets") or payload.get(
+                "encryptedUserSecrets"
+            )
+            if isinstance(encrypted, Mapping):
+                encrypted_ts = _extract_timestamp_from_keys(
+                    encrypted, "creation_date", "creationDate"
+                )
+                if encrypted_ts is not None:
+                    return encrypted_ts
+
+            registration = payload.get("deviceRegistration") or payload.get(
+                "device_registration"
+            )
+            if isinstance(registration, Mapping):
+                nested = _extract_secrets_creation_date(registration)
+                if nested is not None:
+                    return nested
+
+            return None
+
+        def _extract_time_anchors_debug(
+            payload: Mapping[str, Any] | None,
+        ) -> Any | None:
+            """Return optional time anchor hints for diagnostics."""
+
+            if not isinstance(payload, Mapping):
+                return None
+
+            for key in (
+                "time_anchors_debug",
+                "timeAnchorsDebug",
+                "time_anchors",
+                "timeAnchors",
+            ):
+                if key in payload:
+                    return payload.get(key)
+
+            return None
+
         enabled_ids = set(self._enabled_poll_device_ids)
         _LOGGER.debug(
             "Collecting EID identities for %d polling-enabled devices...",
@@ -4377,6 +4519,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         entry = self.config_entry
         entry_id = entry.entry_id if entry is not None else None
         registry_map: dict[str, tuple[str, bytes | None]] = {}
+        registry_pair_dates: dict[str, int] = {}
+        registry_secrets_creation_dates: dict[str, int] = {}
+        registry_time_anchors_debug: dict[str, Any] = {}
         if entry is not None:
             device_reg = dr.async_get(self.hass)
             extract_identifier = getattr(self, "_extract_our_identifier", None)
@@ -4390,7 +4535,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                 if not canonical_id:
                     _LOGGER.debug(
-                        "Device registry entry %s skipped: No canonical identifier", device.id
+                        "Device registry entry %s skipped: No canonical identifier",
+                        device.id,
                     )
                     continue
 
@@ -4398,11 +4544,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     continue
 
                 custom_fields = getattr(device, "custom_fields", None)
-                raw_identity = custom_fields.get("identity_key") if custom_fields else None
+                raw_identity = (
+                    custom_fields.get("identity_key") if custom_fields else None
+                )
                 registry_map[canonical_id] = (
                     device.id,
                     self._normalize_identity_key(raw_identity),
                 )
+
+                if isinstance(custom_fields, Mapping):
+                    pair_date = _extract_pair_date(custom_fields)
+                    if pair_date is not None:
+                        registry_pair_dates[canonical_id] = pair_date
+
+                    secrets_creation_date = _extract_secrets_creation_date(
+                        custom_fields
+                    )
+                    if secrets_creation_date is not None:
+                        registry_secrets_creation_dates[canonical_id] = (
+                            secrets_creation_date
+                        )
+
+                    anchors_debug = _extract_time_anchors_debug(custom_fields)
+                    if anchors_debug is not None:
+                        registry_time_anchors_debug[canonical_id] = anchors_debug
 
         last_device_list = getattr(self, "_last_device_list", None)
         last_identities: dict[str, bytes] = {}
@@ -4411,6 +4576,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         last_fast_pair_model_ids: dict[str, str | None] = {}
         last_raw_keys: dict[str, list[str]] = {}
         last_identity_candidates: dict[str, list[bytes]] = {}
+        last_pair_dates: dict[str, int] = {}
+        last_secrets_creation_dates: dict[str, int] = {}
+        last_time_anchors_debug: dict[str, Any] = {}
         if isinstance(last_device_list, Iterable):
             for raw in last_device_list:
                 if not isinstance(raw, dict):
@@ -4421,9 +4589,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                 last_raw_keys[dev_id] = list(raw.keys())
                 parsed = self._normalize_identity_key(
-                    raw.get("identity_key")
-                    or raw.get("identityKey")
-                    or raw.get("eik")
+                    raw.get("identity_key") or raw.get("identityKey") or raw.get("eik")
                 )
                 if parsed is not None:
                     last_identities[dev_id] = parsed
@@ -4436,8 +4602,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     last_identity_candidates[dev_id] = candidate_list
 
                 encrypted_identity = self._normalize_identity_key(
-                    raw.get("encrypted_identity_key")
-                    or raw.get("encryptedIdentityKey")
+                    raw.get("encrypted_identity_key") or raw.get("encryptedIdentityKey")
                 )
                 owner_key_version = raw.get("owner_key_version")
                 if isinstance(owner_key_version, str) and owner_key_version.isdigit():
@@ -4458,12 +4623,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if fast_pair_model_id is not None:
                     last_fast_pair_model_ids[dev_id] = fast_pair_model_id
 
+                pair_date = _extract_pair_date(raw)
+                if pair_date is not None:
+                    last_pair_dates[dev_id] = pair_date
+
+                secrets_creation_date = _extract_secrets_creation_date(raw)
+                if secrets_creation_date is not None:
+                    last_secrets_creation_dates[dev_id] = secrets_creation_date
+
+                anchors_debug = _extract_time_anchors_debug(raw)
+                if anchors_debug is not None:
+                    last_time_anchors_debug[dev_id] = anchors_debug
+
         data_identities: dict[str, bytes] = {}
         data_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         data_device_types: dict[str, int | None] = {}
         data_fast_pair_model_ids: dict[str, str | None] = {}
         raw_data_keys: dict[str, list[str]] = {}
         data_identity_candidates: dict[str, list[bytes]] = {}
+        data_pair_dates: dict[str, int] = {}
+        data_secrets_creation_dates: dict[str, int] = {}
+        data_time_anchors_debug: dict[str, Any] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
             for raw in device_data:
@@ -4474,9 +4654,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     continue
                 raw_data_keys[dev_id] = list(raw.keys())
                 parsed = self._normalize_identity_key(
-                    raw.get("identity_key")
-                    or raw.get("identityKey")
-                    or raw.get("eik")
+                    raw.get("identity_key") or raw.get("identityKey") or raw.get("eik")
                 )
                 if parsed is not None:
                     data_identities[dev_id] = parsed
@@ -4489,8 +4667,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     data_identity_candidates[dev_id] = candidate_list
 
                 encrypted_identity = self._normalize_identity_key(
-                    raw.get("encrypted_identity_key")
-                    or raw.get("encryptedIdentityKey")
+                    raw.get("encrypted_identity_key") or raw.get("encryptedIdentityKey")
                 )
                 owner_key_version = raw.get("owner_key_version")
                 if isinstance(owner_key_version, str) and owner_key_version.isdigit():
@@ -4511,6 +4688,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if fast_pair_model_id is not None:
                     data_fast_pair_model_ids[dev_id] = fast_pair_model_id
 
+                pair_date = _extract_pair_date(raw)
+                if pair_date is not None:
+                    data_pair_dates[dev_id] = pair_date
+
+                secrets_creation_date = _extract_secrets_creation_date(raw)
+                if secrets_creation_date is not None:
+                    data_secrets_creation_dates[dev_id] = secrets_creation_date
+
+                anchors_debug = _extract_time_anchors_debug(raw)
+                if anchors_debug is not None:
+                    data_time_anchors_debug[dev_id] = anchors_debug
+
         cache = getattr(self, "_device_location_data", None)
         cache_identities: dict[str, bytes] = {}
         cache_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
@@ -4518,6 +4707,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_fast_pair_model_ids: dict[str, str | None] = {}
         cache_data_keys: dict[str, list[str]] = {}
         cache_identity_candidates: dict[str, list[bytes]] = {}
+        cache_pair_dates: dict[str, int] = {}
+        cache_secrets_creation_dates: dict[str, int] = {}
+        cache_time_anchors_debug: dict[str, Any] = {}
         if isinstance(cache, dict):
             for dev_id in allowed_raw_ids:
                 payload = cache.get(dev_id)
@@ -4557,11 +4749,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     cache_device_types[dev_id] = device_type
 
                 fast_pair_model_id = _normalize_fast_pair_model_id(
-                    payload.get("fast_pair_model_id")
-                    or payload.get("fastPairModelId")
+                    payload.get("fast_pair_model_id") or payload.get("fastPairModelId")
                 )
                 if fast_pair_model_id is not None:
                     cache_fast_pair_model_ids[dev_id] = fast_pair_model_id
+
+                pair_date = _extract_pair_date(payload)
+                if pair_date is not None:
+                    cache_pair_dates[dev_id] = pair_date
+
+                secrets_creation_date = _extract_secrets_creation_date(payload)
+                if secrets_creation_date is not None:
+                    cache_secrets_creation_dates[dev_id] = secrets_creation_date
+
+                anchors_debug = _extract_time_anchors_debug(payload)
+                if anchors_debug is not None:
+                    cache_time_anchors_debug[dev_id] = anchors_debug
 
         identities: list[DeviceIdentity] = []
         for canonical_id in device_ids:
@@ -4605,6 +4808,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 last_fast_pair_model_ids,
             )
 
+            pair_date = _lookup_prio(
+                lookup_id,
+                registry_pair_dates,
+                cache_pair_dates,
+                data_pair_dates,
+                last_pair_dates,
+            )
+
+            secrets_creation_date = _lookup_prio(
+                lookup_id,
+                registry_secrets_creation_dates,
+                cache_secrets_creation_dates,
+                data_secrets_creation_dates,
+                last_secrets_creation_dates,
+            )
+
+            anchors_debug = _lookup_prio(
+                lookup_id,
+                registry_time_anchors_debug,
+                cache_time_anchors_debug,
+                data_time_anchors_debug,
+                last_time_anchors_debug,
+            )
+
             if not identity_candidates and identity_key is not None:
                 identity_candidates = [identity_key]
             elif not identity_candidates and registry_key is not None:
@@ -4639,6 +4866,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             device_type=device_type,
                             config_entry_id=entry_id,
                             fast_pair_model_id=fast_pair_model_id,
+                            pair_date=pair_date,
+                            secrets_creation_date=secrets_creation_date,
+                            time_anchors_debug=anchors_debug,
                         )
                     )
             else:
@@ -4652,6 +4882,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         device_type=device_type,
                         config_entry_id=entry_id,
                         fast_pair_model_id=fast_pair_model_id,
+                        pair_date=pair_date,
+                        secrets_creation_date=secrets_creation_date,
+                        time_anchors_debug=anchors_debug,
                     )
                 )
 
@@ -5171,7 +5404,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
             )
 
-            hard_limit_passed = (now_mono - self._last_poll_mono) >= self.min_poll_interval
+            hard_limit_passed = (
+                now_mono - self._last_poll_mono
+            ) >= self.min_poll_interval
 
             due = (
                 (
@@ -5373,7 +5608,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         is_replay = False
                         if isinstance(cached_loc, Mapping):
                             new_ts = _normalize_epoch_seconds(location.get("last_seen"))
-                            old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+                            old_ts = _normalize_epoch_seconds(
+                                cached_loc.get("last_seen")
+                            )
                             if (
                                 new_ts is not None
                                 and old_ts is not None
@@ -5424,14 +5661,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                     )
 
                                     location = dict(location)
-                                    if keep_previous_precise and prev_location is not None:
+                                    if (
+                                        keep_previous_precise
+                                        and prev_location is not None
+                                    ):
                                         _LOGGER.debug(
                                             "Google Home filter: %s detected at '%s', preserving previous precise coordinates",
                                             dev_name,
                                             semantic_name,
                                         )
                                         location["latitude"] = prev_location["latitude"]
-                                        location["longitude"] = prev_location["longitude"]
+                                        location["longitude"] = prev_location[
+                                            "longitude"
+                                        ]
                                         location["accuracy"] = prev_location["accuracy"]
                                     else:
                                         _LOGGER.info(
@@ -5443,19 +5685,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                             "latitude" in replacement_attrs
                                             and "longitude" in replacement_attrs
                                         ):
-                                            location["latitude"] = replacement_attrs.get(
-                                                "latitude"
+                                            location["latitude"] = (
+                                                replacement_attrs.get("latitude")
                                             )
-                                            location["longitude"] = replacement_attrs.get(
-                                                "longitude"
+                                            location["longitude"] = (
+                                                replacement_attrs.get("longitude")
                                             )
                                         if (
                                             "radius" in replacement_attrs
                                             and replacement_attrs.get("radius")
                                             is not None
                                         ):
-                                            location["accuracy"] = replacement_attrs.get(
-                                                "radius"
+                                            location["accuracy"] = (
+                                                replacement_attrs.get("radius")
                                             )
                                     # Clear semantic name so HA Core's zone engine determines the final state.
                                     location["semantic_name"] = None
@@ -6026,7 +6268,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if len(history) < 2:
                 continue
 
-            intervals = [history[idx + 1] - history[idx] for idx in range(len(history) - 1)]
+            intervals = [
+                history[idx + 1] - history[idx] for idx in range(len(history) - 1)
+            ]
             avg_interval = mean(intervals)
 
             if len(intervals) >= 2 and stdev(intervals) > 300:
@@ -6089,7 +6333,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             device_id, slot
         ):
             _LOGGER.debug(
-                "Dropping cache update for %s: weighted fusion rejected payload", device_id
+                "Dropping cache update for %s: weighted fusion rejected payload",
+                device_id,
             )
             return
 
@@ -6276,9 +6521,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
 
         if not isinstance(new_data, dict):
-            _LOGGER.debug(
-                "Rejecting update for %s: payload is not a dict", device_id
-            )
+            _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
             return False
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
@@ -6356,17 +6599,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 allow_location_update = False
             elif incoming_seen == existing_seen and (
                 existing_rank is not None
-                and (
-                    incoming_rank is None
-                    or existing_rank > incoming_rank
-                )
+                and (incoming_rank is None or existing_rank > incoming_rank)
             ):
                 allow_location_update = False
         elif existing_seen is not None and incoming_seen is None:
             allow_location_update = False
-        elif existing_seen is None and incoming_seen is None and (
-            existing_rank is not None
-            and (incoming_rank is None or existing_rank > incoming_rank)
+        elif (
+            existing_seen is None
+            and incoming_seen is None
+            and (
+                existing_rank is not None
+                and (incoming_rank is None or existing_rank > incoming_rank)
+            )
         ):
             allow_location_update = False
 
@@ -6374,9 +6618,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if allow_location_update:
             merged.update(incoming)
         else:
-            merged.update({
-                key: value for key, value in incoming.items() if key not in location_fields
-            })
+            merged.update(
+                {
+                    key: value
+                    for key, value in incoming.items()
+                    if key not in location_fields
+                }
+            )
 
         # Keep monotonic last_seen timestamps when payloads arrive without a newer value.
         if existing_seen is not None and (
@@ -6468,7 +6716,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         new_acc = _safe_accuracy(new_acc_raw)
 
         try:
-            dist = self._haversine_distance(existing_lat, existing_lon, new_lat, new_lon)
+            dist = self._haversine_distance(
+                existing_lat, existing_lon, new_lat, new_lon
+            )
         except Exception:
             return True
 
