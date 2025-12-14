@@ -174,14 +174,11 @@ def get_masked_timestamp(timestamp: int, K: int) -> bytes:
     Args:
         timestamp: The original timestamp as an ``int``.
     """
-    # Create a bitmask that has all bits set except for the K least significant bits
-    mask = ~((1 << K) - 1)
+    ts_u32 = timestamp & 0xFFFFFFFF
+    mask = (~((1 << K) - 1)) & 0xFFFFFFFF
+    masked = ts_u32 & mask
 
-    # Zero out the K least significant bits
-    timestamp &= mask
-
-    # Convert back to a byte array with the same length as the original
-    return timestamp.to_bytes(4, byteorder="big")
+    return masked.to_bytes(4, byteorder="big", signed=False)
 
 
 if __name__ == "__main__":

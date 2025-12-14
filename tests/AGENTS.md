@@ -554,6 +554,11 @@ contract:
   ``"<entry_id>:<platform>"`` identifiers whenever Home Assistant omits the
   value.
 
+- Timebase helpers: `_clamp_and_mask_u32` masks directly to uint32 to preserve
+  drift debugging signals (negative deltas wrap instead of clamping). Keep
+  fixtures and assertions aligned with that contract when adjusting
+  drift-related tests.
+
 When parent-unload rollbacks are exercised (for example,
 ``tests/test_unload_subentry_cleanup.py::test_async_unload_entry_rolls_back_when_parent_unload_fails``),
 the helper now expects retries **per platform** as part of the cleanup

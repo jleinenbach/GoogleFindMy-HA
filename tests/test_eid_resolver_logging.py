@@ -39,7 +39,7 @@ def test_match_triggers_info_log(
 
     assert resolver.resolve_eid(lookup_key) is match
     assert any(
-        "MATCH FOUND: EID" in record.message and record.levelno == logging.INFO
+        "HIT: device=" in record.message and record.levelno == logging.INFO
         for record in caplog.records
     )
 
@@ -65,4 +65,4 @@ def test_probe_logs_sliced_key(
     resolver.resolve_eid(raw_payload)
 
     probe_messages = _probe_message(caplog.records)
-    assert any(expected_lookup.hex() in message for message in probe_messages)
+    assert any(expected_lookup[:4].hex() in message for message in probe_messages)

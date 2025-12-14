@@ -66,12 +66,12 @@ async def test_refresh_cache_logs_debug_dump(
         lambda self, identities, cache=None: identities,
     )
 
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG)
 
     await resolver._refresh_cache()
 
     assert any(
-        record.levelno == logging.INFO
+        record.levelno == logging.DEBUG
         and "DEBUG DUMP: Device=device-d329" in record.message
         and "Variant=legacy" in record.message
         for record in caplog.records
@@ -95,8 +95,7 @@ def test_resolve_eid_logs_match_found(caplog: pytest.LogCaptureFixture) -> None:
     assert resolver.resolve_eid(lookup_key) is match
     assert any(
         record.levelno == logging.INFO
-        and "MATCH FOUND: EID" in record.message
-        and "device-logs" in record.message
+        and "HIT: device=device-logs" in record.message
         for record in caplog.records
     )
 

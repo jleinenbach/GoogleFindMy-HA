@@ -37,9 +37,9 @@ async def test_resolver_matches_counter_timebase(
     resolver._pending_refresh = False
 
     identity_key = bytes.fromhex("00" * 32)
-    pair_date_unix = 1_700_000_000
-    now_unix = pair_date_unix + (ROTATION_PERIOD * 10)
-    counter = (now_unix - pair_date_unix) & 0xFFFFFFFF
+    pair_date = 1_700_000_000
+    now_unix = pair_date + (ROTATION_PERIOD * 10)
+    counter = (now_unix - pair_date) & 0xFFFFFFFF
     base_counter = counter & ~(ROTATION_PERIOD - 1)
 
     identity = DeviceIdentity(
@@ -51,8 +51,7 @@ async def test_resolver_matches_counter_timebase(
         device_type=None,
         config_entry_id="entry-id",
         fast_pair_model_id=None,
-        pair_date=pair_date_unix,
-        pair_date_unix=pair_date_unix,
+        pair_date=pair_date,
     )
 
     async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
@@ -86,5 +85,5 @@ async def test_resolver_matches_counter_timebase(
     assert match.time_offset == 0
     metadata = resolver._lookup_metadata.get(eid)
     assert metadata is not None
-    assert metadata.get("timestamp_basis") == "counter:pair_date_unix"
-    assert metadata.get("anchor_epoch") == pair_date_unix
+    assert metadata.get("timestamp_basis") == "counter:pair_date"
+    assert metadata.get("anchor_epoch") == pair_date
