@@ -394,14 +394,14 @@ async def test_resolver_refreshes_all_rotation_windows(
     await resolver._refresh_cache()
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    earliest_timestamp = rotation_start - (ROTATION_PERIOD * 90)
-    latest_timestamp = rotation_start + (ROTATION_PERIOD * 90)
-    assert min(recorded_timestamps) == earliest_timestamp
-    assert max(recorded_timestamps) == latest_timestamp
-    expected_set = {
-        rotation_start + (offset * ROTATION_PERIOD) for offset in range(-90, 91)
-    }
-    assert expected_set.issubset(set(recorded_timestamps))
+    expected_windows = [
+        rotation_start + (offset * ROTATION_PERIOD)
+        for offset in range(-90, 91)
+        if rotation_start + (offset * ROTATION_PERIOD) >= 0
+    ]
+    assert min(recorded_timestamps) == min(expected_windows)
+    assert max(recorded_timestamps) == max(expected_windows)
+    assert set(expected_windows).issubset(set(recorded_timestamps))
 
     expected_eid = _fixed_length_eid(identity.identity_key, rotation_start)
     match = resolver.resolve_eid(expected_eid)
@@ -409,7 +409,7 @@ async def test_resolver_refreshes_all_rotation_windows(
     assert match.device_id == "registry-4"
     assert match.canonical_id == "device-1"
     assert expected_eid[::-1] in resolver._lookup
-    assert len(resolver._lookup) >= len(expected_set)
+    assert len(resolver._lookup) >= len(expected_windows)
     assert resolver.get_resolved_eid(expected_eid) == "registry-4"
     assert resolver.resolve_eid(b"unknown") is None
     assert resolver.get_resolved_eid(b"unknown") is None
