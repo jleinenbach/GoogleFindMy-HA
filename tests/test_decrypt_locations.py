@@ -99,7 +99,10 @@ def test_async_decrypt_location_response_locations_aligns_missing_network_timest
         return serialize_location(invalid_location)
 
     async def fake_offload_foreign(
-        _identity_key: bytes, encrypted_location: bytes, *_args: object, **_kwargs: object
+        _identity_key: bytes,
+        encrypted_location: bytes,
+        *_args: object,
+        **_kwargs: object,
     ) -> bytes:
         return await fake_offload_aes(_identity_key, encrypted_location)
 
@@ -115,9 +118,7 @@ def test_async_decrypt_location_response_locations_aligns_missing_network_timest
     update = DeviceUpdate_pb2.DeviceUpdate()
     update.deviceMetadata.information.deviceRegistration.SetInParent()
 
-    reports = (
-        update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
-    )
+    reports = update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
 
     network_location = reports.networkLocations.add()
     network_location.status = Common_pb2.Status.LAST_KNOWN
@@ -150,3 +151,84 @@ def test_async_decrypt_location_response_locations_aligns_missing_network_timest
     assert entry["latitude"] == pytest.approx(40.0)
     assert entry["longitude"] == pytest.approx(-74.0)
     assert entry["is_own_report"] is True
+
+
+def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pairing and secrets anchors propagate even without reports."""
+
+    base_now = 1_700_100_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x41" * 32]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.pairDate = int(base_now - 120)
+    registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 60)
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 32
+
+    result = asyncio.run(
+        decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry.get("metadata_only") is True
+    assert entry["pair_date"] == int(base_now - 120)
+    assert entry["secrets_creation_date"] == int(base_now - 60)
+    registration_meta = entry.get("device_registration")
+    assert isinstance(registration_meta, dict)
+    assert registration_meta.get("pairDate") == int(base_now - 120)
+    secrets_meta = entry.get("encrypted_user_secrets")
+    assert isinstance(secrets_meta, dict)
+    assert secrets_meta.get("creationDate") == int(base_now - 60)
+
+
+def test_async_decrypt_location_response_locations_normalizes_anchor_units(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anchor extraction normalizes millisecond-like inputs and preserves keys."""
+
+    base_now = 1_700_200_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x51" * 32]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.pairDate = int(base_now - 300)
+    registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 150)
+    registration.encryptedUserSecrets.creationDate.nanos = 500_000_000
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x10" * 32
+
+    result = asyncio.run(
+        decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry.get("metadata_only") is True
+    assert entry["pair_date"] == int(base_now - 300)
+    assert entry["secrets_creation_date"] == int(base_now - 150)
+    assert entry["identity_key"] == b"\x51" * 32
+    assert entry["identity_key_candidates"] == [b"\x51" * 32]
+    assert entry["encrypted_identity_key"] == b"\x10" * 32
+    assert decrypt_locations._parse_epoch_seconds(  # type: ignore[attr-defined]
+        int((base_now - 75) * 1000), base_now
+    ) == pytest.approx(base_now - 75)
