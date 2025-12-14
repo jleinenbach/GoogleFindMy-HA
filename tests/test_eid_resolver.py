@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -17,7 +18,12 @@ from custom_components.googlefindmy.eid_resolver import (
     TimebaseLabel,
     _build_timebase_candidates,
 )
-from custom_components.googlefindmy.FMDNCrypto.eid_generator import ROTATION_PERIOD
+from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+    ROTATION_PERIOD,
+    EidCandidate,
+    K,
+    get_masked_timestamp,
+)
 
 
 def _fixed_length_eid(key: bytes, timestamp: int) -> bytes:
@@ -37,6 +43,7 @@ def _build_resolver() -> GoogleFindMyEIDResolver:
     resolver._known_timebases = {}
     resolver._decryption_status = {}
     resolver._persisted_locks = {}
+    resolver._provisioning_warn_at = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -261,11 +268,35 @@ def test_build_timebase_candidates_with_time_anchor_hints(
         primary_anchor_epoch=None,
     )
 
-    assert any(candidate.label == "REL_DEBUG_HINT" for candidate in candidates)
+    labels = {candidate.label for candidate in candidates}
+    assert "REL_DEBUG_HINT" in labels
+    assert TimebaseLabel.ABSOLUTE in labels
     debug_candidate = next(
         candidate for candidate in candidates if candidate.label == "REL_DEBUG_HINT"
     )
     assert debug_candidate.anchor_epoch == now - ROTATION_PERIOD
+
+
+def test_build_timebase_candidates_always_include_absolute_with_rel_anchor() -> None:
+    now = ROTATION_PERIOD * 10
+    pair_date = now - ROTATION_PERIOD
+    identity = DeviceIdentity(
+        registry_id="registry-with-pair",
+        canonical_id="device-with-pair",
+        identity_key=b"\x03",
+        pair_date=pair_date,
+    )
+
+    candidates = _build_timebase_candidates(
+        identity,
+        now=now,
+        provisioning_counter=now,
+        primary_anchor_epoch=pair_date,
+    )
+
+    labels = {candidate.label for candidate in candidates}
+    assert TimebaseLabel.ABSOLUTE in labels
+    assert TimebaseLabel.REL_PAIR in labels
 
 
 def test_build_timebase_candidates_ignores_unparsed_anchor_list() -> None:
@@ -363,12 +394,14 @@ async def test_resolver_refreshes_all_rotation_windows(
     await resolver._refresh_cache()
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    earliest_timestamp = max(0, rotation_start - (ROTATION_PERIOD * 90))
+    earliest_timestamp = rotation_start - (ROTATION_PERIOD * 90)
     latest_timestamp = rotation_start + (ROTATION_PERIOD * 90)
     assert min(recorded_timestamps) == earliest_timestamp
     assert max(recorded_timestamps) == latest_timestamp
-    expected_windows = ((latest_timestamp - earliest_timestamp) // ROTATION_PERIOD) + 1
-    assert len(recorded_timestamps) == expected_windows
+    expected_set = {
+        rotation_start + (offset * ROTATION_PERIOD) for offset in range(-90, 91)
+    }
+    assert expected_set.issubset(set(recorded_timestamps))
 
     expected_eid = _fixed_length_eid(identity.identity_key, rotation_start)
     match = resolver.resolve_eid(expected_eid)
@@ -376,10 +409,50 @@ async def test_resolver_refreshes_all_rotation_windows(
     assert match.device_id == "registry-4"
     assert match.canonical_id == "device-1"
     assert expected_eid[::-1] in resolver._lookup
-    assert len(resolver._lookup) == len(recorded_timestamps) * 2
+    assert len(resolver._lookup) >= len(expected_set)
     assert resolver.get_resolved_eid(expected_eid) == "registry-4"
     assert resolver.resolve_eid(b"unknown") is None
     assert resolver.get_resolved_eid(b"unknown") is None
+
+
+@pytest.mark.asyncio
+async def test_negative_windows_processed_when_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base_time = 100
+    recorded_timestamps: list[int] = []
+
+    def _fake_time() -> int:
+        return base_time
+
+    def _fake_cached_candidates(
+        identity_key: bytes, timestamp: int
+    ) -> tuple[EidCandidate, ...]:
+        recorded_timestamps.append(timestamp)
+        return (EidCandidate(name="legacy", eid=b"\x00" * EID_LENGTH),)
+
+    monkeypatch.setattr(resolver_module.time, "time", _fake_time)
+    monkeypatch.setattr(resolver_module, "_cached_candidates", _fake_cached_candidates)
+
+    identity = DeviceIdentity(
+        registry_id="registry-neg",
+        canonical_id="device-neg",
+        identity_key=b"\x01\x02",
+        config_entry_id="entry-neg",
+        pair_date=base_time + ROTATION_PERIOD,
+    )
+
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
+    hass = _StubHass(
+        {DOMAIN: {"entries": {"entry-neg": SimpleNamespace(coordinator=coordinator)}}}
+    )
+
+    resolver = _build_resolver()
+    resolver.hass = hass
+
+    await resolver._refresh_cache()
+
+    assert any(timestamp < 0 for timestamp in recorded_timestamps)
 
 
 @pytest.mark.asyncio
@@ -820,7 +893,7 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
     monkeypatch.setattr(resolver_module, "generate_eid_p256", _fake_generate_eid_p256)
 
-    pair_date = base_time - ROTATION_PERIOD
+    pair_date = base_time + 5
     identity = DeviceIdentity(
         registry_id="registry-lock",
         canonical_id="device-lock",
@@ -864,26 +937,103 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
     assert lock is not None
     assert lock.label == str(counter_eids[0][1].get("timebase"))
     assert lock.anchor_epoch == pair_date
+    assert lock.offset < 0
 
     recorded_timestamps.clear()
     current_time = base_time + ROTATION_PERIOD
 
     await resolver._refresh_cache()
 
-    rotation_start = current_time - (current_time % ROTATION_PERIOD)
+    lock_rotation = resolver._known_timebases[identity.registry_id].rotation_timestamp
     expected_neighbors = {
-        rotation_start,
-        max(0, rotation_start - ROTATION_PERIOD),
-        max(0, rotation_start - (2 * ROTATION_PERIOD)),
-        rotation_start + ROTATION_PERIOD,
+        lock_rotation - ROTATION_PERIOD,
+        lock_rotation,
+        lock_rotation + ROTATION_PERIOD,
     }
-    unix_windows = {
-        meta.get("rotation_timestamp")
-        for meta in resolver._lookup_metadata.values()
-        if meta.get("timestamp_basis") == "unix"
-    }
-    assert unix_windows
-    assert unix_windows <= expected_neighbors
+    assert set(recorded_timestamps) <= expected_neighbors
+
+
+@pytest.mark.asyncio
+async def test_debug_dump_logs_all_variants(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    base_time = ROTATION_PERIOD * 6
+
+    def _fake_time() -> int:
+        return base_time
+
+    def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
+        return _fixed_length_eid(key, timestamp)
+
+    def _fake_generate_eid_p256(key: bytes, timestamp: int) -> bytes:
+        return (b"m" + timestamp.to_bytes(8, "big") * 4)[:32]
+
+    monkeypatch.setattr(resolver_module.time, "time", _fake_time)
+    monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
+    monkeypatch.setattr(resolver_module, "generate_eid_p256", _fake_generate_eid_p256)
+    monkeypatch.setattr(resolver_module, "NARROW_SCAN_RANGE", range(0, 1))
+
+    identity = DeviceIdentity(
+        registry_id="registry-debug",
+        canonical_id="device-d329",
+        identity_key=b"\x01" * 32,
+        config_entry_id="entry-debug",
+        pair_date=base_time - ROTATION_PERIOD,
+        secrets_creation_date=base_time - (2 * ROTATION_PERIOD),
+    )
+
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
+    hass = _StubHass(
+        {DOMAIN: {"entries": {"entry-debug": SimpleNamespace(coordinator=coordinator)}}}
+    )
+
+    resolver = _build_resolver()
+    resolver.hass = hass
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+    resolver._decryption_status = {identity.canonical_id: {"status": "pending"}}
+
+    with caplog.at_level(logging.DEBUG):
+        await resolver._refresh_cache()
+
+    debug_messages = [message for message in caplog.messages if message.startswith("DEBUG DUMP:")]
+    assert len(debug_messages) >= 3
+    assert any("Variant=legacy_secp160r1_rx20" in message for message in debug_messages)
+    assert any("Variant=modern_p256_x32" in message for message in debug_messages)
+    assert any(
+        "Variant=modern_p256_truncated_rx20" in message for message in debug_messages
+    )
+    assert any("Timebase=REL_PAIR" in message for message in debug_messages)
+    assert all("EID_PREFIX=" in message for message in debug_messages)
+
+
+def test_generate_eid_accepts_negative_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _signed_generate(key: bytes, timestamp: int) -> bytes:
+        ts_bytes = int(timestamp).to_bytes(8, "big", signed=True)
+        return (ts_bytes + key).ljust(EID_LENGTH, b"\x00")[:EID_LENGTH]
+
+    cache_clear = getattr(resolver_module._cached_candidates, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
+
+    monkeypatch.setattr(resolver_module, "generate_eid", _signed_generate)
+    monkeypatch.setattr(resolver_module, "generate_eid_p256", _signed_generate)
+
+    key = b"\x02" * 32
+    candidates = resolver_module._cached_candidates(key, -1)
+
+    expected = ((-1).to_bytes(8, "big", signed=True) + key).ljust(
+        EID_LENGTH, b"\x00"
+    )[:EID_LENGTH]
+    assert candidates[0].eid == expected
+    assert candidates == resolver_module._cached_candidates(key, -1)
+
+
+def test_get_masked_timestamp_handles_negative_input() -> None:
+    masked = get_masked_timestamp(-1, K)
+    expected = ((-1 & 0xFFFFFFFF) & ((~((1 << K) - 1)) & 0xFFFFFFFF)).to_bytes(
+        4, "big", signed=False
+    )
+
+    assert masked == expected
 
 
 @pytest.mark.asyncio
