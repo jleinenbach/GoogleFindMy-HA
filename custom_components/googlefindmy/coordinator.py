@@ -5757,6 +5757,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 )
 
                         # Validate/normalize coordinates (and accuracy if present).
+                        self._persist_anchor_metadata(dev_id, location)
                         if not self._normalize_coords(location, device_label=dev_name):
                             if not location.get("semantic_name"):
                                 _LOGGER.debug(
@@ -6288,6 +6289,57 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         if not history or last_seen > history[-1]:
             history.append(last_seen)
+
+    def _persist_anchor_metadata(
+        self, device_id: str, location: Mapping[str, Any] | None
+    ) -> None:
+        """Persist anchor metadata even when no coordinates are present."""
+
+        if not isinstance(location, Mapping):
+            return
+
+        anchor_payload: dict[str, Any] = {}
+        for key in ("pair_date", "secrets_creation_date", "time_anchors_debug"):
+            if key in location and location[key] is not None:
+                anchor_payload[key] = location[key]
+
+        for key, alt in (
+            ("device_registration", "deviceRegistration"),
+            ("encrypted_user_secrets", "encryptedUserSecrets"),
+        ):
+            nested = location.get(key) or location.get(alt)
+            if isinstance(nested, Mapping) and nested:
+                anchor_payload[key] = dict(nested)
+
+        for key, alt in (
+            ("identity_key", "identityKey"),
+            ("identity_key_candidates", "identityKeyCandidates"),
+            ("encrypted_identity_key", "encryptedIdentityKey"),
+        ):
+            if key in location and location[key] is not None:
+                anchor_payload[key] = location[key]
+            elif alt in location and location[alt] is not None:
+                anchor_payload[key] = location[alt]
+
+        if (
+            "owner_key_version" in location
+            and location["owner_key_version"] is not None
+        ):
+            anchor_payload["owner_key_version"] = location["owner_key_version"]
+
+        if not anchor_payload:
+            return
+
+        existing = self._device_location_data.get(device_id)
+        merged: dict[str, Any] = {}
+        if isinstance(existing, Mapping):
+            merged.update(existing)
+
+        merged.update(anchor_payload)
+        if location.get("metadata_only"):
+            merged["metadata_only"] = True
+
+        self._device_location_data[device_id] = merged
 
     def _get_predicted_poll_time(self) -> float | None:
         """Predict the earliest next update time based on device histories."""

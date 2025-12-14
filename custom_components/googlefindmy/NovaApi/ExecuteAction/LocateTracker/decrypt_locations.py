@@ -185,7 +185,10 @@ async def async_retrieve_identity_key(
             eik_bytes = await asyncio.to_thread(
                 decrypt_eik, owner_key_info.key, flipped_blob
             )
-            if not isinstance(eik_bytes, (bytes, bytearray)) or len(eik_bytes) != _EIK_LEN:
+            if (
+                not isinstance(eik_bytes, (bytes, bytearray))
+                or len(eik_bytes) != _EIK_LEN
+            ):
                 raise DecryptionError(
                     f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes)."
                 )
@@ -244,7 +247,9 @@ async def async_retrieve_identity_key(
                 "Owner key version mismatch (tracker=%s, current=%s); %s and retrying once.",
                 old_ver,
                 current_owner_key_version,
-                "clearing cached owner key" if cache_key else "retrying with fresh owner key",
+                "clearing cached owner key"
+                if cache_key
+                else "retrying with fresh owner key",
             )
 
             if cache_key:
@@ -282,6 +287,7 @@ async def async_retrieve_identity_key(
         current_owner_key_version,
     )
     raise DecryptionError("Identity key decryption failed.") from last_exc
+
 
 def retrieve_identity_key(
     device_registration: DeviceRegistration,
@@ -494,13 +500,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             device_registration,
             type(encrypted_user_secrets),
             serialized_length if serialized_length is not None else "Unknown",
-            len(raw_encrypted_identity_key)
-            if raw_encrypted_identity_key
-            else "None",
+            len(raw_encrypted_identity_key) if raw_encrypted_identity_key else "None",
             type(raw_encrypted_identity_key),
-            raw_encrypted_identity_key.hex()
-            if raw_encrypted_identity_key
-            else "None",
+            raw_encrypted_identity_key.hex() if raw_encrypted_identity_key else "None",
         )
 
         if (
@@ -563,7 +565,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     )
     identity_key = identity_key_candidates[0] if identity_key_candidates else None
     identity_key_bytes = bytes(identity_key) if identity_key is not None else None
-    identity_key_candidate_bytes = [bytes(candidate) for candidate in identity_key_candidates]
+    identity_key_candidate_bytes = [
+        bytes(candidate) for candidate in identity_key_candidates
+    ]
 
     if identity_key is None:
         raise DecryptionError("Identity key derivation returned no candidates.")
@@ -575,6 +579,58 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         raise
 
     is_mcu = is_mcu_tracker(device_registration)
+
+    now_wall = time.time()
+
+    def _normalize_anchor_timestamp(raw: Any) -> int | None:
+        ts = _parse_epoch_seconds(raw, now_wall)
+        if ts is None:
+            return None
+        return int(ts)
+
+    metadata: dict[str, Any] = {}
+    device_registration_metadata: dict[str, Any] = {}
+    encrypted_user_secrets_metadata: dict[str, Any] = {}
+
+    pair_date = _normalize_anchor_timestamp(
+        getattr(device_registration, "pairDate", None)
+    )
+    if pair_date is not None:
+        metadata["pair_date"] = pair_date
+        metadata["pairDate"] = pair_date
+        device_registration_metadata["pairDate"] = pair_date
+
+    secrets_creation_date = _normalize_anchor_timestamp(
+        getattr(encrypted_user_secrets, "creationDate", None)
+    )
+    if secrets_creation_date is not None:
+        metadata["secrets_creation_date"] = secrets_creation_date
+        metadata["secretsCreationDate"] = secrets_creation_date
+        metadata["creationDate"] = secrets_creation_date
+        metadata["creation_date"] = secrets_creation_date
+        encrypted_user_secrets_metadata["creationDate"] = secrets_creation_date
+        encrypted_user_secrets_metadata["creation_date"] = secrets_creation_date
+
+    if device_registration_metadata:
+        metadata["device_registration"] = device_registration_metadata
+        metadata.setdefault("deviceRegistration", device_registration_metadata)
+
+    if encrypted_user_secrets_metadata:
+        metadata["encrypted_user_secrets"] = encrypted_user_secrets_metadata
+        metadata.setdefault("encryptedUserSecrets", encrypted_user_secrets_metadata)
+
+    if identity_key_bytes is not None:
+        metadata.setdefault("identity_key", identity_key_bytes)
+        metadata.setdefault("identityKey", identity_key_bytes)
+    if identity_key_candidate_bytes:
+        metadata.setdefault("identity_key_candidates", identity_key_candidate_bytes)
+        metadata.setdefault("identityKeyCandidates", identity_key_candidate_bytes)
+    if raw_encrypted_identity_key:
+        metadata.setdefault("encrypted_identity_key", raw_encrypted_identity_key)
+        metadata.setdefault("encryptedIdentityKey", raw_encrypted_identity_key)
+    if raw_owner_key_version is not None:
+        metadata.setdefault("owner_key_version", raw_owner_key_version)
+        metadata.setdefault("ownerKeyVersion", raw_owner_key_version)
 
     # Assemble reports (preserve semantics; own report is appended if present)
     recent_location = locations_proto.recentLocation
@@ -591,8 +647,6 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     if locations_proto.HasField("recentLocation"):
         network_locations.append(recent_location)
         network_locations_time.append(recent_location_time)
-
-    now_wall = time.time()
 
     # Optional hard cap (defense-in-depth against pathological inputs)
     if len(network_locations) > _MAX_REPORTS:
@@ -675,6 +729,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     if not wrapped:
         _LOGGER.debug("[DecryptLocations] No locations found.")
+        if metadata:
+            metadata_only = dict(metadata)
+            metadata_only["metadata_only"] = True
+            return [metadata_only]
         return []
 
     # Convert to structured payloads for HA entities (with fail-fast validation)
@@ -755,6 +813,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 if report_hint:
                     payload["_report_hint"] = report_hint
 
+            if metadata:
+                payload.update(metadata)
+
             # Log with timezone-awareness if HA util is available (debug only)
             if _LOGGER.isEnabledFor(logging.DEBUG):
                 try:
@@ -822,8 +883,6 @@ def decrypt_location_response_locations(
 if __name__ == "__main__":  # Developer self-check only; not used by Home Assistant
     res = parse_device_update_protobuf("")
     try:
-        decrypt_location_response_locations(
-            res, cache=cast("TokenCache", None)
-        )
+        decrypt_location_response_locations(res, cache=cast("TokenCache", None))
     except Exception as exc:
         print(f"Self-check encountered exception (expected outside HA runtime): {exc}")

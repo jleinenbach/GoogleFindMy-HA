@@ -319,6 +319,81 @@ def test_build_timebase_candidates_ignores_unparsed_anchor_list() -> None:
     assert labels == {TimebaseLabel.ABSOLUTE}
 
 
+def test_compute_provisioning_counter_uses_pair_date(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = ROTATION_PERIOD * 20
+    pair_date = now - 100
+    identity = DeviceIdentity(
+        registry_id="registry-pair-anchor",
+        canonical_id="device-pair-anchor",
+        identity_key=b"\x07",
+        pair_date=pair_date,
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        counter, anchor_label, anchor_epoch = (
+            resolver_module._compute_provisioning_counter(identity, now=now)
+        )
+
+    assert counter == (now - pair_date) & 0xFFFFFFFF
+    assert anchor_label == "pair_date"
+    assert anchor_epoch == pair_date
+    assert any("Type=pair_date" in record.message for record in caplog.records)
+
+
+def test_compute_provisioning_counter_prefers_secrets_creation_date(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = ROTATION_PERIOD * 30
+    pair_date = now - 400
+    secrets_creation_date = now - 10
+    identity = DeviceIdentity(
+        registry_id="registry-secrets-anchor",
+        canonical_id="device-secrets-anchor",
+        identity_key=b"\x08",
+        pair_date=pair_date,
+        secrets_creation_date=secrets_creation_date,
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        counter, anchor_label, anchor_epoch = (
+            resolver_module._compute_provisioning_counter(identity, now=now)
+        )
+
+    assert counter == (now - secrets_creation_date) & 0xFFFFFFFF
+    assert anchor_label == "secrets_creation_date"
+    assert anchor_epoch == secrets_creation_date
+    assert any(
+        "Type=secrets_creation_date" in record.message for record in caplog.records
+    )
+
+
+def test_compute_provisioning_counter_uses_newer_pair_date_when_secrets_stale(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = ROTATION_PERIOD * 31
+    pair_date = now - 25
+    secrets_creation_date = now - 100
+    identity = DeviceIdentity(
+        registry_id="registry-pair-newer",
+        canonical_id="device-pair-newer",
+        identity_key=b"\x09",
+        pair_date=pair_date,
+        secrets_creation_date=secrets_creation_date,
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        counter, anchor_label, anchor_epoch = (
+            resolver_module._compute_provisioning_counter(identity, now=now)
+        )
+
+    assert counter == (now - pair_date) & 0xFFFFFFFF
+    assert anchor_label == "pair_date"
+    assert anchor_epoch == pair_date
+    assert any("Type=pair_date" in record.message for record in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_active_device_identities_surface_cached_timestamps(
     monkeypatch: pytest.MonkeyPatch,
@@ -357,6 +432,38 @@ async def test_active_device_identities_surface_cached_timestamps(
     assert identity.pair_date == 10
     assert identity.secrets_creation_date == 20
     assert identity.time_anchors_debug == [1, 2, 3]
+
+
+def test_persist_anchor_metadata_records_metadata_only_payload() -> None:
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    coordinator._device_location_data = {}
+
+    payload = {
+        "pair_date": 100,
+        "secrets_creation_date": 200,
+        "metadata_only": True,
+        "device_registration": {"pairDate": 100},
+        "encrypted_user_secrets": {"creationDate": 200},
+        "identity_key": b"\x01" * 32,
+        "identity_key_candidates": [b"\x01" * 32],
+        "encrypted_identity_key": b"\x02" * 32,
+        "owner_key_version": 3,
+    }
+
+    coordinator._persist_anchor_metadata("dev-meta", payload)
+
+    stored = coordinator._device_location_data["dev-meta"]
+    assert stored["pair_date"] == 100
+    assert stored["secrets_creation_date"] == 200
+    assert stored.get("metadata_only") is True
+    assert stored["device_registration"] == {"pairDate": 100}
+    assert stored["encrypted_user_secrets"] == {"creationDate": 200}
+    assert stored["identity_key"] == b"\x01" * 32
+    assert stored["identity_key_candidates"] == [b"\x01" * 32]
+    assert stored["encrypted_identity_key"] == b"\x02" * 32
+    assert stored["owner_key_version"] == 3
 
 
 @pytest.mark.asyncio
@@ -954,7 +1061,9 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
 
 
 @pytest.mark.asyncio
-async def test_debug_dump_logs_all_variants(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+async def test_debug_dump_logs_all_variants(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     base_time = ROTATION_PERIOD * 6
 
     def _fake_time() -> int:
@@ -994,7 +1103,9 @@ async def test_debug_dump_logs_all_variants(monkeypatch: pytest.MonkeyPatch, cap
     with caplog.at_level(logging.DEBUG):
         await resolver._refresh_cache()
 
-    debug_messages = [message for message in caplog.messages if message.startswith("DEBUG DUMP:")]
+    debug_messages = [
+        message for message in caplog.messages if message.startswith("DEBUG DUMP:")
+    ]
     assert len(debug_messages) >= 3
     assert any("Variant=legacy_secp160r1_rx20" in message for message in debug_messages)
     assert any("Variant=modern_p256_x32" in message for message in debug_messages)
@@ -1005,7 +1116,9 @@ async def test_debug_dump_logs_all_variants(monkeypatch: pytest.MonkeyPatch, cap
     assert all("EID_PREFIX=" in message for message in debug_messages)
 
 
-def test_generate_eid_accepts_negative_timestamp(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_eid_accepts_negative_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def _signed_generate(key: bytes, timestamp: int) -> bytes:
         ts_bytes = int(timestamp).to_bytes(8, "big", signed=True)
         return (ts_bytes + key).ljust(EID_LENGTH, b"\x00")[:EID_LENGTH]
@@ -1020,9 +1133,9 @@ def test_generate_eid_accepts_negative_timestamp(monkeypatch: pytest.MonkeyPatch
     key = b"\x02" * 32
     candidates = resolver_module._cached_candidates(key, -1)
 
-    expected = ((-1).to_bytes(8, "big", signed=True) + key).ljust(
-        EID_LENGTH, b"\x00"
-    )[:EID_LENGTH]
+    expected = ((-1).to_bytes(8, "big", signed=True) + key).ljust(EID_LENGTH, b"\x00")[
+        :EID_LENGTH
+    ]
     assert candidates[0].eid == expected
     assert candidates == resolver_module._cached_candidates(key, -1)
 

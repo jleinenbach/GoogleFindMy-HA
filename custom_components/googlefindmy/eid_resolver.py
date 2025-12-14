@@ -271,20 +271,41 @@ def _compute_provisioning_counter(
     rollover behavior.
     """
 
-    anchor_candidates = [
-        ("pair_date", identity.pair_date),
-        ("secrets_creation_date", identity.secrets_creation_date),
-    ]
+    secrets_anchor = _coerce_int(identity.secrets_creation_date)
+    pair_anchor = _coerce_int(identity.pair_date)
 
-    for label, anchor in anchor_candidates:
-        anchor_value = _coerce_int(anchor)
-        if anchor_value is None:
-            continue
+    selected_label: str | None = None
+    selected_anchor: int | None = None
 
-        counter = _clamp_and_mask_u32(now - anchor_value)
-        return counter, label, anchor_value
+    if secrets_anchor is not None and (
+        pair_anchor is None or secrets_anchor >= pair_anchor
+    ):
+        selected_label = "secrets_creation_date"
+        selected_anchor = secrets_anchor
+    elif pair_anchor is not None:
+        selected_label = "pair_date"
+        selected_anchor = pair_anchor
 
-    return _mask_u32(now), None, None
+    if selected_label is not None and selected_anchor is not None:
+        counter = _clamp_and_mask_u32(now - selected_anchor)
+        _LOGGER.debug(
+            "Anchor Selected: Type=%s Value=%s Counter=%s (pair_date=%s secrets_creation_date=%s)",
+            selected_label,
+            selected_anchor,
+            counter,
+            pair_anchor,
+            secrets_anchor,
+        )
+        return counter, selected_label, selected_anchor
+
+    fallback_counter = _mask_u32(now)
+    _LOGGER.debug(
+        "Anchor Selected: Type=%s Value=%s Counter=%s",
+        "unix_time",
+        now,
+        fallback_counter,
+    )
+    return fallback_counter, None, None
 
 
 def _build_timebase_candidates(
@@ -561,8 +582,8 @@ class GoogleFindMyEIDResolver:
             registry_id = identity.registry_id
             identity_key_bytes = bytes(identity.identity_key)
 
-            provisioning_counter, anchor_label, anchor_epoch = _compute_provisioning_counter(
-                identity, now=now_unix
+            provisioning_counter, anchor_label, anchor_epoch = (
+                _compute_provisioning_counter(identity, now=now_unix)
             )
             base_counter = provisioning_counter & ~(ROTATION_PERIOD - 1)
             counter_label = f"counter:{anchor_label}" if anchor_label else "counter"
@@ -579,7 +600,10 @@ class GoogleFindMyEIDResolver:
             if anchor_label is None:
                 last_warn = self._provisioning_warn_at.get(identity.canonical_id)
                 now_ts = time.time()
-                if last_warn is None or now_ts - last_warn >= PROVISIONING_WARN_COOLDOWN:
+                if (
+                    last_warn is None
+                    or now_ts - last_warn >= PROVISIONING_WARN_COOLDOWN
+                ):
                     _LOGGER.debug(
                         "Cannot compute provisioning counter reliably for %s",
                         identity.canonical_id,
@@ -674,7 +698,9 @@ class GoogleFindMyEIDResolver:
                 else base_candidates
             )
 
-            requested_timebases.update(candidate.label for candidate in timebase_candidates)
+            requested_timebases.update(
+                candidate.label for candidate in timebase_candidates
+            )
 
             for candidate in timebase_candidates:
                 if candidate.label == TimebaseLabel.REL_PAIR:
@@ -707,7 +733,9 @@ class GoogleFindMyEIDResolver:
                         aligned_rotation = active_lock.rotation_timestamp + (
                             rotations_since_lock * ROTATION_PERIOD
                         )
-                        local_search_offset = aligned_rotation - candidate.reference_time
+                        local_search_offset = (
+                            aligned_rotation - candidate.reference_time
+                        )
 
                     target_time = (
                         candidate.reference_time + local_search_offset
@@ -715,9 +743,7 @@ class GoogleFindMyEIDResolver:
                         else candidate.reference_time
                     )
 
-                    is_reversed = (
-                        local_search_offset is not None and known_endianness
-                    )
+                    is_reversed = local_search_offset is not None and known_endianness
 
                     rotation_windows = iter_rotation_windows(
                         target_time,
@@ -754,7 +780,10 @@ class GoogleFindMyEIDResolver:
                                 "variant": eid_candidate.name,
                             }
 
-                            if should_log_debug_dump and device_debug_state["count"] < DEBUG_LOG_LIMIT:
+                            if (
+                                should_log_debug_dump
+                                and device_debug_state["count"] < DEBUG_LOG_LIMIT
+                            ):
                                 message_key = (
                                     candidate.label,
                                     eid_candidate.name,
@@ -803,9 +832,8 @@ class GoogleFindMyEIDResolver:
             ):
                 rel_candidate = next((candidate for candidate in rel_candidates), None)
                 if rel_candidate is not None:
-                    fallback_rotation = (
-                        rel_candidate.reference_time
-                        - (rel_candidate.reference_time % ROTATION_PERIOD)
+                    fallback_rotation = rel_candidate.reference_time - (
+                        rel_candidate.reference_time % ROTATION_PERIOD
                     )
                     try:
                         fallback_candidates = _cached_candidates(
