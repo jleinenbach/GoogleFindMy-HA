@@ -637,18 +637,47 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     metadata: dict[str, Any] = {}
     device_registration_metadata: dict[str, Any] = {}
     encrypted_user_secrets_metadata: dict[str, Any] = {}
+    device_type_information_metadata: dict[str, Any] = {}
 
-    pair_date = normalize_pair_date_value(
-        getattr(device_registration, "pairDate", None), now_wall=now_wall
-    )
+    device_type_information = getattr(device_update_protobuf, "deviceTypeInformation", None)
+
+    pair_date_sources = [
+        getattr(device_registration, "pairDate", None),
+        getattr(device_update_protobuf, "pairDate", None),
+        getattr(device_type_information, "pairDate", None),
+    ]
+
+    pair_date: int | None = None
+    for candidate in pair_date_sources:
+        pair_date = normalize_pair_date_value(candidate, now_wall=now_wall)
+        if pair_date is not None:
+            break
+
     if pair_date is not None:
         metadata["pair_date"] = pair_date
         metadata["pairDate"] = pair_date
         device_registration_metadata["pairDate"] = pair_date
+        if device_type_information is not None:
+            device_type_information_metadata["pairDate"] = pair_date
 
-    secrets_creation_date = normalize_creation_timestamp_value(
-        getattr(encrypted_user_secrets, "creationDate", None), now_wall=now_wall
-    )
+    creation_date_sources = [
+        getattr(encrypted_user_secrets, "creationDate", None),
+        getattr(getattr(device_update_protobuf, "encryptedUserSecrets", None), "creationDate", None),
+        getattr(
+            getattr(device_type_information, "encryptedUserSecrets", None),
+            "creationDate",
+            None,
+        ),
+    ]
+
+    secrets_creation_date: int | None = None
+    for candidate in creation_date_sources:
+        secrets_creation_date = normalize_creation_timestamp_value(
+            candidate, now_wall=now_wall
+        )
+        if secrets_creation_date is not None:
+            break
+
     if secrets_creation_date is not None:
         metadata["secrets_creation_date"] = secrets_creation_date
         metadata["secretsCreationDate"] = secrets_creation_date
@@ -656,6 +685,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         metadata["creation_date"] = secrets_creation_date
         encrypted_user_secrets_metadata["creationDate"] = secrets_creation_date
         encrypted_user_secrets_metadata["creation_date"] = secrets_creation_date
+        if device_type_information is not None:
+            device_type_information_metadata["creationDate"] = secrets_creation_date
 
     if device_registration_metadata:
         metadata["device_registration"] = device_registration_metadata
@@ -664,6 +695,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     if encrypted_user_secrets_metadata:
         metadata["encrypted_user_secrets"] = encrypted_user_secrets_metadata
         metadata.setdefault("encryptedUserSecrets", encrypted_user_secrets_metadata)
+
+    if device_type_information_metadata:
+        metadata["device_type_information"] = device_type_information_metadata
+        metadata.setdefault("deviceTypeInformation", device_type_information_metadata)
 
     if identity_key_bytes is not None:
         metadata.setdefault("identity_key", identity_key_bytes)

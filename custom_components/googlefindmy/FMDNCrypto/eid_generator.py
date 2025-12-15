@@ -22,6 +22,9 @@ ROTATION_PERIOD: Final[int] = 1 << FHNA_K
 EIK_LENGTH: Final[int] = 32
 LEGACY_EID_LENGTH: Final[int] = 20
 FHNA_PRF_INPUT_LENGTH: Final[int] = 32
+FHNA_ROTATION_MASK: Final[int] = (1 << FHNA_K) - 1
+FHNA_TIMESTAMP_MASK: Final[int] = 0xFFFFFFFF
+TRUNCATED_P256_EID_LENGTH: Final[int] = 20
 _CURVE: CurveParametersProtocol = load_curve()
 
 _LOGGER = logging.getLogger(__name__)
@@ -46,9 +49,9 @@ def fhna_build_prf_input(ts_u32: int) -> bytes:
     AES-256-ECB pseudorandom function.
     """
 
-    ts_mask: int = (1 << FHNA_K) - 1
-    ts_aligned: int = (ts_u32 & 0xFFFFFFFF) & ~ts_mask
-    ts_bytes = ts_aligned.to_bytes(4, byteorder="big", signed=False)
+    ts_mask: int = FHNA_ROTATION_MASK
+    masked_ts: int = (ts_u32 & FHNA_TIMESTAMP_MASK) & ~ts_mask
+    ts_bytes = masked_ts.to_bytes(4, byteorder="big", signed=False)
 
     block = bytearray(FHNA_PRF_INPUT_LENGTH)
     block[0:11] = b"\xff" * 11
@@ -171,10 +174,12 @@ def generate_eid_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCan
 
     legacy_eid = generate_eid_fhna_secp160r1(identity_key, timestamp)
     modern_eid = generate_eid_fhna_secp256r1(identity_key, timestamp)
+    truncated_modern = modern_eid[:TRUNCATED_P256_EID_LENGTH]
 
     return (
         EidCandidate(name="fhna_secp160r1_rx20", eid=legacy_eid),
         EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid),
+        EidCandidate(name="fhna_p256_truncated_rx20", eid=truncated_modern),
     )
 
 
@@ -213,9 +218,9 @@ def get_masked_timestamp(timestamp: int, K: int) -> bytes:
     Args:
         timestamp: The original timestamp as an ``int``.
     """
-    ts_u32 = timestamp & 0xFFFFFFFF
-    mask = (~((1 << K) - 1)) & 0xFFFFFFFF
-    masked = ts_u32 & mask
+    ts_u32: int = timestamp & FHNA_TIMESTAMP_MASK
+    rotation_mask: int = ((1 << K) - 1) & FHNA_TIMESTAMP_MASK
+    masked: int = ts_u32 & (~rotation_mask & FHNA_TIMESTAMP_MASK)
 
     return masked.to_bytes(4, byteorder="big", signed=False)
 
