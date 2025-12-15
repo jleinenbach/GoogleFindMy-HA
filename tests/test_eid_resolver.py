@@ -1404,7 +1404,7 @@ async def test_resolver_learns_offsets_and_endianness(
         max(0, target_rotation - ROTATION_PERIOD),
         target_rotation + ROTATION_PERIOD,
     }
-    assert len(resolver._lookup) == 6
+    assert len(resolver._lookup) == 9
     assert all(match.is_reversed for match in resolver._lookup.values())
 
 
@@ -1454,10 +1454,12 @@ async def test_resolver_populates_modern_and_legacy_eids(
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
     legacy_eid = _fake_generate_eid(identity.identity_key, rotation_start)
     modern_eid_full = _fake_generate_eid_p256(identity.identity_key, rotation_start)
+    modern_eid_truncated = modern_eid_full[:EID_LENGTH]
 
-    assert len(resolver._lookup) == 6
+    assert len(resolver._lookup) == 9
     assert resolver.resolve_eid(legacy_eid).device_id == identity.registry_id
     assert resolver.resolve_eid(modern_eid_full).device_id == identity.registry_id
+    assert resolver.resolve_eid(modern_eid_truncated).device_id == identity.registry_id
 
 
 def test_resolve_eid_slices_fmdn_frame() -> None:

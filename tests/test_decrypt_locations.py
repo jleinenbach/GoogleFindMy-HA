@@ -234,6 +234,52 @@ def test_async_decrypt_location_response_locations_normalizes_anchor_units(
     ) == pytest.approx(base_now - 75)
 
 
+def test_async_decrypt_location_response_reads_registration_anchors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration anchors propagate even when deviceTypeInformation is absent."""
+
+    base_now = 1_700_400_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x61" * 32]
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x22" * 32
+
+    registration.pairDate = int(base_now - 500)
+    registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 250)
+
+    reports = update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+    reports.recentLocationTimestamp.seconds = int(base_now - 100)
+    semantic = reports.recentLocation
+    semantic.status = Common_pb2.Status.SEMANTIC
+    semantic.semanticLocation.locationName = "semantic-anchor"
+
+    result = asyncio.run(
+        decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["pair_date"] == int(base_now - 500)
+    assert entry["secrets_creation_date"] == int(base_now - 250)
+    assert entry["identity_key"] == b"\x61" * 32
+    type_meta = entry.get("device_type_information")
+    assert not type_meta
+    registration_meta = entry.get("device_registration")
+    assert isinstance(registration_meta, dict)
+    assert registration_meta.get("pairDate") == int(base_now - 500)
+
+
 def test_pair_date_microseconds_normalization_and_future_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

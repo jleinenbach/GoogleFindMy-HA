@@ -53,6 +53,7 @@ def test_generate_eid_candidates_expected_variants() -> None:
     assert set(variant_map) == {
         "fhna_secp160r1_rx20",
         "fhna_secp256r1_rx32",
+        "fhna_p256_truncated_rx20",
     }
     assert len(variant_map["fhna_secp160r1_rx20"]) == LEGACY_EID_LENGTH
     assert (
@@ -63,6 +64,11 @@ def test_generate_eid_candidates_expected_variants() -> None:
     assert (
         variant_map["fhna_secp256r1_rx32"].hex()
         == "f5a2f55527688d26c47043bde3f8888274a4eb9fcd6ff5fad3302f12dd47bf5e"
+    )
+    assert len(variant_map["fhna_p256_truncated_rx20"]) == LEGACY_EID_LENGTH
+    assert (
+        variant_map["fhna_p256_truncated_rx20"].hex()
+        == "f5a2f55527688d26c47043bde3f8888274a4eb9f"
     )
 
 
@@ -88,7 +94,9 @@ def test_iter_rotation_windows_alignment_and_neighbors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_cache_registers_hybrid_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_cache_registers_hybrid_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Resolver cache refresh should register all hybrid candidate variants."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
@@ -128,11 +136,14 @@ async def test_refresh_cache_registers_hybrid_candidates(monkeypatch: pytest.Mon
 
     call_order: list[int] = []
 
-    def _fake_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
+    def _fake_candidates(
+        identity_key: bytes, timestamp: int
+    ) -> tuple[EidCandidate, ...]:
         call_order.append(timestamp)
         return (
             EidCandidate(name="legacy", eid=b"A" * LEGACY_EID_LENGTH),
             EidCandidate(name="modern", eid=b"B" * 32),
+            EidCandidate(name="modern_trunc", eid=b"C" * LEGACY_EID_LENGTH),
         )
 
     monkeypatch.setattr(
@@ -147,4 +158,5 @@ async def test_refresh_cache_registers_hybrid_candidates(monkeypatch: pytest.Mon
 
     assert resolver._lookup[b"A" * LEGACY_EID_LENGTH].time_offset == 0
     assert resolver._lookup[b"B" * 32].time_offset == 0
+    assert resolver._lookup[b"C" * LEGACY_EID_LENGTH].time_offset == 0
     assert call_order == [2048, 1024, 3072]

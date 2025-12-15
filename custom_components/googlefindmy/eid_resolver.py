@@ -420,6 +420,12 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
             modern_eid = generate_eid_p256(normalized_key, timestamp)
 
         candidates.append(EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid))
+        candidates.append(
+            EidCandidate(
+                name="fhna_p256_truncated_rx20",
+                eid=modern_eid[:LEGACY_EID_LENGTH],
+            )
+        )
 
     return tuple(candidates)
 
