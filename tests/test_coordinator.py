@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy import coordinator as coordinator_module
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
 
@@ -228,6 +230,9 @@ def test_device_registry_wrapper_retries_with_legacy_config_subentry_kwarg(
     ]
 
 
+# fmt: off
+
+
 def test_device_registry_wrapper_retries_with_legacy_remove_config_subentry_kwarg() -> None:
     """The wrapper retries without ``remove_config_subentry_id`` on legacy cores."""
 
@@ -257,3 +262,114 @@ def test_device_registry_wrapper_retries_with_legacy_remove_config_subentry_kwar
             "remove_config_entry_id": "entry-id",
         },
     ]
+
+# fmt: on
+
+
+def test_coordinator_propagates_timestamps_to_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata-only updates should populate resolver identities with timestamps."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    metadata_only_payload = {
+        "identity_key": b"\x01\x02\x03\x04",
+        "pair_date": 1_700_000_000,
+        "metadata_only": True,
+    }
+
+    coordinator.update_device_cache("device-1", metadata_only_payload)
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.pair_date == metadata_only_payload["pair_date"]
+    assert identity.identity_key == metadata_only_payload["identity_key"]
+
+
+def test_coordinator_persists_camelCase_identity_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CamelCase identity metadata should persist and feed resolver identities."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    camel_payload = {
+        "identityKey": b"\x05\x06\x07\x08",
+        "pairDate": 1_800_000_000,
+        "metadata_only": True,
+    }
+
+    coordinator.update_device_cache("device-1", camel_payload)
+
+    assert (
+        coordinator._device_location_data["device-1"]["identity_key"]
+        == (camel_payload["identityKey"])
+    )
+    assert (
+        coordinator._device_location_data["device-1"]["pair_date"]
+        == camel_payload["pairDate"]
+    )
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.pair_date == camel_payload["pairDate"]
+    assert identity.identity_key == camel_payload["identityKey"]

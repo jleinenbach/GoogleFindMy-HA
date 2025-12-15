@@ -29,7 +29,9 @@ class _StubHass:
         return coro
 
 
-def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.GoogleFindMyCoordinator:
+def _build_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> coordinator_module.GoogleFindMyCoordinator:
     registry = _StubDeviceRegistry([_StubDevice("device-1", registry_id="registry-1")])
     monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
 
@@ -40,7 +42,9 @@ def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.Go
     coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._get_ignored_set = lambda: set()
-    coordinator._extract_our_identifier = lambda device: getattr(device, "identifier", None)
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "identifier", None
+    )
     coordinator.data = []
     return coordinator
 
@@ -50,18 +54,22 @@ def test_cache_prioritized_over_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     coordinator._last_device_list = [
         {
             "id": "device-1",
+            "identityKey": "1111",
             "encryptedIdentityKey": "aaaa",
             "owner_key_version": 1,
             "device_type": 1,
             "fastPairModelId": "poll-model",
+            "pairDate": 1_700_000_001,
         }
     ]
     coordinator._device_location_data = {
         "device-1": {
+            "identity_key": b"\x11\x11",
             "encryptedIdentityKey": "bbbb",
             "owner_key_version": 2,
             "device_type": 3,
             "fast_pair_model_id": "push-model",
+            "pair_date": 1_700_000_001,
         }
     }
 
@@ -84,9 +92,13 @@ def test_poll_used_when_cache_missing(monkeypatch: pytest.MonkeyPatch) -> None:
             "owner_key_version": 4,
             "device_type": 9,
             "fastPairModelId": "poll-fallback",
+            "pairDate": 1_700_000_002,
+            "identityKey": "dddd",
         }
     ]
-    coordinator._device_location_data = {}
+    coordinator._device_location_data = {
+        "device-1": {"pair_date": 1_700_000_002, "identity_key": b"\xdd\xdd"}
+    }
 
     identities = coordinator.get_active_device_identities()
 
