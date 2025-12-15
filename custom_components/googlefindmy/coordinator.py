@@ -204,6 +204,21 @@ _ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
 # Predictive polling buffer to avoid requesting data before it is available server-side.
 _PREDICTION_BUFFER_S = 45
 
+# Fields consumed by get_active_device_identities from cached payloads/anchors.
+_PERSISTED_METADATA_KEYS: tuple[str, ...] = (
+    "pair_date",
+    "secrets_creation_date",
+    "time_anchors_debug",
+    "metadata_only",
+    "device_registration",
+    "encrypted_user_secrets",
+    "identity_key",
+    "identity_key_candidates",
+    "encrypted_identity_key",
+    "encrypted_identity_key_candidates",
+    "owner_key_version",
+)
+
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     """Clamp value between lo and hi (inclusive)."""
@@ -2693,8 +2708,46 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """Return the registry entry for a tracker and migrate legacy unique IDs."""
 
         ent_reg = er.async_get(self.hass)
+        device_reg = dr.async_get(self.hass)
         entry_id = self._entry_id()
-        device_label = self.get_device_display_name(device_id) or device_id
+
+        registry_device = (
+            device_reg.async_get(device_id) if device_reg is not None else None
+        )
+        canonical_device_id = device_id
+        registry_identifier: str | None = None
+
+        if registry_device is not None:
+            registry_identifier = self._extract_our_identifier(registry_device)
+            registry_uuid = getattr(registry_device, "id", None)
+            if registry_uuid == device_id:
+                _LOGGER.debug(
+                    "Tracker entity lookup received registry UUID=%s; attempting canonical mapping",
+                    registry_uuid,
+                )
+            if registry_identifier:
+                canonical_device_id = registry_identifier
+                if canonical_device_id != device_id:
+                    _LOGGER.debug(
+                        "Tracker entity lookup remapped registry_id=%s to canonical_id=%s",
+                        device_id,
+                        canonical_device_id,
+                    )
+            else:
+                _LOGGER.debug(
+                    "Tracker entity lookup found device %s but no matching identifier in %s",
+                    device_id,
+                    registry_device.identifiers,
+                )
+        else:
+            _LOGGER.debug(
+                "Tracker entity lookup could not find device registry entry for id=%s",
+                device_id,
+            )
+
+        device_label = (
+            self.get_device_display_name(canonical_device_id) or canonical_device_id
+        )
 
         entities_container = getattr(ent_reg, "entities", None)
         ent_registry_values: Sequence[Any] = ()
@@ -2742,7 +2795,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 tracker_subentry_identifier = tracker_subentry_key
 
             parts: list[str] = []
-            for part in (entry_id, tracker_subentry_identifier, device_id):
+            for part in (entry_id, tracker_subentry_identifier, canonical_device_id):
                 if isinstance(part, str) and part:
                     stripped = part.strip()
                     if stripped:
@@ -2810,15 +2863,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if entry_id:
             if tracker_subentry_identifier:
                 candidate_unique_ids.append(
-                    f"{entry_id}:{tracker_subentry_identifier}:{device_id}"
+                    f"{entry_id}:{tracker_subentry_identifier}:{canonical_device_id}"
                 )
             if tracker_subentry_key:
                 candidate_unique_ids.append(
-                    f"{entry_id}:{tracker_subentry_key}:{device_id}"
+                    f"{entry_id}:{tracker_subentry_key}:{canonical_device_id}"
                 )
-            candidate_unique_ids.append(f"{entry_id}:{device_id}")
-            candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{device_id}")
-        candidate_unique_ids.append(f"{DOMAIN}_{device_id}")
+            candidate_unique_ids.append(f"{entry_id}:{canonical_device_id}")
+            candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{canonical_device_id}")
+        candidate_unique_ids.append(f"{DOMAIN}_{canonical_device_id}")
 
         for unique_id in candidate_unique_ids:
             entry = _get_entry_for_unique_id(unique_id)
@@ -2864,7 +2917,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if entry.domain != DEVICE_TRACKER_DOMAIN or entry.platform != DOMAIN:
                 continue
             unique_id = getattr(entry, "unique_id", "")
-            if not isinstance(unique_id, str) or device_id not in unique_id:
+            if not isinstance(unique_id, str) or canonical_device_id not in unique_id:
                 continue
             if entry.config_entry_id and entry.config_entry_id != entry_id:
                 continue
@@ -2911,10 +2964,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return entry
 
         _LOGGER.debug(
-            "No entity registry entry for device '%s'; checked unique_id formats %s (canonical=%s)",
+            "No entity registry entry for device '%s'; checked unique_id formats %s (canonical=%s registry_id=%s registry_identifier=%s)",
             device_label,
             candidate_unique_ids,
             canonical_unique_id,
+            device_id,
+            registry_identifier,
         )
         return None
 
@@ -5757,7 +5812,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 )
 
                         # Validate/normalize coordinates (and accuracy if present).
-                        self._persist_anchor_metadata(dev_id, location)
+                        clear_metadata_only = (
+                            (location.get("latitude") is not None
+                            or location.get("longitude") is not None)
+                            and location.get("metadata_only") is not True
+                        )
+                        self._persist_anchor_metadata(
+                            dev_id, location, clear_metadata_only=clear_metadata_only
+                        )
                         if not self._normalize_coords(location, device_label=dev_name):
                             if not location.get("semantic_name"):
                                 _LOGGER.debug(
@@ -5965,8 +6027,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not cached:
             return False
 
-        entry.update(cached)
-        last_updated_ts = cached.get("last_updated", 0)
+        if isinstance(cached, Mapping):
+            entry.update(cached)
+        else:
+            entry.update({"status": "Anchor metadata cached"})
+
+        if entry.get("metadata_only"):
+            entry.setdefault("status", "Anchor metadata cached")
+            return True
+
+        last_updated_ts = cached.get("last_updated", 0) if isinstance(cached, Mapping) else 0
         age = max(0.0, wall_now - float(last_updated_ts))
         if age < self.location_poll_interval:
             entry["status"] = "Location data current"
@@ -6291,7 +6361,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             history.append(last_seen)
 
     def _persist_anchor_metadata(
-        self, device_id: str, location: Mapping[str, Any] | None
+        self,
+        device_id: str,
+        location: Mapping[str, Any] | None,
+        *,
+        clear_metadata_only: bool,
     ) -> None:
         """Persist anchor metadata even when no coordinates are present."""
 
@@ -6315,6 +6389,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ("identity_key", "identityKey"),
             ("identity_key_candidates", "identityKeyCandidates"),
             ("encrypted_identity_key", "encryptedIdentityKey"),
+            (
+                "encrypted_identity_key_candidates",
+                "encryptedIdentityKeyCandidates",
+            ),
         ):
             if key in location and location[key] is not None:
                 anchor_payload[key] = location[key]
@@ -6335,8 +6413,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if isinstance(existing, Mapping):
             merged.update(existing)
 
+        if clear_metadata_only:
+            merged.pop("metadata_only", None)
+
         merged.update(anchor_payload)
-        if location.get("metadata_only"):
+        if location.get("metadata_only") and not clear_metadata_only:
             merged["metadata_only"] = True
 
         self._device_location_data[device_id] = merged
@@ -6397,9 +6478,41 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Shallow copy to avoid caller-side mutation
         slot = dict(location_data)
 
+        previous_cached = self._device_location_data.get(device_id)
+        if not isinstance(previous_cached, Mapping):
+            previous_cached = None
+        comparison_cached = previous_cached
+
+        if isinstance(previous_cached, Mapping):
+            for metadata_key in _PERSISTED_METADATA_KEYS:
+                cached_value = previous_cached.get(metadata_key)
+                incoming_value = slot.get(metadata_key)
+                if cached_value is None or incoming_value is not None:
+                    continue
+
+                if isinstance(cached_value, dict):
+                    slot[metadata_key] = dict(cached_value)
+                elif isinstance(cached_value, list):
+                    slot[metadata_key] = list(cached_value)
+                else:
+                    slot[metadata_key] = cached_value
+
+        incoming_metadata_only = location_data.get("metadata_only")
+        has_location_payload = (
+            slot.get("latitude") is not None or slot.get("longitude") is not None
+        )
+        if slot.get("metadata_only") and incoming_metadata_only is False:
+            slot.pop("metadata_only", None)
+        elif slot.get("metadata_only") and has_location_payload and incoming_metadata_only is not True:
+            slot.pop("metadata_only", None)
+
+        clear_metadata_only = has_location_payload and incoming_metadata_only is not True
+        self._persist_anchor_metadata(
+            device_id, slot, clear_metadata_only=clear_metadata_only
+        )
         self._record_semantic_label(slot, device_id=device_id)
 
-        cached_loc = self._device_location_data.get(device_id)
+        cached_loc = comparison_cached
         is_replay = False
         if isinstance(cached_loc, Mapping):
             new_ts = _normalize_epoch_seconds(slot.get("last_seen"))

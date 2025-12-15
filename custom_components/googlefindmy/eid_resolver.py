@@ -62,8 +62,15 @@ _LOGGER = logging.getLogger(__name__)
 EID_LENGTH = LEGACY_EID_LENGTH
 RAW_HEADER_LENGTH = 1
 FMDN_FRAME_TYPE = 0x40
+FHNA_FRAME_TYPE_LEGACY = 0x40
+FHNA_FRAME_TYPE_MODERN = 0x41
 MODERN_EID_LENGTH = 32
-NARROW_SCAN_RANGE = range(-3, 4)
+FHNA_SERVICE_OFFSET = 8
+FHNA_LEGACY_SERVICE_TOTAL = FHNA_SERVICE_OFFSET + EID_LENGTH
+FHNA_MODERN_SERVICE_TOTAL = FHNA_SERVICE_OFFSET + MODERN_EID_LENGTH
+FHNA_BACKCOMP_LEGACY_TOTAL = RAW_HEADER_LENGTH + EID_LENGTH
+FHNA_BACKCOMP_MODERN_TOTAL = RAW_HEADER_LENGTH + MODERN_EID_LENGTH
+NARROW_SCAN_RANGE: tuple[int, ...] = (0, -1, 1, -2, 2, -3, 3)
 LOCK_CUSTOM_FIELD = "eid_timebase_lock"
 DEBUG_LOG_LIMIT = 50
 PROVISIONING_WARN_COOLDOWN = 3600
@@ -101,7 +108,7 @@ def iter_rotation_windows(
     target_time: int,
     *,
     rotation_period: int,
-    window_range: range,
+    window_range: Iterable[int],
     include_neighbors: bool,
     allow_negative: bool = False,
 ) -> tuple[int, ...]:
@@ -146,6 +153,23 @@ def _normalize_identity_key(identity_key: bytes) -> bytes:
 
 def _coerce_int(value: Any) -> int | None:
     """Return a best-effort integer conversion for optional payloads."""
+
+    if isinstance(value, Mapping):
+        seconds = value.get("seconds")
+        nanos = value.get("nanos", 0)
+        if seconds is not None:
+            try:
+                return int(seconds) + int(nanos) // 1_000_000_000
+            except (TypeError, ValueError):
+                return None
+
+    seconds_attr = getattr(value, "seconds", None)
+    if seconds_attr is not None:
+        try:
+            nanos_attr = getattr(value, "nanos", 0)
+            return int(seconds_attr) + int(nanos_attr) // 1_000_000_000
+        except (TypeError, ValueError):
+            return None
 
     try:
         return int(value)
@@ -246,7 +270,7 @@ def _iter_debug_timebases(anchors: Any, *, now: int) -> list[_TimebaseCandidate]
             offset_seconds = _coerce_int(offset_raw) or 0
 
             label = str(raw.get("label") or "REL_DEBUG")
-            reference_time = now - anchor_epoch + offset_seconds
+            reference_time = _mask_u32(now - anchor_epoch + offset_seconds)
             candidates.append(
                 _TimebaseCandidate(
                     label=label,
@@ -287,7 +311,7 @@ def _compute_provisioning_counter(
         selected_anchor = pair_anchor
 
     if selected_label is not None and selected_anchor is not None:
-        counter = _clamp_and_mask_u32(now - selected_anchor)
+        counter = now - selected_anchor
         _LOGGER.debug(
             "Anchor Selected: Type=%s Value=%s Counter=%s (pair_date=%s secrets_creation_date=%s)",
             selected_label,
@@ -298,7 +322,7 @@ def _compute_provisioning_counter(
         )
         return counter, selected_label, selected_anchor
 
-    fallback_counter = _mask_u32(now)
+    fallback_counter = now
     _LOGGER.debug(
         "Anchor Selected: Type=%s Value=%s Counter=%s",
         "unix_time",
@@ -313,50 +337,85 @@ def _build_timebase_candidates(
     *,
     now: int,
     provisioning_counter: int,
+    primary_anchor_label: str | None,
     primary_anchor_epoch: int | None,
 ) -> list[_TimebaseCandidate]:
     """Return candidate timebases derived from identity anchors."""
 
-    def _build_candidate(
-        label: str, anchor_value: int | None
+    candidates: list[_TimebaseCandidate] = []
+    reference_counter = provisioning_counter
+    anchor_epoch_value = _coerce_int(primary_anchor_epoch)
+    absolute_candidate = _TimebaseCandidate(
+        TimebaseLabel.ABSOLUTE,
+        reference_time=reference_counter,
+        anchor_epoch=anchor_epoch_value,
+    )
+
+    def _build_anchor_candidate(
+        label: str, anchor_epoch: int | None
     ) -> _TimebaseCandidate | None:
+        anchor_value = _coerce_int(anchor_epoch)
         if anchor_value is None:
             return None
 
-        reference = now - anchor_value
-        if reference < -FUTURE_ANCHOR_MAX_DRIFT:
+        anchor_age = now - anchor_value
+        if anchor_age < -FUTURE_ANCHOR_MAX_DRIFT:
             _LOGGER.debug(
                 "Skipping %s timebase for %s due to excessive future skew (%s)",
                 label,
                 identity.canonical_id,
-                reference,
+                anchor_age,
             )
             return None
 
         return _TimebaseCandidate(
             label=label,
-            reference_time=reference,
+            reference_time=anchor_age,
             anchor_epoch=anchor_value,
         )
 
-    candidates: list[_TimebaseCandidate] = []
-    candidates.append(
-        _TimebaseCandidate(
-            TimebaseLabel.ABSOLUTE,
-            reference_time=provisioning_counter,
-            anchor_epoch=primary_anchor_epoch,
+    primary_label: str | None = None
+    primary_anchor_value: int | None = None
+
+    if primary_anchor_label == "secrets_creation_date":
+        primary_label = TimebaseLabel.REL_SECRETS
+        primary_anchor_value = _coerce_int(identity.secrets_creation_date)
+    elif primary_anchor_label == "pair_date":
+        primary_label = TimebaseLabel.REL_PAIR
+        primary_anchor_value = _coerce_int(identity.pair_date)
+
+    if primary_label is not None and primary_anchor_value is not None:
+        primary_anchor_age = now - primary_anchor_value
+        if primary_anchor_age < -FUTURE_ANCHOR_MAX_DRIFT:
+            _LOGGER.debug(
+                "Skipping %s timebase for %s due to excessive future skew (%s)",
+                primary_label,
+                identity.canonical_id,
+                primary_anchor_age,
+            )
+        else:
+            candidates.append(
+                _TimebaseCandidate(
+                    primary_label,
+                    reference_time=reference_counter,
+                    anchor_epoch=primary_anchor_value,
+                )
+            )
+
+    candidates.append(absolute_candidate)
+
+    if primary_label is None or primary_anchor_value is None:
+        fallback_pair = _build_anchor_candidate(
+            TimebaseLabel.REL_PAIR, identity.pair_date
         )
-    )
+        if fallback_pair is not None:
+            candidates.append(fallback_pair)
 
-    pair_candidate = _build_candidate(TimebaseLabel.REL_PAIR, identity.pair_date)
-    if pair_candidate is not None:
-        candidates.append(pair_candidate)
-
-    secrets_candidate = _build_candidate(
-        TimebaseLabel.REL_SECRETS, identity.secrets_creation_date
-    )
-    if secrets_candidate is not None:
-        candidates.append(secrets_candidate)
+        fallback_secrets = _build_anchor_candidate(
+            TimebaseLabel.REL_SECRETS, identity.secrets_creation_date
+        )
+        if fallback_secrets is not None:
+            candidates.append(fallback_secrets)
 
     if identity.time_anchors_debug is not None:
         candidates.extend(_iter_debug_timebases(identity.time_anchors_debug, now=now))
@@ -376,23 +435,23 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
     ``timestamp`` must be the provisioning counter (seconds since pairing), not
     Unix time, to mirror the tracker-side EID PRF input.
     """
+    normalized_key = _normalize_identity_key(identity_key)
 
-    legacy_eid = generate_eid(identity_key, timestamp)
+    try:
+        legacy_eid = generate_eid(identity_key, timestamp)
+    except ValueError:
+        legacy_eid = generate_eid(normalized_key, timestamp)
     candidates: list[EidCandidate] = [
-        EidCandidate(name="legacy_secp160r1_rx20", eid=legacy_eid)
+        EidCandidate(name="fhna_secp160r1_rx20", eid=legacy_eid)
     ]
 
-    if len(identity_key) == EIK_LENGTH:
-        normalized_key = _normalize_identity_key(identity_key)
-        modern_eid = generate_eid_p256(normalized_key, timestamp)
-        modern_truncated = modern_eid[:LEGACY_EID_LENGTH]
+    if len(normalized_key) == EIK_LENGTH:
+        try:
+            modern_eid = generate_eid_p256(identity_key, timestamp)
+        except ValueError:
+            modern_eid = generate_eid_p256(normalized_key, timestamp)
 
-        candidates.extend(
-            (
-                EidCandidate(name="modern_p256_x32", eid=modern_eid),
-                EidCandidate(name="modern_p256_truncated_rx20", eid=modern_truncated),
-            )
-        )
+        candidates.append(EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid))
 
     return tuple(candidates)
 
@@ -494,10 +553,14 @@ class GoogleFindMyEIDResolver:
             return
 
         async with self._refresh_lock:
+            pending_refresh = self._pending_refresh
+            self._pending_refresh = False
             await self._refresh_cache()
             while self._pending_refresh:
                 self._pending_refresh = False
                 await self._refresh_cache()
+            if pending_refresh:
+                self._pending_refresh = False
 
     async def _refresh_cache(self) -> None:  # noqa: PLR0912, PLR0915 - iterative window search
         """Rebuild the EID lookup table for enabled, non-ignored devices."""
@@ -585,7 +648,7 @@ class GoogleFindMyEIDResolver:
             provisioning_counter, anchor_label, anchor_epoch = (
                 _compute_provisioning_counter(identity, now=now_unix)
             )
-            base_counter = provisioning_counter & ~(ROTATION_PERIOD - 1)
+            base_counter = (provisioning_counter // ROTATION_PERIOD) * ROTATION_PERIOD
             counter_label = f"counter:{anchor_label}" if anchor_label else "counter"
 
             _LOGGER.debug(
@@ -663,10 +726,23 @@ class GoogleFindMyEIDResolver:
                 )
                 existing = lookup.get(eid_value)
                 existing_offset = existing.time_offset if existing is not None else None
-                should_force = (
-                    metadata_payload.get("timebase") == TimebaseLabel.REL_PAIR
-                    and TimebaseLabel.REL_PAIR not in recorded_timebases
-                )
+                timebase_label = metadata_payload.get("timebase")
+                should_force = timebase_label in {
+                    TimebaseLabel.REL_PAIR,
+                    TimebaseLabel.REL_SECRETS,
+                } and timebase_label not in recorded_timebases
+
+                existing_metadata = lookup_metadata.get(eid_value)
+                history: list[dict[str, Any]] = []
+                if isinstance(existing_metadata, dict):
+                    prior = existing_metadata.get("timebases")
+                    if isinstance(prior, list):
+                        history = list(prior)
+                    else:
+                        history = [existing_metadata]
+
+                if metadata_payload not in history:
+                    history.append(metadata_payload)
 
                 if (
                     should_force
@@ -678,14 +754,19 @@ class GoogleFindMyEIDResolver:
                     lookup_metadata[eid_value] = {
                         **metadata_payload,
                         "is_reversed": reversed_flag,
+                        "timebases": history,
                     }
                     recorded_timebases.add(str(metadata_payload.get("timebase")))
+                elif isinstance(existing_metadata, dict):
+                    existing_metadata["timebases"] = history
+                    lookup_metadata[eid_value] = existing_metadata
 
             base_candidates = _build_timebase_candidates(
                 identity,
                 now=now_unix,
                 provisioning_counter=provisioning_counter,
-                primary_anchor_epoch=anchor_epoch if anchor_label else None,
+                primary_anchor_label=anchor_label,
+                primary_anchor_epoch=anchor_epoch,
             )
 
             timebase_candidates = (
@@ -706,7 +787,7 @@ class GoogleFindMyEIDResolver:
                 if candidate.label == TimebaseLabel.REL_PAIR:
                     rel_candidates.append(candidate)
 
-                passes: list[tuple[range, bool]]
+                passes: list[tuple[Iterable[int], bool]]
                 if base_search_offset is not None:
                     passes = [(range(0, 1), True)]
                 else:
@@ -714,13 +795,41 @@ class GoogleFindMyEIDResolver:
                     if not skip_deep_scan:
                         passes.append((range(-90, 91), False))
 
-                allow_negative = candidate.label != TimebaseLabel.ABSOLUTE and (
-                    candidate.reference_time < 0
+                anchor_age: int | None = None
+                if candidate.anchor_epoch is not None:
+                    try:
+                        anchor_age = now_unix - int(candidate.anchor_epoch)
+                    except (TypeError, ValueError):
+                        anchor_age = None
+
+                reference_value = candidate.reference_time
+                offset_reference = anchor_age if anchor_age is not None else reference_value
+                allow_negative = bool(
+                    candidate.label != TimebaseLabel.ABSOLUTE
+                    and anchor_age is not None
+                    and anchor_age < 0
                 )
 
                 for window_range, include_neighbors in passes:
+                    local_window_range = window_range
+                    local_include_neighbors = include_neighbors
                     local_search_offset = base_search_offset
+                    base_target_time = offset_reference
+
                     if (
+                        active_lock is not None
+                        and active_lock.label == candidate.label
+                        and active_lock.rotation_timestamp is not None
+                    ):
+                        base_target_time = active_lock.rotation_timestamp
+                        offset_reference = active_lock.rotation_timestamp - (
+                            active_lock.offset or 0
+                        )
+                        local_search_offset = 0
+                        local_window_range = range(0, 3)
+                        local_include_neighbors = False
+
+                    elif (
                         local_search_offset is None
                         and active_lock is not None
                         and active_lock.rotation_timestamp is not None
@@ -738,9 +847,9 @@ class GoogleFindMyEIDResolver:
                         )
 
                     target_time = (
-                        candidate.reference_time + local_search_offset
+                        base_target_time + local_search_offset
                         if local_search_offset is not None
-                        else candidate.reference_time
+                        else base_target_time
                     )
 
                     is_reversed = local_search_offset is not None and known_endianness
@@ -748,17 +857,20 @@ class GoogleFindMyEIDResolver:
                     rotation_windows = iter_rotation_windows(
                         target_time,
                         rotation_period=ROTATION_PERIOD,
-                        window_range=window_range,
-                        include_neighbors=include_neighbors,
+                        window_range=local_window_range,
+                        include_neighbors=local_include_neighbors,
                         allow_negative=allow_negative,
                     )
 
                     for window_timestamp in rotation_windows:
-                        time_offset = window_timestamp - candidate.reference_time
+                        time_offset = window_timestamp - offset_reference
+
+                        masked_timestamp = _mask_u32(window_timestamp)
+                        rotation_timestamp = window_timestamp
 
                         try:
                             candidates = _cached_candidates(
-                                identity_key_bytes, window_timestamp
+                                identity_key_bytes, masked_timestamp
                             )
                         except Exception as err:  # noqa: BLE001 - defensive guard
                             _LOGGER.debug(
@@ -774,7 +886,8 @@ class GoogleFindMyEIDResolver:
                             metadata = {
                                 "timebase": candidate.label,
                                 "anchor_epoch": candidate.anchor_epoch,
-                                "rotation_timestamp": window_timestamp,
+                                "rotation_timestamp": rotation_timestamp,
+                                "masked_rotation_timestamp": masked_timestamp,
                                 "time_offset": time_offset,
                                 "timestamp_basis": counter_label,
                                 "variant": eid_candidate.name,
@@ -787,7 +900,7 @@ class GoogleFindMyEIDResolver:
                                 message_key = (
                                     candidate.label,
                                     eid_candidate.name,
-                                    window_timestamp,
+                                    masked_timestamp,
                                 )
                                 if message_key not in device_debug_state["seen"]:
                                     device_debug_state["seen"].add(message_key)
@@ -1224,15 +1337,16 @@ class GoogleFindMyEIDResolver:
             },
         )
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0912, PLR0915
+    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
         """Resolve a scanned EID to a Home Assistant device registry ID.
 
-        Only Find My Device Network (FMDN) advertising frames (Frame Type
-        ``0x40``) are considered when the payload includes framing/telemetry;
-        the resolver slices the header and trailing bytes to isolate the
-        20-byte EID before lookup. Legacy callers that already provide a
-        20-byte EID bypass the framing filter, while unexpected lengths are
-        rejected with a debug log to aid frame parsing investigations.
+        FHNA Find My Device Network frames encode the frame type at octet 7.
+        Legacy (``0x40``) frames carry a 20-byte EID at octets 8–27; modern
+        (``0x41``) frames carry a 32-byte EID at octets 8–39. Optional hashed
+        flags follow the EID and are ignored for lookup. Raw 20-byte and
+        32-byte payloads are accepted as-is, and a backward compatible slice
+        attempts to parse payloads that start with ``0x40``/``0x41`` when the
+        length matches the legacy one-byte header layout.
 
         Returns the matching :class:`EIDMatch` when the identifier was
         precomputed for a known tracker; otherwise returns ``None``. The
@@ -1247,37 +1361,93 @@ class GoogleFindMyEIDResolver:
         mismatches.
         """
 
-        lookup_key: bytes | None
         eid_length = len(eid_bytes)
+        lookup_candidates: list[bytes] = []
 
         if eid_length == EID_LENGTH:
-            lookup_key = eid_bytes
+            lookup_candidates.append(eid_bytes)
         elif eid_length == MODERN_EID_LENGTH:
-            lookup_key = eid_bytes
-        elif eid_length >= EID_LENGTH + 1:
-            if eid_bytes[0] != FMDN_FRAME_TYPE:
-                _LOGGER.debug(
-                    "RESOLVER PROBE: Unexpected frame type for %d-byte payload",
-                    eid_length,
-                )
-                return None
-            lookup_key = eid_bytes[1 : 1 + EID_LENGTH]
+            lookup_candidates.append(eid_bytes)
         else:
+            if eid_length >= FHNA_LEGACY_SERVICE_TOTAL and eid_bytes[7] == FHNA_FRAME_TYPE_LEGACY:
+                lookup_candidates.append(
+                    eid_bytes[FHNA_SERVICE_OFFSET:FHNA_LEGACY_SERVICE_TOTAL]
+                )
+            if eid_length >= FHNA_MODERN_SERVICE_TOTAL and eid_bytes[7] == FHNA_FRAME_TYPE_MODERN:
+                lookup_candidates.append(
+                    eid_bytes[FHNA_SERVICE_OFFSET:FHNA_MODERN_SERVICE_TOTAL]
+                )
+
+            if not lookup_candidates and eid_length >= RAW_HEADER_LENGTH:
+                frame_type = eid_bytes[0]
+                if frame_type == FHNA_FRAME_TYPE_LEGACY and eid_length >= FHNA_BACKCOMP_LEGACY_TOTAL:
+                    lookup_candidates.append(eid_bytes[RAW_HEADER_LENGTH:FHNA_BACKCOMP_LEGACY_TOTAL])
+                elif frame_type == FHNA_FRAME_TYPE_MODERN and eid_length >= FHNA_BACKCOMP_MODERN_TOTAL:
+                    lookup_candidates.append(eid_bytes[RAW_HEADER_LENGTH:FHNA_BACKCOMP_MODERN_TOTAL])
+
+        if not lookup_candidates:
             _LOGGER.debug(
                 "RESOLVER PROBE: Unexpected EID length received (length=%d)", eid_length
             )
             return None
 
-        eid_prefix = _eid_prefix(lookup_key)
+        if not lookup_candidates:
+            _LOGGER.debug(
+                "RESOLVER PROBE: No candidates produced for length=%d", eid_length
+            )
+            return None
+
+        eid_prefix = _eid_prefix(lookup_candidates[0])
         _LOGGER.debug(
             "RESOLVER PROBE: Checking Sliced EID prefix %s (Original Len: %d)",
             eid_prefix,
             len(eid_bytes),
         )
 
-        match = self._lookup.get(lookup_key)
-        if match is None:
-            match = self._lookup.get(lookup_key[::-1])
+        if not self._lookup:
+            is_locked = self._refresh_lock.locked()
+            if self._pending_refresh or is_locked:
+                _LOGGER.debug(
+                    "RESOLVER NOT READY: cache priming (pending=%s locked=%s prefix=%s)",
+                    self._pending_refresh,
+                    is_locked,
+                    eid_prefix,
+                )
+                return None
+
+            _LOGGER.debug(
+                "RESOLVER NOT READY: empty cache; scheduling refresh for prefix=%s",
+                eid_prefix,
+            )
+            refresh = getattr(self, "async_refresh", None)
+            create_task = getattr(self.hass, "async_create_task", None)
+            if callable(refresh) and callable(create_task):
+                self._pending_refresh = True
+                try:
+                    create_task(refresh())
+                except Exception:  # pragma: no cover - defensive
+                    self._pending_refresh = False
+                    _LOGGER.debug(
+                        "RESOLVER REFRESH SCHEDULING FAILED (prefix=%s)", eid_prefix
+                    )
+            return None
+
+        match: EIDMatch | None = None
+        metadata: dict[str, Any] | None = None
+
+        for lookup_key in lookup_candidates:
+            match = self._lookup.get(lookup_key)
+            if match is None:
+                match = self._lookup.get(lookup_key[::-1])
+            if match is None:
+                continue
+
+            lookup_metadata = getattr(self, "_lookup_metadata", None)
+            if isinstance(lookup_metadata, dict):
+                metadata = lookup_metadata.get(lookup_key) or lookup_metadata.get(
+                    lookup_key[::-1]
+                )
+            break
 
         if match is None:
             known_timebases = getattr(self, "_known_timebases", {})
@@ -1288,13 +1458,6 @@ class GoogleFindMyEIDResolver:
                 len(known_timebases),
             )
             return None
-
-        metadata: dict[str, Any] | None = None
-        lookup_metadata = getattr(self, "_lookup_metadata", None)
-        if isinstance(lookup_metadata, dict):
-            metadata = lookup_metadata.get(lookup_key)
-            if metadata is None:
-                metadata = lookup_metadata.get(lookup_key[::-1])
 
         previous_offset = self._known_offsets.get(match.device_id)
         previous_endianness = self._known_endianness.get(match.device_id)

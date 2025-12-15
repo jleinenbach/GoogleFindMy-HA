@@ -1,5 +1,8 @@
 import pytest
+from cryptography.hazmat.primitives.asymmetric import ec
 
+from custom_components.googlefindmy.FMDNCrypto import eid_generator
+from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import load_curve
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     _prf_table10,
@@ -34,3 +37,37 @@ def test_generate_eid_p256_matches_known_x_coordinate() -> None:
 def test_generate_eid_p256_rejects_invalid_key_lengths() -> None:
     with pytest.raises(ValueError):
         generate_eid_p256(b"short", 0)
+
+
+def test_generate_eid_p256_avoids_zero_scalar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero PRF output should still yield the generator point (r=1)."""
+
+    identity_key = b"\xAA" * 32
+
+    monkeypatch.setattr(
+        eid_generator, "fhna_prf_aes_ecb_256", lambda *_args, **_kwargs: b"\x00" * 32
+    )
+
+    eid = generate_eid_p256(identity_key, 0)
+
+    generator_point = ec.derive_private_key(1, ec.SECP256R1()).public_key().public_numbers()
+    expected_x = int(generator_point.x).to_bytes(32, "big")
+
+    assert eid == expected_x
+
+
+def test_generate_eid_legacy_avoids_zero_scalar(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy path maps zero PRF output to the curve generator (r=1)."""
+
+    identity_key = b"\xBB" * 32
+
+    monkeypatch.setattr(
+        eid_generator, "fhna_prf_aes_ecb_256", lambda *_args, **_kwargs: b"\x00" * 32
+    )
+
+    eid = eid_generator.generate_eid(identity_key, 0)
+
+    curve = load_curve()
+    expected_x = int(curve.generator.x()).to_bytes(20, "big")
+
+    assert eid == expected_x
