@@ -85,5 +85,5 @@ async def test_resolver_matches_counter_timebase(
     assert match.time_offset == 0
     metadata = resolver._lookup_metadata.get(eid)
     assert metadata is not None
-    assert metadata.get("timestamp_basis") == "counter:pair_date"
+    assert metadata.get("timestamp_basis") == "counter:REL_PAIR"
     assert metadata.get("anchor_epoch") == pair_date

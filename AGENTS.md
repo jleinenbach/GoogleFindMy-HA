@@ -294,6 +294,7 @@ Prefer the executable name when it is available; fall back to the module form wh
 ### Shared pip cache for stub installs
 
 * Export `PIP_CACHE_DIR=/workspace/.cache/pip` (or reuse the default `~/.cache/pip`) before invoking `make test-stubs` so wheel downloads persist across sessions. Reusing the same cache keeps the Home Assistant and pytest stub installs fast and avoids repeated dependency fetches in fresh shells.
+* If you routinely rebuild the stub environment, keep a reusable virtualenv or wheelhouse around to sidestep the lengthy `make test-stubs` bootstrap. For example, cache a pre-populated `.venv` or store `pip download` artifacts in a shared directory that `PIP_FIND_LINKS` or `pip --no-index --find-links` can consume on the next run.
 
 ---
 
