@@ -69,10 +69,8 @@ def test_future_anchor_candidates_are_skipped() -> None:
 
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=now,
-        primary_anchor_label=None,
-        primary_anchor_epoch=None,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -104,20 +102,24 @@ def test_selected_anchor_drives_relative_candidate() -> None:
 
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=provisioning_counter,
-        primary_anchor_label=anchor_label,
-        primary_anchor_epoch=anchor_epoch,
     )
 
     labels = {candidate.label for candidate in candidates}
-    assert TimebaseLabel.REL_SECRETS in labels
-    assert TimebaseLabel.REL_PAIR not in labels
+    assert labels.issuperset({TimebaseLabel.REL_SECRETS, TimebaseLabel.REL_PAIR})
 
-    rel_candidate = next(
+    rel_secrets_candidate = next(
         candidate
         for candidate in candidates
         if candidate.label == TimebaseLabel.REL_SECRETS
     )
-    assert rel_candidate.reference_time == provisioning_counter
-    assert rel_candidate.anchor_epoch == secrets_creation_date
+    rel_pair_candidate = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
+    )
+    assert rel_secrets_candidate.reference_time == provisioning_counter
+    assert rel_secrets_candidate.anchor_epoch == secrets_creation_date
+    assert rel_pair_candidate.reference_time == now - pair_date
+    assert rel_pair_candidate.anchor_epoch == pair_date

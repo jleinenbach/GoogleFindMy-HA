@@ -115,20 +115,29 @@ async def test_refresh_cache_records_consistent_time_domains(
         config_entry_id="entry-time",  # type: ignore[arg-type]
         pair_date=500,
     )
+    provisioning_counter = anchor_now - identity.pair_date  # type: ignore[operator]
 
-    async def _fake_collect(self: resolver_module.GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
         return [identity]
 
     monkeypatch.setattr(
-        resolver_module.GoogleFindMyEIDResolver, "_collect_device_secrets", _fake_collect
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
     )
     monkeypatch.setattr(
-        resolver_module, "_cached_candidates", lambda *_args, **_kwargs: (
-            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xAA" * EID_LENGTH),
-        )
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xaa" * EID_LENGTH),
+        ),
     )
     monkeypatch.setattr(
-        resolver_module.dr, "async_get", lambda _hass: SimpleNamespace(async_get=lambda _id: None)
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
     )
 
     await resolver._refresh_cache()
@@ -136,8 +145,14 @@ async def test_refresh_cache_records_consistent_time_domains(
     assert resolver._lookup_metadata
     metadata = next(iter(resolver._lookup_metadata.values()))
 
-    expected_reference = anchor_now - identity.pair_date
-    assert metadata["rotation_timestamp"] - metadata["time_offset"] == expected_reference
+    expected_reference = (
+        resolver_module._mask_u32(anchor_now)  # type: ignore[attr-defined]
+        if metadata.get("timebase") == TimebaseLabel.ABSOLUTE
+        else provisioning_counter
+    )
+    assert (
+        metadata["rotation_timestamp"] - metadata["time_offset"] == expected_reference
+    )
     assert metadata["masked_rotation_timestamp"] == resolver_module._mask_u32(
         metadata["rotation_timestamp"]
     )
@@ -154,6 +169,7 @@ def test_coerce_int_accepts_timestamp_like_mapping() -> None:
 def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
     now = 1_700_000_000
     secrets_anchor = now - 86_400
+    pair_anchor = now - 200_000
     identity = DeviceIdentity(
         device_type="pixel",
         registry_id="registry-anchor",
@@ -162,33 +178,128 @@ def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
         encrypted_identity_key=None,
         owner_key_version=None,
         config_entry_id="entry-anchor",
-        pair_date=now - 200_000,
+        pair_date=pair_anchor,
         secrets_creation_date=secrets_anchor,
         time_anchors_debug=None,
     )
 
-    provisioning_counter, anchor_label, anchor_epoch = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
+    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
         identity, now=now
     )
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=provisioning_counter,
-        primary_anchor_label=anchor_label,
-        primary_anchor_epoch=anchor_epoch,
     )
 
     absolute = next(
-        candidate for candidate in candidates if candidate.label == TimebaseLabel.ABSOLUTE
-    )
-    relative = next(
         candidate
         for candidate in candidates
-        if candidate.label in {TimebaseLabel.REL_SECRETS, TimebaseLabel.REL_PAIR}
+        if candidate.label == TimebaseLabel.ABSOLUTE
+    )
+    rel_pair = next(
+        candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR
+    )
+    rel_secrets = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_SECRETS
     )
 
-    assert absolute.reference_time == provisioning_counter
-    assert relative.reference_time == provisioning_counter
+    assert absolute.reference_time == resolver_module._mask_u32(now)  # type: ignore[attr-defined]
+    assert rel_secrets.reference_time == provisioning_counter
+    assert rel_pair.reference_time == now - pair_anchor
+
+
+def test_timebase_domain_separation() -> None:
+    """Absolute and relative candidates should stay in their own time domains."""
+
+    now = 1_760_000_000
+    pair_date = now - 100_000
+    identity = DeviceIdentity(
+        device_type="pixel",
+        registry_id="registry-domain",  # type: ignore[arg-type]
+        canonical_id="domain-device",  # type: ignore[arg-type]
+        identity_key=b"\x05" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-domain",  # type: ignore[arg-type]
+        pair_date=pair_date,
+        secrets_creation_date=None,
+        time_anchors_debug=None,
+    )
+
+    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
+        identity, now=now
+    )
+    candidates = _build_timebase_candidates(
+        identity,
+        now_unix=now,
+        provisioning_counter=provisioning_counter,
+    )
+
+    absolute = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.ABSOLUTE
+    )
+    rel_pair = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
+    )
+
+    assert absolute.reference_time == resolver_module._mask_u32(now)  # type: ignore[attr-defined]
+    assert rel_pair.reference_time == provisioning_counter
+    assert absolute.reference_time > 1_000_000_000
+    assert rel_pair.reference_time < 1_000_000_000
+
+
+def test_candidates_include_both_anchors_when_present() -> None:
+    now = 1_800_000_000
+    pair_date = now - 500_000
+    secrets_creation_date = now - 50_000
+    identity = DeviceIdentity(
+        device_type="pixel",
+        registry_id="registry-both-anchors",  # type: ignore[arg-type]
+        canonical_id="both-anchors",  # type: ignore[arg-type]
+        identity_key=b"\x06" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-both-anchors",  # type: ignore[arg-type]
+        pair_date=pair_date,
+        secrets_creation_date=secrets_creation_date,
+        time_anchors_debug=None,
+    )
+
+    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
+        identity, now=now
+    )
+    candidates = _build_timebase_candidates(
+        identity,
+        now_unix=now,
+        provisioning_counter=provisioning_counter,
+    )
+
+    labels = {candidate.label for candidate in candidates}
+    assert {
+        TimebaseLabel.ABSOLUTE,
+        TimebaseLabel.REL_PAIR,
+        TimebaseLabel.REL_SECRETS,
+    }.issubset(labels)
+
+    rel_pair = next(
+        candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR
+    )
+    rel_secrets = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_SECRETS
+    )
+
+    assert rel_pair.reference_time == now - pair_date
+    assert rel_secrets.reference_time == now - secrets_creation_date
+    assert rel_pair.reference_time != rel_secrets.reference_time
 
 
 def test_time_offset_alignment_uses_candidate_reference() -> None:
@@ -207,19 +318,23 @@ def test_time_offset_alignment_uses_candidate_reference() -> None:
         time_anchors_debug=None,
     )
 
-    provisioning_counter, anchor_label, anchor_epoch = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
+    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
         identity, now=now
     )
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=provisioning_counter,
-        primary_anchor_label=anchor_label,
-        primary_anchor_epoch=anchor_epoch,
     )
 
-    relative = next(candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR)
-    rotation_timestamp = relative.reference_time - (relative.reference_time % ROTATION_PERIOD)
+    relative = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
+    )
+    rotation_timestamp = relative.reference_time - (
+        relative.reference_time % ROTATION_PERIOD
+    )
     time_offset = rotation_timestamp - relative.reference_time
 
     assert abs(time_offset) < ROTATION_PERIOD
@@ -438,10 +553,8 @@ def test_build_timebase_candidates_with_time_anchor_hints(
 
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=now,
-        primary_anchor_label=None,
-        primary_anchor_epoch=None,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -465,10 +578,8 @@ def test_build_timebase_candidates_always_include_absolute_with_rel_anchor() -> 
 
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=now,
-        primary_anchor_label="pair_date",
-        primary_anchor_epoch=pair_date,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -489,14 +600,14 @@ def test_build_timebase_candidates_use_provisioning_for_absolute() -> None:
 
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=provisioning_counter,
-        primary_anchor_label="secrets_creation_date",
-        primary_anchor_epoch=anchor_epoch,
     )
 
     absolute_candidate = next(
-        candidate for candidate in candidates if candidate.label == TimebaseLabel.ABSOLUTE
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.ABSOLUTE
     )
     relative_candidate = next(
         candidate
@@ -504,7 +615,7 @@ def test_build_timebase_candidates_use_provisioning_for_absolute() -> None:
         if candidate.label == TimebaseLabel.REL_SECRETS
     )
 
-    assert absolute_candidate.reference_time == provisioning_counter
+    assert absolute_candidate.reference_time == resolver_module._mask_u32(now)  # type: ignore[attr-defined]
     assert relative_candidate.reference_time == provisioning_counter
     assert relative_candidate.anchor_epoch == anchor_epoch
 
@@ -520,10 +631,8 @@ def test_build_timebase_candidates_ignores_unparsed_anchor_list() -> None:
 
     candidates = _build_timebase_candidates(
         identity,
-        now=now,
+        now_unix=now,
         provisioning_counter=now,
-        primary_anchor_label=None,
-        primary_anchor_epoch=None,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -663,9 +772,7 @@ def test_persist_anchor_metadata_records_metadata_only_payload() -> None:
         "owner_key_version": 3,
     }
 
-    coordinator._persist_anchor_metadata(
-        "dev-meta", payload, clear_metadata_only=False
-    )
+    coordinator._persist_anchor_metadata("dev-meta", payload, clear_metadata_only=False)
 
     stored = coordinator._device_location_data["dev-meta"]
     assert stored["pair_date"] == 100
@@ -840,7 +947,9 @@ async def test_resolve_eid_parses_fhna_legacy_service_data(
     legacy_eid = b"L" * resolver_module.EID_LENGTH
     modern_eid = b"M" * resolver_module.MODERN_EID_LENGTH
 
-    def _fake_cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
+    def _fake_cached_candidates(
+        identity_key: bytes, timestamp: int
+    ) -> tuple[EidCandidate, ...]:
         return (
             EidCandidate(name="fhna_secp160r1_rx20", eid=legacy_eid),
             EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid),
@@ -866,7 +975,9 @@ def test_resolve_eid_parses_fhna_modern_service_data(
     legacy_eid = b"L" * resolver_module.EID_LENGTH
     modern_eid = b"M" * resolver_module.MODERN_EID_LENGTH
 
-    def _fake_cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
+    def _fake_cached_candidates(
+        identity_key: bytes, timestamp: int
+    ) -> tuple[EidCandidate, ...]:
         return (
             EidCandidate(name="fhna_secp160r1_rx20", eid=legacy_eid),
             EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid),
@@ -912,14 +1023,12 @@ async def test_provisioning_counters_used_for_timebases(
     identity = DeviceIdentity(
         registry_id="registry-counter",
         canonical_id="device-counter",
-        identity_key=b"\x0B" * resolver_module.EIK_LENGTH,
+        identity_key=b"\x0b" * resolver_module.EIK_LENGTH,
         config_entry_id="entry-counter",
         pair_date=base_time - 120,
     )
 
-    coordinator = SimpleNamespace(
-        get_active_device_identities=lambda: [identity]
-    )
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
     hass = _StubHass(
         {
             DOMAIN: {
@@ -938,6 +1047,7 @@ async def test_provisioning_counters_used_for_timebases(
 
     assert recorded_timestamps
     assert all(ts < 5_000_000 for ts in recorded_timestamps)
+
 
 @pytest.mark.asyncio
 async def test_resolver_refreshes_all_rotation_windows(
@@ -996,7 +1106,9 @@ async def test_resolver_refreshes_all_rotation_windows(
 
 
 @pytest.mark.asyncio
-async def test_time_offset_uses_candidate_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_time_offset_uses_candidate_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     base_time = 1_700_000_000
     anchor_epoch = base_time - 86400
 
@@ -1019,7 +1131,11 @@ async def test_time_offset_uses_candidate_reference(monkeypatch: pytest.MonkeyPa
 
     coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
     hass = _StubHass(
-        {DOMAIN: {"entries": {"entry-offset": SimpleNamespace(coordinator=coordinator)}}}
+        {
+            DOMAIN: {
+                "entries": {"entry-offset": SimpleNamespace(coordinator=coordinator)}
+            }
+        }
     )
 
     resolver = _build_resolver()
@@ -1601,7 +1717,11 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
     lock = resolver._known_timebases.get(identity.registry_id)
     assert lock is not None
     assert lock.label == str(best_meta.get("timebase"))
-    assert lock.anchor_epoch == pair_date
+    anchor_epoch = best_meta.get("anchor_epoch")
+    if anchor_epoch is not None:
+        assert lock.anchor_epoch == anchor_epoch
+    else:
+        assert lock.anchor_epoch is None
     assert abs(lock.offset) < ROTATION_PERIOD
 
     recorded_timestamps.clear()
