@@ -51,16 +51,19 @@ def test_generate_eid_candidates_expected_variants() -> None:
     variant_map = {candidate.name: candidate.eid for candidate in candidates}
 
     assert set(variant_map) == {
-        "legacy_secp160r1_rx20",
-        "modern_p256_x32",
-        "modern_p256_trunc20",
+        "fhna_secp160r1_rx20",
+        "fhna_secp256r1_rx32",
     }
-    assert len(variant_map["legacy_secp160r1_rx20"]) == LEGACY_EID_LENGTH
-    assert variant_map["legacy_secp160r1_rx20"].hex() == "1783ab2c308fd47caa8ec4274373322e51ed5031"
-    assert len(variant_map["modern_p256_x32"]) == 32
-    assert variant_map["modern_p256_x32"].hex() == "f5a2f55527688d26c47043bde3f8888274a4eb9fcd6ff5fad3302f12dd47bf5e"
-    assert variant_map["modern_p256_trunc20"] == variant_map["modern_p256_x32"][:LEGACY_EID_LENGTH]
-    assert variant_map["modern_p256_trunc20"].hex() == "f5a2f55527688d26c47043bde3f8888274a4eb9f"
+    assert len(variant_map["fhna_secp160r1_rx20"]) == LEGACY_EID_LENGTH
+    assert (
+        variant_map["fhna_secp160r1_rx20"].hex()
+        == "bccc42845790b5a2d9376edd6d66f8d15a6c7877"
+    )
+    assert len(variant_map["fhna_secp256r1_rx32"]) == 32
+    assert (
+        variant_map["fhna_secp256r1_rx32"].hex()
+        == "f5a2f55527688d26c47043bde3f8888274a4eb9fcd6ff5fad3302f12dd47bf5e"
+    )
 
 
 def test_iter_rotation_windows_alignment_and_neighbors() -> None:

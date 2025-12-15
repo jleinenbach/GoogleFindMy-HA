@@ -11,6 +11,7 @@ from custom_components.googlefindmy.eid_resolver import (
     TimebaseLabel,
     _build_timebase_candidates,
     _clamp_and_mask_u32,
+    _compute_provisioning_counter,
 )
 
 
@@ -70,9 +71,53 @@ def test_future_anchor_candidates_are_skipped() -> None:
         identity,
         now=now,
         provisioning_counter=now,
+        primary_anchor_label=None,
         primary_anchor_epoch=None,
     )
 
     labels = {candidate.label for candidate in candidates}
     assert TimebaseLabel.ABSOLUTE in labels
     assert TimebaseLabel.REL_PAIR not in labels
+
+
+def test_selected_anchor_drives_relative_candidate() -> None:
+    """Chosen anchor should seed the relative timebase candidate."""
+
+    now = 200 * 86_400
+    secrets_creation_date = now - 86_400
+    pair_date = now - 15_552_000
+    identity = DeviceIdentity(
+        registry_id="registry-anchor",
+        canonical_id="can-anchor",
+        identity_key=b"\x01" * 2,
+        config_entry_id="entry-anchor",
+        pair_date=pair_date,
+        secrets_creation_date=secrets_creation_date,
+    )
+
+    provisioning_counter, anchor_label, anchor_epoch = _compute_provisioning_counter(
+        identity, now=now
+    )
+
+    assert anchor_label == "secrets_creation_date"
+    assert provisioning_counter == 86_400
+
+    candidates = _build_timebase_candidates(
+        identity,
+        now=now,
+        provisioning_counter=provisioning_counter,
+        primary_anchor_label=anchor_label,
+        primary_anchor_epoch=anchor_epoch,
+    )
+
+    labels = {candidate.label for candidate in candidates}
+    assert TimebaseLabel.REL_SECRETS in labels
+    assert TimebaseLabel.REL_PAIR not in labels
+
+    rel_candidate = next(
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_SECRETS
+    )
+    assert rel_candidate.reference_time == provisioning_counter
+    assert rel_candidate.anchor_epoch == secrets_creation_date

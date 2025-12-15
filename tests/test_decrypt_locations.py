@@ -232,3 +232,25 @@ def test_async_decrypt_location_response_locations_normalizes_anchor_units(
     assert decrypt_locations._parse_epoch_seconds(  # type: ignore[attr-defined]
         int((base_now - 75) * 1000), base_now
     ) == pytest.approx(base_now - 75)
+
+
+def test_pair_date_microseconds_normalization_and_future_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PairDate with microseconds normalizes while future drift is discarded."""
+
+    base_now = 1_700_300_000.0
+
+    normalized_pair_date = decrypt_locations.normalize_pair_date_value(
+        (base_now - 240) * 1_000_000,
+        now_wall=base_now,
+    )
+    assert normalized_pair_date == int(base_now - 240)
+
+    future_pair_date = decrypt_locations.normalize_pair_date_value(
+        (base_now + decrypt_locations.MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S + 50)
+        * 1_000_000,
+        now_wall=base_now,
+    )
+
+    assert future_pair_date is None

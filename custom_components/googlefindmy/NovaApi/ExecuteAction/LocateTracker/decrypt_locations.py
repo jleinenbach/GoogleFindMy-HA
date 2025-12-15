@@ -4,7 +4,7 @@
 #
 from __future__ import annotations
 
-# ruff: noqa: PLR0912, PLR0915
+# ruff: noqa: PLR0911, PLR0912, PLR0915
 import asyncio
 import datetime
 import hashlib
@@ -353,6 +353,59 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:  # noqa: PLR
     return v
 
 
+def normalize_pair_date_value(raw: Any, *, now_wall: float) -> int | None:
+    """Normalize pairDate values that may include millisecond or microsecond units."""
+
+    if raw is None:
+        return None
+
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        if not math.isfinite(raw):
+            return None
+
+        value = float(raw)
+        if value > _MICROSECONDS_THRESHOLD:
+            value /= 1e6
+        elif value > _MILLISECONDS_THRESHOLD:
+            value /= 1e3
+
+        if value < _MIN_VALID_EPOCH_S:
+            return None
+        if value > (now_wall + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S):
+            return None
+        return int(value)
+
+    ts = _parse_epoch_seconds(raw, now_wall)
+    if ts is None:
+        return None
+    return int(ts)
+
+
+def normalize_creation_timestamp_value(raw: Any, *, now_wall: float) -> int | None:
+    """Normalize encryptedUserSecrets.creationDate inputs."""
+
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        if not math.isfinite(raw):
+            return None
+
+        value = float(raw)
+        if value > _MICROSECONDS_THRESHOLD:
+            value /= 1e6
+        elif value > _MILLISECONDS_THRESHOLD:
+            value /= 1e3
+
+        if value < _MIN_VALID_EPOCH_S:
+            return None
+        if value > (now_wall + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S):
+            return None
+        return int(value)
+
+    ts = _parse_epoch_seconds(raw, now_wall)
+    if ts is None:
+        return None
+    return int(ts)
+
+
 async def _offload_decrypt_aes(identity_key: bytes, encrypted_location: bytes) -> bytes:
     """Offload AES-GCM decryption; derive key hash cheaply on event loop."""
     identity_key_hash = hashlib.sha256(identity_key).digest()  # cheap hash → OK on loop
@@ -581,27 +634,20 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     is_mcu = is_mcu_tracker(device_registration)
 
     now_wall = time.time()
-
-    def _normalize_anchor_timestamp(raw: Any) -> int | None:
-        ts = _parse_epoch_seconds(raw, now_wall)
-        if ts is None:
-            return None
-        return int(ts)
-
     metadata: dict[str, Any] = {}
     device_registration_metadata: dict[str, Any] = {}
     encrypted_user_secrets_metadata: dict[str, Any] = {}
 
-    pair_date = _normalize_anchor_timestamp(
-        getattr(device_registration, "pairDate", None)
+    pair_date = normalize_pair_date_value(
+        getattr(device_registration, "pairDate", None), now_wall=now_wall
     )
     if pair_date is not None:
         metadata["pair_date"] = pair_date
         metadata["pairDate"] = pair_date
         device_registration_metadata["pairDate"] = pair_date
 
-    secrets_creation_date = _normalize_anchor_timestamp(
-        getattr(encrypted_user_secrets, "creationDate", None)
+    secrets_creation_date = normalize_creation_timestamp_value(
+        getattr(encrypted_user_secrets, "creationDate", None), now_wall=now_wall
     )
     if secrets_creation_date is not None:
         metadata["secrets_creation_date"] = secrets_creation_date
