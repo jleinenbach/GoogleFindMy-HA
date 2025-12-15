@@ -183,13 +183,9 @@ def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
         time_anchors_debug=None,
     )
 
-    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
-        identity, now=now
-    )
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=provisioning_counter,
     )
 
     absolute = next(
@@ -198,7 +194,9 @@ def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
         if candidate.label == TimebaseLabel.ABSOLUTE
     )
     rel_pair = next(
-        candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
     )
     rel_secrets = next(
         candidate
@@ -207,7 +205,7 @@ def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
     )
 
     assert absolute.reference_time == resolver_module._mask_u32(now)  # type: ignore[attr-defined]
-    assert rel_secrets.reference_time == provisioning_counter
+    assert rel_secrets.reference_time == now - secrets_anchor
     assert rel_pair.reference_time == now - pair_anchor
 
 
@@ -229,13 +227,9 @@ def test_timebase_domain_separation() -> None:
         time_anchors_debug=None,
     )
 
-    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
-        identity, now=now
-    )
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=provisioning_counter,
     )
 
     absolute = next(
@@ -250,7 +244,7 @@ def test_timebase_domain_separation() -> None:
     )
 
     assert absolute.reference_time == resolver_module._mask_u32(now)  # type: ignore[attr-defined]
-    assert rel_pair.reference_time == provisioning_counter
+    assert rel_pair.reference_time == now - pair_date
     assert absolute.reference_time > 1_000_000_000
     assert rel_pair.reference_time < 1_000_000_000
 
@@ -272,13 +266,9 @@ def test_candidates_include_both_anchors_when_present() -> None:
         time_anchors_debug=None,
     )
 
-    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
-        identity, now=now
-    )
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=provisioning_counter,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -289,7 +279,9 @@ def test_candidates_include_both_anchors_when_present() -> None:
     }.issubset(labels)
 
     rel_pair = next(
-        candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
     )
     rel_secrets = next(
         candidate
@@ -318,13 +310,9 @@ def test_time_offset_alignment_uses_candidate_reference() -> None:
         time_anchors_debug=None,
     )
 
-    provisioning_counter, _, _ = resolver_module._compute_provisioning_counter(  # type: ignore[attr-defined]
-        identity, now=now
-    )
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=provisioning_counter,
     )
 
     relative = next(
@@ -338,7 +326,7 @@ def test_time_offset_alignment_uses_candidate_reference() -> None:
     time_offset = rotation_timestamp - relative.reference_time
 
     assert abs(time_offset) < ROTATION_PERIOD
-    assert relative.reference_time == provisioning_counter
+    assert relative.reference_time == now - anchor_epoch
 
 
 class _StubDevice:
@@ -398,7 +386,7 @@ async def test_active_device_identities_prefer_registry_custom_fields(
             _StubDevice(
                 "dev-1",
                 registry_id="registry-1",
-                custom_fields={"identity_key": "0f0e0d"},
+                custom_fields={"identity_key": "0f0e0d", "pairDate": 1_700_000_006},
             )
         ]
     )
@@ -447,7 +435,9 @@ async def test_active_device_identities_fall_back_to_location_cache(
         device, "identifier", None
     )
     coordinator.data = []
-    coordinator._device_location_data = {"dev-2": {"identityKey": "abcd"}}
+    coordinator._device_location_data = {
+        "dev-2": {"identityKey": "abcd", "pair_date": 1_700_000_007}
+    }
 
     identities = coordinator.get_active_device_identities()
 
@@ -536,9 +526,7 @@ async def test_active_device_identities_surface_registry_timestamps(
     assert identity.time_anchors_debug == {"hint": "anchor"}
 
 
-def test_build_timebase_candidates_with_time_anchor_hints(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_build_timebase_candidates_with_time_anchor_hints() -> None:
     now = ROTATION_PERIOD * 8
     identity = DeviceIdentity(
         registry_id="registry-anchor",
@@ -554,7 +542,6 @@ def test_build_timebase_candidates_with_time_anchor_hints(
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=now,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -579,7 +566,6 @@ def test_build_timebase_candidates_always_include_absolute_with_rel_anchor() -> 
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=now,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -590,7 +576,6 @@ def test_build_timebase_candidates_always_include_absolute_with_rel_anchor() -> 
 def test_build_timebase_candidates_use_provisioning_for_absolute() -> None:
     now = 1_700_000_000
     anchor_epoch = now - 100_000
-    provisioning_counter = 100_000
     identity = DeviceIdentity(
         registry_id="registry-absolute",
         canonical_id="device-absolute",
@@ -601,7 +586,6 @@ def test_build_timebase_candidates_use_provisioning_for_absolute() -> None:
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=provisioning_counter,
     )
 
     absolute_candidate = next(
@@ -616,7 +600,7 @@ def test_build_timebase_candidates_use_provisioning_for_absolute() -> None:
     )
 
     assert absolute_candidate.reference_time == resolver_module._mask_u32(now)  # type: ignore[attr-defined]
-    assert relative_candidate.reference_time == provisioning_counter
+    assert relative_candidate.reference_time == now - anchor_epoch
     assert relative_candidate.anchor_epoch == anchor_epoch
 
 
@@ -632,7 +616,6 @@ def test_build_timebase_candidates_ignores_unparsed_anchor_list() -> None:
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=now,
     )
 
     labels = {candidate.label for candidate in candidates}

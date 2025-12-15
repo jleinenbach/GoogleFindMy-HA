@@ -42,7 +42,9 @@ def _build_coordinator(monkeypatch):
     coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._get_ignored_set = lambda: set()
-    coordinator._extract_our_identifier = lambda device: getattr(device, "identifier", None)
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "identifier", None
+    )
     coordinator.data = []
     coordinator._last_device_list = []
     coordinator._device_location_data = {}
@@ -56,6 +58,8 @@ def test_multiple_candidates_expand_identities(monkeypatch):
             "identity_key_candidates": [b"a" * 32, b"b" * 32],
             "encrypted_identity_key": b"enc",
             "owner_key_version": 7,
+            "pair_date": 1_700_000_005,
+            "identity_key": b"a" * 32,
         }
     }
 

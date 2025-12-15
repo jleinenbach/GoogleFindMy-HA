@@ -31,7 +31,9 @@ class _StubHass:
         return coro
 
 
-def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.GoogleFindMyCoordinator:
+def _build_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> coordinator_module.GoogleFindMyCoordinator:
     registry = _StubDeviceRegistry([_StubDevice("device-1", registry_id="registry-1")])
     monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
 
@@ -42,19 +44,24 @@ def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.Go
     coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._get_ignored_set = lambda: set()
-    coordinator._extract_our_identifier = lambda device: getattr(device, "identifier", None)
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "identifier", None
+    )
     coordinator.data = []
     coordinator._device_location_data = {}
     return coordinator
 
 
-def test_decrypted_cache_identity_overrides_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decrypted_cache_identity_overrides_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     coordinator = _build_coordinator(monkeypatch)
     coordinator._last_device_list = [
         {
             "id": "device-1",
             "encryptedIdentityKey": "aaaa",
             "owner_key_version": 1,
+            "pairDate": 1_700_000_003,
         }
     ]
     coordinator._device_location_data = {
@@ -62,6 +69,7 @@ def test_decrypted_cache_identity_overrides_poll(monkeypatch: pytest.MonkeyPatch
             "identity_key": b"\x01\x02",
             "encryptedIdentityKey": "bbbb",
             "owner_key_version": 2,
+            "pair_date": 1_700_000_003,
         }
     }
 
@@ -82,12 +90,14 @@ def test_poll_identity_used_when_cache_missing(monkeypatch: pytest.MonkeyPatch) 
             "identityKey": "0c0d",
             "encryptedIdentityKey": "cccc",
             "owner_key_version": 4,
+            "pairDate": 1_700_000_004,
         }
     ]
     coordinator._device_location_data = {
         "device-1": {
             "encryptedIdentityKey": "aaaa",
             "owner_key_version": 4,
+            "pair_date": 1_700_000_004,
         }
     }
 
@@ -100,7 +110,9 @@ def test_poll_identity_used_when_cache_missing(monkeypatch: pytest.MonkeyPatch) 
     assert identity.owner_key_version == 4
 
 
-def test_cache_update_triggers_resolver_reset(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_cache_update_triggers_resolver_reset(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     coordinator = _build_coordinator(monkeypatch)
     coordinator._is_on_hass_loop = lambda: True
     coordinator._run_on_hass_loop = lambda *_args, **_kwargs: None
@@ -124,5 +136,6 @@ def test_cache_update_triggers_resolver_reset(monkeypatch: pytest.MonkeyPatch, c
 
     assert reset_calls == ["device-1"]
     assert refresh_calls == [True]
-    assert any("Identity key update detected" in record.message for record in caplog.records)
-
+    assert any(
+        "Identity key update detected" in record.message for record in caplog.records
+    )

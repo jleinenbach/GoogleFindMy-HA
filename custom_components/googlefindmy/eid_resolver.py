@@ -336,7 +336,6 @@ def _build_timebase_candidates(
     identity: DeviceIdentity,
     *,
     now_unix: int,
-    provisioning_counter: int,
 ) -> list[_TimebaseCandidate]:
     """Return candidate timebases derived from identity anchors."""
 
@@ -372,17 +371,17 @@ def _build_timebase_candidates(
 
     candidates.append(absolute_candidate)
 
-    pair_candidate = _build_anchor_candidate(
-        TimebaseLabel.REL_PAIR, identity.pair_date
-    )
-    if pair_candidate is not None:
-        candidates.append(pair_candidate)
-
     secrets_candidate = _build_anchor_candidate(
         TimebaseLabel.REL_SECRETS, identity.secrets_creation_date
     )
     if secrets_candidate is not None:
         candidates.append(secrets_candidate)
+
+    pair_candidate = _build_anchor_candidate(
+        TimebaseLabel.REL_PAIR, identity.pair_date
+    )
+    if pair_candidate is not None:
+        candidates.append(pair_candidate)
 
     if identity.time_anchors_debug is not None:
         candidates.extend(
@@ -614,34 +613,6 @@ class GoogleFindMyEIDResolver:
             registry_id = identity.registry_id
             identity_key_bytes = bytes(identity.identity_key)
 
-            provisioning_counter, anchor_label, anchor_epoch = (
-                _compute_provisioning_counter(identity, now=now_unix)
-            )
-            base_counter = (provisioning_counter // ROTATION_PERIOD) * ROTATION_PERIOD
-            counter_label = f"counter:{anchor_label}" if anchor_label else "counter"
-
-            _LOGGER.debug(
-                "EID cache anchor: device=%s key_len=%d anchor=%s counter=%d base_counter=%d",
-                identity.canonical_id,
-                len(identity_key_bytes),
-                anchor_label or "unknown",
-                provisioning_counter,
-                base_counter,
-            )
-
-            if anchor_label is None:
-                last_warn = self._provisioning_warn_at.get(identity.canonical_id)
-                now_ts = time.time()
-                if (
-                    last_warn is None
-                    or now_ts - last_warn >= PROVISIONING_WARN_COOLDOWN
-                ):
-                    _LOGGER.debug(
-                        "Cannot compute provisioning counter reliably for %s",
-                        identity.canonical_id,
-                    )
-                    self._provisioning_warn_at[identity.canonical_id] = now_ts
-
             active_lock: _TimebaseLock | None = self._known_timebases.get(registry_id)
             known_offset = (
                 active_lock.offset
@@ -649,21 +620,6 @@ class GoogleFindMyEIDResolver:
                 else self._known_offsets.get(registry_id)
             )
             known_endianness = self._known_endianness.get(registry_id, False)
-            base_search_offset = known_offset
-            if (
-                base_search_offset is None
-                and active_lock is not None
-                and active_lock.rotation_timestamp is not None
-            ):
-                rotations_since_lock = round(
-                    (provisioning_counter - active_lock.rotation_timestamp)
-                    / ROTATION_PERIOD
-                )
-                aligned_rotation = active_lock.rotation_timestamp + (
-                    rotations_since_lock * ROTATION_PERIOD
-                )
-                base_search_offset = aligned_rotation - provisioning_counter
-
             requested_timebases: set[str] = set()
             recorded_timebases: set[str] = set()
             rel_candidates: list[_TimebaseCandidate] = []
@@ -737,7 +693,6 @@ class GoogleFindMyEIDResolver:
             base_candidates = _build_timebase_candidates(
                 identity,
                 now_unix=now_unix,
-                provisioning_counter=provisioning_counter,
             )
 
             timebase_candidates = (
@@ -758,8 +713,24 @@ class GoogleFindMyEIDResolver:
                 if candidate.label == TimebaseLabel.REL_PAIR:
                     rel_candidates.append(candidate)
 
+                local_search_offset = known_offset
+                if (
+                    local_search_offset is None
+                    and active_lock is not None
+                    and active_lock.rotation_timestamp is not None
+                    and active_lock.label == candidate.label
+                ):
+                    rotations_since_lock = round(
+                        (candidate.reference_time - active_lock.rotation_timestamp)
+                        / ROTATION_PERIOD
+                    )
+                    aligned_rotation = active_lock.rotation_timestamp + (
+                        rotations_since_lock * ROTATION_PERIOD
+                    )
+                    local_search_offset = aligned_rotation - candidate.reference_time
+
                 passes: list[tuple[Iterable[int], bool]]
-                if base_search_offset is not None:
+                if local_search_offset is not None:
                     passes = [(range(0, 1), True)]
                 else:
                     passes = [(NARROW_SCAN_RANGE, False)]
@@ -789,8 +760,13 @@ class GoogleFindMyEIDResolver:
                 for window_range, include_neighbors in passes:
                     local_window_range = window_range
                     local_include_neighbors = include_neighbors
-                    local_search_offset = base_search_offset
                     base_target_time = offset_reference
+
+                    counter_label = (
+                        f"counter:{candidate.label}"
+                        if candidate.label != TimebaseLabel.ABSOLUTE
+                        else "counter"
+                    )
 
                     if (
                         active_lock is not None
@@ -940,9 +916,9 @@ class GoogleFindMyEIDResolver:
                                 "timebase": TimebaseLabel.REL_PAIR,
                                 "anchor_epoch": rel_candidate.anchor_epoch,
                                 "rotation_timestamp": fallback_rotation,
-                                "time_offset": fallback_rotation - base_counter,
-                                "timestamp_basis": anchor_label
-                                and f"counter:{anchor_label}",
+                                "time_offset": fallback_rotation
+                                - rel_candidate.reference_time,
+                                "timestamp_basis": "counter:REL_PAIR",
                                 "variant": eid_candidate.name,
                             }
                             _register_with_metadata(

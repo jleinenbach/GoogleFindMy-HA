@@ -11,7 +11,6 @@ from custom_components.googlefindmy.eid_resolver import (
     TimebaseLabel,
     _build_timebase_candidates,
     _clamp_and_mask_u32,
-    _compute_provisioning_counter,
 )
 
 
@@ -70,7 +69,6 @@ def test_future_anchor_candidates_are_skipped() -> None:
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=now,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -93,17 +91,9 @@ def test_selected_anchor_drives_relative_candidate() -> None:
         secrets_creation_date=secrets_creation_date,
     )
 
-    provisioning_counter, anchor_label, anchor_epoch = _compute_provisioning_counter(
-        identity, now=now
-    )
-
-    assert anchor_label == "secrets_creation_date"
-    assert provisioning_counter == 86_400
-
     candidates = _build_timebase_candidates(
         identity,
         now_unix=now,
-        provisioning_counter=provisioning_counter,
     )
 
     labels = {candidate.label for candidate in candidates}
@@ -119,7 +109,7 @@ def test_selected_anchor_drives_relative_candidate() -> None:
         for candidate in candidates
         if candidate.label == TimebaseLabel.REL_PAIR
     )
-    assert rel_secrets_candidate.reference_time == provisioning_counter
+    assert rel_secrets_candidate.reference_time == now - secrets_creation_date
     assert rel_secrets_candidate.anchor_epoch == secrets_creation_date
     assert rel_pair_candidate.reference_time == now - pair_date
     assert rel_pair_candidate.anchor_epoch == pair_date
