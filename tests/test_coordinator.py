@@ -471,3 +471,94 @@ def test_coordinator_yields_identities_without_pair_date(
     identity = identities[0]
     assert identity.identity_key == identity_only_payload["identity_key"]
     assert identity.pair_date is None
+
+
+def test_active_device_identities_assigns_correct_timestamps_per_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each device should retain its own timestamps from the last device list."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1", "device-2"}
+    coordinator._last_device_list = [
+        {"id": "device-1", "identity_key": b"\x01", "pair_date": 100},
+        {"id": "device-2", "identity_key": b"\x02", "pair_date": 200},
+    ]
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    registry = SimpleNamespace()
+    registry_devices = [
+        SimpleNamespace(
+            id="registry-1", disabled_by=None, custom_fields={"canonical_id": "device-1"}
+        ),
+        SimpleNamespace(
+            id="registry-2", disabled_by=None, custom_fields={"canonical_id": "device-2"}
+        ),
+    ]
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: registry_devices,
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    pair_dates = {identity.canonical_id: identity.pair_date for identity in identities}
+    assert pair_dates == {"device-1": 100, "device-2": 200}
+
+
+def test_active_device_identities_handles_missing_custom_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coordinator should not crash when registry devices lack custom fields."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = [
+        {"id": "device-1", "identity_key": b"\x01", "pair_date": 100}
+    ]
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "canonical_id", None
+    )
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-1",
+        disabled_by=None,
+        custom_fields=None,
+        canonical_id="device-1",
+    )
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.canonical_id == "device-1"
+    assert identity.pair_date == 100
