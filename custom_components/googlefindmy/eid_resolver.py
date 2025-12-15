@@ -335,20 +335,16 @@ def _compute_provisioning_counter(
 def _build_timebase_candidates(
     identity: DeviceIdentity,
     *,
-    now: int,
+    now_unix: int,
     provisioning_counter: int,
-    primary_anchor_label: str | None,
-    primary_anchor_epoch: int | None,
 ) -> list[_TimebaseCandidate]:
     """Return candidate timebases derived from identity anchors."""
 
     candidates: list[_TimebaseCandidate] = []
-    reference_counter = provisioning_counter
-    anchor_epoch_value = _coerce_int(primary_anchor_epoch)
     absolute_candidate = _TimebaseCandidate(
         TimebaseLabel.ABSOLUTE,
-        reference_time=reference_counter,
-        anchor_epoch=anchor_epoch_value,
+        reference_time=_mask_u32(now_unix),
+        anchor_epoch=None,
     )
 
     def _build_anchor_candidate(
@@ -358,7 +354,7 @@ def _build_timebase_candidates(
         if anchor_value is None:
             return None
 
-        anchor_age = now - anchor_value
+        anchor_age = now_unix - anchor_value
         if anchor_age < -FUTURE_ANCHOR_MAX_DRIFT:
             _LOGGER.debug(
                 "Skipping %s timebase for %s due to excessive future skew (%s)",
@@ -374,51 +370,24 @@ def _build_timebase_candidates(
             anchor_epoch=anchor_value,
         )
 
-    primary_label: str | None = None
-    primary_anchor_value: int | None = None
-
-    if primary_anchor_label == "secrets_creation_date":
-        primary_label = TimebaseLabel.REL_SECRETS
-        primary_anchor_value = _coerce_int(identity.secrets_creation_date)
-    elif primary_anchor_label == "pair_date":
-        primary_label = TimebaseLabel.REL_PAIR
-        primary_anchor_value = _coerce_int(identity.pair_date)
-
-    if primary_label is not None and primary_anchor_value is not None:
-        primary_anchor_age = now - primary_anchor_value
-        if primary_anchor_age < -FUTURE_ANCHOR_MAX_DRIFT:
-            _LOGGER.debug(
-                "Skipping %s timebase for %s due to excessive future skew (%s)",
-                primary_label,
-                identity.canonical_id,
-                primary_anchor_age,
-            )
-        else:
-            candidates.append(
-                _TimebaseCandidate(
-                    primary_label,
-                    reference_time=reference_counter,
-                    anchor_epoch=primary_anchor_value,
-                )
-            )
-
     candidates.append(absolute_candidate)
 
-    if primary_label is None or primary_anchor_value is None:
-        fallback_pair = _build_anchor_candidate(
-            TimebaseLabel.REL_PAIR, identity.pair_date
-        )
-        if fallback_pair is not None:
-            candidates.append(fallback_pair)
+    pair_candidate = _build_anchor_candidate(
+        TimebaseLabel.REL_PAIR, identity.pair_date
+    )
+    if pair_candidate is not None:
+        candidates.append(pair_candidate)
 
-        fallback_secrets = _build_anchor_candidate(
-            TimebaseLabel.REL_SECRETS, identity.secrets_creation_date
-        )
-        if fallback_secrets is not None:
-            candidates.append(fallback_secrets)
+    secrets_candidate = _build_anchor_candidate(
+        TimebaseLabel.REL_SECRETS, identity.secrets_creation_date
+    )
+    if secrets_candidate is not None:
+        candidates.append(secrets_candidate)
 
     if identity.time_anchors_debug is not None:
-        candidates.extend(_iter_debug_timebases(identity.time_anchors_debug, now=now))
+        candidates.extend(
+            _iter_debug_timebases(identity.time_anchors_debug, now=now_unix)
+        )
 
     unique: dict[tuple[str, int, int | None], _TimebaseCandidate] = {}
     for candidate in candidates:
@@ -727,10 +696,14 @@ class GoogleFindMyEIDResolver:
                 existing = lookup.get(eid_value)
                 existing_offset = existing.time_offset if existing is not None else None
                 timebase_label = metadata_payload.get("timebase")
-                should_force = timebase_label in {
-                    TimebaseLabel.REL_PAIR,
-                    TimebaseLabel.REL_SECRETS,
-                } and timebase_label not in recorded_timebases
+                should_force = (
+                    timebase_label
+                    in {
+                        TimebaseLabel.REL_PAIR,
+                        TimebaseLabel.REL_SECRETS,
+                    }
+                    and timebase_label not in recorded_timebases
+                )
 
                 existing_metadata = lookup_metadata.get(eid_value)
                 history: list[dict[str, Any]] = []
@@ -763,10 +736,8 @@ class GoogleFindMyEIDResolver:
 
             base_candidates = _build_timebase_candidates(
                 identity,
-                now=now_unix,
+                now_unix=now_unix,
                 provisioning_counter=provisioning_counter,
-                primary_anchor_label=anchor_label,
-                primary_anchor_epoch=anchor_epoch,
             )
 
             timebase_candidates = (
@@ -803,7 +774,12 @@ class GoogleFindMyEIDResolver:
                         anchor_age = None
 
                 reference_value = candidate.reference_time
-                offset_reference = anchor_age if anchor_age is not None else reference_value
+                offset_reference = (
+                    anchor_age
+                    if anchor_age is not None
+                    and candidate.label != TimebaseLabel.ABSOLUTE
+                    else reference_value
+                )
                 allow_negative = bool(
                     candidate.label != TimebaseLabel.ABSOLUTE
                     and anchor_age is not None
@@ -863,7 +839,7 @@ class GoogleFindMyEIDResolver:
                     )
 
                     for window_timestamp in rotation_windows:
-                        time_offset = window_timestamp - offset_reference
+                        time_offset = window_timestamp - candidate.reference_time
 
                         masked_timestamp = _mask_u32(window_timestamp)
                         rotation_timestamp = window_timestamp
@@ -1369,21 +1345,37 @@ class GoogleFindMyEIDResolver:
         elif eid_length == MODERN_EID_LENGTH:
             lookup_candidates.append(eid_bytes)
         else:
-            if eid_length >= FHNA_LEGACY_SERVICE_TOTAL and eid_bytes[7] == FHNA_FRAME_TYPE_LEGACY:
+            if (
+                eid_length >= FHNA_LEGACY_SERVICE_TOTAL
+                and eid_bytes[7] == FHNA_FRAME_TYPE_LEGACY
+            ):
                 lookup_candidates.append(
                     eid_bytes[FHNA_SERVICE_OFFSET:FHNA_LEGACY_SERVICE_TOTAL]
                 )
-            if eid_length >= FHNA_MODERN_SERVICE_TOTAL and eid_bytes[7] == FHNA_FRAME_TYPE_MODERN:
+            if (
+                eid_length >= FHNA_MODERN_SERVICE_TOTAL
+                and eid_bytes[7] == FHNA_FRAME_TYPE_MODERN
+            ):
                 lookup_candidates.append(
                     eid_bytes[FHNA_SERVICE_OFFSET:FHNA_MODERN_SERVICE_TOTAL]
                 )
 
             if not lookup_candidates and eid_length >= RAW_HEADER_LENGTH:
                 frame_type = eid_bytes[0]
-                if frame_type == FHNA_FRAME_TYPE_LEGACY and eid_length >= FHNA_BACKCOMP_LEGACY_TOTAL:
-                    lookup_candidates.append(eid_bytes[RAW_HEADER_LENGTH:FHNA_BACKCOMP_LEGACY_TOTAL])
-                elif frame_type == FHNA_FRAME_TYPE_MODERN and eid_length >= FHNA_BACKCOMP_MODERN_TOTAL:
-                    lookup_candidates.append(eid_bytes[RAW_HEADER_LENGTH:FHNA_BACKCOMP_MODERN_TOTAL])
+                if (
+                    frame_type == FHNA_FRAME_TYPE_LEGACY
+                    and eid_length >= FHNA_BACKCOMP_LEGACY_TOTAL
+                ):
+                    lookup_candidates.append(
+                        eid_bytes[RAW_HEADER_LENGTH:FHNA_BACKCOMP_LEGACY_TOTAL]
+                    )
+                elif (
+                    frame_type == FHNA_FRAME_TYPE_MODERN
+                    and eid_length >= FHNA_BACKCOMP_MODERN_TOTAL
+                ):
+                    lookup_candidates.append(
+                        eid_bytes[RAW_HEADER_LENGTH:FHNA_BACKCOMP_MODERN_TOTAL]
+                    )
 
         if not lookup_candidates:
             _LOGGER.debug(
