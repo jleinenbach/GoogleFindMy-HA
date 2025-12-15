@@ -4648,8 +4648,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         )
 
                     anchors_debug = _extract_time_anchors_debug(custom_fields)
-                    if anchors_debug is not None:
-                        registry_time_anchors_debug[canonical_id] = anchors_debug
+                if anchors_debug is not None:
+                    registry_time_anchors_debug[canonical_id] = anchors_debug
 
         last_device_list = getattr(self, "_last_device_list", None)
         last_identities: dict[str, bytes] = {}
@@ -4911,25 +4911,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 last_fast_pair_model_ids,
             )
 
-            pair_date = normalize_epoch_seconds(
-                _lookup_prio(
-                    lookup_id,
-                    registry_pair_dates,
-                    cache_pair_dates,
-                    data_pair_dates,
-                    last_pair_dates,
-                )
+            pair_date = _lookup_prio(
+                lookup_id,
+                cache_pair_dates,
+                data_pair_dates,
+                last_pair_dates,
             )
+            if pair_date is None:
+                pair_date = _lookup_prio(lookup_id, registry_pair_dates)
+            pair_date = normalize_epoch_seconds(pair_date)
 
-            secrets_creation_date = normalize_epoch_seconds(
-                _lookup_prio(
-                    lookup_id,
-                    registry_secrets_creation_dates,
-                    cache_secrets_creation_dates,
-                    data_secrets_creation_dates,
-                    last_secrets_creation_dates,
-                )
+            secrets_creation_date = _lookup_prio(
+                lookup_id,
+                cache_secrets_creation_dates,
+                data_secrets_creation_dates,
+                last_secrets_creation_dates,
             )
+            if secrets_creation_date is None:
+                secrets_creation_date = _lookup_prio(
+                    lookup_id, registry_secrets_creation_dates
+                )
+            secrets_creation_date = normalize_epoch_seconds(secrets_creation_date)
 
             anchors_debug = _lookup_prio(
                 lookup_id,
