@@ -4783,6 +4783,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     data_time_anchors_debug[dev_id] = anchors_debug
 
         cache = getattr(self, "_device_location_data", None)
+        internal_cache: dict[str, Any] = cache if isinstance(cache, dict) else {}
         cache_identities: dict[str, bytes] = {}
         cache_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
         cache_device_types: dict[str, int | None] = {}
@@ -4792,9 +4793,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_pair_dates: dict[str, int] = {}
         cache_secrets_creation_dates: dict[str, int] = {}
         cache_time_anchors_debug: dict[str, Any] = {}
-        if isinstance(cache, dict):
+        if internal_cache:
             for dev_id in allowed_raw_ids:
-                payload = cache.get(dev_id)
+                payload = internal_cache.get(dev_id)
                 if not isinstance(payload, dict):
                     continue
                 cache_data_keys[dev_id] = list(payload.keys())
@@ -4851,6 +4852,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         identities: list[DeviceIdentity] = []
         for canonical_id in device_ids:
             lookup_id = canonical_id.split(":")[-1]
+            device_data = None
+            cache_lookup: Mapping[str, Any] | None = (
+                cache if isinstance(cache, Mapping) else None
+            )
+            if cache_lookup is not None:
+                device_data = cache_lookup.get(canonical_id) or cache_lookup.get(lookup_id)
+            fallback_device_data = internal_cache.get(canonical_id) or internal_cache.get(
+                lookup_id
+            )
+            merged_device_data: dict[str, Any] = {}
+            if isinstance(fallback_device_data, Mapping):
+                merged_device_data.update(fallback_device_data)
+            if isinstance(device_data, Mapping):
+                merged_device_data.update(device_data)
+            if merged_device_data:
+                device_data = merged_device_data
+            _LOGGER.debug(
+                "Building Identity for %s: cached_data=%s", canonical_id, device_data
+            )
+
             registry_entry = registry_map.get(canonical_id)
             if registry_entry is None:
                 continue
@@ -4931,6 +4952,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     and normalized_key not in normalized_candidates
                 ):
                     normalized_candidates.append(normalized_key)
+
+            effective_identity_for_log = identity_key
+            if effective_identity_for_log is None and normalized_candidates:
+                effective_identity_for_log = normalized_candidates[0]
+            has_key = identity_key is not None or encrypted_identity_key is not None
+            if not has_key or pair_date is None:
+                _LOGGER.warning(
+                    "Missing crypto material for %s: key=%s, pair=%s. Skipping resolution.",
+                    canonical_id,
+                    effective_identity_for_log,
+                    pair_date,
+                )
+                continue
 
             if not normalized_candidates and encrypted_identity_key is None:
                 _LOGGER.debug(
@@ -6373,37 +6407,38 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         anchor_payload: dict[str, Any] = {}
-        for key in ("pair_date", "secrets_creation_date", "time_anchors_debug"):
-            if key in location and location[key] is not None:
-                anchor_payload[key] = location[key]
-
-        for key, alt in (
-            ("device_registration", "deviceRegistration"),
-            ("encrypted_user_secrets", "encryptedUserSecrets"),
-        ):
-            nested = location.get(key) or location.get(alt)
-            if isinstance(nested, Mapping) and nested:
-                anchor_payload[key] = dict(nested)
-
-        for key, alt in (
-            ("identity_key", "identityKey"),
-            ("identity_key_candidates", "identityKeyCandidates"),
-            ("encrypted_identity_key", "encryptedIdentityKey"),
-            (
-                "encrypted_identity_key_candidates",
+        alt_keys = {
+            "pair_date": ("pairDate",),
+            "secrets_creation_date": ("secretsCreationDate",),
+            "device_registration": ("deviceRegistration",),
+            "encrypted_user_secrets": ("encryptedUserSecrets",),
+            "identity_key": ("identityKey",),
+            "identity_key_candidates": ("identityKeyCandidates",),
+            "encrypted_identity_key": ("encryptedIdentityKey",),
+            "encrypted_identity_key_candidates": (
                 "encryptedIdentityKeyCandidates",
             ),
-        ):
-            if key in location and location[key] is not None:
-                anchor_payload[key] = location[key]
-            elif alt in location and location[alt] is not None:
-                anchor_payload[key] = location[alt]
+            "owner_key_version": ("ownerKeyVersion",),
+            "time_anchors_debug": ("timeAnchorsDebug", "timeAnchors"),
+        }
 
-        if (
-            "owner_key_version" in location
-            and location["owner_key_version"] is not None
-        ):
-            anchor_payload["owner_key_version"] = location["owner_key_version"]
+        for key in _PERSISTED_METADATA_KEYS:
+            value = location.get(key)
+            if value is None:
+                for alt in alt_keys.get(key, ()):  # Prefer snake_case when present
+                    if alt in location:
+                        value = location.get(alt)
+                        break
+
+            if value is None:
+                continue
+
+            if isinstance(value, list) and value:
+                anchor_payload[key] = list(value)
+            elif isinstance(value, Mapping) and value:
+                anchor_payload[key] = dict(value)
+            else:
+                anchor_payload[key] = value
 
         if not anchor_payload:
             return

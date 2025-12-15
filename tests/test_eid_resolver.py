@@ -198,7 +198,9 @@ def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
         if candidate.label == TimebaseLabel.ABSOLUTE
     )
     rel_pair = next(
-        candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
     )
     rel_secrets = next(
         candidate
@@ -289,7 +291,9 @@ def test_candidates_include_both_anchors_when_present() -> None:
     }.issubset(labels)
 
     rel_pair = next(
-        candidate for candidate in candidates if candidate.label == TimebaseLabel.REL_PAIR
+        candidate
+        for candidate in candidates
+        if candidate.label == TimebaseLabel.REL_PAIR
     )
     rel_secrets = next(
         candidate
@@ -398,7 +402,7 @@ async def test_active_device_identities_prefer_registry_custom_fields(
             _StubDevice(
                 "dev-1",
                 registry_id="registry-1",
-                custom_fields={"identity_key": "0f0e0d"},
+                custom_fields={"identity_key": "0f0e0d", "pairDate": 1_700_000_006},
             )
         ]
     )
@@ -447,7 +451,9 @@ async def test_active_device_identities_fall_back_to_location_cache(
         device, "identifier", None
     )
     coordinator.data = []
-    coordinator._device_location_data = {"dev-2": {"identityKey": "abcd"}}
+    coordinator._device_location_data = {
+        "dev-2": {"identityKey": "abcd", "pair_date": 1_700_000_007}
+    }
 
     identities = coordinator.get_active_device_identities()
 
