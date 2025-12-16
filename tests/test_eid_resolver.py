@@ -20,6 +20,7 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_K,
+    FHNA_ROTATION_MASK,
     ROTATION_PERIOD,
     EidCandidate,
     K,
@@ -85,6 +86,29 @@ def test_fhna_prf_input_masks_low_bits() -> None:
     assert fhna_build_prf_input(base_ts) == fhna_build_prf_input(offset_ts)
 
 
+def test_fhna_prf_input_masks_low_bits_within_rotation() -> None:
+    base_ts = 0xABCDE000
+    nearly_next_rotation = base_ts + (FHNA_ROTATION_MASK - 1)
+
+    assert fhna_build_prf_input(base_ts) == fhna_build_prf_input(nearly_next_rotation)
+
+
+def test_fhna_prf_input_matches_expected_layout_bytes() -> None:
+    ts_u32 = 0x1F2E3D4C
+    masked = (ts_u32 & 0xFFFFFFFF) & ~((1 << FHNA_K) - 1)
+
+    expected = (
+        b"\xff" * 11
+        + bytes([FHNA_K])
+        + masked.to_bytes(4, "big")
+        + b"\x00" * 11
+        + bytes([FHNA_K])
+        + masked.to_bytes(4, "big")
+    )
+
+    assert fhna_build_prf_input(ts_u32) == expected
+
+
 def test_build_table10_block_enforces_fhna_k() -> None:
     ts_u32 = 0x12345678
 
@@ -115,7 +139,6 @@ async def test_refresh_cache_records_consistent_time_domains(
         config_entry_id="entry-time",  # type: ignore[arg-type]
         pair_date=500,
     )
-    provisioning_counter = anchor_now - identity.pair_date  # type: ignore[operator]
 
     async def _fake_collect(
         self: resolver_module.GoogleFindMyEIDResolver,
@@ -143,18 +166,153 @@ async def test_refresh_cache_records_consistent_time_domains(
     await resolver._refresh_cache()
 
     assert resolver._lookup_metadata
-    metadata = next(iter(resolver._lookup_metadata.values()))
+    for metadata in resolver._lookup_metadata.values():
+        timebase = metadata.get("timebase")
+        anchor_epoch = metadata.get("anchor_epoch")
+        try:
+            anchor_ts = int(anchor_epoch) if anchor_epoch is not None else None
+        except (TypeError, ValueError):
+            anchor_ts = None
 
-    expected_reference = (
-        resolver_module._mask_u32(anchor_now)  # type: ignore[attr-defined]
+        expected_reference = resolver_module._mask_u32(anchor_now)  # type: ignore[attr-defined]
+        if timebase != TimebaseLabel.ABSOLUTE:
+            assert anchor_ts is not None
+            expected_reference = anchor_now - anchor_ts
+
+        assert (
+            metadata["rotation_timestamp"] - metadata["time_offset"]
+            == expected_reference
+        )
+        assert metadata["masked_rotation_timestamp"] == resolver_module._mask_u32(
+            metadata["rotation_timestamp"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_absolute_timebase_skips_deep_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 50
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    identity = DeviceIdentity(
+        registry_id="registry-absolute",  # type: ignore[arg-type]
+        canonical_id="absolute-device",  # type: ignore[arg-type]
+        identity_key=b"\x33" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-absolute",  # type: ignore[arg-type]
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xaa" * EID_LENGTH),
+        ),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    await resolver._refresh_cache()
+
+    offsets = [
+        metadata["time_offset"]
+        for metadata in resolver._lookup_metadata.values()
         if metadata.get("timebase") == TimebaseLabel.ABSOLUTE
-        else provisioning_counter
+    ]
+
+    assert offsets
+    max_narrow_rotations = max(
+        abs(value) for value in resolver_module.NARROW_SCAN_RANGE
     )
-    assert (
-        metadata["rotation_timestamp"] - metadata["time_offset"] == expected_reference
+    assert max(abs(offset) for offset in offsets) <= ROTATION_PERIOD * (
+        max_narrow_rotations + 1
     )
-    assert metadata["masked_rotation_timestamp"] == resolver_module._mask_u32(
-        metadata["rotation_timestamp"]
+
+
+@pytest.mark.asyncio
+async def test_relative_timebase_allows_deep_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(resolver_module, "REL_DEEP_SCAN_DENSE_RADIUS", 5)
+    monkeypatch.setattr(resolver_module, "REL_DEEP_SCAN_MAX_DRIFT", 5)
+    monkeypatch.setattr(resolver_module, "REL_DEEP_SCAN_SPARSE_STEP", 1)
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 75
+    anchor_epoch = now - 10
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    identity = DeviceIdentity(
+        registry_id="registry-rel",  # type: ignore[arg-type]
+        canonical_id="rel-device",  # type: ignore[arg-type]
+        identity_key=b"\x44" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-rel",  # type: ignore[arg-type]
+        pair_date=anchor_epoch,
+    )
+
+    async def _fake_collect_rel(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect_rel,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda _identity_key, timestamp, **_kwargs: (
+            EidCandidate(
+                name="fhna_secp160r1_rx20",
+                eid=timestamp.to_bytes(EID_LENGTH, "big", signed=False),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    await resolver._refresh_cache()
+
+    max_narrow_rotations = max(
+        abs(value) for value in resolver_module.NARROW_SCAN_RANGE
+    )
+    rel_offsets = {
+        metadata["time_offset"]
+        for metadata in resolver._lookup_metadata.values()
+        if metadata.get("timebase") == TimebaseLabel.REL_PAIR
+    }
+
+    assert any(
+        abs(offset) > max_narrow_rotations * ROTATION_PERIOD for offset in rel_offsets
     )
 
 
@@ -164,6 +322,7 @@ def test_coerce_int_accepts_timestamp_like_mapping() -> None:
 
     assert resolver_module._coerce_int(timestamp_mapping) == 1_000
     assert resolver_module._coerce_int(timestamp_object) == 2_000
+    assert resolver_module._coerce_int({"nanos": 123}) is None
 
 
 def test_timebase_candidates_include_absolute_and_relative_anchor() -> None:
@@ -327,6 +486,19 @@ def test_time_offset_alignment_uses_candidate_reference() -> None:
 
     assert abs(time_offset) < ROTATION_PERIOD
     assert relative.reference_time == now - anchor_epoch
+
+
+def test_p256_truncation_variants_enabled_and_deduplicated() -> None:
+    identity_key = b"\x0c" * EID_LENGTH
+
+    resolver_module._cached_candidates.cache_clear()
+    candidates = resolver_module._cached_candidates(identity_key, 0)
+
+    names = {candidate.name for candidate in candidates}
+    unique_payloads = {candidate.eid for candidate in candidates}
+
+    assert "fhna_p256_truncated_tail_rx20" in names
+    assert len(unique_payloads) == len(candidates)
 
 
 class _StubDevice:
@@ -697,6 +869,27 @@ def test_compute_provisioning_counter_uses_newer_pair_date_when_secrets_stale(
     assert any("Type=pair_date" in record.message for record in caplog.records)
 
 
+def test_compute_provisioning_counter_falls_back_to_unix_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = ROTATION_PERIOD * 40
+    identity = DeviceIdentity(
+        registry_id="registry-fallback",
+        canonical_id="device-fallback",
+        identity_key=b"\x0a",
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        counter, anchor_label, anchor_epoch = (
+            resolver_module._compute_provisioning_counter(identity, now=now)
+        )
+
+    assert counter == now
+    assert anchor_label == "unix_time"
+    assert anchor_epoch == now
+    assert any("Type=unix_time" in record.message for record in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_active_device_identities_surface_cached_timestamps(
     monkeypatch: pytest.MonkeyPatch,
@@ -737,6 +930,79 @@ async def test_active_device_identities_surface_cached_timestamps(
     assert identity.time_anchors_debug == [1, 2, 3]
 
 
+@pytest.mark.asyncio
+async def test_active_device_identities_retain_cached_anchors_when_not_polled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _StubDeviceRegistry(
+        [_StubDevice("dev-sleep", registry_id="registry-sleep", custom_fields={})]
+    )
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    coordinator.hass = _StubHass()
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-sleep")
+    coordinator._enabled_poll_device_ids = set()
+    coordinator._get_ignored_set = lambda: set()
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "identifier", None
+    )
+    coordinator.data = []
+    coordinator._last_device_list = []
+    coordinator._device_location_data = {
+        "dev-sleep": {
+            "identityKey": b"\xaa" * 32,
+            "pairDate": {"seconds": 30},
+            "encrypted_user_secrets": {"creationDate": {"seconds": 40, "nanos": 0}},
+        }
+    }
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.pair_date == 30
+    assert identity.secrets_creation_date == 40
+
+
+@pytest.mark.asyncio
+async def test_sleeping_devices_merge_cache_and_registry_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _StubDeviceRegistry(
+        [_StubDevice("dev-sleep", registry_id="registry-sleep", custom_fields={})]
+    )
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    coordinator.hass = _StubHass()
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-sleep-merge")
+    coordinator._enabled_poll_device_ids = set()
+    coordinator._get_ignored_set = lambda: set()
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "identifier", None
+    )
+    coordinator.data = []
+    coordinator._device_location_data = {
+        "registry-sleep": {
+            "pair_date": {"seconds": 55, "nanos": 900_000_000},
+            "secrets_creation_date": 66,
+            "identityKey": "0abc",
+        }
+    }
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.pair_date == 55
+    assert identity.secrets_creation_date == 66
+
+
 def test_persist_anchor_metadata_records_metadata_only_payload() -> None:
     coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
         coordinator_module.GoogleFindMyCoordinator
@@ -767,6 +1033,39 @@ def test_persist_anchor_metadata_records_metadata_only_payload() -> None:
     assert stored["identity_key_candidates"] == [b"\x01" * 32]
     assert stored["encrypted_identity_key"] == b"\x02" * 32
     assert stored["owner_key_version"] == 3
+
+
+def test_persist_anchor_metadata_ignores_nanos_only_payload() -> None:
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    coordinator._device_location_data = {
+        "dev-meta": {"pair_date": 100, "secrets_creation_date": 200}
+    }
+
+    nanos_only_payload = {
+        "pair_date": {"nanos": 500_000_000},
+        "secrets_creation_date": {"nsec": 750_000_000},
+    }
+
+    coordinator._persist_anchor_metadata(
+        "dev-meta", nanos_only_payload, clear_metadata_only=False
+    )
+
+    stored = coordinator._device_location_data["dev-meta"]
+    assert stored["pair_date"] == 100
+    assert stored["secrets_creation_date"] == 200
+
+    fresh_coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    fresh_coordinator._device_location_data = {}
+
+    fresh_coordinator._persist_anchor_metadata(
+        "dev-new", nanos_only_payload, clear_metadata_only=False
+    )
+
+    assert fresh_coordinator._device_location_data == {}
 
 
 def test_update_device_cache_preserves_anchor_metadata() -> None:
@@ -1067,13 +1366,14 @@ async def test_resolver_refreshes_all_rotation_windows(
     await resolver._refresh_cache()
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    expected_windows = [
-        rotation_start + (offset * ROTATION_PERIOD)
-        for offset in range(-90, 91)
-        if rotation_start + (offset * ROTATION_PERIOD) >= 0
-    ]
-    assert min(recorded_timestamps) == min(expected_windows)
-    assert max(recorded_timestamps) == max(expected_windows)
+    expected_windows = resolver_module.iter_rotation_windows(
+        rotation_start,
+        rotation_period=ROTATION_PERIOD,
+        window_range=resolver_module.NARROW_SCAN_RANGE,
+        include_neighbors=False,
+        allow_negative=False,
+    )
+    assert set(recorded_timestamps) == set(expected_windows)
     assert set(expected_windows).issubset(set(recorded_timestamps))
 
     expected_eid = _fixed_length_eid(identity.identity_key, rotation_start)
@@ -1380,7 +1680,14 @@ async def test_resolver_learns_offsets_and_endianness(
     await resolver._refresh_cache()
 
     rotation_start = base_time - (base_time % ROTATION_PERIOD)
-    assert len(generated) == 181
+    expected_windows = resolver_module.iter_rotation_windows(
+        rotation_start,
+        rotation_period=ROTATION_PERIOD,
+        window_range=resolver_module.NARROW_SCAN_RANGE,
+        include_neighbors=False,
+        allow_negative=False,
+    )
+    assert set(generated) == set(expected_windows)
     target_timestamp = rotation_start + (ROTATION_PERIOD * 2)
     expected_eid = _fixed_length_eid(identity.identity_key, target_timestamp)
     assert expected_eid in resolver._lookup
@@ -1404,7 +1711,15 @@ async def test_resolver_learns_offsets_and_endianness(
         max(0, target_rotation - ROTATION_PERIOD),
         target_rotation + ROTATION_PERIOD,
     }
-    assert len(resolver._lookup) == 9
+    expected_windows = {
+        target_rotation,
+        max(0, target_rotation - ROTATION_PERIOD),
+        target_rotation + ROTATION_PERIOD,
+    }
+    candidate_count = len(
+        resolver_module._cached_candidates(identity.identity_key, target_rotation)
+    )
+    assert len(resolver._lookup) == len(expected_windows) * candidate_count
     assert all(match.is_reversed for match in resolver._lookup.values())
 
 
@@ -1456,10 +1771,84 @@ async def test_resolver_populates_modern_and_legacy_eids(
     modern_eid_full = _fake_generate_eid_p256(identity.identity_key, rotation_start)
     modern_eid_truncated = modern_eid_full[:EID_LENGTH]
 
-    assert len(resolver._lookup) == 9
+    assert len(resolver._lookup) == 12
     assert resolver.resolve_eid(legacy_eid).device_id == identity.registry_id
     assert resolver.resolve_eid(modern_eid_full).device_id == identity.registry_id
     assert resolver.resolve_eid(modern_eid_truncated).device_id == identity.registry_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_eid_logs_variant_and_reversal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    base_time = ROTATION_PERIOD * 4
+
+    def _fake_time() -> int:
+        return base_time
+
+    def _fake_generate_eid(key: bytes, timestamp: int) -> bytes:
+        return (timestamp.to_bytes(8, "big") * 3)[:EID_LENGTH]
+
+    def _fake_generate_eid_p256(key: bytes, timestamp: int) -> bytes:
+        return (b"m" + timestamp.to_bytes(8, "big") * 4)[:32]
+
+    monkeypatch.setattr(resolver_module.time, "time", _fake_time)
+    monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
+    monkeypatch.setattr(resolver_module, "generate_eid_p256", _fake_generate_eid_p256)
+
+    identity = DeviceIdentity(
+        registry_id="registry-modern",  # noqa: S106 - test identifier
+        canonical_id="canonical-modern",
+        identity_key=b"\x02" * 32,
+        pair_date=base_time - 90,
+        config_entry_id="entry-modern",
+    )
+
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
+    hass = _StubHass(
+        {
+            DOMAIN: {
+                "entries": {"entry-modern": SimpleNamespace(coordinator=coordinator)}
+            }
+        }
+    )
+
+    resolver = _build_resolver()
+    resolver.hass = hass
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+
+    caplog.set_level(logging.INFO)
+    await resolver._refresh_cache()
+
+    lookup_metadata = getattr(resolver, "_lookup_metadata", {})
+    reversed_tail_entry = next(
+        (
+            (key, meta)
+            for key, meta in lookup_metadata.items()
+            if meta.get("variant") == "fhna_p256_truncated_tail_rx20"
+            and meta.get("is_reversed") is True
+            and meta.get("timebase") != TimebaseLabel.ABSOLUTE
+        ),
+        None,
+    )
+    assert reversed_tail_entry is not None
+
+    eid_bytes, metadata = reversed_tail_entry
+    assert metadata.get("timebase") in {
+        TimebaseLabel.REL_PAIR,
+        TimebaseLabel.REL_SECRETS,
+    }
+
+    match = resolver.resolve_eid(eid_bytes)
+
+    assert match is not None
+    assert match.is_reversed is True
+    assert any(
+        "variant=fhna_p256_truncated_tail_rx20" in record.message
+        and "timebase" in record.message
+        for record in caplog.records
+    )
 
 
 def test_resolve_eid_slices_fmdn_frame() -> None:
