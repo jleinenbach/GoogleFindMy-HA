@@ -101,6 +101,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
 from .api import GoogleFindMyAPI
+from .Auth.token_cache import TokenCache
 from .const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
@@ -144,6 +145,7 @@ from .const import (
     service_device_identifier,
 )
 from .ha_typing import DataUpdateCoordinator, callback
+from .KeyBackup.cloud_key_decryptor import decrypt_eik
 from .SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
@@ -4584,6 +4586,98 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             return None
 
+        _expected_identity_key_length = 32
+
+        cached_owner_key: bytes | None = None
+        cached_owner_key_version: int | None = None
+        owner_key_checked = False
+
+        def _get_cached_owner_key() -> tuple[bytes | None, int | None]:
+            """Return the cached owner key when available without I/O."""
+
+            nonlocal cached_owner_key, cached_owner_key_version, owner_key_checked
+
+            if owner_key_checked:
+                return cached_owner_key, cached_owner_key_version
+
+            owner_key_checked = True
+
+            cache_obj = getattr(self, "_cache", None)
+            if not isinstance(cache_obj, TokenCache):
+                return None, None
+
+            cache_snapshot = getattr(cache_obj, "_data", None)
+            if not isinstance(cache_snapshot, Mapping):
+                return None, None
+
+            username = cache_snapshot.get("username")
+            if not isinstance(username, str) or not username:
+                return None, None
+
+            owner_entry = cache_snapshot.get(f"owner_key_{username}") or cache_snapshot.get(
+                "owner_key"
+            )
+
+            raw_key: Any | None
+            version: int | None = None
+            if isinstance(owner_entry, Mapping):
+                raw_key = owner_entry.get("key")
+                version_value = owner_entry.get("version")
+                version = version_value if isinstance(version_value, int) else None
+            else:
+                raw_key = owner_entry
+
+            candidate: bytes | None = None
+            if isinstance(raw_key, str):
+                try:
+                    candidate = bytes.fromhex(raw_key.strip())
+                except ValueError:
+                    candidate = None
+            elif isinstance(raw_key, (bytes, bytearray)):
+                candidate = bytes(raw_key)
+
+            if candidate is None or len(candidate) != _expected_identity_key_length:
+                return None, None
+
+            cached_owner_key = candidate
+            cached_owner_key_version = version
+            return cached_owner_key, cached_owner_key_version
+
+        def _decrypt_identity_key(
+            ciphertext: bytes, canonical_id: str
+        ) -> tuple[bytes | None, int | None]:
+            """Attempt to decrypt the encrypted identity key using cached material."""
+
+            owner_key, owner_version = _get_cached_owner_key()
+            if owner_key is None:
+                return None, None
+
+            try:
+                decrypted = decrypt_eik(owner_key, ciphertext)
+            except Exception as err:  # noqa: BLE001 - defensive
+                _LOGGER.debug(
+                    "Failed to decrypt identity key for %s: %s",
+                    canonical_id,
+                    err,
+                )
+                return None, None
+
+            if not isinstance(decrypted, (bytes, bytearray)):
+                return None, None
+
+            key_bytes = bytes(decrypted)
+            if len(key_bytes) != _expected_identity_key_length:
+                _LOGGER.warning(
+                    "Decrypted identity key for %s has invalid length: %s (expected %s)",
+                    canonical_id,
+                    len(key_bytes),
+                    _expected_identity_key_length,
+                )
+                return None, None
+
+            _LOGGER.debug("Successfully decrypted identity key for %s", canonical_id)
+            return key_bytes, owner_version
+
         enabled_ids = set(self._enabled_poll_device_ids)
         ignored = self._get_ignored_set()
         entry = self.config_entry
@@ -4984,6 +5078,27 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     and normalized_key not in normalized_candidates
                 ):
                     normalized_candidates.append(normalized_key)
+
+            if identity_key is not None and len(identity_key) != _expected_identity_key_length:
+                _LOGGER.debug(
+                    "Discarding identity key with invalid length %s for %s",
+                    len(identity_key),
+                    canonical_id,
+                )
+                identity_key = None
+
+            decrypted_owner_version: int | None = None
+            if (
+                identity_key is None
+                and isinstance(encrypted_identity_key, (bytes, bytearray))
+            ):
+                decrypted_identity_key, decrypted_owner_version = _decrypt_identity_key(
+                    encrypted_identity_key, canonical_id
+                )
+                if decrypted_identity_key is not None:
+                    identity_key = decrypted_identity_key
+                    if owner_key_version is None:
+                        owner_key_version = decrypted_owner_version
 
             effective_identity_for_log = identity_key
             if effective_identity_for_log is None and normalized_candidates:
