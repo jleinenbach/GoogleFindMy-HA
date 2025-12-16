@@ -4873,6 +4873,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 "Building Identity for %s: cached_data=%s", canonical_id, device_data
             )
 
+            direct_pair_date = _extract_pair_date(device_data)
+            direct_secrets_date = _extract_secrets_creation_date(device_data)
+
             registry_entry = registry_map.get(canonical_id)
             if registry_entry is None:
                 continue
@@ -4920,6 +4923,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             if pair_date is None:
                 pair_date = _lookup_prio(lookup_id, registry_pair_dates)
+            if pair_date is None:
+                pair_date = direct_pair_date
             pair_date = normalize_epoch_seconds(pair_date)
 
             secrets_creation_date = _lookup_prio(
@@ -4932,6 +4937,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 secrets_creation_date = _lookup_prio(
                     lookup_id, registry_secrets_creation_dates
                 )
+            if secrets_creation_date is None:
+                secrets_creation_date = direct_secrets_date
             secrets_creation_date = normalize_epoch_seconds(secrets_creation_date)
 
             anchors_debug = _lookup_prio(
