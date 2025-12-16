@@ -24,6 +24,7 @@ from custom_components.googlefindmy.FMDNCrypto.mcu_utils import (
     is_mcu_tracker,
 )
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
+    EIK_GCM_TOTAL_LEN,
     decrypt_aes_gcm,
     decrypt_eik,
 )
@@ -621,6 +622,29 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     identity_key_candidate_bytes = [
         bytes(candidate) for candidate in identity_key_candidates
     ]
+
+    # Handle Moto Tag / Chipolo-style 60-byte EIK wrappers by unwrapping to 32 bytes.
+    if identity_key_bytes is not None and len(identity_key_bytes) == EIK_GCM_TOTAL_LEN:
+        try:
+            owner_key_info = await async_get_owner_key(cache=cache)
+            decrypted_eik = await asyncio.to_thread(
+                decrypt_eik, owner_key_info.key, identity_key_bytes
+            )
+
+            if len(decrypted_eik) == _EIK_LEN:
+                identity_key_bytes = bytes(decrypted_eik)
+                identity_key_candidate_bytes = [identity_key_bytes]
+                identity_key = identity_key_bytes
+                _LOGGER.debug(
+                    "[DECRYPT-FIX] Successfully unwrapped 60-byte EIK to 32 bytes."
+                )
+            else:
+                _LOGGER.debug(
+                    "[DECRYPT-FIX] Unwrapped 60-byte EIK to unexpected length %s bytes",
+                    len(decrypted_eik),
+                )
+        except Exception as exc:  # pragma: no cover - defensive diagnostic path
+            _LOGGER.warning("[DECRYPT-FIX] Failed to unwrap 60-byte EIK: %s", exc)
 
     if identity_key is None:
         raise DecryptionError("Identity key derivation returned no candidates.")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -25,6 +25,9 @@ FHNA_PRF_INPUT_LENGTH: Final[int] = 32
 FHNA_ROTATION_MASK: Final[int] = (1 << FHNA_K) - 1
 FHNA_TIMESTAMP_MASK: Final[int] = 0xFFFFFFFF
 TRUNCATED_P256_EID_LENGTH: Final[int] = 20
+P256_ORDER: Final[int] = (
+    0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+)
 _CURVE: CurveParametersProtocol = load_curve()
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,19 +41,63 @@ class EidCandidate:
     eid: bytes
 
 
-def fhna_build_prf_input(ts_u32: int) -> bytes:
-    """Return the FHNA Table 10 PRF input buffer for a masked timestamp.
+def _normalize_ts_u32(timestamp: int, *, strict: bool = True) -> int:
+    """Normalize a timestamp to an unsigned 32-bit integer.
 
-    FHN Accessory Specification v1.3 Table 10: Construction of a
-    pseudorandom number mandates a 32-byte buffer composed of fixed padding,
-    the rotation exponent (``K = 10``), and the rotation-aligned timestamp.
-    This helper aligns ``ts_u32`` to the current rotation boundary by clearing
-    the lowest ``FHNA_K`` bits and emits the exact byte layout required by the
-    AES-256-ECB pseudorandom function.
+    Args:
+        timestamp: Raw timestamp value to normalize.
+        strict: Raise instead of coercing when the value is out of range.
+
+    Raises:
+        TypeError: If ``timestamp`` is not an ``int`` or is a ``bool``.
+        ValueError: If ``timestamp`` is outside ``[0, FHNA_TIMESTAMP_MASK]`` in
+            strict mode.
     """
 
-    ts_mask: int = FHNA_ROTATION_MASK
-    masked_ts: int = (ts_u32 & FHNA_TIMESTAMP_MASK) & ~ts_mask
+    if isinstance(timestamp, bool) or not isinstance(timestamp, int):
+        raise TypeError(
+            f"timestamp must be int (not bool); got {type(timestamp)!r}"
+        )
+
+    if 0 <= timestamp <= FHNA_TIMESTAMP_MASK:
+        return timestamp
+
+    if strict:
+        raise ValueError(f"timestamp out of u32 range: {timestamp}")
+
+    _LOGGER.warning(
+        "timestamp out of u32 range; coercing via & 0xFFFFFFFF: %s", timestamp
+    )
+    return timestamp & FHNA_TIMESTAMP_MASK
+
+
+def _align_ts_to_rotation(
+    ts_u32: int, *, rotation_mask: int = FHNA_ROTATION_MASK
+) -> tuple[int, bool]:
+    """Align a normalized timestamp to the rotation boundary."""
+
+    aligned: int = ts_u32 & ~rotation_mask
+    return aligned, aligned != ts_u32
+
+
+def fhna_build_prf_input(timestamp: int, *, strict: bool = True) -> bytes:
+    """Return the FHNA Table 10 PRF input buffer for a raw timestamp.
+
+    FHN Accessory Specification v1.3 Table 10: Construction of a pseudorandom
+    number mandates a 32-byte buffer composed of fixed padding, the rotation
+    exponent (``K = 10``), and the rotation-aligned timestamp. Inputs are
+    normalized to an unsigned 32-bit integer and aligned to the current
+    rotation boundary before encoding the AES-256-ECB pseudorandom function
+    buffer.
+    """
+
+    ts_u32: int = _normalize_ts_u32(timestamp, strict=strict)
+    masked_ts, was_aligned = _align_ts_to_rotation(ts_u32)
+    if was_aligned:
+        _LOGGER.debug(
+            "Timestamp %s masked to rotation-aligned %s", ts_u32, masked_ts
+        )
+
     ts_bytes = masked_ts.to_bytes(4, byteorder="big", signed=False)
 
     block = bytearray(FHNA_PRF_INPUT_LENGTH)
@@ -64,7 +111,7 @@ def fhna_build_prf_input(ts_u32: int) -> bytes:
     return bytes(block)
 
 
-def build_table10_block(timestamp: int, k: int = K) -> bytes:
+def build_table10_block(timestamp: int, k: int = K, *, strict: bool = True) -> bytes:
     """Legacy wrapper for FHNA Table 10 PRF input construction.
 
     The ``k`` argument is retained for backward compatibility with older test
@@ -78,7 +125,7 @@ def build_table10_block(timestamp: int, k: int = K) -> bytes:
             f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}"
         )
 
-    return fhna_build_prf_input(timestamp & 0xFFFFFFFF)
+    return fhna_build_prf_input(timestamp, strict=strict)
 
 
 def fhna_prf_aes_ecb_256(eik: bytes, prf_input: bytes) -> bytes:
@@ -102,10 +149,14 @@ def fhna_prf_aes_ecb_256(eik: bytes, prf_input: bytes) -> bytes:
     return encryptor.update(prf_input) + encryptor.finalize()
 
 
-def _prf_table10(identity_key: bytes, timestamp: int, k: int = K) -> bytes:
+def _prf_table10(
+    identity_key: bytes, timestamp: int, k: int = K, *, strict: bool = True
+) -> bytes:
     """Derive the 32-byte Table 10 pseudorandom output from the masked timestamp."""
 
-    return fhna_prf_aes_ecb_256(identity_key, build_table10_block(timestamp, k=k))
+    return fhna_prf_aes_ecb_256(
+        identity_key, build_table10_block(timestamp, k=k, strict=strict)
+    )
 
 
 def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
@@ -115,16 +166,29 @@ def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
 
 
 def generate_eid_p256(identity_key: bytes, timestamp: int) -> bytes:
-    """Generate a modern FHNA EID using secp256r1 semantics."""
+    """Generate a modern FHNA EID using secp256r1 semantics (big endian)."""
 
-    return generate_eid_fhna_secp256r1(identity_key, timestamp)
+    scalar_r = _derive_scalar_p256(identity_key, timestamp, K, byteorder="big")
+    return _serialize_p256_x(scalar_r)
 
 
-def generate_eid_fhna_secp160r1(identity_key: bytes, ts_u32: int) -> bytes:
+def generate_eid_p256_le(identity_key: bytes, timestamp: int) -> bytes:
+    """Generate a modern FHNA EID using little-endian scalar derivation.
+
+    Some tracker firmware interprets the PRF output as a little-endian integer
+    before applying the secp256r1 scalar multiplication. This variant preserves
+    interoperability with those devices while keeping the on-curve projection
+    identical to the big-endian path.
+    """
+
+    scalar_r = _derive_scalar_p256(identity_key, timestamp, K, byteorder="little")
+    return _serialize_p256_x(scalar_r)
+
+
+def generate_eid_fhna_secp160r1(identity_key: bytes, timestamp: int) -> bytes:
     """Generate a 20-byte FHNA EID on secp160r1 (Table 10 PRF)."""
 
-    ts_masked: int = ts_u32 & 0xFFFFFFFF
-    prf_input = fhna_build_prf_input(ts_masked)
+    prf_input = fhna_build_prf_input(timestamp)
     r_bytes = fhna_prf_aes_ecb_256(identity_key, prf_input)
     r_prime: int = int.from_bytes(r_bytes, byteorder="big", signed=False)
 
@@ -141,27 +205,10 @@ def generate_eid_fhna_secp160r1(identity_key: bytes, ts_u32: int) -> bytes:
     return x_bytes
 
 
-def generate_eid_fhna_secp256r1(identity_key: bytes, ts_u32: int) -> bytes:
+def generate_eid_fhna_secp256r1(identity_key: bytes, timestamp: int) -> bytes:
     """Generate a 32-byte FHNA EID on secp256r1 (Table 10 PRF)."""
 
-    ts_masked: int = ts_u32 & 0xFFFFFFFF
-    prf_input = fhna_build_prf_input(ts_masked)
-    r_bytes = fhna_prf_aes_ecb_256(identity_key, prf_input)
-    r_prime: int = int.from_bytes(r_bytes, byteorder="big", signed=False)
-
-    n: int = (
-        0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
-    )
-    # Project into 1..n-1 to avoid generating the point at infinity
-    r: int = (r_prime % (n - 1)) + 1
-
-    curve = ec.SECP256R1()
-    private_key = ec.derive_private_key(r, curve)
-    public_numbers = private_key.public_key().public_numbers()
-
-    x_int: int = int(public_numbers.x)
-    x_bytes: bytes = x_int.to_bytes(32, byteorder="big")
-    return x_bytes
+    return generate_eid_p256(identity_key, timestamp)
 
 
 def generate_eid_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidate, ...]:
@@ -208,19 +255,59 @@ def calculate_r(identity_key: bytes, timestamp: int) -> int:
     return r_mod
 
 
-def get_masked_timestamp(timestamp: int, K: int) -> bytes:
-    """Return the timestamp with the least-significant bits masked.
+def _derive_scalar_p256(
+    identity_key: bytes,
+    timestamp: int,
+    K: int,
+    byteorder: Literal["big", "little"] = "big",
+) -> int:
+    """Derive the secp256r1 scalar ``r`` from the Table 10 PRF output.
+
+    FHN Accessory Specification v1.3 — Table 10 defines the AES-ECB-256 PRF.
+    The resulting 32-byte value is interpreted as an integer using the provided
+    ``byteorder`` before being projected into the curve order range via
+    ``(r' mod (n - 1)) + 1`` to avoid the point at infinity.
+    """
+
+    r_dash: bytes = _prf_table10(identity_key, timestamp, K)
+
+    # Convert r' to an integer using the requested endianness
+    r_dash_int: int = int.from_bytes(r_dash, byteorder=byteorder, signed=False)
+
+    curve_order: int = P256_ORDER
+
+    # r' is now projected to the finite field Fp by calculating r = (r' mod (n-1)) + 1
+    # Keep the scalar in the valid range [1, n-1]
+    r_mod: int = (r_dash_int % (curve_order - 1)) + 1
+    return r_mod
+
+
+def _serialize_p256_x(scalar_r: int) -> bytes:
+    """Return the big-endian x-coordinate for ``R = r * G`` on secp256r1."""
+
+    curve = ec.SECP256R1()
+    public_numbers = ec.derive_private_key(scalar_r, curve).public_key().public_numbers()
+
+    x_int: int = int(public_numbers.x)
+    x_bytes: bytes = x_int.to_bytes(32, byteorder="big")
+    return x_bytes
+
+
+def get_masked_timestamp(timestamp: int, K: int, *, strict: bool = True) -> bytes:
+    """Return the rotation-aligned timestamp bytes for a raw timestamp.
 
     Table 10 requires clearing the lowest ``K`` bits of the beacon time counter
-    before encrypting the AES input block. This helper mirrors that requirement
-    so the pseudorandom number derives from the rotation-aligned timestamp.
+    before encrypting the AES input block. Inputs are normalized to an unsigned
+    32-bit integer, aligned to the requested rotation period, and returned in
+    big-endian form.
 
     Args:
         timestamp: The original timestamp as an ``int``.
     """
-    ts_u32: int = timestamp & FHNA_TIMESTAMP_MASK
+
+    ts_u32: int = _normalize_ts_u32(timestamp, strict=strict)
     rotation_mask: int = ((1 << K) - 1) & FHNA_TIMESTAMP_MASK
-    masked: int = ts_u32 & (~rotation_mask & FHNA_TIMESTAMP_MASK)
+    masked, _was_aligned = _align_ts_to_rotation(ts_u32, rotation_mask=rotation_mask)
 
     return masked.to_bytes(4, byteorder="big", signed=False)
 

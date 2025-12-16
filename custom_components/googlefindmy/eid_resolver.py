@@ -38,6 +38,9 @@ from .FMDNCrypto.eid_generator import (
 from .FMDNCrypto.eid_generator import (
     generate_eid_p256 as _modern_generate_eid,
 )
+from .FMDNCrypto.eid_generator import (
+    generate_eid_p256_le as _modern_generate_eid_le,
+)
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
 from .KeyBackup.shared_key_retrieval import async_get_shared_key
@@ -56,6 +59,7 @@ else:
 
 generate_eid = _legacy_generate_eid
 generate_eid_p256 = _modern_generate_eid
+generate_eid_p256_le = _modern_generate_eid_le
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -423,6 +427,11 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
         except ValueError:
             modern_eid = generate_eid_p256(normalized_key, timestamp)
 
+        try:
+            modern_eid_le = _modern_generate_eid_le(identity_key, timestamp)
+        except ValueError:
+            modern_eid_le = _modern_generate_eid_le(normalized_key, timestamp)
+
         candidates.append(EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid))
         candidates.append(
             EidCandidate(
@@ -437,9 +446,24 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
                     eid=modern_eid[-LEGACY_EID_LENGTH:],
                 )
             )
-            if not _TAIL_TRUNCATION_LOG_FLAG[0]:
-                _LOGGER.debug("Tail truncation candidate enabled for P-256 EIDs")
-                _TAIL_TRUNCATION_LOG_FLAG[0] = True
+        candidates.append(EidCandidate(name="fhna_p256_le_rx32", eid=modern_eid_le))
+        candidates.append(
+            EidCandidate(
+                name="fhna_p256_le_truncated_rx20",
+                eid=modern_eid_le[:LEGACY_EID_LENGTH],
+            )
+        )
+        if ENABLE_P256_TAIL_TRUNCATION:
+            candidates.append(
+                EidCandidate(
+                    name="fhna_p256_le_truncated_tail_rx20",
+                    eid=modern_eid_le[-LEGACY_EID_LENGTH:],
+                )
+            )
+
+        if ENABLE_P256_TAIL_TRUNCATION and not _TAIL_TRUNCATION_LOG_FLAG[0]:
+            _LOGGER.debug("Tail truncation & LE variants enabled for P-256 EIDs")
+            _TAIL_TRUNCATION_LOG_FLAG[0] = True
 
     unique_candidates: dict[bytes, EidCandidate] = {}
     for candidate in candidates:

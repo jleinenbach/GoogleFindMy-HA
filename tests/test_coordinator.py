@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy import coordinator as coordinator_module
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
 
@@ -294,12 +295,20 @@ def test_coordinator_propagates_timestamps_to_identity(
 
     coordinator.update_device_cache("device-1", metadata_only_payload)
 
-    registry = SimpleNamespace()
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
     registry_device = SimpleNamespace(
         id="registry-id",
         disabled_by=None,
         custom_fields={"canonical_id": "device-1"},
     )
+
+    registry = _StubRegistry(registry_device)
 
     monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
@@ -353,12 +362,20 @@ def test_coordinator_persists_camelCase_identity_keys(
         == camel_payload["pairDate"]
     )
 
-    registry = SimpleNamespace()
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
     registry_device = SimpleNamespace(
         id="registry-id",
         disabled_by=None,
         custom_fields={"canonical_id": "device-1"},
     )
+
+    registry = _StubRegistry(registry_device)
 
     monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
@@ -402,12 +419,20 @@ def test_coordinator_yields_encrypted_only_identities(
 
     coordinator.update_device_cache("device-1", encrypted_payload)
 
-    registry = SimpleNamespace()
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
     registry_device = SimpleNamespace(
         id="registry-id",
         disabled_by=None,
         custom_fields={"canonical_id": "device-1"},
     )
+
+    registry = _StubRegistry(registry_device)
 
     monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
@@ -425,6 +450,82 @@ def test_coordinator_yields_encrypted_only_identities(
         identity.encrypted_identity_key == encrypted_payload["encrypted_identity_key"]
     )
     assert identity.pair_date == encrypted_payload["pair_date"]
+
+
+def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure wrapped 60-byte encrypted keys are unwrapped to 32 bytes before reaching the resolver."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    encrypted_eik = b"\x66" * 60  # Wrapped 60-byte identity key payload (Moto Tag/Chipolo style)
+    decrypted_eik = b"\xAA" * 32
+
+    cache = TokenCache.__new__(TokenCache)
+    cache._data = {
+        "username": "user@example.com",
+        "owner_key_user@example.com": {"key": b"\xCC" * 32, "version": 7},
+    }
+    coordinator._cache = cache
+
+    unwrap_calls: dict[str, bytes] = {}
+
+    def fake_decrypt(owner_key: bytes, ciphertext: bytes) -> bytes:
+        unwrap_calls["owner_key"] = owner_key
+        unwrap_calls["ciphertext"] = ciphertext
+        return decrypted_eik
+
+    monkeypatch.setattr(coordinator_module, "decrypt_eik", fake_decrypt)
+
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    registry = _StubRegistry(registry_device)
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    coordinator.update_device_cache("device-1", {"encrypted_identity_key": encrypted_eik})
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.identity_key == decrypted_eik
+    assert len(identity.identity_key) == 32
+    assert identity.identity_key != encrypted_eik
+    assert identity.encrypted_identity_key == encrypted_eik
+    assert identity.owner_key_version == 7
+    assert unwrap_calls["ciphertext"] == encrypted_eik
+    assert unwrap_calls["owner_key"] == b"\xCC" * 32
 
 
 def test_coordinator_yields_identities_without_pair_date(

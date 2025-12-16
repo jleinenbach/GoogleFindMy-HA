@@ -498,6 +498,9 @@ def test_p256_truncation_variants_enabled_and_deduplicated() -> None:
     unique_payloads = {candidate.eid for candidate in candidates}
 
     assert "fhna_p256_truncated_tail_rx20" in names
+    assert "fhna_p256_le_rx32" in names
+    assert "fhna_p256_le_truncated_rx20" in names
+    assert "fhna_p256_le_truncated_tail_rx20" in names
     assert len(unique_payloads) == len(candidates)
 
 
@@ -1301,6 +1304,9 @@ async def test_provisioning_counters_used_for_timebases(
     monkeypatch.setattr(
         resolver_module, "generate_eid_p256", _recording_generate_eid_p256
     )
+    monkeypatch.setattr(
+        resolver_module, "generate_eid_p256_le", _recording_generate_eid_p256
+    )
 
     identity = DeviceIdentity(
         registry_id="registry-counter",
@@ -1741,6 +1747,9 @@ async def test_resolver_populates_modern_and_legacy_eids(
     monkeypatch.setattr(resolver_module.time, "time", _fake_time)
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
     monkeypatch.setattr(resolver_module, "generate_eid_p256", _fake_generate_eid_p256)
+    monkeypatch.setattr(
+        resolver_module, "generate_eid_p256_le", _fake_generate_eid_p256
+    )
 
     identity = DeviceIdentity(
         registry_id="registry-modern",
@@ -1771,7 +1780,7 @@ async def test_resolver_populates_modern_and_legacy_eids(
     modern_eid_full = _fake_generate_eid_p256(identity.identity_key, rotation_start)
     modern_eid_truncated = modern_eid_full[:EID_LENGTH]
 
-    assert len(resolver._lookup) == 12
+    assert len(resolver._lookup) == 21
     assert resolver.resolve_eid(legacy_eid).device_id == identity.registry_id
     assert resolver.resolve_eid(modern_eid_full).device_id == identity.registry_id
     assert resolver.resolve_eid(modern_eid_truncated).device_id == identity.registry_id
@@ -2129,6 +2138,9 @@ async def test_debug_dump_logs_all_variants(
     monkeypatch.setattr(resolver_module.time, "time", _fake_time)
     monkeypatch.setattr(resolver_module, "generate_eid", _fake_generate_eid)
     monkeypatch.setattr(resolver_module, "generate_eid_p256", _fake_generate_eid_p256)
+    monkeypatch.setattr(
+        resolver_module, "generate_eid_p256_le", _fake_generate_eid_p256
+    )
     monkeypatch.setattr(resolver_module, "NARROW_SCAN_RANGE", range(0, 1))
 
     identity = DeviceIdentity(
@@ -2160,41 +2172,37 @@ async def test_debug_dump_logs_all_variants(
     assert len(debug_messages) >= 3
     assert any("Variant=fhna_secp160r1_rx20" in message for message in debug_messages)
     assert any("Variant=fhna_secp256r1_rx32" in message for message in debug_messages)
+    assert any("Variant=fhna_p256_le_rx32" in message for message in debug_messages)
     assert any("Timebase=REL_PAIR" in message for message in debug_messages)
     assert all("EID_PREFIX=" in message for message in debug_messages)
 
 
-def test_generate_eid_accepts_negative_timestamp(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def _signed_generate(key: bytes, timestamp: int) -> bytes:
-        ts_bytes = int(timestamp).to_bytes(8, "big", signed=True)
-        return (ts_bytes + key).ljust(EID_LENGTH, b"\x00")[:EID_LENGTH]
-
-    cache_clear = getattr(resolver_module._cached_candidates, "cache_clear", None)
-    if callable(cache_clear):
-        cache_clear()
-
-    monkeypatch.setattr(resolver_module, "generate_eid", _signed_generate)
-    monkeypatch.setattr(resolver_module, "generate_eid_p256", _signed_generate)
+def test_generate_eid_rejects_negative_timestamp() -> None:
+    """Resolver should surface invalid negative timestamps instead of coercing."""
 
     key = b"\x02" * 32
-    candidates = resolver_module._cached_candidates(key, -1)
 
-    expected = ((-1).to_bytes(8, "big", signed=True) + key).ljust(EID_LENGTH, b"\x00")[
-        :EID_LENGTH
-    ]
-    assert candidates[0].eid == expected
-    assert candidates == resolver_module._cached_candidates(key, -1)
+    with pytest.raises(ValueError):
+        resolver_module._cached_candidates(key, -1)
 
 
-def test_get_masked_timestamp_handles_negative_input() -> None:
-    masked = get_masked_timestamp(-1, K)
+def test_get_masked_timestamp_rejects_negative_input() -> None:
+    with pytest.raises(ValueError):
+        get_masked_timestamp(-1, K)
+
+
+def test_get_masked_timestamp_warns_when_coercing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        masked = get_masked_timestamp(-1, K, strict=False)
+
     expected = ((-1 & 0xFFFFFFFF) & ((~((1 << K) - 1)) & 0xFFFFFFFF)).to_bytes(
         4, "big", signed=False
     )
 
     assert masked == expected
+    assert "coercing via & 0xFFFFFFFF" in caplog.text
 
 
 @pytest.mark.asyncio
