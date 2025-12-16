@@ -5099,6 +5099,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     identity_key = decrypted_identity_key
                     if owner_key_version is None:
                         owner_key_version = decrypted_owner_version
+                    if not identity_candidates:
+                        identity_candidates = [identity_key]
 
             effective_identity_for_log = identity_key
             if effective_identity_for_log is None and normalized_candidates:
@@ -5147,7 +5149,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     DeviceIdentity(
                         registry_id=registry_id,
                         canonical_id=canonical_id,
-                        identity_key=None,
+                        identity_key=identity_key,
                         encrypted_identity_key=encrypted_identity_key,
                         owner_key_version=owner_key_version,
                         device_type=device_type,

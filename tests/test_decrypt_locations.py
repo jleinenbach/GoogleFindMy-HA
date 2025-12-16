@@ -11,6 +11,9 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
 )
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    OwnerKeyInfo,
+)
 
 ALTITUDE_METERS = 1337
 ACCURACY_METERS = 5.0
@@ -191,6 +194,97 @@ def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
     secrets_meta = entry.get("encrypted_user_secrets")
     assert isinstance(secrets_meta, dict)
     assert secrets_meta.get("creationDate") == int(base_now - 60)
+
+
+def test_async_decrypt_location_response_unwraps_60_byte_eik(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression Test: Unwrap 60-byte EIKs so HKDF/location decryption never sees "Key length 60"."""
+
+    base_now = 1_700_100_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    encrypted_eik = b"\x99" * decrypt_locations.EIK_GCM_TOTAL_LEN
+    # Moto Tag/Chipolo responses wrap the 32-byte identity key inside a 60-byte envelope.
+    unwrapped_eik = b"\x42" * 32
+
+    location_proto = DeviceUpdate_pb2.Location()
+    location_proto.latitude = int(37.42 * 1e7)
+    location_proto.longitude = int(-122.084 * 1e7)
+    location_proto.altitude = ALTITUDE_METERS
+    location_bytes = location_proto.SerializeToString()
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [encrypted_eik]
+
+    unwrap_calls: dict[str, object] = {}
+    offload_calls: dict[str, bytes] = {}
+
+    async def fake_get_owner_key(*, cache):  # type: ignore[no-untyped-def]
+        unwrap_calls["cache"] = cache
+        return OwnerKeyInfo(key=b"\xAA" * 32, version=3)
+
+    async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
+        return func(*args, **kwargs)
+
+    def fake_decrypt(owner_key: bytes, encrypted_identity_key: bytes) -> bytes:
+        unwrap_calls["owner_key"] = owner_key
+        unwrap_calls["encrypted"] = encrypted_identity_key
+        return unwrapped_eik
+
+    async def fake_offload_aes(
+        identity_key: bytes, encrypted_location: bytes
+    ) -> bytes:
+        offload_calls["identity_key"] = identity_key
+        offload_calls["encrypted_location"] = encrypted_location
+        return location_bytes
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "async_get_owner_key", fake_get_owner_key)
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(decrypt_locations, "decrypt_eik", fake_decrypt)
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.pairDate = int(base_now - 30)
+    registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 15)
+    registration.encryptedUserSecrets.encryptedIdentityKey = encrypted_eik
+
+    reports = update.deviceMetadata.information.locationInformation.reports
+    report_group = reports.recentLocationAndNetworkLocations
+    report_group.recentLocationTimestamp.seconds = int(base_now - 10)
+    recent = report_group.recentLocation
+    recent.status = Common_pb2.Status.LAST_KNOWN
+    recent.geoLocation.accuracy = ACCURACY_METERS
+    encrypted_report = recent.geoLocation.encryptedReport
+    encrypted_report.publicKeyRandom = b""
+    encrypted_report.encryptedLocation = b"ciphertext"
+    encrypted_report.isOwnReport = True
+
+    cache = object()
+    result = asyncio.run(
+        decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=cache
+        )
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry.get("metadata_only") is not True
+    assert entry["identity_key"] == unwrapped_eik
+    assert entry["identity_key_candidates"] == [unwrapped_eik]
+    assert entry["encrypted_identity_key"] == encrypted_eik
+    assert entry["accuracy"] == ACCURACY_METERS
+    assert entry["altitude"] == ALTITUDE_METERS
+    assert offload_calls["identity_key"] == unwrapped_eik
+    assert len(offload_calls["identity_key"]) == 32
+    assert offload_calls["encrypted_location"] == b"ciphertext"
+    assert unwrap_calls["cache"] is cache
+    assert unwrap_calls["owner_key"] == b"\xAA" * 32
+    assert unwrap_calls["encrypted"] == encrypted_eik
 
 
 def test_async_decrypt_location_response_locations_normalizes_anchor_units(
