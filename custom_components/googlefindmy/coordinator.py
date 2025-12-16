@@ -4447,12 +4447,21 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         T = TypeVar("T")
 
-        def _lookup_prio(key: str, *sources: Mapping[str, T]) -> T | None:
+        def _lookup_prio(
+            lookup_keys: tuple[str | None, ...], *sources: Mapping[str, T]
+        ) -> T | None:
             """Return the first matching value across ordered sources."""
 
+            key_candidates: tuple[str, ...] = tuple(
+                key for key in lookup_keys if isinstance(key, str)
+            )
+
             for source in sources:
-                if key in source:
-                    return source[key]
+                if not isinstance(source, Mapping):
+                    continue
+                for key in key_candidates:
+                    if key in source:
+                        return source[key]
             return None
 
         def _normalize_timestamp(value: Any) -> int | None:
@@ -4464,21 +4473,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             if isinstance(value, Mapping):
                 seconds = _normalize_epoch_seconds(value.get("seconds"))
-                nanos_raw = value.get("nanos") or value.get("nsec")
-                nanos = None
-                try:
-                    if nanos_raw is not None:
-                        nanos = float(nanos_raw) / 1_000_000_000
-                except (TypeError, ValueError):
-                    nanos = None
-
-                if seconds is None and nanos is None:
+                if seconds is not None:
+                    return seconds
+                if "nanos" in value or "nsec" in value:
                     return None
-
-                ts_float = float(seconds or 0)
-                if nanos:
-                    ts_float += nanos
-                return int(ts_float)
 
             return None
 
@@ -4587,17 +4585,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return None
 
         enabled_ids = set(self._enabled_poll_device_ids)
-        _LOGGER.debug(
-            "Collecting EID identities for %d polling-enabled devices...",
-            len(enabled_ids),
-        )
         ignored = self._get_ignored_set()
-        device_ids = [dev_id for dev_id in enabled_ids if dev_id not in ignored]
-        if not device_ids:
-            return []
-
-        allowed_raw_ids = {did.split(":")[-1] for did in device_ids}
-
         entry = self.config_entry
         entry_id = entry.entry_id if entry is not None else None
         registry_map: dict[str, tuple[str, bytes | None]] = {}
@@ -4622,7 +4610,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     )
                     continue
 
-                if canonical_id not in device_ids:
+                if canonical_id in ignored:
                     continue
 
                 custom_fields = getattr(device, "custom_fields", None)
@@ -4652,6 +4640,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if anchors_debug is not None:
                     registry_time_anchors_debug[canonical_id] = anchors_debug
 
+        device_ids_set = {dev_id for dev_id in enabled_ids if dev_id not in ignored}
+        device_ids_set.update(registry_map)
+        device_ids = sorted(device_ids_set)
+        if not device_ids:
+            return []
+
+        _LOGGER.debug(
+            "Collecting EID identities for %d eligible devices (polling=%d, registry=%d)",
+            len(device_ids),
+            len(enabled_ids),
+            len(registry_map),
+        )
+
+        allowed_raw_ids = {did.split(":")[-1] for did in device_ids}
+        registry_ids: set[str] = {registry for registry, _ in registry_map.values()}
+        allowed_payload_ids = device_ids_set | allowed_raw_ids | registry_ids
+
         last_device_list = getattr(self, "_last_device_list", None)
         last_identities: dict[str, bytes] = {}
         last_encrypted: dict[str, tuple[bytes | None, int | None]] = {}
@@ -4662,14 +4667,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         last_pair_dates: dict[str, int] = {}
         last_secrets_creation_dates: dict[str, int] = {}
         last_time_anchors_debug: dict[str, Any] = {}
+        last_payloads: dict[str, Mapping[str, Any]] = {}
         if isinstance(last_device_list, Iterable):
             for raw in last_device_list:
                 if not isinstance(raw, dict):
                     continue
                 dev_id = raw.get("id")
-                if not isinstance(dev_id, str) or dev_id not in allowed_raw_ids:
+                if not isinstance(dev_id, str):
+                    continue
+                if dev_id not in allowed_payload_ids:
                     continue
 
+                last_payloads[dev_id] = raw
                 last_raw_keys[dev_id] = list(raw.keys())
                 parsed = self._normalize_identity_key(
                     raw.get("identity_key") or raw.get("identityKey") or raw.get("eik")
@@ -4727,14 +4736,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         data_pair_dates: dict[str, int] = {}
         data_secrets_creation_dates: dict[str, int] = {}
         data_time_anchors_debug: dict[str, Any] = {}
+        data_payloads: dict[str, Mapping[str, Any]] = {}
         device_data = getattr(self, "data", None)
         if isinstance(device_data, Iterable):
             for raw in device_data:
                 if not isinstance(raw, dict):
                     continue
                 dev_id = raw.get("id")
-                if not isinstance(dev_id, str) or dev_id not in allowed_raw_ids:
+                if not isinstance(dev_id, str):
                     continue
+                if dev_id not in allowed_payload_ids:
+                    continue
+                data_payloads[dev_id] = raw
                 raw_data_keys[dev_id] = list(raw.keys())
                 parsed = self._normalize_identity_key(
                     raw.get("identity_key") or raw.get("identityKey") or raw.get("eik")
@@ -4795,8 +4808,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         cache_secrets_creation_dates: dict[str, int] = {}
         cache_time_anchors_debug: dict[str, Any] = {}
         if internal_cache:
-            for dev_id in allowed_raw_ids:
-                payload = internal_cache.get(dev_id)
+            allowed_cache_keys = set(device_ids) | allowed_raw_ids | registry_ids
+            for dev_id, payload in internal_cache.items():
+                if dev_id not in allowed_cache_keys:
+                    continue
                 if not isinstance(payload, dict):
                     continue
                 cache_data_keys[dev_id] = list(payload.keys())
@@ -4853,43 +4868,50 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         identities: list[DeviceIdentity] = []
         for canonical_id in device_ids:
             lookup_id = canonical_id.split(":")[-1]
-            device_data = None
-            cache_lookup: Mapping[str, Any] | None = (
-                cache if isinstance(cache, Mapping) else None
-            )
-            if cache_lookup is not None:
-                device_data = cache_lookup.get(canonical_id) or cache_lookup.get(lookup_id)
-            fallback_device_data = internal_cache.get(canonical_id) or internal_cache.get(
-                lookup_id
-            )
-            merged_device_data: dict[str, Any] = {}
-            if isinstance(fallback_device_data, Mapping):
-                merged_device_data.update(fallback_device_data)
-            if isinstance(device_data, Mapping):
-                merged_device_data.update(device_data)
-            if merged_device_data:
-                device_data = merged_device_data
-            _LOGGER.debug(
-                "Building Identity for %s: cached_data=%s", canonical_id, device_data
-            )
-
-            direct_pair_date = _extract_pair_date(device_data)
-            direct_secrets_date = _extract_secrets_creation_date(device_data)
-
             registry_entry = registry_map.get(canonical_id)
             if registry_entry is None:
                 continue
 
             registry_id, registry_key = registry_entry
 
+            cache_lookup: Mapping[str, Any] | None = (
+                cache if isinstance(cache, Mapping) else None
+            )
+            cache_keys = (canonical_id, lookup_id, registry_id)
+            merged_device_data: dict[str, Any] = {}
+
+            for source in (
+                cache_lookup,
+                internal_cache,
+                last_payloads,
+                data_payloads,
+            ):
+                if not isinstance(source, Mapping):
+                    continue
+                for key in cache_keys:
+                    if key is None or key not in source:
+                        continue
+                    payload = source.get(key)
+                    if isinstance(payload, Mapping):
+                        merged_device_data.update(payload)
+
+            _LOGGER.debug(
+                "Building Identity for %s: cached_data=%s", canonical_id, merged_device_data
+            )
+
+            direct_pair_date = _extract_pair_date(merged_device_data)
+            direct_secrets_date = _extract_secrets_creation_date(merged_device_data)
+
+            lookup_keys = (canonical_id, lookup_id, registry_id)
+
             identity_key = _lookup_prio(
-                lookup_id, cache_identities, data_identities, last_identities
+                lookup_keys, cache_identities, data_identities, last_identities
             )
             if identity_key is None:
                 identity_key = registry_key
 
             identity_candidates = _lookup_prio(
-                lookup_id,
+                lookup_keys,
                 cache_identity_candidates,
                 data_identity_candidates,
                 last_identity_candidates,
@@ -4898,51 +4920,51 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 identity_candidates = []
 
             encrypted_identity_tuple = _lookup_prio(
-                lookup_id, cache_encrypted, data_encrypted, last_encrypted
+                lookup_keys, cache_encrypted, data_encrypted, last_encrypted
             )
             encrypted_identity_key, owner_key_version = encrypted_identity_tuple or (
                 None,
                 None,
             )
             device_type = _lookup_prio(
-                lookup_id, cache_device_types, data_device_types, last_device_types
+                lookup_keys, cache_device_types, data_device_types, last_device_types
             )
 
             fast_pair_model_id = _lookup_prio(
-                lookup_id,
+                lookup_keys,
                 cache_fast_pair_model_ids,
                 data_fast_pair_model_ids,
                 last_fast_pair_model_ids,
             )
 
             pair_date = _lookup_prio(
-                lookup_id,
+                lookup_keys,
                 cache_pair_dates,
                 data_pair_dates,
                 last_pair_dates,
             )
             if pair_date is None:
-                pair_date = _lookup_prio(lookup_id, registry_pair_dates)
+                pair_date = _lookup_prio(lookup_keys, registry_pair_dates)
             if pair_date is None:
                 pair_date = direct_pair_date
             pair_date = normalize_epoch_seconds(pair_date)
 
             secrets_creation_date = _lookup_prio(
-                lookup_id,
+                lookup_keys,
                 cache_secrets_creation_dates,
                 data_secrets_creation_dates,
                 last_secrets_creation_dates,
             )
             if secrets_creation_date is None:
                 secrets_creation_date = _lookup_prio(
-                    lookup_id, registry_secrets_creation_dates
+                    lookup_keys, registry_secrets_creation_dates
                 )
             if secrets_creation_date is None:
                 secrets_creation_date = direct_secrets_date
             secrets_creation_date = normalize_epoch_seconds(secrets_creation_date)
 
             anchors_debug = _lookup_prio(
-                lookup_id,
+                lookup_keys,
                 registry_time_anchors_debug,
                 cache_time_anchors_debug,
                 data_time_anchors_debug,
@@ -4966,7 +4988,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             effective_identity_for_log = identity_key
             if effective_identity_for_log is None and normalized_candidates:
                 effective_identity_for_log = normalized_candidates[0]
-            has_key = identity_key is not None or encrypted_identity_key is not None
+            has_key = bool(normalized_candidates) or identity_key is not None
+            has_key = has_key or encrypted_identity_key is not None
             if not has_key:
                 _LOGGER.warning(
                     "Missing crypto material for %s: key=%s (pair=%s). Skipping resolution.",
@@ -5912,7 +5935,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             location.pop("_fusion_preapplied", None)
                             location.pop("_report_hint", None)
                             location.setdefault("last_updated", wall_now)
-                            self._device_location_data[dev_id] = location
+                            merged_location = self._merge_with_existing_cache_row(
+                                dev_id, location
+                            )
+                            self._device_location_data[dev_id] = merged_location
 
                         self.increment_stat("polled_updates")
                         self._consecutive_timeouts = 0
@@ -6416,6 +6442,36 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not isinstance(location, Mapping):
             return
 
+        def _normalize_anchor_value(value: Any) -> int | Any:
+            normalized = normalize_epoch_seconds(value)
+            if normalized is not None:
+                return normalized
+
+            seconds: int | None = None
+            nanos_raw: Any | None = None
+            if isinstance(value, Mapping):
+                seconds = normalize_epoch_seconds(value.get("seconds"))
+                nanos_raw = value.get("nanos") or value.get("nsec")
+            else:
+                seconds = normalize_epoch_seconds(getattr(value, "seconds", None))
+                nanos_raw = getattr(value, "nanos", None) or getattr(value, "nsec", None)
+
+            nanos_fraction = None
+            try:
+                if nanos_raw is not None:
+                    nanos_fraction = float(nanos_raw) / 1_000_000_000
+            except (TypeError, ValueError):
+                nanos_fraction = None
+
+            if seconds is None and nanos_fraction is None:
+                return value
+
+            if seconds is None:
+                return None
+            if nanos_fraction:
+                seconds += int(nanos_fraction)
+            return seconds
+
         anchor_payload: dict[str, Any] = {}
         alt_keys = {
             "pair_date": ("pairDate",),
@@ -6444,12 +6500,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if value is None:
                 continue
 
-            if isinstance(value, list) and value:
-                anchor_payload[key] = list(value)
-            elif isinstance(value, Mapping) and value:
-                anchor_payload[key] = dict(value)
+            normalized_value = value
+            if key in {"pair_date", "secrets_creation_date"}:
+                normalized_value = _normalize_anchor_value(value)
+                if normalized_value is None:
+                    continue
+
+            if isinstance(normalized_value, list) and normalized_value:
+                anchor_payload[key] = list(normalized_value)
+            elif isinstance(normalized_value, Mapping) and normalized_value:
+                anchor_payload[key] = dict(normalized_value)
             else:
-                anchor_payload[key] = value
+                anchor_payload[key] = normalized_value
 
         if not anchor_payload:
             return

@@ -71,10 +71,15 @@ FHNA_MODERN_SERVICE_TOTAL = FHNA_SERVICE_OFFSET + MODERN_EID_LENGTH
 FHNA_BACKCOMP_LEGACY_TOTAL = RAW_HEADER_LENGTH + EID_LENGTH
 FHNA_BACKCOMP_MODERN_TOTAL = RAW_HEADER_LENGTH + MODERN_EID_LENGTH
 NARROW_SCAN_RANGE: tuple[int, ...] = (0, -1, 1, -2, 2, -3, 3)
+REL_DEEP_SCAN_DENSE_RADIUS = 96
+REL_DEEP_SCAN_MAX_DRIFT = 180
+REL_DEEP_SCAN_SPARSE_STEP = 4
 LOCK_CUSTOM_FIELD = "eid_timebase_lock"
 DEBUG_LOG_LIMIT = 50
 PROVISIONING_WARN_COOLDOWN = 3600
 FUTURE_ANCHOR_MAX_DRIFT = 86400
+ENABLE_P256_TAIL_TRUNCATION = True
+_TAIL_TRUNCATION_LOG_FLAG: list[bool] = [False]
 
 
 class TimebaseLabel:
@@ -154,20 +159,21 @@ def _normalize_identity_key(identity_key: bytes) -> bytes:
 def _coerce_int(value: Any) -> int | None:
     """Return a best-effort integer conversion for optional payloads."""
 
+    seconds: Any | None
+    nanos_only = False
+
     if isinstance(value, Mapping):
         seconds = value.get("seconds")
-        nanos = value.get("nanos", 0)
-        if seconds is not None:
-            try:
-                return int(seconds) + int(nanos) // 1_000_000_000
-            except (TypeError, ValueError):
-                return None
+        nanos_only = seconds is None and ("nanos" in value or "nsec" in value)
+    else:
+        seconds = getattr(value, "seconds", None)
 
-    seconds_attr = getattr(value, "seconds", None)
-    if seconds_attr is not None:
+    if nanos_only:
+        return None
+
+    if seconds is not None:
         try:
-            nanos_attr = getattr(value, "nanos", 0)
-            return int(seconds_attr) + int(nanos_attr) // 1_000_000_000
+            return int(seconds)
         except (TypeError, ValueError):
             return None
 
@@ -329,7 +335,7 @@ def _compute_provisioning_counter(
         now,
         fallback_counter,
     )
-    return fallback_counter, None, None
+    return fallback_counter, "unix_time", now
 
 
 def _build_timebase_candidates(
@@ -377,9 +383,7 @@ def _build_timebase_candidates(
     if secrets_candidate is not None:
         candidates.append(secrets_candidate)
 
-    pair_candidate = _build_anchor_candidate(
-        TimebaseLabel.REL_PAIR, identity.pair_date
-    )
+    pair_candidate = _build_anchor_candidate(TimebaseLabel.REL_PAIR, identity.pair_date)
     if pair_candidate is not None:
         candidates.append(pair_candidate)
 
@@ -426,8 +430,23 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
                 eid=modern_eid[:LEGACY_EID_LENGTH],
             )
         )
+        if ENABLE_P256_TAIL_TRUNCATION:
+            candidates.append(
+                EidCandidate(
+                    name="fhna_p256_truncated_tail_rx20",
+                    eid=modern_eid[-LEGACY_EID_LENGTH:],
+                )
+            )
+            if not _TAIL_TRUNCATION_LOG_FLAG[0]:
+                _LOGGER.debug("Tail truncation candidate enabled for P-256 EIDs")
+                _TAIL_TRUNCATION_LOG_FLAG[0] = True
 
-    return tuple(candidates)
+    unique_candidates: dict[bytes, EidCandidate] = {}
+    for candidate in candidates:
+        if candidate.eid not in unique_candidates:
+            unique_candidates[candidate.eid] = candidate
+
+    return tuple(unique_candidates.values())
 
 
 class EIDMatch(NamedTuple):
@@ -735,13 +754,43 @@ class GoogleFindMyEIDResolver:
                     )
                     local_search_offset = aligned_rotation - candidate.reference_time
 
+                is_anchored = (
+                    candidate.label != TimebaseLabel.ABSOLUTE
+                    and candidate.anchor_epoch is not None
+                )
+
                 passes: list[tuple[Iterable[int], bool]]
                 if local_search_offset is not None:
                     passes = [(range(0, 1), True)]
                 else:
                     passes = [(NARROW_SCAN_RANGE, False)]
-                    if not skip_deep_scan:
-                        passes.append((range(-90, 91), False))
+                    if is_anchored and not skip_deep_scan:
+                        passes.append(
+                            (
+                                range(
+                                    -REL_DEEP_SCAN_DENSE_RADIUS,
+                                    REL_DEEP_SCAN_DENSE_RADIUS + 1,
+                                ),
+                                False,
+                            )
+                        )
+                        if REL_DEEP_SCAN_MAX_DRIFT > REL_DEEP_SCAN_DENSE_RADIUS:
+                            sparse_negative = range(
+                                -REL_DEEP_SCAN_MAX_DRIFT,
+                                -REL_DEEP_SCAN_DENSE_RADIUS,
+                                REL_DEEP_SCAN_SPARSE_STEP,
+                            )
+                            sparse_positive = range(
+                                REL_DEEP_SCAN_DENSE_RADIUS + REL_DEEP_SCAN_SPARSE_STEP,
+                                REL_DEEP_SCAN_MAX_DRIFT + 1,
+                                REL_DEEP_SCAN_SPARSE_STEP,
+                            )
+                            passes.append(((tuple(sparse_negative) + tuple(sparse_positive)), False))
+                    elif not is_anchored and not skip_deep_scan:
+                        _LOGGER.debug(
+                            "DEEP-SCAN SKIPPED: candidate=%s (no anchor)",
+                            candidate.label,
+                        )
 
                 anchor_age: int | None = None
                 if candidate.anchor_epoch is not None:
@@ -751,12 +800,7 @@ class GoogleFindMyEIDResolver:
                         anchor_age = None
 
                 reference_value = candidate.reference_time
-                offset_reference = (
-                    anchor_age
-                    if anchor_age is not None
-                    and candidate.label != TimebaseLabel.ABSOLUTE
-                    else reference_value
-                )
+                offset_reference = reference_value
                 allow_negative = bool(
                     candidate.label != TimebaseLabel.ABSOLUTE
                     and anchor_age is not None
@@ -1426,7 +1470,7 @@ class GoogleFindMyEIDResolver:
         if match is None:
             known_timebases = getattr(self, "_known_timebases", {})
             _LOGGER.debug(
-                "RESOLVER MISS: prefix=%s cache_size=%d timebases_cached=%d",
+                "RESOLVER MISS: prefix=%s cache_size=%d locks_cached=%d",
                 eid_prefix,
                 len(self._lookup),
                 len(known_timebases),
@@ -1437,6 +1481,7 @@ class GoogleFindMyEIDResolver:
         previous_endianness = self._known_endianness.get(match.device_id)
 
         timebase_label = TimebaseLabel.ABSOLUTE
+        rotation_timestamp: int | None = None
 
         if metadata is not None:
             anchor_epoch = metadata.get("anchor_epoch")
@@ -1483,13 +1528,20 @@ class GoogleFindMyEIDResolver:
                 timebase_label,
             )
 
+        variant = metadata.get("variant") if metadata is not None else None
+        anchor_epoch = anchor_ts if metadata is not None else None
+
         _LOGGER.info(
-            "HIT: device=%s timebase=%s variant=%s offset=%s reversed=%s eid_prefix=%s",
+            "HIT: device=%s canonical=%s timebase=%s variant=%s reversed=%s "
+            "offset=%s rotation=%s anchor=%s eid_prefix=%s",
             match.device_id,
+            match.canonical_id,
             timebase_label,
-            metadata.get("variant") if metadata is not None else None,
-            chosen_offset,
+            variant,
             match.is_reversed,
+            chosen_offset,
+            rotation_timestamp,
+            anchor_epoch,
             eid_prefix,
         )
 
