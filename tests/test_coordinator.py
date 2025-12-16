@@ -421,7 +421,9 @@ def test_coordinator_yields_encrypted_only_identities(
     assert len(identities) == 1
     identity = identities[0]
     assert identity.identity_key is None
-    assert identity.encrypted_identity_key == encrypted_payload["encrypted_identity_key"]
+    assert (
+        identity.encrypted_identity_key == encrypted_payload["encrypted_identity_key"]
+    )
     assert identity.pair_date == encrypted_payload["pair_date"]
 
 
@@ -446,7 +448,7 @@ def test_coordinator_yields_identities_without_pair_date(
     )
 
     identity_only_payload = {
-        "identity_key": b"\x09\x0A\x0B\x0C",
+        "identity_key": b"\x09\x0a\x0b\x0c",
     }
 
     coordinator.update_device_cache("device-1", identity_only_payload)
@@ -499,10 +501,14 @@ def test_active_device_identities_assigns_correct_timestamps_per_device(
     registry = SimpleNamespace()
     registry_devices = [
         SimpleNamespace(
-            id="registry-1", disabled_by=None, custom_fields={"canonical_id": "device-1"}
+            id="registry-1",
+            disabled_by=None,
+            custom_fields={"canonical_id": "device-1"},
         ),
         SimpleNamespace(
-            id="registry-2", disabled_by=None, custom_fields={"canonical_id": "device-2"}
+            id="registry-2",
+            disabled_by=None,
+            custom_fields={"canonical_id": "device-2"},
         ),
     ]
 
@@ -562,3 +568,53 @@ def test_active_device_identities_handles_missing_custom_fields(
     identity = identities[0]
     assert identity.canonical_id == "device-1"
     assert identity.pair_date == 100
+
+
+def test_active_device_identities_uses_cache_when_not_in_poll_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pull pair dates directly from cached device data when poll list is empty."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {
+        "canonical/device-1": {
+            "identity_key": b"\x01",
+            "pair_date": 123,
+        }
+    }
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"canonical/device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-1",
+        disabled_by=None,
+        custom_fields={
+            "canonical_id": "canonical/device-1",
+            "identity_key": b"\x01",
+        },
+    )
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_module.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.canonical_id == "canonical/device-1"
+    assert identity.pair_date == 123
