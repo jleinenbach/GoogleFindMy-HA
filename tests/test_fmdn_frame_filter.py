@@ -1,3 +1,5 @@
+# tests/test_fmdn_frame_filter.py
+import asyncio
 from types import SimpleNamespace
 
 from custom_components.googlefindmy.eid_resolver import (
@@ -16,8 +18,12 @@ def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolv
     resolver._known_timebases = {}
     resolver._persisted_locks = {}
     resolver._decryption_status = {}
+    resolver._last_lock_confirmation = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+    resolver._provisioning_warn_at = {}
     return resolver
 
 
