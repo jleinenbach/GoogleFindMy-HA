@@ -111,6 +111,7 @@ class _TimebaseLock:
     anchor_epoch: int | None
     rotation_timestamp: int
     offset: int
+    variant: str | None = None
 
 
 def iter_rotation_windows(
@@ -221,6 +222,7 @@ def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] 
     rotation_raw = raw.get("rotation_timestamp")
     offset_raw = raw.get("time_offset")
     anchor_raw = raw.get("anchor_epoch")
+    variant_raw = raw.get("variant")
 
     try:
         label = str(label_raw)
@@ -230,6 +232,12 @@ def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] 
     rotation_timestamp = _coerce_int(rotation_raw)
     offset = _coerce_int(offset_raw) or 0
     anchor_epoch = _coerce_int(anchor_raw)
+
+    variant: str | None
+    try:
+        variant = str(variant_raw) if variant_raw is not None else None
+    except Exception:  # pragma: no cover - defensive
+        variant = None
 
     is_reversed = bool(raw.get("is_reversed", False))
 
@@ -241,6 +249,7 @@ def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] 
         anchor_epoch=anchor_epoch,
         rotation_timestamp=rotation_timestamp,
         offset=offset,
+        variant=variant,
     ), is_reversed
 
 
@@ -427,11 +436,6 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
         except ValueError:
             modern_eid = generate_eid_p256(normalized_key, timestamp)
 
-        try:
-            modern_eid_le = _modern_generate_eid_le(identity_key, timestamp)
-        except ValueError:
-            modern_eid_le = _modern_generate_eid_le(normalized_key, timestamp)
-
         candidates.append(EidCandidate(name="fhna_secp256r1_rx32", eid=modern_eid))
         candidates.append(
             EidCandidate(
@@ -446,6 +450,19 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
                     eid=modern_eid[-LEGACY_EID_LENGTH:],
                 )
             )
+
+        # ------------------------------------------------------------------
+        # CRITICAL: MOTO TAG / CHIPOLO SUPPORT (Little Endian)
+        # Moto Tag hardware derives the P-256 scalar using little-endian
+        # byte order. Without these LE variants, the resolver will never
+        # match Moto Tag (or similar Chipolo-based) trackers. Keep the
+        # `_le_` candidates in lockstep with the big-endian set above.
+        # ------------------------------------------------------------------
+        try:
+            modern_eid_le = _modern_generate_eid_le(identity_key, timestamp)
+        except ValueError:
+            modern_eid_le = _modern_generate_eid_le(normalized_key, timestamp)
+
         candidates.append(EidCandidate(name="fhna_p256_le_rx32", eid=modern_eid_le))
         candidates.append(
             EidCandidate(
@@ -762,7 +779,15 @@ class GoogleFindMyEIDResolver:
                 if candidate.label == TimebaseLabel.REL_PAIR:
                     rel_candidates.append(candidate)
 
-                local_search_offset = known_offset
+                lock_for_candidate = (
+                    active_lock is not None
+                    and active_lock.label == candidate.label
+                    and active_lock.rotation_timestamp is not None
+                    and candidate.label == TimebaseLabel.ABSOLUTE
+                    and abs(active_lock.offset) >= ROTATION_PERIOD
+                )
+
+                local_search_offset = known_offset if not lock_for_candidate else 0
                 if (
                     local_search_offset is None
                     and active_lock is not None
@@ -778,17 +803,33 @@ class GoogleFindMyEIDResolver:
                     )
                     local_search_offset = aligned_rotation - candidate.reference_time
 
-                is_anchored = (
+                passes: list[tuple[Iterable[int], bool]]
+                anchor_age: int | None = None
+                if candidate.anchor_epoch is not None:
+                    try:
+                        anchor_age = now_unix - int(candidate.anchor_epoch)
+                    except (TypeError, ValueError):
+                        anchor_age = None
+
+                reference_value = candidate.reference_time
+                offset_reference = reference_value
+                allow_negative = bool(
                     candidate.label != TimebaseLabel.ABSOLUTE
-                    and candidate.anchor_epoch is not None
+                    and anchor_age is not None
+                    and anchor_age < 0
                 )
 
-                passes: list[tuple[Iterable[int], bool]]
-                if local_search_offset is not None:
+                if lock_for_candidate and active_lock is not None:
+                    passes = [((-1, 0, 1), False)]
+                    reference_value = active_lock.rotation_timestamp
+                    offset_reference = active_lock.rotation_timestamp
+                    local_search_offset = 0
+                    allow_negative = False
+                elif local_search_offset is not None:
                     passes = [(range(0, 1), True)]
                 else:
                     passes = [(NARROW_SCAN_RANGE, False)]
-                    if is_anchored and not skip_deep_scan:
+                    if not skip_deep_scan:
                         passes.append(
                             (
                                 range(
@@ -810,26 +851,6 @@ class GoogleFindMyEIDResolver:
                                 REL_DEEP_SCAN_SPARSE_STEP,
                             )
                             passes.append(((tuple(sparse_negative) + tuple(sparse_positive)), False))
-                    elif not is_anchored and not skip_deep_scan:
-                        _LOGGER.debug(
-                            "DEEP-SCAN SKIPPED: candidate=%s (no anchor)",
-                            candidate.label,
-                        )
-
-                anchor_age: int | None = None
-                if candidate.anchor_epoch is not None:
-                    try:
-                        anchor_age = now_unix - int(candidate.anchor_epoch)
-                    except (TypeError, ValueError):
-                        anchor_age = None
-
-                reference_value = candidate.reference_time
-                offset_reference = reference_value
-                allow_negative = bool(
-                    candidate.label != TimebaseLabel.ABSOLUTE
-                    and anchor_age is not None
-                    and anchor_age < 0
-                )
 
                 for window_range, include_neighbors in passes:
                     local_window_range = window_range
@@ -843,7 +864,8 @@ class GoogleFindMyEIDResolver:
                     )
 
                     if (
-                        active_lock is not None
+                        not lock_for_candidate
+                        and active_lock is not None
                         and active_lock.label == candidate.label
                         and active_lock.rotation_timestamp is not None
                     ):
@@ -1555,6 +1577,31 @@ class GoogleFindMyEIDResolver:
         variant = metadata.get("variant") if metadata is not None else None
         anchor_epoch = anchor_ts if metadata is not None else None
 
+        active_lock = self._known_timebases.get(match.device_id)
+        if (
+            timebase_label == TimebaseLabel.ABSOLUTE
+            and rotation_timestamp is not None
+            and abs(chosen_offset) >= ROTATION_PERIOD
+        ):
+            locked_timebase = _TimebaseLock(
+                label=timebase_label,
+                anchor_epoch=anchor_epoch,
+                rotation_timestamp=rotation_timestamp,
+                offset=chosen_offset,
+                variant=variant,
+            )
+            if locked_timebase != active_lock:
+                self._known_timebases[match.device_id] = locked_timebase
+                lock_state = "updated" if active_lock is not None else "created"
+                _LOGGER.info(
+                    "[LOCK-ON] %s absolute timebase for %s (offset=%s, variant=%s, rotation=%s)",
+                    lock_state,
+                    match.device_id,
+                    chosen_offset,
+                    variant,
+                    rotation_timestamp,
+                )
+
         _LOGGER.info(
             "HIT: device=%s canonical=%s timebase=%s variant=%s reversed=%s "
             "offset=%s rotation=%s anchor=%s eid_prefix=%s",
@@ -1611,12 +1658,22 @@ class GoogleFindMyEIDResolver:
         except (TypeError, ValueError):
             anchor_epoch = None
 
+        try:
+            variant = (
+                str(metadata.get("variant"))
+                if metadata.get("variant") is not None
+                else None
+            )
+        except Exception:
+            variant = None
+
         lock_payload = {
             "label": timebase_label,
             "anchor_epoch": anchor_epoch,
             "rotation_timestamp": rotation_timestamp,
             "time_offset": time_offset,
             "is_reversed": match.is_reversed,
+            "variant": variant,
         }
 
         if self._persisted_locks.get(match.device_id) == lock_payload:
@@ -1640,6 +1697,26 @@ class GoogleFindMyEIDResolver:
             create_task(_async_store())
         except Exception:  # pragma: no cover - defensive
             asyncio.create_task(_async_store())
+
+    async def async_trigger_immediate_refresh(self) -> None:
+        """Force an immediate re-calculation of EID candidates.
+
+        Callers should invoke this when critical crypto material (Identity Key or
+        Secrets Creation Date) changes due to an incoming device update so the
+        resolver does not wait for the next scheduled refresh.
+        """
+
+        if self._refresh_lock.locked():
+            _LOGGER.debug(
+                "Immediate refresh requested but resolver is busy; skipping duplicate trigger.",
+            )
+            return
+
+        _LOGGER.info(
+            "EVENT-DRIVEN: Critical Key Update detected. Triggering immediate EID recalculation.",
+        )
+
+        await self._refresh_cache()
 
     def get_resolved_eid(self, eid_bytes: bytes) -> str | None:
         """Backward compatible convenience wrapper for resolve_eid.

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from custom_components.googlefindmy import eid_resolver as resolver_module
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.eid_resolver import (
     GoogleFindMyEIDResolver,
@@ -70,6 +71,32 @@ def test_generate_eid_candidates_expected_variants() -> None:
         variant_map["fhna_p256_truncated_rx20"].hex()
         == "f5a2f55527688d26c47043bde3f8888274a4eb9f"
     )
+
+
+def test_cached_candidates_registers_endianness_variants() -> None:
+    """Both big- and little-endian P-256 variants should be cached."""
+
+    identity_key = bytes.fromhex(
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+    )
+    cache_clear = getattr(
+        resolver_module._cached_candidates, "cache_clear", None
+    )
+    if callable(cache_clear):
+        cache_clear()
+
+    candidates = resolver_module._cached_candidates(identity_key, 1_700_000_000)
+    variant_names = {candidate.name for candidate in candidates}
+
+    assert variant_names == {
+        "fhna_secp160r1_rx20",
+        "fhna_secp256r1_rx32",
+        "fhna_p256_truncated_rx20",
+        "fhna_p256_truncated_tail_rx20",
+        "fhna_p256_le_rx32",
+        "fhna_p256_le_truncated_rx20",
+        "fhna_p256_le_truncated_tail_rx20",
+    }
 
 
 def test_iter_rotation_windows_alignment_and_neighbors() -> None:
@@ -160,3 +187,80 @@ async def test_refresh_cache_registers_hybrid_candidates(
     assert resolver._lookup[b"B" * 32].time_offset == 0
     assert resolver._lookup[b"C" * LEGACY_EID_LENGTH].time_offset == 0
     assert call_order == [2048, 1024, 3072]
+
+
+@pytest.mark.asyncio
+async def test_unanchored_absolute_timebase_runs_deep_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unanchored identities should still receive deep scan coverage."""
+
+    resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+    resolver.hass = SimpleNamespace()
+    resolver._lookup = {}
+    resolver._lookup_metadata = {}
+    resolver._known_offsets = {}
+    resolver._known_endianness = {}
+    resolver._decryption_status = {}
+    resolver._known_timebases = {}
+    resolver._persisted_locks = {}
+    resolver._provisioning_warn_at = {}
+    resolver._unsub_interval = None
+    resolver._unsub_alignment = None
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+
+    identity = DeviceIdentity(
+        registry_id="abs-id",
+        canonical_id="abs-canonical",
+        identity_key=b"\x02" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+    )
+
+    async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _collect,
+    )
+    monkeypatch.setattr(
+        GoogleFindMyEIDResolver,
+        "_normalize_identities",
+        lambda self, identities, cache=None: identities,
+    )
+
+    window_timestamps: list[int] = []
+
+    def _fake_candidates(
+        identity_key: bytes, timestamp: int
+    ) -> tuple[EidCandidate, ...]:
+        window_timestamps.append(timestamp)
+        eid_bytes = timestamp.to_bytes(4, "big") * 5
+        return (EidCandidate(name=f"eid-{timestamp}", eid=eid_bytes),)
+
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        _fake_candidates,
+    )
+
+    fixed_time = 2048
+    monkeypatch.setattr(time, "time", lambda: float(fixed_time))
+
+    await resolver._refresh_cache()
+
+    # Deep scan should expand far beyond the narrow +/-3 window range.
+    assert len(window_timestamps) >= 90
+    assert max(window_timestamps) >= (
+        fixed_time
+        + (
+            resolver_module.REL_DEEP_SCAN_DENSE_RADIUS
+            * resolver_module.ROTATION_PERIOD
+        )
+    )

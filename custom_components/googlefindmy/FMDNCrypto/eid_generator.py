@@ -172,18 +172,6 @@ def generate_eid_p256(identity_key: bytes, timestamp: int) -> bytes:
     return _serialize_p256_x(scalar_r)
 
 
-def generate_eid_p256_le(identity_key: bytes, timestamp: int) -> bytes:
-    """Generate a modern FHNA EID using little-endian scalar derivation.
-
-    Some tracker firmware interprets the PRF output as a little-endian integer
-    before applying the secp256r1 scalar multiplication. This variant preserves
-    interoperability with those devices while keeping the on-curve projection
-    identical to the big-endian path.
-    """
-
-    scalar_r = _derive_scalar_p256(identity_key, timestamp, K, byteorder="little")
-    return _serialize_p256_x(scalar_r)
-
 
 def generate_eid_fhna_secp160r1(identity_key: bytes, timestamp: int) -> bytes:
     """Generate a 20-byte FHNA EID on secp160r1 (Table 10 PRF)."""
@@ -259,6 +247,7 @@ def _derive_scalar_p256(
     identity_key: bytes,
     timestamp: int,
     K: int,
+    *,
     byteorder: Literal["big", "little"] = "big",
 ) -> int:
     """Derive the secp256r1 scalar ``r`` from the Table 10 PRF output.
@@ -310,6 +299,15 @@ def get_masked_timestamp(timestamp: int, K: int, *, strict: bool = True) -> byte
     masked, _was_aligned = _align_ts_to_rotation(ts_u32, rotation_mask=rotation_mask)
 
     return masked.to_bytes(4, byteorder="big", signed=False)
+
+
+def generate_eid_p256_le(
+    identity_key: bytes, timestamp: int, K: int = FHNA_K
+) -> bytes:
+    """Generate an EID using P-256 with Little Endian scalar derivation."""
+
+    r = _derive_scalar_p256(identity_key, timestamp, K, byteorder="little")
+    return _serialize_p256_x(r)
 
 
 if __name__ == "__main__":

@@ -6572,7 +6572,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 return
 
-            device_entry = dev_reg.async_get_device(identifiers={(DOMAIN, device_id)})
+            async_get_device = getattr(dev_reg, "async_get_device", None)
+            if async_get_device is None:
+                _LOGGER.debug(
+                    "Device registry missing async_get_device; skipping persistence for %s",
+                    device_id,
+                )
+                return
+
+            device_entry = async_get_device(identifiers={(DOMAIN, device_id)})
             if device_entry is None:
                 return
 
@@ -6607,23 +6615,30 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 return
 
             try:
-                self._call_device_registry_api(
-                    dev_reg.async_update_device,
-                    base_kwargs={
-                        "device_id": device_entry.id,
-                        "custom_fields": new_custom_fields,
-                    },
+                dev_reg.async_update_device(
+                    device_entry.id,
+                    custom_fields=new_custom_fields,
                 )
             except Exception as err:  # pragma: no cover - defensive fallback
                 _LOGGER.warning(
                     "Failed to persist anchors to device registry for %s: %s",
                     device_id,
                     err,
+                    exc_info=err,
                 )
             else:
                 _LOGGER.debug(
                     "Persisted anchor metadata to device registry for %s", device_id
                 )
+
+                eid_resolver = getattr(self, "eid_resolver", None)
+                if eid_resolver is not None:
+                    _LOGGER.debug(
+                        "Triggering immediate EID Resolver refresh for %s", device_id
+                    )
+                    self.hass.async_create_task(
+                        eid_resolver.async_trigger_immediate_refresh()
+                    )
 
         def _normalize_anchor_value(value: Any) -> int | Any:
             normalized = normalize_epoch_seconds(value)
