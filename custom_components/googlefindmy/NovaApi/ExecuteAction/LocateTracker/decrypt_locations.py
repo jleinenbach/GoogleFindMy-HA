@@ -1003,6 +1003,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 if report_hint:
                     payload["_report_hint"] = report_hint
 
+            # [FIX: CRITICAL DATA MERGE]
+            # Forward the extracted metadata to the coordinator so it can be persisted.
+            if "pair_date" in metadata_update:
+                payload["pair_date"] = metadata_update["pair_date"]
+
+            if "secrets_creation_date" in metadata_update:
+                payload["secrets_creation_date"] = metadata_update[
+                    "secrets_creation_date"
+                ]
+
             if metadata:
                 payload.update(metadata)
 
