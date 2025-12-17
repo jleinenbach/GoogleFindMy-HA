@@ -4491,6 +4491,34 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         return source[key]
             return None
 
+        def _lookup_prio_with_source(
+            lookup_keys: tuple[str | None, ...],
+            *sources: tuple[Mapping[str, T], str],
+        ) -> tuple[T | None, str | None]:
+            """Return the first matching value and its source label."""
+
+            key_candidates: tuple[str, ...] = tuple(
+                key for key in lookup_keys if isinstance(key, str)
+            )
+
+            for source, label in sources:
+                if not isinstance(source, Mapping):
+                    continue
+                for key in key_candidates:
+                    if key in source:
+                        value = source[key]
+                        if value is not None:
+                            return value, label
+            return None, None
+
+        U = TypeVar("U")
+
+        def _store_if_value(target: dict[str, U], key: str, value: U | None) -> None:
+            """Store non-null lookup values to avoid shadowing fallbacks."""
+
+            if value is not None:
+                target[key] = value
+
         def _normalize_timestamp(value: Any) -> int | None:
             """Return epoch seconds from ints/strings or Timestamp-like mappings."""
 
@@ -4802,8 +4830,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 parsed = self._normalize_identity_key(
                     raw.get("identity_key") or raw.get("identityKey") or raw.get("eik")
                 )
-                if parsed is not None:
-                    last_identities[dev_id] = parsed
+                _store_if_value(last_identities, dev_id, parsed)
 
                 candidate_list = self._normalize_identity_key_candidates(
                     raw.get("identity_key_candidates")
@@ -4835,12 +4862,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     last_fast_pair_model_ids[dev_id] = fast_pair_model_id
 
                 pair_date = _extract_pair_date(raw)
-                if pair_date is not None:
-                    last_pair_dates[dev_id] = pair_date
+                _store_if_value(last_pair_dates, dev_id, pair_date)
 
                 secrets_creation_date = _extract_secrets_creation_date(raw)
-                if secrets_creation_date is not None:
-                    last_secrets_creation_dates[dev_id] = secrets_creation_date
+                _store_if_value(
+                    last_secrets_creation_dates, dev_id, secrets_creation_date
+                )
 
                 anchors_debug = _extract_time_anchors_debug(raw)
                 if anchors_debug is not None:
@@ -4871,8 +4898,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 parsed = self._normalize_identity_key(
                     raw.get("identity_key") or raw.get("identityKey") or raw.get("eik")
                 )
-                if parsed is not None:
-                    data_identities[dev_id] = parsed
+                _store_if_value(data_identities, dev_id, parsed)
 
                 candidate_list = self._normalize_identity_key_candidates(
                     raw.get("identity_key_candidates")
@@ -4904,12 +4930,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     data_fast_pair_model_ids[dev_id] = fast_pair_model_id
 
                 pair_date = _extract_pair_date(raw)
-                if pair_date is not None:
-                    data_pair_dates[dev_id] = pair_date
+                _store_if_value(data_pair_dates, dev_id, pair_date)
 
                 secrets_creation_date = _extract_secrets_creation_date(raw)
-                if secrets_creation_date is not None:
-                    data_secrets_creation_dates[dev_id] = secrets_creation_date
+                _store_if_value(
+                    data_secrets_creation_dates, dev_id, secrets_creation_date
+                )
 
                 anchors_debug = _extract_time_anchors_debug(raw)
                 if anchors_debug is not None:
@@ -4939,8 +4965,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     or payload.get("identityKey")
                     or payload.get("eik")
                 )
-                if parsed is not None:
-                    cache_identities[dev_id] = parsed
+                _store_if_value(cache_identities, dev_id, parsed)
 
                 candidate_list = self._normalize_identity_key_candidates(
                     payload.get("identity_key_candidates")
@@ -4973,12 +4998,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     cache_fast_pair_model_ids[dev_id] = fast_pair_model_id
 
                 pair_date = _extract_pair_date(payload)
-                if pair_date is not None:
-                    cache_pair_dates[dev_id] = pair_date
+                _store_if_value(cache_pair_dates, dev_id, pair_date)
 
                 secrets_creation_date = _extract_secrets_creation_date(payload)
-                if secrets_creation_date is not None:
-                    cache_secrets_creation_dates[dev_id] = secrets_creation_date
+                _store_if_value(
+                    cache_secrets_creation_dates, dev_id, secrets_creation_date
+                )
 
                 anchors_debug = _extract_time_anchors_debug(payload)
                 if anchors_debug is not None:
@@ -5056,31 +5081,49 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 last_fast_pair_model_ids,
             )
 
-            pair_date = _lookup_prio(
+            pair_date_source: str | None = None
+            pair_date_raw, pair_date_source = _lookup_prio_with_source(
                 lookup_keys,
-                cache_pair_dates,
-                data_pair_dates,
-                last_pair_dates,
+                (cache_pair_dates, "cache"),
+                (data_pair_dates, "live"),
+                (last_pair_dates, "last"),
             )
-            if pair_date is None:
-                pair_date = _lookup_prio(lookup_keys, registry_pair_dates)
-            if pair_date is None:
-                pair_date = direct_pair_date
-            pair_date = normalize_epoch_seconds(pair_date)
-
-            secrets_creation_date = _lookup_prio(
-                lookup_keys,
-                cache_secrets_creation_dates,
-                data_secrets_creation_dates,
-                last_secrets_creation_dates,
-            )
-            if secrets_creation_date is None:
-                secrets_creation_date = _lookup_prio(
-                    lookup_keys, registry_secrets_creation_dates
+            if pair_date_raw is None:
+                registry_pair_date, registry_pair_source = _lookup_prio_with_source(
+                    lookup_keys, (registry_pair_dates, "registry")
                 )
+                if registry_pair_date is not None:
+                    pair_date_raw = registry_pair_date
+                    pair_date_source = registry_pair_source
+            if pair_date_raw is None:
+                pair_date_raw = direct_pair_date
+                if pair_date_raw is not None:
+                    pair_date_source = "merged"
+            pair_date = normalize_epoch_seconds(pair_date_raw)
+            if pair_date is None:
+                pair_date_source = None
+
+            secrets_creation_source: str | None = None
+            secrets_creation_raw, secrets_creation_source = _lookup_prio_with_source(
+                lookup_keys,
+                (cache_secrets_creation_dates, "cache"),
+                (data_secrets_creation_dates, "live"),
+                (last_secrets_creation_dates, "last"),
+            )
+            if secrets_creation_raw is None:
+                registry_secrets_date, registry_secrets_source = _lookup_prio_with_source(
+                    lookup_keys, (registry_secrets_creation_dates, "registry")
+                )
+                if registry_secrets_date is not None:
+                    secrets_creation_raw = registry_secrets_date
+                    secrets_creation_source = registry_secrets_source
+            if secrets_creation_raw is None:
+                secrets_creation_raw = direct_secrets_date
+                if secrets_creation_raw is not None:
+                    secrets_creation_source = "merged"
+            secrets_creation_date = normalize_epoch_seconds(secrets_creation_raw)
             if secrets_creation_date is None:
-                secrets_creation_date = direct_secrets_date
-            secrets_creation_date = normalize_epoch_seconds(secrets_creation_date)
+                secrets_creation_source = None
 
             anchors_debug = _lookup_prio(
                 lookup_keys,
@@ -5151,6 +5194,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     or [],
                 )
                 continue
+
+            _LOGGER.debug(
+                "Resolving Identity for %s: Anchor=%s (source=%s), PairDate=%s (source=%s)",
+                canonical_id,
+                secrets_creation_date,
+                (secrets_creation_source or "unknown").upper(),
+                pair_date,
+                (pair_date_source or "unknown").upper(),
+            )
 
             if normalized_candidates:
                 for candidate in normalized_candidates:
