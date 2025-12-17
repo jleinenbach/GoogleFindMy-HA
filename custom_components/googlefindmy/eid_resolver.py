@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/eid_resolver.py
 """Ephemeral identifier resolver for local BLE scans.
 
 This module exposes a resolver that maps rotating Find My Device Network
@@ -78,7 +79,11 @@ NARROW_SCAN_RANGE: tuple[int, ...] = (0, -1, 1, -2, 2, -3, 3)
 REL_DEEP_SCAN_DENSE_RADIUS = 96
 REL_DEEP_SCAN_MAX_DRIFT = 180
 REL_DEEP_SCAN_SPARSE_STEP = 4
+REL_FALLBACK_VARIANT_LIMIT = 8
 LOCK_CUSTOM_FIELD = "eid_timebase_lock"
+# Be conservative: devices may be out of BLE range for hours/days.
+# We only treat a lock as stale after multiple full rotations without a HIT.
+LOCK_STALE_AFTER_SECONDS = 12 * ROTATION_PERIOD
 DEBUG_LOG_LIMIT = 50
 PROVISIONING_WARN_COOLDOWN = 3600
 FUTURE_ANCHOR_MAX_DRIFT = 86400
@@ -216,7 +221,9 @@ def _clamp_and_mask_u32(delta_seconds: int) -> int:
     return _mask_u32(delta_seconds)
 
 
-def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] | None:
+def _parse_persisted_lock(
+    raw: Mapping[str, Any],
+) -> tuple[_TimebaseLock, bool, int | None] | None:
     """Return a parsed lock payload from registry custom fields when present."""
 
     label_raw = raw.get("label")
@@ -241,6 +248,7 @@ def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] 
         variant = None
 
     is_reversed = bool(raw.get("is_reversed", False))
+    confirmed_at = _coerce_int(raw.get("confirmed_at"))
 
     if rotation_timestamp is None:
         return None
@@ -251,7 +259,7 @@ def _parse_persisted_lock(raw: Mapping[str, Any]) -> tuple[_TimebaseLock, bool] 
         rotation_timestamp=rotation_timestamp,
         offset=offset,
         variant=variant,
-    ), is_reversed
+    ), is_reversed, confirmed_at
 
 
 def _iter_debug_timebases(anchors: Any, *, now: int) -> list[_TimebaseCandidate]:
@@ -548,6 +556,7 @@ class GoogleFindMyEIDResolver:
     _known_timebases: dict[str, _TimebaseLock] = field(default_factory=dict)
     _persisted_locks: dict[str, dict[str, Any]] = field(default_factory=dict)
     _provisioning_warn_at: dict[str, float] = field(default_factory=dict)
+    _last_lock_confirmation: dict[str, float] = field(default_factory=dict)
     _unsub_interval: CALLBACK_TYPE | None = field(init=False, default=None)
     _unsub_alignment: CALLBACK_TYPE | None = field(init=False, default=None)
     _refresh_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
@@ -624,6 +633,8 @@ class GoogleFindMyEIDResolver:
             self._persisted_locks = {}
         if not hasattr(self, "_provisioning_warn_at"):
             self._provisioning_warn_at = {}
+        if not hasattr(self, "_last_lock_confirmation"):
+            self._last_lock_confirmation = {}
         identities: list[DeviceIdentity] = await self._collect_device_secrets()
         _LOGGER.debug(
             "Resolver received %d identities from coordinator", len(identities)
@@ -638,35 +649,97 @@ class GoogleFindMyEIDResolver:
         except Exception:  # pragma: no cover - defensive stub fallback
             device_reg = None
 
+        stale_cutoff_ts = now_unix - LOCK_STALE_AFTER_SECONDS
+
         if device_reg is not None:
             for identity in identities:
                 registry_id = identity.registry_id
                 if not registry_id:
                     continue
 
-                if (
-                    registry_id in self._known_timebases
-                    and registry_id in self._persisted_locks
-                ):
+                entry = device_reg.async_get(registry_id)
+                if entry is None:
+                    _LOGGER.debug(
+                        "Skipping lock rehydration for %s: registry entry missing",
+                        registry_id,
+                    )
                     continue
 
-                entry = device_reg.async_get(registry_id)
-                custom_fields = getattr(entry, "custom_fields", None) if entry else None
+                custom_fields = getattr(entry, "custom_fields", None)
                 if not isinstance(custom_fields, Mapping):
+                    _LOGGER.debug(
+                        "Dropping persisted lock for %s: custom_fields missing or invalid",
+                        registry_id,
+                    )
+                    self._persisted_locks.pop(registry_id, None)
                     continue
 
                 lock_payload = custom_fields.get(LOCK_CUSTOM_FIELD)
+                if lock_payload is None:
+                    _LOGGER.debug(
+                        "Disabling hard lock for %s: %s absent from custom_fields (keeping in-memory hints)",
+                        registry_id,
+                        LOCK_CUSTOM_FIELD,
+                    )
+                    self._persisted_locks.pop(registry_id, None)
+                    continue
+
                 if not isinstance(lock_payload, Mapping):
+                    _LOGGER.debug(
+                        "Disabling hard lock for %s: lock payload is not a mapping (keeping in-memory hints)",
+                        registry_id,
+                    )
+                    self._persisted_locks.pop(registry_id, None)
                     continue
 
                 parsed = _parse_persisted_lock(lock_payload)
                 if parsed is None:
+                    _LOGGER.debug(
+                        "Disabling hard lock for %s: failed to parse payload (keeping in-memory hints)",
+                        registry_id,
+                    )
+                    self._persisted_locks.pop(registry_id, None)
                     continue
 
-                persisted_lock, is_reversed = parsed
-                self._known_timebases.setdefault(registry_id, persisted_lock)
-                self._known_offsets.setdefault(registry_id, persisted_lock.offset)
-                self._known_endianness.setdefault(registry_id, is_reversed)
+                persisted_lock, is_reversed, confirmed_at = parsed
+                last_seen = self._last_lock_confirmation.get(registry_id)
+                if confirmed_at is not None:
+                    last_seen = confirmed_at
+                    self._last_lock_confirmation[registry_id] = confirmed_at
+
+                if (
+                    last_seen is not None
+                    and last_seen < stale_cutoff_ts
+                    and (confirmed_at is not None or registry_id in self._last_lock_confirmation)
+                ):
+                    _LOGGER.debug(
+                        "Dropping persisted lock for %s: stale (confirmed_at=%s)",
+                        registry_id,
+                        last_seen,
+                    )
+                    self._known_timebases.pop(registry_id, None)
+                    self._known_offsets.pop(registry_id, None)
+                    self._known_endianness.pop(registry_id, None)
+                    self._persisted_locks.pop(registry_id, None)
+                    self._last_lock_confirmation.pop(registry_id, None)
+                    cleaned_fields = dict(custom_fields)
+                    cleaned_fields.pop(LOCK_CUSTOM_FIELD, None)
+                    try:
+                        device_reg.async_update_device(
+                            registry_id, custom_fields=cleaned_fields
+                        )
+                    except Exception:  # pragma: no cover - defensive best-effort
+                        pass
+                    if hasattr(entry, "custom_fields"):
+                        try:
+                            entry.custom_fields = cleaned_fields
+                        except Exception:  # pragma: no cover - defensive fallback
+                            pass
+                    continue
+
+                self._known_timebases[registry_id] = persisted_lock
+                self._known_offsets[registry_id] = persisted_lock.offset
+                self._known_endianness[registry_id] = is_reversed
                 self._persisted_locks[registry_id] = dict(lock_payload)
 
         first_identity_id: str | None = None
@@ -691,17 +764,19 @@ class GoogleFindMyEIDResolver:
             registry_id = identity.registry_id
             identity_key_bytes = bytes(identity.identity_key)
 
-            active_lock: _TimebaseLock | None = self._known_timebases.get(registry_id)
+            # Keep any remembered lock as a *hint*, but only enable hard-lock filtering
+            # if we still have a persisted lock payload (prevents stale/wrong locks from
+            # blocking broad EID generation when devices return after long gaps).
+            hint_lock: _TimebaseLock | None = self._known_timebases.get(registry_id)
+            hard_lock: _TimebaseLock | None = (
+                hint_lock if (hint_lock is not None and registry_id in self._persisted_locks) else None
+            )
             known_offset = (
-                active_lock.offset
-                if active_lock is not None
-                else self._known_offsets.get(registry_id)
+                hard_lock.offset if hard_lock is not None else self._known_offsets.get(registry_id)
             )
             known_endianness = self._known_endianness.get(registry_id, False)
-            requested_timebases: set[str] = set()
             recorded_timebases: set[str] = set()
-            rel_candidates: list[_TimebaseCandidate] = []
-            should_log_debug_dump = identity.canonical_id.endswith("d329") or (
+            should_log_debug_dump = (
                 first_identity_id is not None
                 and identity.canonical_id == first_identity_id
             )
@@ -720,6 +795,20 @@ class GoogleFindMyEIDResolver:
             def _register_with_metadata(
                 eid_value: bytes, reversed_flag: bool, metadata_payload: dict[str, Any]
             ) -> None:
+                # Strict invariant: resolver lookup keys must be real EIDs only (20B legacy / 32B modern).
+                # This prevents accidental registration of truncated/extended artifacts during refactors.
+                if len(eid_value) not in (EID_LENGTH, MODERN_EID_LENGTH):
+                    _LOGGER.debug(
+                        "Skipping unexpected EID length=%d (timebase=%s variant=%s)",
+                        len(eid_value),
+                        metadata_payload.get("timebase"),
+                        metadata_payload.get("variant"),
+                    )
+                    return
+                timebase_label = metadata_payload.get("timebase")
+                if timebase_label is not None:
+                    recorded_timebases.add(str(timebase_label))
+
                 match = EIDMatch(
                     device_id=registry_id,
                     config_entry_id=config_entry_id,
@@ -727,90 +816,129 @@ class GoogleFindMyEIDResolver:
                     time_offset=metadata_payload["time_offset"],
                     is_reversed=reversed_flag,
                 )
-                existing = lookup.get(eid_value)
-                existing_offset = existing.time_offset if existing is not None else None
-                timebase_label = metadata_payload.get("timebase")
-                should_force = (
-                    timebase_label
-                    in {
-                        TimebaseLabel.REL_PAIR,
-                        TimebaseLabel.REL_SECRETS,
-                    }
-                    and timebase_label not in recorded_timebases
-                )
 
+                existing = lookup.get(eid_value)
                 existing_metadata = lookup_metadata.get(eid_value)
+
+                def _score(metadata: Mapping[str, Any], is_reversed: bool) -> tuple[Any, ...]:
+                    time_offset = _coerce_int(metadata.get("time_offset")) or 0
+                    abs_offset = abs(time_offset)
+                    lock_rank = (
+                        0
+                        if hard_lock is not None
+                        and metadata.get("timebase") == hard_lock.label
+                        else 1
+                    )
+                    known_rank = (
+                        0
+                        if known_offset is not None and time_offset == known_offset
+                        else 1 if known_offset is not None else 0
+                    )
+                    reverse_rank = 0 if not is_reversed else 1
+                    variant_rank = str(metadata.get("variant") or "")
+                    timebase_rank = str(metadata.get("timebase") or "")
+                    return (
+                        lock_rank,
+                        known_rank,
+                        abs_offset,
+                        reverse_rank,
+                        variant_rank,
+                        timebase_rank,
+                    )
+
                 history: list[dict[str, Any]] = []
+                best_metadata: dict[str, Any] | None = None
+                best_match = existing
+                best_score: tuple[Any, ...] | None = None
+                best_is_reversed = False
+
                 if isinstance(existing_metadata, dict):
                     prior = existing_metadata.get("timebases")
                     if isinstance(prior, list):
-                        history = list(prior)
-                    else:
-                        history = [existing_metadata]
+                        history = [item for item in prior if isinstance(item, dict)]
+                    base_metadata = {
+                        key: value
+                        for key, value in existing_metadata.items()
+                        if key not in {"timebases", "is_reversed"}
+                    }
+                    if not history:
+                        history = [base_metadata]
+                    best_metadata = base_metadata
+                    best_is_reversed = bool(existing_metadata.get("is_reversed", False))
+                    best_score = _score(base_metadata, best_is_reversed)
 
                 if metadata_payload not in history:
                     history.append(metadata_payload)
 
-                if (
-                    should_force
-                    or existing is None
-                    or existing_offset is None
-                    or abs(match.time_offset) < abs(existing_offset)
-                ):
-                    lookup[eid_value] = match
-                    lookup_metadata[eid_value] = {
-                        **metadata_payload,
-                        "is_reversed": reversed_flag,
-                        "timebases": history,
-                    }
-                    recorded_timebases.add(str(metadata_payload.get("timebase")))
-                elif isinstance(existing_metadata, dict):
-                    existing_metadata["timebases"] = history
-                    lookup_metadata[eid_value] = existing_metadata
+                candidate_score = _score(metadata_payload, reversed_flag)
+
+                if best_metadata is None or best_score is None or candidate_score < best_score:
+                    best_metadata = metadata_payload
+                    best_match = match
+                    best_score = candidate_score
+                    best_is_reversed = reversed_flag
+
+                if best_metadata is None:
+                    return
+
+                lookup[eid_value] = best_match or match
+                lookup_metadata[eid_value] = {
+                    **best_metadata,
+                    "is_reversed": best_is_reversed,
+                    "timebases": history,
+                }
 
             base_candidates = _build_timebase_candidates(
                 identity,
                 now_unix=now_unix,
             )
 
-            timebase_candidates = (
-                [
-                    candidate
-                    for candidate in base_candidates
-                    if active_lock and candidate.label == active_lock.label
-                ]
-                if active_lock is not None
-                else base_candidates
-            )
+            base_rel_candidates = {
+                candidate.label: candidate
+                for candidate in base_candidates
+                if candidate.label
+                in (
+                    TimebaseLabel.REL_PAIR,
+                    TimebaseLabel.REL_SECRETS,
+                )
+            }
 
-            requested_timebases.update(
-                candidate.label for candidate in timebase_candidates
-            )
+            if hard_lock is not None:
+                # Hard lock: prioritize the locked label, but always include ABSOLUTE as a safety net
+                # so we never completely block correct EID generation if the lock is wrong.
+                timebase_candidates = [
+                    candidate for candidate in base_candidates if candidate.label == hard_lock.label
+                ]
+                if hard_lock.label != TimebaseLabel.ABSOLUTE:
+                    timebase_candidates.extend(
+                        candidate
+                        for candidate in base_candidates
+                        if candidate.label == TimebaseLabel.ABSOLUTE
+                    )
+            else:
+                timebase_candidates = base_candidates
 
             for candidate in timebase_candidates:
-                if candidate.label == TimebaseLabel.REL_PAIR:
-                    rel_candidates.append(candidate)
-
                 lock_for_candidate = (
-                    active_lock is not None
-                    and active_lock.label == candidate.label
-                    and active_lock.rotation_timestamp is not None
+                    hard_lock is not None
+                    and hard_lock.label == candidate.label
+                    and hard_lock.rotation_timestamp is not None
                     and candidate.label == TimebaseLabel.ABSOLUTE
-                    and abs(active_lock.offset) >= ROTATION_PERIOD
+                    and abs(hard_lock.offset) >= ROTATION_PERIOD
                 )
 
                 local_search_offset = known_offset if not lock_for_candidate else 0
                 if (
                     local_search_offset is None
-                    and active_lock is not None
-                    and active_lock.rotation_timestamp is not None
-                    and active_lock.label == candidate.label
+                    and hard_lock is not None
+                    and hard_lock.rotation_timestamp is not None
+                    and hard_lock.label == candidate.label
                 ):
                     rotations_since_lock = round(
-                        (candidate.reference_time - active_lock.rotation_timestamp)
+                        (candidate.reference_time - hard_lock.rotation_timestamp)
                         / ROTATION_PERIOD
                     )
-                    aligned_rotation = active_lock.rotation_timestamp + (
+                    aligned_rotation = hard_lock.rotation_timestamp + (
                         rotations_since_lock * ROTATION_PERIOD
                     )
                     local_search_offset = aligned_rotation - candidate.reference_time
@@ -831,10 +959,10 @@ class GoogleFindMyEIDResolver:
                     and anchor_age < 0
                 )
 
-                if lock_for_candidate and active_lock is not None:
+                if lock_for_candidate and hard_lock is not None:
                     passes = [((-1, 0, 1), False)]
-                    reference_value = active_lock.rotation_timestamp
-                    offset_reference = active_lock.rotation_timestamp
+                    reference_value = hard_lock.rotation_timestamp
+                    offset_reference = hard_lock.rotation_timestamp
                     local_search_offset = 0
                     allow_negative = False
                 elif local_search_offset is not None:
@@ -877,13 +1005,13 @@ class GoogleFindMyEIDResolver:
 
                     if (
                         not lock_for_candidate
-                        and active_lock is not None
-                        and active_lock.label == candidate.label
-                        and active_lock.rotation_timestamp is not None
+                        and hard_lock is not None
+                        and hard_lock.label == candidate.label
+                        and hard_lock.rotation_timestamp is not None
                     ):
-                        base_target_time = active_lock.rotation_timestamp
-                        offset_reference = active_lock.rotation_timestamp - (
-                            active_lock.offset or 0
+                        base_target_time = hard_lock.rotation_timestamp
+                        offset_reference = hard_lock.rotation_timestamp - (
+                            hard_lock.offset or 0
                         )
                         local_search_offset = 0
                         local_window_range = range(0, 3)
@@ -891,15 +1019,15 @@ class GoogleFindMyEIDResolver:
 
                     elif (
                         local_search_offset is None
-                        and active_lock is not None
-                        and active_lock.rotation_timestamp is not None
-                        and active_lock.label == candidate.label
+                        and hard_lock is not None
+                        and hard_lock.rotation_timestamp is not None
+                        and hard_lock.label == candidate.label
                     ):
                         rotations_since_lock = round(
-                            (candidate.reference_time - active_lock.rotation_timestamp)
+                            (candidate.reference_time - hard_lock.rotation_timestamp)
                             / ROTATION_PERIOD
                         )
-                        aligned_rotation = active_lock.rotation_timestamp + (
+                        aligned_rotation = hard_lock.rotation_timestamp + (
                             rotations_since_lock * ROTATION_PERIOD
                         )
                         local_search_offset = (
@@ -999,43 +1127,55 @@ class GoogleFindMyEIDResolver:
                                     eid_bytes, is_reversed, metadata
                                 )
 
-            if (
-                TimebaseLabel.REL_PAIR in requested_timebases
-                and TimebaseLabel.REL_PAIR not in recorded_timebases
+            for rel_label in (
+                TimebaseLabel.REL_PAIR,
+                TimebaseLabel.REL_SECRETS,
             ):
-                rel_candidate = next((candidate for candidate in rel_candidates), None)
-                if rel_candidate is not None:
-                    fallback_rotation = rel_candidate.reference_time - (
-                        rel_candidate.reference_time % ROTATION_PERIOD
+                if rel_label in recorded_timebases:
+                    continue
+
+                rel_candidate = base_rel_candidates.get(rel_label)
+                if rel_candidate is None:
+                    _LOGGER.debug(
+                        "Skipping %s fallback registration: no relative candidate", rel_label
                     )
-                    try:
-                        fallback_candidates = _cached_candidates(
-                            identity_key_bytes, fallback_rotation
-                        )
-                    except Exception as err:  # noqa: BLE001 - defensive guard
-                        _LOGGER.debug(
-                            "Failed to generate fallback REL_PAIR candidates for %s: %s",
-                            identity.canonical_id,
-                            err,
-                        )
-                    else:
-                        for eid_candidate in fallback_candidates[:1]:
-                            fallback_metadata = {
-                                "timebase": TimebaseLabel.REL_PAIR,
-                                "anchor_epoch": rel_candidate.anchor_epoch,
-                                "rotation_timestamp": fallback_rotation,
-                                "time_offset": fallback_rotation
-                                - rel_candidate.reference_time,
-                                "timestamp_basis": "counter:REL_PAIR",
-                                "variant": eid_candidate.name,
-                            }
-                            _register_with_metadata(
-                                eid_candidate.eid, False, fallback_metadata
-                            )
-                            _register_with_metadata(
-                                eid_candidate.eid[::-1], True, fallback_metadata
-                            )
-                            break
+                    continue
+
+                # REL fallbacks must stay on the relative counter timebase; mixing in
+                # absolute rotation timestamps would generate incorrect EIDs.
+                fallback_rotation = rel_candidate.reference_time - (
+                    rel_candidate.reference_time % ROTATION_PERIOD
+                )
+
+                try:
+                    fallback_candidates = _cached_candidates(
+                        identity_key_bytes, fallback_rotation
+                    )
+                except Exception as err:  # noqa: BLE001 - defensive guard
+                    _LOGGER.debug(
+                        "Failed to generate fallback %s candidates for %s: %s",
+                        rel_label,
+                        identity.canonical_id,
+                        err,
+                    )
+                    continue
+
+                for eid_candidate in fallback_candidates[:REL_FALLBACK_VARIANT_LIMIT]:
+                    fallback_metadata = {
+                        "timebase": rel_label,
+                        "anchor_epoch": rel_candidate.anchor_epoch,
+                        "rotation_timestamp": fallback_rotation,
+                        "time_offset": fallback_rotation
+                        - rel_candidate.reference_time,
+                        "timestamp_basis": f"counter:{rel_label}",
+                        "variant": eid_candidate.name,
+                    }
+                    _register_with_metadata(
+                        eid_candidate.eid, False, fallback_metadata
+                    )
+                    _register_with_metadata(
+                        eid_candidate.eid[::-1], True, fallback_metadata
+                    )
 
         self._lookup = lookup
         self._lookup_metadata = lookup_metadata
@@ -1480,6 +1620,11 @@ class GoogleFindMyEIDResolver:
             len(eid_bytes),
         )
 
+        if not hasattr(self, "_last_lock_confirmation"):
+            self._last_lock_confirmation = {}
+        if not hasattr(self, "_provisioning_warn_at"):
+            self._provisioning_warn_at = {}
+
         if not self._lookup:
             is_locked = self._refresh_lock.locked()
             if self._pending_refresh or is_locked:
@@ -1630,6 +1775,7 @@ class GoogleFindMyEIDResolver:
 
         self._known_offsets[match.device_id] = chosen_offset
         self._known_endianness[match.device_id] = match.is_reversed
+        self._last_lock_confirmation[match.device_id] = int(time.time())
         self._schedule_lock_persistence(match, metadata)
         _LOGGER.debug("Resolved EID to device %s", match.device_id)
         return match
@@ -1679,6 +1825,10 @@ class GoogleFindMyEIDResolver:
         except Exception:
             variant = None
 
+        confirmed_at = self._last_lock_confirmation.get(
+            match.device_id, int(time.time())
+        )
+
         lock_payload = {
             "label": timebase_label,
             "anchor_epoch": anchor_epoch,
@@ -1686,6 +1836,7 @@ class GoogleFindMyEIDResolver:
             "time_offset": time_offset,
             "is_reversed": match.is_reversed,
             "variant": variant,
+            "confirmed_at": confirmed_at,
         }
 
         if self._persisted_locks.get(match.device_id) == lock_payload:

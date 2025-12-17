@@ -1,3 +1,4 @@
+# tests/test_eid_resolver.py
 import asyncio
 import logging
 from types import SimpleNamespace
@@ -56,6 +57,7 @@ def _build_resolver() -> GoogleFindMyEIDResolver:
     resolver._decryption_status = {}
     resolver._persisted_locks = {}
     resolver._provisioning_warn_at = {}
+    resolver._last_lock_confirmation = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -314,6 +316,664 @@ async def test_relative_timebase_allows_deep_scan(
     assert any(
         abs(offset) > max_narrow_rotations * ROTATION_PERIOD for offset in rel_offsets
     )
+
+
+@pytest.mark.asyncio
+async def test_relative_fallback_populates_pair_and_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REL timebases should populate even when window generation is skipped."""
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 42
+    pair_date = now - 1234
+    secrets_date = now - 2345
+
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    identity = DeviceIdentity(
+        registry_id="registry-rel-fallback",  # type: ignore[arg-type]
+        canonical_id="fallback-device",  # type: ignore[arg-type]
+        identity_key=b"\x44" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-rel-fallback",  # type: ignore[arg-type]
+        pair_date=pair_date,
+        secrets_creation_date=secrets_date,
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "iter_rotation_windows",
+        lambda *_args, **_kwargs: tuple(),
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xab" * EID_LENGTH),
+        ),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    await resolver._refresh_cache()
+
+    expected_lengths = {EID_LENGTH, resolver_module.MODERN_EID_LENGTH}
+    assert set(len(key) for key in resolver._lookup) <= expected_lengths
+    assert set(len(key) for key in resolver._lookup_metadata) <= expected_lengths
+
+    anchors: dict[str, int] = {}
+    label_eids: dict[str, set[bytes]] = {
+        TimebaseLabel.REL_PAIR: set(),
+        TimebaseLabel.REL_SECRETS: set(),
+    }
+
+    for eid_key, metadata in resolver._lookup_metadata.items():
+        if not isinstance(metadata, dict):
+            continue
+        for payload in metadata.get("timebases", []):
+            if not isinstance(payload, dict):
+                continue
+            label = payload.get("timebase")
+            if label in label_eids:
+                label_eids[label].add(eid_key)
+                anchor = payload.get("anchor_epoch")
+                if anchor is not None:
+                    anchors.setdefault(label, int(anchor))
+
+    assert all(label_eids[label] for label in label_eids)
+    assert anchors[TimebaseLabel.REL_PAIR] == pair_date
+    assert anchors[TimebaseLabel.REL_SECRETS] == secrets_date
+
+    for eids in label_eids.values():
+        for eid_key in eids:
+            assert eid_key in resolver._lookup
+            assert eid_key[::-1] in resolver._lookup
+
+
+@pytest.mark.asyncio
+async def test_registry_miss_preserves_cached_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    registry_id = "registry-lock-miss"
+    cached_lock = resolver_module._TimebaseLock(  # type: ignore[attr-defined]
+        TimebaseLabel.ABSOLUTE,
+        anchor_epoch=None,
+        rotation_timestamp=123,
+        offset=42,
+        variant="fhna_p256_truncated_rx20",
+    )
+    resolver._known_timebases[registry_id] = cached_lock
+    resolver._known_offsets[registry_id] = cached_lock.offset
+    resolver._known_endianness[registry_id] = False
+    resolver._persisted_locks[registry_id] = {"label": cached_lock.label}
+
+    identity = DeviceIdentity(
+        registry_id=registry_id,  # type: ignore[arg-type]
+        canonical_id="canonical-lock-miss",  # type: ignore[arg-type]
+        identity_key=b"\x99" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-lock-miss",  # type: ignore[arg-type]
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xaa" * EID_LENGTH),
+        ),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    await resolver._refresh_cache()
+
+    assert resolver._known_timebases.get(registry_id) == cached_lock
+    assert resolver._known_offsets.get(registry_id) == cached_lock.offset
+    assert resolver._known_endianness.get(registry_id) is False
+    assert resolver._persisted_locks.get(registry_id) == {"label": cached_lock.label}
+
+
+@pytest.mark.asyncio
+async def test_registry_entry_without_lock_drops_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    registry_id = "registry-lock-drop"
+    resolver._known_timebases[registry_id] = resolver_module._TimebaseLock(  # type: ignore[attr-defined]
+        TimebaseLabel.ABSOLUTE, anchor_epoch=None, rotation_timestamp=10, offset=5
+    )
+    resolver._known_offsets[registry_id] = 5
+    resolver._known_endianness[registry_id] = True
+    resolver._persisted_locks[registry_id] = {"label": TimebaseLabel.ABSOLUTE}
+
+    identity = DeviceIdentity(
+        registry_id=registry_id,  # type: ignore[arg-type]
+        canonical_id="canonical-lock-drop",  # type: ignore[arg-type]
+        identity_key=b"\x98" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-lock-drop",  # type: ignore[arg-type]
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xaa" * EID_LENGTH),
+        ),
+    )
+
+    entry = SimpleNamespace(custom_fields={})
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: entry),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        await resolver._refresh_cache()
+
+    # Keep in-memory hints, but disable persisted hard lock filtering.
+    assert registry_id in resolver._known_timebases
+    assert registry_id in resolver._known_offsets
+    assert registry_id in resolver._known_endianness
+    assert registry_id not in resolver._persisted_locks
+    assert any(
+        "Disabling hard lock" in message and registry_id in message
+        for message in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_registry_lock_update_overwrites_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    registry_id = "registry-lock-update"
+    resolver._known_timebases[registry_id] = resolver_module._TimebaseLock(  # type: ignore[attr-defined]
+        TimebaseLabel.ABSOLUTE, anchor_epoch=None, rotation_timestamp=10, offset=5
+    )
+    resolver._known_offsets[registry_id] = 5
+    resolver._known_endianness[registry_id] = False
+    resolver._persisted_locks[registry_id] = {"label": TimebaseLabel.ABSOLUTE}
+
+    identity = DeviceIdentity(
+        registry_id=registry_id,  # type: ignore[arg-type]
+        canonical_id="canonical-lock-update",  # type: ignore[arg-type]
+        identity_key=b"\x97" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-lock-update",  # type: ignore[arg-type]
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_secp160r1_rx20", eid=b"\xaa" * EID_LENGTH),
+        ),
+    )
+
+    new_payload = {
+        "label": TimebaseLabel.REL_PAIR,
+        "rotation_timestamp": 44,
+        "time_offset": 99,
+        "anchor_epoch": 11,
+        "variant": "fhna_p256_le_rx32",
+    }
+    entry = SimpleNamespace(custom_fields={LOCK_CUSTOM_FIELD: new_payload})
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: entry),
+    )
+
+    await resolver._refresh_cache()
+
+    updated_lock = resolver._known_timebases[registry_id]
+    assert updated_lock.label == TimebaseLabel.REL_PAIR
+    assert updated_lock.offset == 99
+    assert updated_lock.anchor_epoch == 11
+    assert updated_lock.variant == "fhna_p256_le_rx32"
+    assert resolver._known_endianness[registry_id] is False
+    assert resolver._persisted_locks[registry_id] == new_payload
+
+
+@pytest.mark.asyncio
+async def test_relative_fallback_registers_multiple_variants_and_endianness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 40
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    identity = DeviceIdentity(
+        registry_id="registry-fallback-multi",  # type: ignore[arg-type]
+        canonical_id="canonical-fallback",  # type: ignore[arg-type]
+        identity_key=b"\x45" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-fallback",  # type: ignore[arg-type]
+        pair_date=now - 100,
+        secrets_creation_date=now - 200,
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "iter_rotation_windows",
+        lambda *_args, **_kwargs: tuple(),
+    )
+
+    candidate_one = EidCandidate(name="fhna_variant_one", eid=b"\x01" * EID_LENGTH)
+    candidate_two = EidCandidate(name="fhna_variant_two", eid=b"\x02" * EID_LENGTH)
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (candidate_one, candidate_two),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    await resolver._refresh_cache()
+
+    variants = {
+        payload.get("variant")
+        for metadata in resolver._lookup_metadata.values()
+        for payload in metadata.get("timebases", [])
+        if isinstance(metadata, dict)
+        and isinstance(payload, dict)
+        and payload.get("timebase")
+        in {TimebaseLabel.REL_PAIR, TimebaseLabel.REL_SECRETS}
+    }
+
+    assert {candidate_one.name, candidate_two.name}.issubset(variants)
+
+    for eid_candidate in (candidate_one, candidate_two):
+        assert eid_candidate.eid in resolver._lookup
+        assert eid_candidate.eid[::-1] in resolver._lookup
+
+
+@pytest.mark.asyncio
+async def test_relative_fallback_registers_le_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fallback registration should not trim little-endian variants."""
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 50
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    identity = DeviceIdentity(
+        registry_id="registry-fallback-variants",  # type: ignore[arg-type]
+        canonical_id="canonical-fallback-variants",  # type: ignore[arg-type]
+        identity_key=b"\x46" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-fallback-variants",  # type: ignore[arg-type]
+        pair_date=now - 10,
+        secrets_creation_date=now - 20,
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "iter_rotation_windows",
+        lambda *_args, **_kwargs: tuple(),
+    )
+
+    candidates = [
+        EidCandidate(name=f"fhna_variant_{idx}", eid=bytes([idx]) * EID_LENGTH)
+        for idx in range(5)
+    ]
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: tuple(candidates),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    await resolver._refresh_cache()
+
+    registered = set(resolver._lookup)
+    for candidate in candidates:
+        assert candidate.eid in registered
+        assert candidate.eid[::-1] in registered
+
+    variants = {
+        payload.get("variant")
+        for metadata in resolver._lookup_metadata.values()
+        for payload in metadata.get("timebases", [])
+        if isinstance(metadata, dict)
+        and isinstance(payload, dict)
+        and payload.get("timebase")
+        in {TimebaseLabel.REL_PAIR, TimebaseLabel.REL_SECRETS}
+    }
+
+    assert {candidate.name for candidate in candidates}.issubset(variants)
+
+
+@pytest.mark.asyncio
+async def test_relative_fallback_runs_under_absolute_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Relative fallback should populate even when an absolute lock filters scans."""
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 55
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    registry_id = "registry-absolute-lock"
+    active_lock = resolver_module._TimebaseLock(  # type: ignore[attr-defined]
+        label=TimebaseLabel.ABSOLUTE,
+        anchor_epoch=None,
+        rotation_timestamp=now - ROTATION_PERIOD,
+        offset=ROTATION_PERIOD,
+        variant="fhna_p256_truncated_rx20",
+    )
+    resolver._known_timebases[registry_id] = active_lock
+    resolver._known_offsets[registry_id] = active_lock.offset
+    resolver._known_endianness[registry_id] = False
+    resolver._persisted_locks[registry_id] = {"label": active_lock.label}
+
+    identity = DeviceIdentity(
+        registry_id=registry_id,  # type: ignore[arg-type]
+        canonical_id="canonical-absolute-lock",  # type: ignore[arg-type]
+        identity_key=b"\x4a" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-absolute-lock",  # type: ignore[arg-type]
+        pair_date=now - 300,
+        secrets_creation_date=now - 600,
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "iter_rotation_windows",
+        lambda *_args, **_kwargs: tuple(),
+    )
+
+    captured_timestamps: list[int] = []
+
+    def _eid_from_timestamp(ts: int, *, record: bool = True) -> tuple[EidCandidate, ...]:
+        if record:
+            captured_timestamps.append(ts)
+        ts_bytes = int(ts).to_bytes(8, "big", signed=False)
+        base_seed = (b"ts:" + ts_bytes) * 4
+        eid_20 = base_seed.ljust(EID_LENGTH, b"\x00")[:EID_LENGTH]
+        eid_32 = (b"ts32:" + ts_bytes) * 6
+        eid_32 = eid_32.ljust(resolver_module.MODERN_EID_LENGTH, b"\x00")[
+            : resolver_module.MODERN_EID_LENGTH
+        ]
+        return (
+            EidCandidate(name=f"ts20_{ts}", eid=eid_20),
+            EidCandidate(name=f"ts32_{ts}", eid=eid_32),
+        )
+
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda _key, ts: _eid_from_timestamp(ts),
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: None),
+    )
+
+    base_candidates = resolver_module._build_timebase_candidates(identity, now_unix=now)
+    rel_pair = next(
+        candidate for candidate in base_candidates if candidate.label == TimebaseLabel.REL_PAIR
+    )
+    rel_secrets = next(
+        candidate for candidate in base_candidates if candidate.label == TimebaseLabel.REL_SECRETS
+    )
+    expected_pair_rotation = rel_pair.reference_time - (
+        rel_pair.reference_time % ROTATION_PERIOD
+    )
+    expected_secrets_rotation = rel_secrets.reference_time - (
+        rel_secrets.reference_time % ROTATION_PERIOD
+    )
+
+    await resolver._refresh_cache()
+
+    assert set(captured_timestamps) == {expected_pair_rotation, expected_secrets_rotation}
+
+    expected_lengths = {EID_LENGTH, resolver_module.MODERN_EID_LENGTH}
+    assert set(len(key) for key in resolver._lookup) <= expected_lengths
+    assert set(len(key) for key in resolver._lookup_metadata) <= expected_lengths
+
+    expected_eids = (
+        _eid_from_timestamp(expected_pair_rotation, record=False)[0].eid,
+        _eid_from_timestamp(expected_pair_rotation, record=False)[1].eid,
+        _eid_from_timestamp(expected_secrets_rotation, record=False)[0].eid,
+        _eid_from_timestamp(expected_secrets_rotation, record=False)[1].eid,
+    )
+
+    for eid_key in expected_eids:
+        assert eid_key in resolver._lookup
+        assert eid_key[::-1] in resolver._lookup
+        assert eid_key in resolver._lookup_metadata
+        assert eid_key[::-1] in resolver._lookup_metadata
+
+
+@pytest.mark.asyncio
+async def test_stale_lock_drops_after_stale_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Locks confirmed long ago should be cleared before rehydration."""
+
+    resolver = _build_resolver()
+    resolver.hass = SimpleNamespace()
+    resolver._refresh_lock = asyncio.Lock()
+
+    now = ROTATION_PERIOD * 60
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    registry_id = "registry-stale-lock"
+    stale_lock = resolver_module._TimebaseLock(  # type: ignore[attr-defined]
+        TimebaseLabel.ABSOLUTE,
+        anchor_epoch=None,
+        rotation_timestamp=now - ROTATION_PERIOD,
+        offset=ROTATION_PERIOD,
+        variant="fhna_p256_truncated_rx20",
+    )
+
+    resolver._known_timebases[registry_id] = stale_lock
+    resolver._known_offsets[registry_id] = stale_lock.offset
+    resolver._known_endianness[registry_id] = False
+    resolver._persisted_locks[registry_id] = {"label": stale_lock.label}
+
+    identity = DeviceIdentity(
+        registry_id=registry_id,  # type: ignore[arg-type]
+        canonical_id="canonical-stale",  # type: ignore[arg-type]
+        identity_key=b"\x47" * EID_LENGTH,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        config_entry_id="entry-stale",  # type: ignore[arg-type]
+    )
+
+    async def _fake_collect(
+        self: resolver_module.GoogleFindMyEIDResolver,
+    ) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver,
+        "_collect_device_secrets",
+        _fake_collect,
+    )
+
+    device_entry = SimpleNamespace(
+        custom_fields={
+            LOCK_CUSTOM_FIELD: {
+                "label": stale_lock.label,
+                "rotation_timestamp": stale_lock.rotation_timestamp,
+                "time_offset": stale_lock.offset,
+                "is_reversed": False,
+                "confirmed_at": now - (resolver_module.LOCK_STALE_AFTER_SECONDS + 1),
+            }
+        }
+    )
+    monkeypatch.setattr(
+        resolver_module.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(async_get=lambda _id: device_entry),
+    )
+    monkeypatch.setattr(
+        resolver_module,
+        "_cached_candidates",
+        lambda *_args, **_kwargs: (
+            EidCandidate(name="fhna_variant_one", eid=b"\x10" * EID_LENGTH),
+        ),
+    )
+
+    await resolver._refresh_cache()
+
+    assert registry_id not in resolver._known_timebases
+    assert registry_id not in resolver._known_offsets
+    assert registry_id not in resolver._known_endianness
+    assert registry_id not in resolver._persisted_locks
+    assert registry_id not in resolver._last_lock_confirmation
+    assert LOCK_CUSTOM_FIELD not in device_entry.custom_fields
+
+
+def test_resolve_updates_last_lock_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful resolutions should refresh the confirmation timestamp."""
+
+    resolver = _build_resolver()
+    now = 123456
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    registry_id = "registry-confirmation"
+    eid_bytes = b"\x01" * EID_LENGTH
+    resolver._lookup[eid_bytes] = EIDMatch(
+        device_id=registry_id,
+        config_entry_id="entry-confirmation",
+        canonical_id="canonical-confirmation",
+        time_offset=0,
+        is_reversed=False,
+    )
+    resolver._lookup_metadata[eid_bytes] = {
+        "time_offset": 0,
+        "rotation_timestamp": now,
+        "timebase": TimebaseLabel.ABSOLUTE,
+    }
+
+    resolver.hass = SimpleNamespace(
+        async_create_task=lambda coro: asyncio.get_event_loop().create_task(coro)
+    )
+    monkeypatch.setattr(resolver_module.dr, "async_get", lambda _hass: None)
+
+    match = resolver.resolve_eid(eid_bytes)
+
+    assert match is not None
+    assert resolver._last_lock_confirmation[registry_id] == now
 
 
 def test_coerce_int_accepts_timestamp_like_mapping() -> None:
@@ -2176,7 +2836,19 @@ async def test_rel_pair_timebase_lock_reduces_scan_volume(
         resolver_module._mask_u32(lock_rotation + (offset * ROTATION_PERIOD))
         for offset in range(0, 3)
     }
-    assert set(recorded_timestamps) <= expected_neighbors
+    rel_fallback_rotations = {
+        candidate.reference_time - (candidate.reference_time % ROTATION_PERIOD)
+        for candidate in resolver_module._build_timebase_candidates(identity, now_unix=current_time)
+        if candidate.label in {TimebaseLabel.REL_PAIR, TimebaseLabel.REL_SECRETS}
+    }
+    rel_neighbor_rotations = set(rel_fallback_rotations)
+    for rotation in rel_fallback_rotations:
+        for neighbor in (rotation - ROTATION_PERIOD, rotation + ROTATION_PERIOD):
+            if neighbor >= 0:
+                rel_neighbor_rotations.add(neighbor)
+
+    # Safety net: future-dated anchors can yield rotation window 0 when allow_negative=True.
+    assert set(recorded_timestamps) <= expected_neighbors | rel_neighbor_rotations | {0}
 
 
 @pytest.mark.asyncio
@@ -2256,11 +2928,17 @@ async def test_absolute_timebase_lock_narrows_deep_scan(
 
     await resolver._refresh_cache()
 
-    lock_rotation = resolver._known_timebases[identity.registry_id].rotation_timestamp
-    expected_neighbors = {
-        resolver_module._mask_u32(lock_rotation + (offset * ROTATION_PERIOD))
-        for offset in (-1, 0, 1)
-    }
+    known_offset = resolver._known_offsets[identity.registry_id]
+    target_time = current_time + known_offset
+    expected_neighbors = set(
+        resolver_module.iter_rotation_windows(
+            target_time,
+            rotation_period=ROTATION_PERIOD,
+            window_range=range(0, 1),
+            include_neighbors=True,
+            allow_negative=False,
+        )
+    )
     assert set(recorded_timestamps) <= expected_neighbors
 
 
@@ -2426,6 +3104,7 @@ async def test_restores_persisted_timebase_lock(
     expected_neighbors = {
         rotation_start,
         max(0, rotation_start - ROTATION_PERIOD),
+        max(0, rotation_start - (2 * ROTATION_PERIOD)),
         rotation_start + ROTATION_PERIOD,
     }
     assert set(recorded_timestamps) <= expected_neighbors
@@ -2444,6 +3123,8 @@ async def test_persists_lock_state_on_match(monkeypatch: pytest.MonkeyPatch) -> 
 
     resolver = _build_resolver()
     resolver.hass = _StubHass({})
+    now = 12_345
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
 
     metadata = {
         "timebase": TimebaseLabel.REL_PAIR,
@@ -2475,7 +3156,76 @@ async def test_persists_lock_state_on_match(monkeypatch: pytest.MonkeyPatch) -> 
         "time_offset": -5,
         "is_reversed": False,
         "variant": None,
+        "confirmed_at": now,
     }
+
+
+@pytest.mark.asyncio
+async def test_refresh_drops_stale_persisted_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = resolver_module.LOCK_STALE_AFTER_SECONDS + 100
+    stale_confirmed = now - (resolver_module.LOCK_STALE_AFTER_SECONDS + 1)
+
+    registry = _StubDeviceRegistry(
+        [
+            _StubDevice(
+                "device-stale",
+                registry_id="registry-stale",
+                custom_fields={
+                    LOCK_CUSTOM_FIELD: {
+                        "label": TimebaseLabel.REL_PAIR,
+                        "anchor_epoch": 100,
+                        "rotation_timestamp": ROTATION_PERIOD,
+                        "time_offset": -ROTATION_PERIOD,
+                        "is_reversed": True,
+                        "variant": None,
+                        "confirmed_at": stale_confirmed,
+                    }
+                },
+            )
+        ]
+    )
+    monkeypatch.setattr(resolver_module.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(resolver_module.time, "time", lambda: now)
+
+    resolver = _build_resolver()
+    resolver._known_timebases["registry-stale"] = resolver_module._TimebaseLock(
+        label=TimebaseLabel.REL_PAIR,
+        anchor_epoch=100,
+        rotation_timestamp=ROTATION_PERIOD,
+        offset=-ROTATION_PERIOD,
+    )
+    resolver._known_offsets["registry-stale"] = -ROTATION_PERIOD
+    resolver._known_endianness["registry-stale"] = True
+    resolver._persisted_locks["registry-stale"] = {
+        "label": TimebaseLabel.REL_PAIR,
+        "anchor_epoch": 100,
+        "rotation_timestamp": ROTATION_PERIOD,
+        "time_offset": -ROTATION_PERIOD,
+        "is_reversed": True,
+        "variant": None,
+        "confirmed_at": stale_confirmed,
+    }
+    resolver._last_lock_confirmation["registry-stale"] = stale_confirmed
+
+    identity = DeviceIdentity(
+        registry_id="registry-stale",
+        canonical_id="device-stale",
+        identity_key=b"\x01\x02",
+        config_entry_id="entry-stale",
+    )
+    coordinator = SimpleNamespace(get_active_device_identities=lambda: [identity])
+    resolver.hass = _StubHass(
+        {DOMAIN: {"entries": {"entry-stale": SimpleNamespace(coordinator=coordinator)}}}
+    )
+
+    await resolver._refresh_cache()
+
+    assert "registry-stale" not in resolver._known_timebases
+    assert "registry-stale" not in resolver._known_offsets
+    assert "registry-stale" not in resolver._known_endianness
+    assert "registry-stale" not in resolver._persisted_locks
 
 
 @pytest.mark.asyncio
