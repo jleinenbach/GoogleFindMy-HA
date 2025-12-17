@@ -6559,6 +6559,72 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not isinstance(location, Mapping):
             return
 
+        def _persist_registry_anchor_metadata(anchor_payload: Mapping[str, Any]) -> None:
+            hass_obj = getattr(self, "hass", None)
+            if hass_obj is None:
+                return
+
+            try:
+                dev_reg = dr.async_get(hass_obj)
+            except Exception as err:  # pragma: no cover - defensive fallback
+                _LOGGER.debug(
+                    "Unable to load device registry for %s: %s", device_id, err
+                )
+                return
+
+            device_entry = dev_reg.async_get_device(identifiers={(DOMAIN, device_id)})
+            if device_entry is None:
+                return
+
+            custom_fields: Mapping[str, Any] | None = getattr(
+                device_entry, "custom_fields", None
+            )
+            new_custom_fields: dict[str, Any] = (
+                dict(custom_fields) if isinstance(custom_fields, Mapping) else {}
+            )
+            changed = False
+
+            for key in ("pair_date", "secrets_creation_date"):
+                if key not in anchor_payload:
+                    continue
+                candidate_value = anchor_payload[key]
+                if candidate_value != new_custom_fields.get(key):
+                    new_custom_fields[key] = candidate_value
+                    changed = True
+
+            if "identity_key" in anchor_payload:
+                raw_key = anchor_payload["identity_key"]
+                key_hex = raw_key.hex() if isinstance(raw_key, (bytes, bytearray)) else raw_key
+                if key_hex != new_custom_fields.get("identity_key"):
+                    new_custom_fields["identity_key"] = key_hex
+                    changed = True
+                    _LOGGER.info(
+                        "Persisting updated identity key for %s to device registry",
+                        device_id,
+                    )
+
+            if not changed:
+                return
+
+            try:
+                self._call_device_registry_api(
+                    dev_reg.async_update_device,
+                    base_kwargs={
+                        "device_id": device_entry.id,
+                        "custom_fields": new_custom_fields,
+                    },
+                )
+            except Exception as err:  # pragma: no cover - defensive fallback
+                _LOGGER.warning(
+                    "Failed to persist anchors to device registry for %s: %s",
+                    device_id,
+                    err,
+                )
+            else:
+                _LOGGER.debug(
+                    "Persisted anchor metadata to device registry for %s", device_id
+                )
+
         def _normalize_anchor_value(value: Any) -> int | Any:
             normalized = normalize_epoch_seconds(value)
             if normalized is not None:
@@ -6632,6 +6698,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         if not anchor_payload:
             return
+
+        _persist_registry_anchor_metadata(anchor_payload)
 
         existing = self._device_location_data.get(device_id)
         merged: dict[str, Any] = {}
