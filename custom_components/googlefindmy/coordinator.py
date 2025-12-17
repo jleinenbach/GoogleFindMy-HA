@@ -1930,19 +1930,24 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
 
+        await self._async_unload()
+
     async def _async_unload(self) -> None:
         """Cleanup resources on unload."""
-        if self._unsub_scheduler:
-            self._unsub_scheduler()
+        unsub_scheduler = getattr(self, "_unsub_scheduler", None)
+        if unsub_scheduler:
+            unsub_scheduler()
             self._unsub_scheduler = None
 
-        if self.eid_resolver:
-            self.eid_resolver.stop()
+        eid_resolver = getattr(self, "eid_resolver", None)
+        if eid_resolver is not None:
+            eid_resolver.stop()
 
-        if self.api:
+        api = getattr(self, "api", None)
+        if api is not None:
             # Safe to call close() now that it strictly un-refs the session
             # without killing the connection.
-            await self.api.close()
+            await api.close()
 
     # --- BEGIN: Add/Replace inside Coordinator class ------------------------------
     def _redact_text(self, value: str | None, max_len: int = 120) -> str:

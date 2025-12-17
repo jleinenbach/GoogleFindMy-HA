@@ -84,6 +84,7 @@ PROVISIONING_WARN_COOLDOWN = 3600
 FUTURE_ANCHOR_MAX_DRIFT = 86400
 ENABLE_P256_TAIL_TRUNCATION = True
 _TAIL_TRUNCATION_LOG_FLAG: list[bool] = [False]
+_LE_GENERATION_WARN_FLAG: list[bool] = [False]
 
 
 class TimebaseLabel:
@@ -460,23 +461,34 @@ def _cached_candidates(identity_key: bytes, timestamp: int) -> tuple[EidCandidat
         # ------------------------------------------------------------------
         try:
             modern_eid_le = _modern_generate_eid_le(identity_key, timestamp)
-        except ValueError:
-            modern_eid_le = _modern_generate_eid_le(normalized_key, timestamp)
+        except (ValueError, TypeError) as exc:
+            try:
+                modern_eid_le = _modern_generate_eid_le(normalized_key, timestamp)
+            except (ValueError, TypeError):
+                if not _LE_GENERATION_WARN_FLAG[0]:
+                    _LOGGER.warning(
+                        "EID generation failed for LE variant (key type %s): %s",
+                        type(identity_key),
+                        exc,
+                    )
+                    _LE_GENERATION_WARN_FLAG[0] = True
+                modern_eid_le = b""
 
-        candidates.append(EidCandidate(name="fhna_p256_le_rx32", eid=modern_eid_le))
-        candidates.append(
-            EidCandidate(
-                name="fhna_p256_le_truncated_rx20",
-                eid=modern_eid_le[:LEGACY_EID_LENGTH],
-            )
-        )
-        if ENABLE_P256_TAIL_TRUNCATION:
+        if modern_eid_le:
+            candidates.append(EidCandidate(name="fhna_p256_le_rx32", eid=modern_eid_le))
             candidates.append(
                 EidCandidate(
-                    name="fhna_p256_le_truncated_tail_rx20",
-                    eid=modern_eid_le[-LEGACY_EID_LENGTH:],
+                    name="fhna_p256_le_truncated_rx20",
+                    eid=modern_eid_le[:LEGACY_EID_LENGTH],
                 )
             )
+            if ENABLE_P256_TAIL_TRUNCATION:
+                candidates.append(
+                    EidCandidate(
+                        name="fhna_p256_le_truncated_tail_rx20",
+                        eid=modern_eid_le[-LEGACY_EID_LENGTH:],
+                    )
+                )
 
         if ENABLE_P256_TAIL_TRUNCATION and not _TAIL_TRUNCATION_LOG_FLAG[0]:
             _LOGGER.debug("Tail truncation & LE variants enabled for P-256 EIDs")
