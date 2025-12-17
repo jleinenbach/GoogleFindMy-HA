@@ -144,6 +144,55 @@ def test_decoder_logs_decryption_failures(caplog: pytest.LogCaptureFixture) -> N
     )
 
 
+def test_device_list_preserves_anchor_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Metadata from decrypted device list payloads must survive filtering."""
+
+    devices_list = DeviceUpdate_pb2.DevicesList()
+    device = devices_list.deviceMetadata.add()
+    device.userDefinedDeviceName = "Tracker"
+    canonic = device.identifierInformation.canonicIds.canonicId.add()
+    canonic.id = "device-anchor"
+
+    reports = device.information.locationInformation.reports
+    reports.recentLocationAndNetworkLocations.recentLocation.semanticLocation.locationName = (
+        "seed"
+    )
+
+    anchor_payload = {
+        "pair_date": 1_700_000_100,
+        "secrets_creation_date": 1_700_000_200,
+        "identity_key": b"\xaa" * 32,
+        "identity_key_candidates": [b"\xaa" * 32, b"\xbb" * 32],
+        "encrypted_identity_key_candidates": [b"\x01\x02"],
+        "device_registration": {"pairDate": 1_700_000_300},
+        "encrypted_user_secrets": {"creationDate": 1_700_000_400},
+        "time_anchors_debug": {"source": "device_list"},
+        "metadata_only": True,
+    }
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
+        lambda *args, **kwargs: [anchor_payload],
+    )
+
+    rows = get_devices_with_location(devices_list, cache=cast("TokenCache", object()))
+
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert row["pair_date"] == anchor_payload["pair_date"]
+    assert row["secrets_creation_date"] == anchor_payload["secrets_creation_date"]
+    assert row["identity_key"] == anchor_payload["identity_key"]
+    assert row["identity_key_candidates"] == anchor_payload["identity_key_candidates"]
+    assert row["encrypted_identity_key_candidates"] == anchor_payload[
+        "encrypted_identity_key_candidates"
+    ]
+    assert row["device_registration"] == anchor_payload["device_registration"]
+    assert row["encrypted_user_secrets"] == anchor_payload["encrypted_user_secrets"]
+    assert row["time_anchors_debug"] == anchor_payload["time_anchors_debug"]
+    assert row["metadata_only"] is True
+
+
 def test_semantic_report_outranks_older_coordinate_candidate() -> None:
     """A fresher semantic report without coords takes selection precedence."""
 

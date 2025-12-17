@@ -236,6 +236,19 @@ def get_canonic_ids(
 # Tunables to keep behavior explicit and easily auditable
 _NEAR_TS_TOLERANCE_S: float = 5.0  # semantic merge tolerance (seconds)
 
+_ANCHOR_METADATA_KEYS: tuple[str, ...] = (
+    "pair_date",
+    "secrets_creation_date",
+    "device_registration",
+    "device_type_information",
+    "encrypted_user_secrets",
+    "identity_key",
+    "identity_key_candidates",
+    "encrypted_identity_key_candidates",
+    "time_anchors_debug",
+    "metadata_only",
+)
+
 _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "name",
     "id",
@@ -255,6 +268,7 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "is_own_report",
     "semantic_name",
     "battery_level",
+    *_ANCHOR_METADATA_KEYS,
 )
 
 
@@ -283,6 +297,16 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "is_own_report": None,
         "semantic_name": None,
         "battery_level": None,
+        "pair_date": None,
+        "secrets_creation_date": None,
+        "device_registration": None,
+        "device_type_information": None,
+        "encrypted_user_secrets": None,
+        "identity_key": None,
+        "identity_key_candidates": None,
+        "encrypted_identity_key_candidates": None,
+        "time_anchors_debug": None,
+        "metadata_only": None,
     }
 
 
