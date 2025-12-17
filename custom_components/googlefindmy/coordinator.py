@@ -198,7 +198,11 @@ _COOLDOWN_OWNER_MIN_S = 60  # at least 1 minute
 _COOLDOWN_OWNER_MAX_S = 15 * 60  # at most 15 minutes
 
 # Maximum delay before falling back to polling even when push is unavailable.
-_FCM_FALLBACK_POLL_AFTER_S = 5 * 60
+# [FIX: Reduce 300s -> 15s to allow degraded-mode polling quickly]
+_PUSH_NOT_READY_TIMEOUT_S = 15
+# Backward-compatible alias for legacy status tests; keep in sync with the
+# primary timeout constant above.
+_FCM_FALLBACK_POLL_AFTER_S = _PUSH_NOT_READY_TIMEOUT_S
 
 # Altitude adjustments smaller than 1 m are considered noise for significance checks.
 _ALTITUDE_SIGNIFICANT_DELTA_M = 1.0
@@ -858,6 +862,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._enabled_poll_device_ids: set[str] = set()
         self._devices_with_entry: set[str] = set()
         self._dr_unsub: Callable[[], None] | None = None
+        self._unsub_scheduler: Callable[[], None] | None = None
+        self.eid_resolver: Any | None = None
         # Subentry awareness (feature groups / platform scoping)
         self._subentry_metadata: dict[str, SubentryMetadata] = {}
         self._subentry_snapshots: dict[str, tuple[dict[str, Any], ...]] = {}
@@ -1923,6 +1929,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
+
+        await self._async_unload()
+
+    async def _async_unload(self) -> None:
+        """Cleanup resources on unload."""
+        unsub_scheduler = getattr(self, "_unsub_scheduler", None)
+        if unsub_scheduler:
+            unsub_scheduler()
+            self._unsub_scheduler = None
+
+        eid_resolver = getattr(self, "eid_resolver", None)
+        if eid_resolver is not None:
+            eid_resolver.stop()
+
+        api = getattr(self, "api", None)
+        if api is not None:
+            # Safe to call close() now that it strictly un-refs the session
+            # without killing the connection.
+            await api.close()
 
     # --- BEGIN: Add/Replace inside Coordinator class ------------------------------
     def _redact_text(self, value: str | None, max_len: int = 120) -> str:
@@ -5697,7 +5722,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     defer_started = self._fcm_defer_started_mono or 0.0
                     if defer_started:
                         elapsed = now_mono - defer_started
-                        if elapsed >= _FCM_FALLBACK_POLL_AFTER_S:
+                        if elapsed >= _PUSH_NOT_READY_TIMEOUT_S:
                             force_poll = True
                         else:
                             self._schedule_short_retry(
@@ -5712,7 +5737,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     if force_poll:
                         _LOGGER.warning(
                             "Push transport unavailable for %ds; forcing poll cycle.",
-                            _FCM_FALLBACK_POLL_AFTER_S,
+                            _PUSH_NOT_READY_TIMEOUT_S,
                         )
                     _LOGGER.debug(
                         "Scheduling background polling cycle (devices=%d, interval=%ds)",

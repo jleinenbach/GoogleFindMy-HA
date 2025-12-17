@@ -1003,6 +1003,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 if report_hint:
                     payload["_report_hint"] = report_hint
 
+            # [FIX: UNIVERSAL METADATA MERGE]
+            # Apply this to ALL payloads, not just semantic ones.
+            # This fixes the "Anchor=None" bug for standard GPS updates.
+            if metadata_update:
+                payload.update(metadata_update)
+
+            # Safety net: ensure identity key propagates even if metadata lacks it
+            if "identity_key" not in payload and identity_key_bytes:
+                payload["identity_key"] = identity_key_bytes
+
             if metadata:
                 payload.update(metadata)
 

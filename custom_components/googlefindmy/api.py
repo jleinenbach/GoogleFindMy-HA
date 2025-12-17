@@ -414,6 +414,13 @@ class GoogleFindMyAPI:
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: dict[str, bool] = {}
 
+    async def close(self) -> None:
+        """Cleanup local references."""
+
+        # [FIX] Do not close the shared Home Assistant session.
+        self._session = None
+        _LOGGER.debug("API session unreferenced (shared session preserved)")
+
     @staticmethod
     def _normalize_contributor_mode(mode: str | None) -> str:
         """Normalize a contributor mode value."""
