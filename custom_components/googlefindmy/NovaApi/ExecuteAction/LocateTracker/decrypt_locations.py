@@ -1007,6 +1007,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             # Apply this to ALL payloads, not just semantic ones.
             # This fixes the "Anchor=None" bug for standard GPS updates.
             if metadata_update:
+                if (
+                    "secretsCreationDate" in metadata_update
+                    and "secrets_creation_date" not in metadata_update
+                ):
+                    metadata_update["secrets_creation_date"] = metadata_update[
+                        "secretsCreationDate"
+                    ]
                 payload.update(metadata_update)
 
             # Safety net: ensure identity key propagates even if metadata lacks it
