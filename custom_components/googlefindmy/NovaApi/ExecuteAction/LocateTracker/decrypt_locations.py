@@ -102,6 +102,40 @@ class StaleOwnerKeyError(DecryptionError):
     """Raised when the tracker was encrypted with an older owner key version."""
 
 
+async def _unwrap_encrypted_identity_key(
+    identity_key: bytes, *, cache: TokenCache
+) -> bytes | None:
+    """Unwrap a 60-byte encrypted identity key into a 32-byte EIK if possible."""
+
+    if len(identity_key) != EIK_GCM_TOTAL_LEN:
+        return None
+
+    try:
+        owner_key_info = await async_get_owner_key(cache=cache)
+    except Exception as exc:  # pragma: no cover - defensive diagnostic path
+        _LOGGER.debug("[DECRYPT] Owner key lookup failed while unwrapping EIK: %s", exc)
+        return None
+
+    try:
+        decrypted_eik = await asyncio.to_thread(
+            decrypt_eik, owner_key_info.key, identity_key
+        )
+    except Exception as exc:  # pragma: no cover - defensive diagnostic path
+        _LOGGER.debug("[DECRYPT] EIK unwrap failed in thread: %s", exc)
+        return None
+
+    if len(decrypted_eik) != _EIK_LEN:
+        _LOGGER.debug(
+            "[DECRYPT] Unwrapped EIK length %s does not match expected %s bytes",
+            len(decrypted_eik),
+            _EIK_LEN,
+        )
+        return None
+
+    _LOGGER.debug("[DECRYPT] Successfully unwrapped 60-byte EIK to 32 bytes (early path).")
+    return bytes(decrypted_eik)
+
+
 def _status_name_safe(code: Any) -> str:
     """Safely get the string representation of an enum, with a robust fallback."""
     try:
@@ -528,6 +562,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         raise
 
     encrypted_user_secrets = device_registration.encryptedUserSecrets
+    raw_encrypted_identity_key: bytes = b""
+    early_unwrapped_identity_key: bytes | None = None
     try:
         raw_encrypted_identity_key = getattr(
             encrypted_user_secrets, "encryptedIdentityKey", b""
@@ -541,6 +577,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             _LOGGER.debug(
                 "Failed to serialize encryptedUserSecrets for length check: %s",
                 serialize_exc,
+            )
+
+        if raw_encrypted_identity_key and len(raw_encrypted_identity_key) == EIK_GCM_TOTAL_LEN:
+            early_unwrapped_identity_key = await _unwrap_encrypted_identity_key(
+                raw_encrypted_identity_key, cache=cache
             )
 
         _LOGGER.warning(
@@ -566,11 +607,15 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             _LOGGER.warning(
                 "[DIAG-ALERT] encryptedUserSecrets serialized length is %d bytes (> %d)."
                 " This suggests a wrapped/structured payload instead of a raw key.",
-                serialized_length,
-                _SECRETS_STRUCT_LEN_THRESHOLD,
-            )
+            serialized_length,
+            _SECRETS_STRUCT_LEN_THRESHOLD,
+        )
 
-        if raw_encrypted_identity_key and len(raw_encrypted_identity_key) != _EIK_LEN:
+        if (
+            early_unwrapped_identity_key is None
+            and raw_encrypted_identity_key
+            and len(raw_encrypted_identity_key) != _EIK_LEN
+        ):
             _LOGGER.warning(
                 "[DIAG-ALERT] Key length is %d (expected %d for raw EIK)."
                 " This suggests wrapping/encryption!",
@@ -578,7 +623,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 _EIK_LEN,
             )
 
-        if raw_encrypted_identity_key and len(raw_encrypted_identity_key) > _EIK_LEN:
+        if (
+            early_unwrapped_identity_key is None
+            and raw_encrypted_identity_key
+            and len(raw_encrypted_identity_key) > _EIK_LEN
+        ):
             _LOGGER.warning(
                 "[DIAG-ALERT] Key length %d bytes exceeds expected raw EIK length (%d)."
                 " Probable wrapped key container or HKDF-required envelope.",
@@ -614,8 +663,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
     raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
 
-    identity_key_candidates = await async_retrieve_identity_key(
-        device_registration, cache=cache
+    identity_key_candidates = (
+        [early_unwrapped_identity_key]
+        if early_unwrapped_identity_key is not None
+        else await async_retrieve_identity_key(device_registration, cache=cache)
     )
     identity_key = identity_key_candidates[0] if identity_key_candidates else None
     identity_key_bytes = bytes(identity_key) if identity_key is not None else None
@@ -625,26 +676,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     # Handle Moto Tag / Chipolo-style 60-byte EIK wrappers by unwrapping to 32 bytes.
     if identity_key_bytes is not None and len(identity_key_bytes) == EIK_GCM_TOTAL_LEN:
-        try:
-            owner_key_info = await async_get_owner_key(cache=cache)
-            decrypted_eik = await asyncio.to_thread(
-                decrypt_eik, owner_key_info.key, identity_key_bytes
-            )
-
-            if len(decrypted_eik) == _EIK_LEN:
-                identity_key_bytes = bytes(decrypted_eik)
-                identity_key_candidate_bytes = [identity_key_bytes]
-                identity_key = identity_key_bytes
-                _LOGGER.debug(
-                    "[DECRYPT-FIX] Successfully unwrapped 60-byte EIK to 32 bytes."
-                )
-            else:
-                _LOGGER.debug(
-                    "[DECRYPT-FIX] Unwrapped 60-byte EIK to unexpected length %s bytes",
-                    len(decrypted_eik),
-                )
-        except Exception as exc:  # pragma: no cover - defensive diagnostic path
-            _LOGGER.warning("[DECRYPT-FIX] Failed to unwrap 60-byte EIK: %s", exc)
+        unwrapped_identity_key = await _unwrap_encrypted_identity_key(
+            identity_key_bytes, cache=cache
+        )
+        if unwrapped_identity_key:
+            identity_key_bytes = unwrapped_identity_key
+            identity_key_candidate_bytes = [identity_key_bytes]
+            identity_key = identity_key_bytes
 
     if identity_key is None:
         raise DecryptionError("Identity key derivation returned no candidates.")
@@ -659,6 +697,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     now_wall = time.time()
     metadata: dict[str, Any] = {}
+    metadata_update: dict[str, Any] = {}
     device_registration_metadata: dict[str, Any] = {}
     encrypted_user_secrets_metadata: dict[str, Any] = {}
     device_type_information_metadata: dict[str, Any] = {}
@@ -678,8 +717,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             break
 
     if pair_date is not None:
-        metadata["pair_date"] = pair_date
-        metadata["pairDate"] = pair_date
+        metadata_update["pair_date"] = pair_date
+        metadata_update["pairDate"] = pair_date
         device_registration_metadata["pairDate"] = pair_date
         if device_type_information is not None:
             device_type_information_metadata["pairDate"] = pair_date
@@ -703,10 +742,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             break
 
     if secrets_creation_date is not None:
-        metadata["secrets_creation_date"] = secrets_creation_date
-        metadata["secretsCreationDate"] = secrets_creation_date
-        metadata["creationDate"] = secrets_creation_date
-        metadata["creation_date"] = secrets_creation_date
+        metadata_update["secrets_creation_date"] = secrets_creation_date
+        metadata_update["secretsCreationDate"] = secrets_creation_date
+        metadata_update["creationDate"] = secrets_creation_date
+        metadata_update["creation_date"] = secrets_creation_date
         encrypted_user_secrets_metadata["creationDate"] = secrets_creation_date
         encrypted_user_secrets_metadata["creation_date"] = secrets_creation_date
         if device_type_information is not None:
@@ -724,18 +763,21 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         metadata["device_type_information"] = device_type_information_metadata
         metadata.setdefault("deviceTypeInformation", device_type_information_metadata)
 
-    if identity_key_bytes is not None:
-        metadata.setdefault("identity_key", identity_key_bytes)
-        metadata.setdefault("identityKey", identity_key_bytes)
+    if identity_key_bytes is not None and len(identity_key_bytes) == _EIK_LEN:
+        metadata_update["identity_key"] = identity_key_bytes
+        metadata_update["identityKey"] = identity_key_bytes
     if identity_key_candidate_bytes:
         metadata.setdefault("identity_key_candidates", identity_key_candidate_bytes)
         metadata.setdefault("identityKeyCandidates", identity_key_candidate_bytes)
     if raw_encrypted_identity_key:
-        metadata.setdefault("encrypted_identity_key", raw_encrypted_identity_key)
-        metadata.setdefault("encryptedIdentityKey", raw_encrypted_identity_key)
+        metadata_update.setdefault("encrypted_identity_key", raw_encrypted_identity_key)
+        metadata_update.setdefault("encryptedIdentityKey", raw_encrypted_identity_key)
     if raw_owner_key_version is not None:
         metadata.setdefault("owner_key_version", raw_owner_key_version)
         metadata.setdefault("ownerKeyVersion", raw_owner_key_version)
+
+    if metadata_update:
+        metadata.update(metadata_update)
 
     # Assemble reports (preserve semantics; own report is appended if present)
     recent_location = locations_proto.recentLocation

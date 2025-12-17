@@ -512,11 +512,13 @@ class _StubDevice:
         registry_id: str | None = None,
         custom_fields: dict | None = None,
         disabled: bool = False,
+        identifiers: set[tuple[str, str]] | None = None,
     ) -> None:
         self.identifier = identifier
         self.id = registry_id or identifier
         self.custom_fields = custom_fields
         self.disabled_by = "user" if disabled else None
+        self.identifiers = identifiers or {(DOMAIN, identifier)}
 
 
 class _StubDeviceRegistry:
@@ -530,6 +532,23 @@ class _StubDeviceRegistry:
         return next(
             (device for device in self._devices if device.id == device_id), None
         )
+
+    def async_get_device(
+        self,
+        *,
+        identifiers: set[tuple[str, str]] | None = None,
+        device_id: str | None = None,
+    ) -> _StubDevice | None:
+        if device_id:
+            return self.async_get(device_id)
+
+        if identifiers:
+            for device in self._devices:
+                device_identifiers = getattr(device, "identifiers", None)
+                if device_identifiers and set(device_identifiers) & identifiers:
+                    return device
+
+        return None
 
     def async_update_device(
         self, device_id: str, *, custom_fields: dict | None = None
@@ -1036,6 +1055,47 @@ def test_persist_anchor_metadata_records_metadata_only_payload() -> None:
     assert stored["identity_key_candidates"] == [b"\x01" * 32]
     assert stored["encrypted_identity_key"] == b"\x02" * 32
     assert stored["owner_key_version"] == 3
+
+
+def test_persist_anchor_metadata_updates_device_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _StubDeviceRegistry(
+        [
+            _StubDevice(
+                "dev-anchor",
+                registry_id="registry-anchor",
+                custom_fields={"pair_date": 1, "identity_key": "00"},
+            )
+        ]
+    )
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    coordinator.hass = _StubHass()
+    coordinator._device_location_data = {}
+
+    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda _hass: registry)
+
+    payload = {
+        "pair_date": 2,
+        "secrets_creation_date": 3,
+        "identity_key": b"\x01" * 32,
+    }
+
+    coordinator._persist_anchor_metadata(
+        "dev-anchor", payload, clear_metadata_only=False
+    )
+
+    updated_device = registry.async_get_device(
+        identifiers={(DOMAIN, "dev-anchor")}
+    )
+    assert updated_device is not None
+    assert updated_device.custom_fields == {
+        "pair_date": 2,
+        "secrets_creation_date": 3,
+        "identity_key": (b"\x01" * 32).hex(),
+    }
 
 
 def test_persist_anchor_metadata_ignores_nanos_only_payload() -> None:

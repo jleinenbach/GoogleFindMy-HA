@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -197,12 +198,14 @@ def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
 
 
 def test_async_decrypt_location_response_unwraps_60_byte_eik(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Regression Test: Unwrap 60-byte EIKs so HKDF/location decryption never sees "Key length 60"."""
 
     base_now = 1_700_100_000.0
     monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    caplog.set_level(logging.WARNING)
 
     encrypted_eik = b"\x99" * decrypt_locations.EIK_GCM_TOTAL_LEN
     # Moto Tag/Chipolo responses wrap the 32-byte identity key inside a 60-byte envelope.
@@ -214,7 +217,10 @@ def test_async_decrypt_location_response_unwraps_60_byte_eik(
     location_proto.altitude = ALTITUDE_METERS
     location_bytes = location_proto.SerializeToString()
 
+    identity_key_calls = {"count": 0}
+
     async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        identity_key_calls["count"] += 1
         return [encrypted_eik]
 
     unwrap_calls: dict[str, object] = {}
@@ -277,6 +283,8 @@ def test_async_decrypt_location_response_unwraps_60_byte_eik(
     assert entry["identity_key"] == unwrapped_eik
     assert entry["identity_key_candidates"] == [unwrapped_eik]
     assert entry["encrypted_identity_key"] == encrypted_eik
+    assert entry["pair_date"] == int(base_now - 30)
+    assert entry["secrets_creation_date"] == int(base_now - 15)
     assert entry["accuracy"] == ACCURACY_METERS
     assert entry["altitude"] == ALTITUDE_METERS
     assert offload_calls["identity_key"] == unwrapped_eik
@@ -285,6 +293,8 @@ def test_async_decrypt_location_response_unwraps_60_byte_eik(
     assert unwrap_calls["cache"] is cache
     assert unwrap_calls["owner_key"] == b"\xAA" * 32
     assert unwrap_calls["encrypted"] == encrypted_eik
+    assert identity_key_calls["count"] == 0
+    assert "[DIAG-ALERT] Key length" not in caplog.text
 
 
 def test_async_decrypt_location_response_locations_normalizes_anchor_units(
