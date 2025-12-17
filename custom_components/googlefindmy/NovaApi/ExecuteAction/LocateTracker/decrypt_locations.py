@@ -78,7 +78,9 @@ _MAX_REPORTS: int = 500
 # Strict length of Ephemeral Identity Key (bytes). Paper and ecosystem practice expect 32 bytes.
 _EIK_LEN: int = 32
 # Heuristic threshold suggesting encryptedUserSecrets holds structured data rather than a raw key blob.
-_SECRETS_STRUCT_LEN_THRESHOLD: int = 48
+# Moto Tag payloads can legitimately exceed the smaller legacy cutoff, so tolerate larger blobs before
+# raising a diagnostic warning.
+_SECRETS_STRUCT_LEN_THRESHOLD: int = 256
 
 
 def _get_common_pb2() -> Any:
@@ -607,9 +609,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             _LOGGER.warning(
                 "[DIAG-ALERT] encryptedUserSecrets serialized length is %d bytes (> %d)."
                 " This suggests a wrapped/structured payload instead of a raw key.",
-            serialized_length,
-            _SECRETS_STRUCT_LEN_THRESHOLD,
-        )
+                serialized_length,
+                _SECRETS_STRUCT_LEN_THRESHOLD,
+            )
 
         if (
             early_unwrapped_identity_key is None
@@ -675,14 +677,19 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     ]
 
     # Handle Moto Tag / Chipolo-style 60-byte EIK wrappers by unwrapping to 32 bytes.
-    if identity_key_bytes is not None and len(identity_key_bytes) == EIK_GCM_TOTAL_LEN:
-        unwrapped_identity_key = await _unwrap_encrypted_identity_key(
-            identity_key_bytes, cache=cache
-        )
-        if unwrapped_identity_key:
-            identity_key_bytes = unwrapped_identity_key
-            identity_key_candidate_bytes = [identity_key_bytes]
-            identity_key = identity_key_bytes
+    if identity_key_bytes and len(identity_key_bytes) == EIK_GCM_TOTAL_LEN and cache:
+        try:
+            owner_key_info = await async_get_owner_key(cache=cache)
+            decrypted_identity_key = await asyncio.to_thread(
+                decrypt_eik, owner_key_info.key, identity_key_bytes
+            )
+            if len(decrypted_identity_key) == _EIK_LEN:
+                _LOGGER.debug("[DECRYPT] Successfully unwrapped 60-byte EIK.")
+                identity_key_bytes = bytes(decrypted_identity_key)
+                identity_key_candidate_bytes = [identity_key_bytes]
+                identity_key = identity_key_bytes
+        except Exception as exc:  # pragma: no cover - diagnostics only
+            _LOGGER.debug("[DECRYPT] Failed to unwrap: %s", exc)
 
     if identity_key is None:
         raise DecryptionError("Identity key derivation returned no candidates.")
@@ -701,6 +708,30 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     device_registration_metadata: dict[str, Any] = {}
     encrypted_user_secrets_metadata: dict[str, Any] = {}
     device_type_information_metadata: dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # PERSISTENCE DATA EXTRACTION (Reboot Bug fix)
+    # Preserve pairing and secrets metadata as soon as the protobuf is
+    # parsed so the coordinator can persist the refreshed crypto material
+    # to the device registry. Without this step, HA restarts lose the
+    # decrypted identity key and creation date (Moto Tag / Chipolo lock-on
+    # fails).
+    # ------------------------------------------------------------------
+    if device_registration:
+        pair_date_raw = getattr(device_registration, "pairDate", None)
+        if pair_date_raw is not None:
+            metadata_update.setdefault("pair_date", pair_date_raw)
+            metadata_update.setdefault("pairDate", pair_date_raw)
+
+    if encrypted_user_secrets:
+        creation = getattr(encrypted_user_secrets, "creationDate", None)
+        if creation is not None:
+            creation_seconds = getattr(creation, "seconds", None)
+            if creation_seconds is not None:
+                metadata_update.setdefault("secrets_creation_date", creation_seconds)
+                metadata_update.setdefault("secretsCreationDate", creation_seconds)
+                metadata_update.setdefault("creationDate", creation_seconds)
+                metadata_update.setdefault("creation_date", creation_seconds)
 
     device_type_information = getattr(device_update_protobuf, "deviceTypeInformation", None)
 
@@ -887,6 +918,18 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     for loc in wrapped:
         try:
             report_hint = _infer_report_hint(loc.status)  # may be None (conservative)
+
+            try:
+                setattr(loc, "pair_date", metadata_update.get("pair_date"))
+                setattr(
+                    loc,
+                    "secrets_creation_date",
+                    metadata_update.get("secrets_creation_date"),
+                )
+                setattr(loc, "identity_key", identity_key_bytes)
+                _LOGGER.debug("Injected fresh metadata into location object.")
+            except Exception as metadata_exc:  # pragma: no cover - diagnostic safety
+                _LOGGER.debug("Failed to inject metadata: %s", metadata_exc)
 
             if loc.status == common_pb2.Status.SEMANTIC:
                 payload: dict[str, Any] = {
