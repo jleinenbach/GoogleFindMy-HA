@@ -236,6 +236,19 @@ def get_canonic_ids(
 # Tunables to keep behavior explicit and easily auditable
 _NEAR_TS_TOLERANCE_S: float = 5.0  # semantic merge tolerance (seconds)
 
+_ANCHOR_METADATA_KEYS: tuple[str, ...] = (
+    "pair_date",
+    "secrets_creation_date",
+    "device_registration",
+    "device_type_information",
+    "encrypted_user_secrets",
+    "identity_key",
+    "identity_key_candidates",
+    "encrypted_identity_key_candidates",
+    "time_anchors_debug",
+    "metadata_only",
+)
+
 _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "name",
     "id",
@@ -255,6 +268,7 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "is_own_report",
     "semantic_name",
     "battery_level",
+    *_ANCHOR_METADATA_KEYS,
 )
 
 
@@ -283,6 +297,16 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "is_own_report": None,
         "semantic_name": None,
         "battery_level": None,
+        "pair_date": None,
+        "secrets_creation_date": None,
+        "device_registration": None,
+        "device_type_information": None,
+        "encrypted_user_secrets": None,
+        "identity_key": None,
+        "identity_key_candidates": None,
+        "encrypted_identity_key_candidates": None,
+        "time_anchors_debug": None,
+        "metadata_only": None,
     }
 
 
@@ -305,6 +329,24 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError):
             out.pop(num_key, None)
     return out
+
+
+def _normalize_timestamp(value: Any) -> int | None:
+    """Return epoch seconds from primitive or Timestamp-like values."""
+
+    if value is None:
+        return None
+
+    if hasattr(value, "seconds"):
+        try:
+            return int(getattr(value, "seconds"))
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
@@ -627,6 +669,8 @@ def get_devices_with_location(
         owner_key_version = None
         device_type = None
         fast_pair_model_id: str | None = None
+        pair_date: int | None = None
+        secrets_creation_date: int | None = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -692,6 +736,11 @@ def get_devices_with_location(
                 except UnicodeDecodeError:
                     fast_pair_model_id = raw_fast_pair_model_id.hex()
 
+            creation_date = getattr(encrypted_user_secrets, "creationDate", None)
+            secrets_creation_date = _normalize_timestamp(creation_date)
+
+            pair_date = _normalize_timestamp(getattr(registration, "pairDate", None))
+
         # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
         if not encrypted_identity_key:
             ids_str = ", ".join(
@@ -743,6 +792,10 @@ def get_devices_with_location(
             row["owner_key_version"] = owner_key_version
             row["device_type"] = device_type
             row["fast_pair_model_id"] = fast_pair_model_id
+            if pair_date is not None:
+                row["pair_date"] = pair_date
+            if secrets_creation_date is not None:
+                row["secrets_creation_date"] = secrets_creation_date
 
             if best:
                 # best already normalized by selection; merge only known keys
