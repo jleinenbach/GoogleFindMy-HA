@@ -331,6 +331,117 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _normalize_timestamp(value: Any) -> int | None:
+    """Return epoch seconds from primitive or Timestamp-like values.
+
+    For *anchor* timestamps, treat unset/default values (0 / non-positive) as missing.
+    """
+
+    if value is None:
+        return None
+
+    # Protobuf Timestamp-like object
+    if hasattr(value, "seconds"):
+        try:
+            seconds = int(getattr(value, "seconds"))
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    return seconds if seconds > 0 else None
+
+
+def _merge_dict_preserve_left(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    """Merge two dicts without overwriting keys from the left dict."""
+
+    merged = dict(left)
+    for key, value in right.items():
+        if key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Union anchor/metadata keys across *all* candidates.
+
+    This protects metadata-only candidates from being dropped when a different
+    candidate wins the location ranking.
+    """
+
+    union: dict[str, Any] = {}
+    for key in _ANCHOR_METADATA_KEYS:
+        union[key] = None
+
+    # Union strategy:
+    # - timestamps: keep the first non-null positive value
+    # - identity_key: keep the first non-null bytes value
+    # - *_candidates: union lists (dedup, stable order)
+    # - dict blobs: keep first; for time_anchors_debug merge (preserve-left)
+    # - metadata_only: OR
+    for cand in location_candidates:
+        if not isinstance(cand, dict):
+            continue
+
+        # boolean
+        if "metadata_only" in cand:
+            union["metadata_only"] = bool(union.get("metadata_only")) or bool(cand.get("metadata_only"))
+
+        for ts_key in ("pair_date", "secrets_creation_date"):
+            if ts_key in cand:
+                ts_val = _normalize_timestamp(cand.get(ts_key))
+                if ts_val is not None and union.get(ts_key) is None:
+                    union[ts_key] = ts_val
+
+        # identity key material (bytes)
+        for b_key in ("identity_key",):
+            if union.get(b_key) is None:
+                b_val = cand.get(b_key)
+                if isinstance(b_val, (bytes, bytearray)) and b_val:
+                    union[b_key] = bytes(b_val)
+
+        # list unions
+        for list_key in ("identity_key_candidates", "encrypted_identity_key_candidates"):
+            lst = cand.get(list_key)
+            if not isinstance(lst, list) or not lst:
+                continue
+            existing = union.get(list_key)
+            if not isinstance(existing, list):
+                existing = []
+            for item in lst:
+                if isinstance(item, (bytes, bytearray)) and item:
+                    b = bytes(item)
+                    if b not in existing:
+                        existing.append(b)
+                else:
+                    # allow non-bytes items (diagnostics) but still dedup
+                    if item not in existing:
+                        existing.append(item)
+            union[list_key] = existing
+
+        # dict blobs (diagnostics)
+        for dict_key in ("device_registration", "device_type_information", "encrypted_user_secrets"):
+            if union.get(dict_key) is None:
+                d_val = cand.get(dict_key)
+                if isinstance(d_val, dict) and d_val:
+                    union[dict_key] = d_val
+
+        # debug blob: merge without overwriting left keys
+        dbg = cand.get("time_anchors_debug")
+        if isinstance(dbg, dict) and dbg:
+            existing_dbg = union.get("time_anchors_debug")
+            if isinstance(existing_dbg, dict) and existing_dbg:
+                union["time_anchors_debug"] = _merge_dict_preserve_left(existing_dbg, dbg)
+            else:
+                union["time_anchors_debug"] = dbg
+
+    return union
+
+
 def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     """Create a sort key tuple prioritizing the freshest timestamp.
 
@@ -651,6 +762,8 @@ def get_devices_with_location(
         owner_key_version = None
         device_type = None
         fast_pair_model_id: str | None = None
+        pair_date: int | None = None
+        secrets_creation_date: int | None = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -716,6 +829,21 @@ def get_devices_with_location(
                 except UnicodeDecodeError:
                     fast_pair_model_id = raw_fast_pair_model_id.hex()
 
+            # Anchor timestamps used for relative EID timebases
+            # - pairDate is a scalar proto3 field: default 0 means "unset"
+            pair_date = _normalize_timestamp(getattr(registration, "pairDate", None))
+
+            # - creationDate is a Timestamp message: avoid treating an unset/default Timestamp as epoch (0)
+            creation_date_obj: Any | None = None
+            try:
+                if encrypted_user_secrets.HasField("creationDate"):
+                    creation_date_obj = getattr(encrypted_user_secrets, "creationDate", None)
+            except (ValueError, AttributeError):
+                # Fallback for unexpected protobuf implementations
+                creation_date_obj = getattr(encrypted_user_secrets, "creationDate", None)
+
+            secrets_creation_date = _normalize_timestamp(creation_date_obj)
+
         # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
         if not encrypted_identity_key:
             ids_str = ", ".join(
@@ -756,6 +884,25 @@ def get_devices_with_location(
         else:
             best, normed = None, []
 
+        # Collect anchor/metadata keys across all candidates to avoid dropping metadata-only payloads.
+        anchor_union = _collect_anchor_metadata(location_candidates)
+        if pair_date is not None:
+            anchor_union["pair_date"] = pair_date
+        if secrets_creation_date is not None:
+            anchor_union["secrets_creation_date"] = secrets_creation_date
+
+        # Record provenance hints for later refactoring-robust testing/debugging.
+        if pair_date is not None or secrets_creation_date is not None:
+            dbg = anchor_union.get("time_anchors_debug")
+            if not isinstance(dbg, dict):
+                dbg = {}
+            if pair_date is not None:
+                dbg.setdefault("pair_date_source", "device_registration.proto")
+            if secrets_creation_date is not None:
+                dbg.setdefault("secrets_creation_date_source", "encrypted_user_secrets.proto")
+            anchor_union["time_anchors_debug"] = dbg
+
+
         # Emit **exactly one** row per canonic ID.
         for canonic in canonic_ids:
             cid = getattr(canonic, "id", None)
@@ -767,6 +914,7 @@ def get_devices_with_location(
             row["owner_key_version"] = owner_key_version
             row["device_type"] = device_type
             row["fast_pair_model_id"] = fast_pair_model_id
+            # Apply anchor/metadata union after identity fields are set (and after location merge below)
 
             if best:
                 # best already normalized by selection; merge only known keys
@@ -777,6 +925,13 @@ def get_devices_with_location(
                 row["name"] = device_name
                 row["id"] = cid
                 row["device_id"] = cid
+
+            # Ensure anchor/metadata keys survive location ranking and do not get overwritten by defaults.
+            for k in _ANCHOR_METADATA_KEYS:
+                v = anchor_union.get(k)
+                if v is not None:
+                    row[k] = v
+
 
             results.append(row)
 
