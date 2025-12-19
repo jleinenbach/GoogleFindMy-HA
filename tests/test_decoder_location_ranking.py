@@ -11,11 +11,15 @@ from unittest.mock import patch
 import pytest
 
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
-from custom_components.googlefindmy.ProtoDecoders.decoder import get_devices_with_location
+from custom_components.googlefindmy.ProtoDecoders.decoder import (
+    get_devices_with_location,
+)
 
 try:
     # Only needed for typing / consistency with other tests.
-    from custom_components.googlefindmy.Auth.token_cache import TokenCache  # type: ignore
+    from custom_components.googlefindmy.Auth.token_cache import (
+        TokenCache,  # type: ignore
+    )
 except Exception:  # pragma: no cover
     TokenCache = Any  # type: ignore[misc,assignment]
 

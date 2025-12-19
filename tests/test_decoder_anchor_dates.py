@@ -1,14 +1,16 @@
 # tests/test_decoder_anchor_dates.py
 from __future__ import annotations
 
-from typing import cast
-
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
-from custom_components.googlefindmy.ProtoDecoders.decoder import get_devices_with_location
+from custom_components.googlefindmy.ProtoDecoders.decoder import (
+    get_devices_with_location,
+)
 
 try:
     # Optional: TokenCache only used for typing in other tests; we don't need a real instance here.
-    from custom_components.googlefindmy.Auth.token_cache import TokenCache  # type: ignore
+    from custom_components.googlefindmy.Auth.token_cache import (
+        TokenCache,  # type: ignore
+    )
 except Exception:  # pragma: no cover
     TokenCache = object  # type: ignore[misc,assignment]
 

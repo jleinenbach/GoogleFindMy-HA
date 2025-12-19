@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/SpotApi/spot_request.py
 from __future__ import annotations
 
 import asyncio
@@ -5,12 +6,51 @@ import logging
 import random
 import socket
 from collections.abc import Collection
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import grpclib.client as grpclib_client
-import grpclib.exceptions
-from grpclib.client import UnaryUnaryMethod
-from grpclib.const import Status
+if TYPE_CHECKING:
+    class _UnaryStreamContext(Protocol):
+        async def __aenter__(self) -> _UnaryStreamContext: ...
+        async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any: ...
+        async def send_message(self, payload: bytes, end: bool) -> None: ...
+        async def recv_message(self) -> bytes | None: ...
+
+    class UnaryUnaryMethod:
+        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+        def open(self, *args: Any, **kwargs: Any) -> _UnaryStreamContext: ...
+
+    class Status:
+        UNAUTHENTICATED: Status
+        PERMISSION_DENIED: Status
+        RESOURCE_EXHAUSTED: Status
+        UNAVAILABLE: Status
+        INTERNAL: Status
+        UNKNOWN: Status
+        DEADLINE_EXCEEDED: Status
+        name: str
+
+    class _GrpcError(Exception):
+        status: Status
+
+    class _ProtocolError(Exception):
+        ...
+
+    class _GrpclibExceptions(Protocol):
+        GRPCError: type[_GrpcError]
+        ProtocolError: type[_ProtocolError]
+        StreamTerminatedError: type[_ProtocolError]
+
+    class _GrpclibClient(Protocol):
+        USER_AGENT: str
+
+    grpclib_client = cast(_GrpclibClient, object())
+    grpclib_exceptions = cast(_GrpclibExceptions, object())
+else:
+    import grpclib.client as grpclib_client
+    import grpclib.exceptions as grpclib_exceptions
+    from grpclib.client import UnaryUnaryMethod
+    from grpclib.const import Status
 
 from custom_components.googlefindmy.Auth.adm_token_retrieval import (
     async_get_adm_token as async_get_adm_token_api,
@@ -174,7 +214,7 @@ async def async_spot_request(
             async with method.open(metadata=metadata, timeout=30.0) as stream:
                 await stream.send_message(payload, end=True)
                 reply_bytes = await stream.recv_message()
-        except grpclib.exceptions.GRPCError as err:
+        except grpclib_exceptions.GRPCError as err:
             status = err.status
 
             if status in (Status.UNAUTHENTICATED, Status.PERMISSION_DENIED):
@@ -208,8 +248,8 @@ async def async_spot_request(
             raise SpotGrpcStatusError(f"gRPC error: {status.name}") from err
 
         except (
-            grpclib.exceptions.ProtocolError,
-            grpclib.exceptions.StreamTerminatedError,
+            grpclib_exceptions.ProtocolError,
+            grpclib_exceptions.StreamTerminatedError,
             ConnectionResetError,
             BrokenPipeError,
         ) as err:
@@ -242,7 +282,8 @@ async def async_spot_request(
                 continue
             raise SpotTrailersOnlyError("OK status but empty reply payload.")
 
-        return reply_bytes
+        assert isinstance(reply_bytes, (bytes, bytearray))
+        return bytes(reply_bytes)
 
 
 def spot_request(*_args: object, **_kwargs: object) -> bytes:

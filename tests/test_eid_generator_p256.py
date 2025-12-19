@@ -1,3 +1,4 @@
+# tests/test_eid_generator_p256.py
 import logging
 
 import pytest
@@ -13,9 +14,11 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     _normalize_ts_u32,
     _prf_table10,
-    fhna_build_prf_input,
     generate_eid_p256,
     generate_eid_p256_le,
+)
+from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+    build_table10_prf_input as fhna_build_prf_input,
 )
 
 
@@ -112,7 +115,7 @@ def test_generate_eid_p256_avoids_zero_scalar(monkeypatch: pytest.MonkeyPatch) -
     identity_key = b"\xaa" * 32
 
     monkeypatch.setattr(
-        eid_generator, "fhna_prf_aes_ecb_256", lambda *_args, **_kwargs: b"\x00" * 32
+        eid_generator, "prf_aes_256_ecb", lambda *_args, **_kwargs: b"\x00" * 32
     )
 
     eid = generate_eid_p256(identity_key, 0)
@@ -133,7 +136,7 @@ def test_generate_eid_legacy_avoids_zero_scalar(
     identity_key = b"\xbb" * 32
 
     monkeypatch.setattr(
-        eid_generator, "fhna_prf_aes_ecb_256", lambda *_args, **_kwargs: b"\x00" * 32
+        eid_generator, "prf_aes_256_ecb", lambda *_args, **_kwargs: b"\x00" * 32
     )
 
     eid = eid_generator.generate_eid(identity_key, 0)
