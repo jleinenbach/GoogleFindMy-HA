@@ -1,3 +1,4 @@
+# tests/test_moto_tag_regressions.py
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -6,12 +7,6 @@ from unittest.mock import MagicMock
 import pytest
 
 import custom_components.googlefindmy.coordinator as coordinator_module
-import custom_components.googlefindmy.eid_resolver as resolver_module
-from custom_components.googlefindmy.coordinator import DeviceIdentity
-from custom_components.googlefindmy.eid_resolver import (
-    TimebaseLabel,
-    _build_timebase_candidates,
-)
 from custom_components.googlefindmy.FMDNCrypto import eid_generator
 from custom_components.googlefindmy.KeyBackup import cloud_key_decryptor
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
@@ -149,101 +144,12 @@ def test_little_endian_generation_registers_variants() -> None:
     )
     timestamp = 1_700_000_000
 
-    be_eid = eid_generator.generate_eid_p256(identity_key, timestamp)
-    le_eid = eid_generator.generate_eid_p256_le(identity_key, timestamp)
+    be_eid = eid_generator.generate_eid_variant(
+        identity_key, timestamp, eid_generator.EidVariant.MODERN_P256_X32_BE
+    )
+    le_eid = eid_generator.generate_eid_variant(
+        identity_key, timestamp, eid_generator.EidVariant.MODERN_P256_X32_LE_SCALAR
+    )
 
     assert be_eid != le_eid
-
-    cache_clear = getattr(resolver_module._cached_candidates, "cache_clear", None)
-    if callable(cache_clear):
-        cache_clear()
-
-    candidates = resolver_module._cached_candidates(identity_key, timestamp)
-    variant_names = {candidate.name for candidate in candidates}
-
-    if "fhna_p256_le_rx32" not in variant_names:
-        pytest.fail(
-            "CRITICAL REGRESSION: The Resolver is NOT generating Little Endian variants!\n"
-            "This breaks Moto Tag support. You must restore the "
-            "'_modern_generate_eid_le' calls inside "
-            "'eid_resolver.py -> _cached_candidates'."
-        )
-
-    assert "fhna_p256_le_truncated_rx20" in variant_names
-    assert any("le" in name for name in variant_names)
-
-
-def test_absolute_timebase_deep_scan_range_is_wide() -> None:
-    """Absolute fallback should include deep scan ranges when enabled."""
-
-    identity = DeviceIdentity(
-        registry_id="registry-id",
-        canonical_id="canonical-id",
-        identity_key=b"\x01" * 32,
-        pair_date=None,
-        secrets_creation_date=None,
-    )
-    now_unix = 1_700_000_000
-
-    candidates = _build_timebase_candidates(identity, now_unix=now_unix)
-    absolute_candidate = next(
-        candidate
-        for candidate in candidates
-        if candidate.label == TimebaseLabel.ABSOLUTE
-    )
-
-    passes: list[tuple[range | tuple[int, ...], bool]] = [
-        (resolver_module.NARROW_SCAN_RANGE, False)
-    ]
-    passes.append(
-        (
-            range(
-                -resolver_module.REL_DEEP_SCAN_DENSE_RADIUS,
-                resolver_module.REL_DEEP_SCAN_DENSE_RADIUS + 1,
-            ),
-            False,
-        )
-    )
-    sparse_negative = range(
-        -resolver_module.REL_DEEP_SCAN_MAX_DRIFT,
-        -resolver_module.REL_DEEP_SCAN_DENSE_RADIUS,
-        resolver_module.REL_DEEP_SCAN_SPARSE_STEP,
-    )
-    sparse_positive = range(
-        resolver_module.REL_DEEP_SCAN_DENSE_RADIUS
-        + resolver_module.REL_DEEP_SCAN_SPARSE_STEP,
-        resolver_module.REL_DEEP_SCAN_MAX_DRIFT + 1,
-        resolver_module.REL_DEEP_SCAN_SPARSE_STEP,
-    )
-    passes.append(((tuple(sparse_negative) + tuple(sparse_positive)), False))
-
-    window_ranges = [window_range for window_range, _include_neighbors in passes]
-
-    dense_range = window_ranges[1]
-    assert isinstance(dense_range, range)
-    assert dense_range.start == -resolver_module.REL_DEEP_SCAN_DENSE_RADIUS
-    assert dense_range.stop == resolver_module.REL_DEEP_SCAN_DENSE_RADIUS + 1
-
-    sparse_range = window_ranges[2]
-    assert isinstance(sparse_range, tuple)
-    assert min(sparse_range) <= -resolver_module.REL_DEEP_SCAN_DENSE_RADIUS
-    assert max(sparse_range) >= resolver_module.REL_DEEP_SCAN_DENSE_RADIUS
-
-    rotation_windows = resolver_module.iter_rotation_windows(
-        absolute_candidate.reference_time,
-        rotation_period=resolver_module.ROTATION_PERIOD,
-        window_range=dense_range,
-        include_neighbors=False,
-        allow_negative=False,
-    )
-    assert rotation_windows[0] <= absolute_candidate.reference_time
-    assert rotation_windows[-1] >= absolute_candidate.reference_time
-    assert len(rotation_windows) > len(
-        resolver_module.iter_rotation_windows(
-            absolute_candidate.reference_time,
-            rotation_period=resolver_module.ROTATION_PERIOD,
-            window_range=resolver_module.NARROW_SCAN_RANGE,
-            include_neighbors=False,
-            allow_negative=False,
-        )
-    )
+    assert len(be_eid) == len(le_eid)

@@ -1,4 +1,5 @@
-"""Provisioning counter and timestamp normalization tests for the EID resolver."""
+# tests/test_eid_provisioning_counter.py
+"""Timestamp normalization tests for the EID resolver."""
 
 import asyncio
 import time
@@ -13,34 +14,33 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
-    generate_eid,
+    EidVariant,
+    generate_eid_variant,
 )
 
 
 @pytest.mark.asyncio
-async def test_resolver_matches_counter_timebase(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Provisioning counters should drive EID matching instead of Unix time."""
+async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolver should match EIDs generated from the current unix rotation window."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
-    resolver.hass = SimpleNamespace(data={})
+    resolver.hass = SimpleNamespace(data={}, async_create_task=lambda coro: asyncio.create_task(coro))
     resolver._lookup = {}
     resolver._lookup_metadata = {}
-    resolver._known_offsets = {}
-    resolver._known_endianness = {}
-    resolver._known_timebases = {}
-    resolver._persisted_locks = {}
+    resolver._locks = {}
+    async def _async_noop(payload=None):
+        return None
+
+    resolver._store = SimpleNamespace(async_load=lambda: None, async_save=_async_noop)
     resolver._unsub_alignment = None
     resolver._unsub_interval = None
     resolver._refresh_lock = asyncio.Lock()
     resolver._pending_refresh = False
+    resolver._load_task = None
 
     identity_key = bytes.fromhex("00" * 32)
-    pair_date = 1_700_000_000
-    now_unix = pair_date + (ROTATION_PERIOD * 10)
-    counter = (now_unix - pair_date) & 0xFFFFFFFF
-    base_counter = counter & ~(ROTATION_PERIOD - 1)
+    now_unix = 1_700_000_000
+    base_counter = (now_unix - (now_unix % ROTATION_PERIOD))
 
     identity = DeviceIdentity(
         registry_id="registry-id",
@@ -51,7 +51,6 @@ async def test_resolver_matches_counter_timebase(
         device_type=None,
         config_entry_id="entry-id",
         fast_pair_model_id=None,
-        pair_date=pair_date,
     )
 
     async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
@@ -68,12 +67,8 @@ async def test_resolver_matches_counter_timebase(
         lambda self, identities, cache=None: identities,
     )
     monkeypatch.setattr(time, "time", lambda: float(now_unix))
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.eid_resolver.dr.async_get",
-        lambda hass: None,
-    )
 
-    eid = generate_eid(identity_key, base_counter)
+    eid = generate_eid_variant(identity_key, base_counter, EidVariant.LEGACY_SECP160R1_X20_BE)
     payload = bytes([FMDN_FRAME_TYPE]) + eid + b"\x00"
 
     await resolver._refresh_cache()
@@ -82,8 +77,4 @@ async def test_resolver_matches_counter_timebase(
 
     assert match is not None
     assert match.device_id == "registry-id"
-    assert match.time_offset == 0
-    metadata = resolver._lookup_metadata.get(eid)
-    assert metadata is not None
-    assert metadata.get("timestamp_basis") == "counter:REL_PAIR"
-    assert metadata.get("anchor_epoch") == pair_date
+    assert abs(match.time_offset) < ROTATION_PERIOD

@@ -14,11 +14,16 @@ def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolv
     resolver._lookup = {lookup_key: match}
     resolver._lookup_metadata = {}
     resolver._known_offsets = {}
-    resolver._known_endianness = {}
+    resolver._known_advertisement_reversed = {}
     resolver._known_timebases = {}
     resolver._persisted_locks = {}
     resolver._decryption_status = {}
     resolver._last_lock_confirmation = {}
+    resolver._locks = {}
+    resolver._lock_miss_counts = {}
+    async def _async_noop(payload=None):
+        return None
+    resolver._store = SimpleNamespace(async_load=_async_noop, async_save=_async_noop)
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()

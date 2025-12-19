@@ -1,162 +1,270 @@
 # custom_components/googlefindmy/FMDNCrypto/eid_generator.py
-"""Eddystone-EID derivation helpers (AES-128, no elliptic curves).
+"""Spec-driven FHNA ephemeral identifier derivation primitives.
 
-This module implements the public, documented Eddystone-EID computation:
-- Temporary Key: AES-128(identity_key, temp_key_data)
-- EID: AES-128(temp_key, eid_data) truncated to 8 bytes (MSB)
+This module exposes deterministic, side-effect free helpers for Find My Device
+Network (FHNA/FMDN) ephemeral identifiers. Responsibilities are intentionally
+split so resolver heuristics remain out-of-tree:
 
-Find My Device Network (FMDN) is widely understood to build on the same
-cryptographic primitive; the public Eddystone document specifies the exact
-16-byte block layouts and truncation rules.
-
-References:
-- Google (n.d.): "EID Computation" (Eddystone-EID). See:
-  https://raw.githubusercontent.com/google/eddystone/master/eddystone-eid/eid-computation.md
+* ``build_table10_prf_input`` constructs the 32-byte Table 10 buffer
+  (FHN Accessory Specification v1.3 — Table 10).
+* ``prf_aes_256_ecb`` applies the AES-256-ECB PRF to that buffer.
+* ``generate_eid_variant`` derives explicit EID variants given an Ephemeral
+  Identity Key (EIK), a 32-bit time counter, and a declared ``EidVariant``.
+* ``generate_eid`` is a thin, deprecated wrapper that forces callers to pass an
+  explicit ``EidVariant`` to avoid silent semantic changes.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Final
+import warnings
+from enum import Enum
+from typing import Final, Literal
 
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
+    CurveParametersProtocol,
+    load_curve,
+)
+
+FHNA_K: Final[int] = 10
+K: Final[int] = FHNA_K
+ROTATION_PERIOD: Final[int] = 1 << FHNA_K
+EIK_LENGTH: Final[int] = 32
+LEGACY_EID_LENGTH: Final[int] = 20
+MODERN_EID_LENGTH: Final[int] = 32
+FHNA_PRF_INPUT_LENGTH: Final[int] = 32
+FHNA_ROTATION_MASK: Final[int] = (1 << FHNA_K) - 1
+FHNA_COUNTER_MASK: Final[int] = 0xFFFFFFFF
+P256_ORDER: Final[int] = (
+    0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+)
+_CURVE: CurveParametersProtocol = load_curve()
 
 _LOGGER = logging.getLogger(__name__)
 
-# Public Eddystone-EID parameters
-K_DEFAULT: Final[int] = 10
-K: Final[int] = K_DEFAULT  # Backwards-compatible alias used by some callers.
 
-ROTATION_PERIOD: Final[int] = 1 << K_DEFAULT  # 2^K seconds
+class EidVariant(str, Enum):
+    """Supported FHNA EID variants (explicit, no silent format changes)."""
 
-# Identity key size per Eddystone spec (AES-128 key).
-IDENTITY_KEY_LENGTH: Final[int] = 16
-
-# Some FMDN implementations surface a 32-byte "identity key" after decryption.
-# Eddystone-EID itself needs 16 bytes; callers may split 32 bytes into two
-# candidates and test both.
-EIK_LENGTH: Final[int] = 32
-
-# Eddystone-EID advertised length: 8 bytes (64 bits).
-EID_LENGTH: Final[int] = 8
-
-# Legacy constant kept for compatibility with older resolver code paths.
-LEGACY_EID_LENGTH: Final[int] = EID_LENGTH
+    LEGACY_SECP160R1_X20_BE = "legacy_secp160r1_x20_be"
+    MODERN_P256_X32_BE = "modern_p256_x32_be"
+    MODERN_P256_X20_TRUNC_BE = "modern_p256_x20_trunc_be"
+    MODERN_P256_X32_LE_SCALAR = "modern_p256_x32_le_scalar"
 
 
-@dataclass(frozen=True, slots=True)
-class EidCandidate:
-    """Candidate EID produced for a given time window and key interpretation."""
+def _normalize_time_counter(time_counter_u32: int, *, strict: bool) -> int:
+    """Normalize a raw time counter to u32.
 
-    name: str
-    eid: bytes
-
-
-def _aes128_ecb_encrypt(key_16: bytes, block_16: bytes) -> bytes:
-    """Encrypt a single 16-byte block with AES-128-ECB."""
-    if len(key_16) != IDENTITY_KEY_LENGTH:
-        raise ValueError(f"identity_key must be {IDENTITY_KEY_LENGTH} bytes; got {len(key_16)}")
-    if len(block_16) != 16:
-        raise ValueError(f"block must be 16 bytes; got {len(block_16)}")
-
-    cipher = Cipher(algorithms.AES(key_16), modes.ECB())
-    encryptor = cipher.encryptor()
-    return encryptor.update(block_16) + encryptor.finalize()
-
-
-def _mask_time_counter(time_counter_u32: int, k: int) -> int:
-    """Mask the lowest k bits of the 32-bit time counter (rotation alignment)."""
-    if not (0 <= k <= 15):
-        raise ValueError(f"k must be in 0..15; got {k}")
-    mask = (~((1 << k) - 1)) & 0xFFFFFFFF
-    return time_counter_u32 & mask
-
-
-def _build_temporary_key_block(time_counter_u32: int) -> bytes:
-    """Build the 16-byte 'temporary key' input block per Eddystone-EID.
-
-    Layout (byte offsets):
-    - 0..10: 0x00 padding
-    - 11: 0xFF (salt)
-    - 12..13: 0x00 padding
-    - 14..15: top 16 bits of time counter (big-endian)
+    A strict call enforces ``0 <= counter <= 0xFFFFFFFF``. Lenient callers mask
+    wrap-around counters with ``& FHNA_COUNTER_MASK`` to preserve drift signals.
     """
-    ts_top16 = (time_counter_u32 >> 16) & 0xFFFF
-    return b"\x00" * 11 + b"\xFF" + b"\x00" * 2 + ts_top16.to_bytes(2, "big")
 
-
-def _build_eid_block(time_counter_u32: int, k: int) -> bytes:
-    """Build the 16-byte EID input block per Eddystone-EID.
-
-    Layout (byte offsets):
-    - 0..10: 0x00 padding
-    - 11: K (rotation period exponent)
-    - 12..15: time counter (big-endian), with the lowest K bits cleared
-    """
-    masked = _mask_time_counter(time_counter_u32, k)
-    return b"\x00" * 11 + bytes([k & 0xFF]) + masked.to_bytes(4, "big")
-
-
-def generate_eid_eddystone(identity_key_16: bytes, time_counter: int, *, k: int = K_DEFAULT) -> bytes:
-    """Compute the 8-byte Eddystone-EID for a given 32-bit seconds counter.
-
-    Args:
-        identity_key_16: 16-byte AES-128 identity key.
-        time_counter: Beacon time counter in seconds. Treated as 32-bit unsigned.
-        k: Rotation period exponent (0..15). New EID every 2^k seconds.
-
-    Returns:
-        8-byte EID value (leading 8 bytes of AES output).
-    """
-    time_counter_u32 = int(time_counter) & 0xFFFFFFFF
-
-    temp_key_block = _build_temporary_key_block(time_counter_u32)
-    temp_key = _aes128_ecb_encrypt(identity_key_16, temp_key_block)
-
-    eid_block = _build_eid_block(time_counter_u32, k)
-    eid_full = _aes128_ecb_encrypt(temp_key, eid_block)
-
-    return eid_full[:EID_LENGTH]
-
-
-def _identity_key_candidates(identity_key: bytes) -> tuple[tuple[str, bytes], ...]:
-    """Return 16-byte AES identity key candidates from the provided bytes."""
-    if not isinstance(identity_key, (bytes, bytearray)):
-        raise TypeError(f"identity_key must be bytes-like; got {type(identity_key)!r}")
-
-    key_bytes = bytes(identity_key)
-    if len(key_bytes) == IDENTITY_KEY_LENGTH:
-        return (("aes128_identity_key_16", key_bytes),)
-
-    if len(key_bytes) == EIK_LENGTH:
-        first = key_bytes[:16]
-        second = key_bytes[16:]
-        if first == second:
-            return (("aes128_identity_key_32_dup_first16", first),)
-        return (
-            ("aes128_identity_key_32_first16", first),
-            ("aes128_identity_key_32_second16", second),
+    if isinstance(time_counter_u32, bool) or not isinstance(time_counter_u32, int):
+        raise TypeError(
+            f"time_counter_u32 must be int (not bool); got {type(time_counter_u32)!r}"
         )
 
-    raise ValueError(
-        f"Unsupported identity_key length {len(key_bytes)}; expected 16 (Eddystone) or 32 (FMDN decrypted key)"
+    if 0 <= time_counter_u32 <= FHNA_COUNTER_MASK:
+        return time_counter_u32
+
+    if strict:
+        raise ValueError(f"time_counter_u32 out of u32 range: {time_counter_u32}")
+
+    masked = time_counter_u32 & FHNA_COUNTER_MASK
+    _LOGGER.debug(
+        "time_counter_u32 out of range (%s); masking to %s", time_counter_u32, masked
     )
+    return masked
 
 
-def generate_eid_candidates(identity_key: bytes, unix_time_seconds: int, *, k: int = K_DEFAULT) -> tuple[EidCandidate, ...]:
-    """Generate Eddystone-EID candidates for the given second counter.
+def _align_to_rotation(
+    counter_u32: int, *, rotation_mask: int = FHNA_ROTATION_MASK
+) -> tuple[int, bool]:
+    """Return the rotation-aligned counter per Table 10."""
 
-    For 32-byte keys, this yields two candidates (first/second half) to allow
-    callers to validate which half matches the beacon's AES-128 identity key.
+    aligned: int = counter_u32 & ~rotation_mask
+    return aligned, aligned != counter_u32
+
+
+def build_table10_prf_input(
+    time_counter_u32: int, *, k: int = K, strict: bool = True
+) -> bytes:
+    """Return the 32-byte Table 10 PRF input buffer (FHN spec v1.3 — Table 10)."""
+
+    if k != FHNA_K:
+        raise ValueError(f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}")
+
+    counter_u32: int = _normalize_time_counter(time_counter_u32, strict=strict)
+    masked_counter, was_aligned = _align_to_rotation(counter_u32)
+    if was_aligned:
+        _LOGGER.debug("Counter %s masked to rotation-aligned %s", counter_u32, masked_counter)
+
+    counter_bytes = masked_counter.to_bytes(4, byteorder="big", signed=False)
+
+    block = bytearray(FHNA_PRF_INPUT_LENGTH)
+    block[0:11] = b"\xff" * 11
+    block[11] = FHNA_K
+    block[12:16] = counter_bytes
+    block[16:27] = b"\x00" * 11
+    block[27] = FHNA_K
+    block[28:32] = counter_bytes
+
+    return bytes(block)
+
+
+def prf_aes_256_ecb(eik: bytes, prf_input: bytes) -> bytes:
+    """Encrypt the FHNA PRF input with AES-256-ECB (deterministic, no padding)."""
+
+    if len(eik) != EIK_LENGTH:
+        raise ValueError(f"Ephemeral Identity Key must be {EIK_LENGTH} bytes")
+    if len(prf_input) != FHNA_PRF_INPUT_LENGTH:
+        raise ValueError(f"PRF input must be {FHNA_PRF_INPUT_LENGTH} bytes")
+
+    cipher = Cipher(algorithms.AES(eik), modes.ECB())
+    encryptor = cipher.encryptor()
+    return encryptor.update(prf_input) + encryptor.finalize()
+
+
+def _prf_table10(
+    identity_key: bytes,
+    time_counter_u32: int,
+    k: int = K,
+    *,
+    strict: bool = True,
+) -> bytes:
+    """Derive the Table 10 pseudorandom output for the provided counter."""
+
+    prf_input = build_table10_prf_input(time_counter_u32, k=k, strict=strict)
+    return prf_aes_256_ecb(identity_key, prf_input)
+
+
+def _derive_scalar(  # noqa: PLR0913
+    identity_key: bytes,
+    time_counter_u32: int,
+    *,
+    k: int,
+    byteorder: Literal["big", "little"],
+    curve_order: int,
+    strict: bool,
+) -> int:
+    """Derive a scalar in ``[1, curve_order - 1]`` from the Table 10 PRF output."""
+
+    r_dash: bytes = _prf_table10(identity_key, time_counter_u32, k, strict=strict)
+    r_dash_int: int = int.from_bytes(r_dash, byteorder=byteorder, signed=False)
+    scalar: int = (r_dash_int % (curve_order - 1)) + 1
+    return scalar
+
+
+def _serialize_legacy_x(scalar_r: int) -> bytes:
+    """Return the big-endian x-coordinate for ``R = r * G`` on secp160r1."""
+
+    curve = _CURVE
+    generator = curve.generator
+    R = scalar_r * generator
+
+    x_int: int = int(R.x())
+    return x_int.to_bytes(LEGACY_EID_LENGTH, byteorder="big")
+
+
+def _serialize_p256_x(scalar_r: int) -> bytes:
+    """Return the big-endian x-coordinate for ``R = r * G`` on secp256r1."""
+
+    curve = ec.SECP256R1()
+    public_numbers = ec.derive_private_key(scalar_r, curve).public_key().public_numbers()
+
+    x_int: int = int(public_numbers.x)
+    return x_int.to_bytes(MODERN_EID_LENGTH, byteorder="big")
+
+
+def generate_eid_variant(
+    eik: bytes,
+    time_counter_u32: int,
+    variant: EidVariant,
+    *,
+    k: int = K,
+    strict: bool = True,
+) -> bytes:
+    """Return the explicit EID variant for the given counter and EIK."""
+
+    if len(eik) != EIK_LENGTH:
+        raise ValueError(f"Ephemeral Identity Key must be {EIK_LENGTH} bytes")
+    counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
+
+    if variant is EidVariant.LEGACY_SECP160R1_X20_BE:
+        scalar = _derive_scalar(
+            eik,
+            counter_u32,
+            k=k,
+            byteorder="big",
+            curve_order=int(_CURVE.order),
+            strict=strict,
+        )
+        return _serialize_legacy_x(scalar)
+
+    if variant is EidVariant.MODERN_P256_X32_BE:
+        scalar = _derive_scalar(
+            eik,
+            counter_u32,
+            k=k,
+            byteorder="big",
+            curve_order=P256_ORDER,
+            strict=strict,
+        )
+        return _serialize_p256_x(scalar)
+
+    if variant is EidVariant.MODERN_P256_X20_TRUNC_BE:
+        full = generate_eid_variant(
+            eik,
+            counter_u32,
+            EidVariant.MODERN_P256_X32_BE,
+            k=k,
+            strict=strict,
+        )
+        return full[:LEGACY_EID_LENGTH]
+
+    if variant is EidVariant.MODERN_P256_X32_LE_SCALAR:
+        scalar = _derive_scalar(
+            eik,
+            counter_u32,
+            k=k,
+            byteorder="little",
+            curve_order=P256_ORDER,
+            strict=strict,
+        )
+        return _serialize_p256_x(scalar)
+
+    raise ValueError(f"Unsupported EID variant: {variant}")
+
+
+def get_masked_counter(time_counter_u32: int, k: int, *, strict: bool = True) -> bytes:
+    """Return the rotation-aligned counter bytes for diagnostics."""
+
+    counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
+    rotation_mask: int = ((1 << k) - 1) & FHNA_COUNTER_MASK
+    masked, _ = _align_to_rotation(counter_u32, rotation_mask=rotation_mask)
+
+    return masked.to_bytes(4, byteorder="big", signed=False)
+
+
+def generate_eid(
+    eik: bytes,
+    time_counter_u32: int,
+    *,
+    variant: EidVariant,
+    k: int = K,
+    strict: bool = True,
+) -> bytes:
+    """Deprecated shim that forwards to ``generate_eid_variant``.
+
+    Callers must pass ``variant`` explicitly to avoid silent format changes.
     """
-    candidates: list[EidCandidate] = []
-    for name, key16 in _identity_key_candidates(identity_key):
-        eid = generate_eid_eddystone(key16, unix_time_seconds, k=k)
-        candidates.append(EidCandidate(name=f"eddystone_eid/{name}/k{k}", eid=eid))
-    return tuple(candidates)
 
-
-def generate_eid(identity_key: bytes, timestamp: int) -> bytes:
-    """Compatibility wrapper: returns the first Eddystone-EID candidate."""
-    return generate_eid_candidates(identity_key, timestamp)[0].eid
+    warnings.warn(
+        "generate_eid is deprecated; call generate_eid_variant(..., variant=...) directly",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return generate_eid_variant(eik, time_counter_u32, variant, k=k, strict=strict)

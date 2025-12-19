@@ -18,7 +18,7 @@ def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolv
     resolver._lookup = {lookup_key: match}
     resolver._lookup_metadata = {}
     resolver._known_offsets = {}
-    resolver._known_endianness = {}
+    resolver._known_advertisement_reversed = {}
     resolver._known_timebases = {}
     resolver._persisted_locks = {}
     resolver._decryption_status = {}
@@ -49,7 +49,7 @@ def test_resolve_eid_slices_raw_payload() -> None:
 
     assert resolved == match
     assert resolver._known_offsets.get("device-raw") == 0
-    assert resolver._known_endianness.get("device-raw") is False
+    assert resolver._known_advertisement_reversed.get("device-raw") is False
 
 
 def test_resolve_eid_accepts_pure_eid() -> None:
@@ -69,7 +69,7 @@ def test_resolve_eid_accepts_pure_eid() -> None:
 
     assert resolved == match
     assert resolver._known_offsets.get("device-pure") == 5
-    assert resolver._known_endianness.get("device-pure") is True
+    assert resolver._known_advertisement_reversed.get("device-pure") is True
 
 
 def test_resolve_eid_rejects_short_payload() -> None:
@@ -88,4 +88,4 @@ def test_resolve_eid_rejects_short_payload() -> None:
 
     assert resolver.resolve_eid(b"\x01" * 19) is None
     assert resolver._known_offsets == {}
-    assert resolver._known_endianness == {}
+    assert resolver._known_advertisement_reversed == {}

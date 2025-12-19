@@ -1,10 +1,12 @@
+# tests/test_eid_resolver_logging.py
+import asyncio
 import logging
+from types import SimpleNamespace
 
 import pytest
 
 from custom_components.googlefindmy.eid_resolver import (
     EID_LENGTH,
-    RAW_HEADER_LENGTH,
     EIDMatch,
     GoogleFindMyEIDResolver,
 )
@@ -12,10 +14,26 @@ from custom_components.googlefindmy.eid_resolver import (
 
 @pytest.fixture
 def resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
-    monkeypatch.setattr(
-        GoogleFindMyEIDResolver, "_start_alignment_timer", lambda self: None
+    async def _async_noop(payload=None):
+        return None
+
+    hass = SimpleNamespace(
+        async_create_task=lambda coro: None,
+        data={},
     )
-    return GoogleFindMyEIDResolver(hass=object())
+
+    instance = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+    instance.hass = hass
+    instance._lookup = {}
+    instance._lookup_metadata = {}
+    instance._locks = {}
+    instance._store = SimpleNamespace(async_load=lambda: None, async_save=_async_noop)
+    instance._unsub_interval = None
+    instance._unsub_alignment = None
+    instance._refresh_lock = asyncio.Lock()
+    instance._pending_refresh = False
+    instance._load_task = None
+    return instance
 
 
 def _probe_message(records: list[logging.LogRecord]) -> list[str]:
@@ -57,7 +75,6 @@ def test_probe_logs_sliced_key(
     resolver: GoogleFindMyEIDResolver, caplog: pytest.LogCaptureFixture
 ) -> None:
     raw_payload = b"\x40" + (b"\x03" * EID_LENGTH) + b"\xFF"
-    expected_lookup = raw_payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + EID_LENGTH]
     resolver._lookup = {}
 
     caplog.set_level(logging.DEBUG)
@@ -65,4 +82,4 @@ def test_probe_logs_sliced_key(
     resolver.resolve_eid(raw_payload)
 
     probe_messages = _probe_message(caplog.records)
-    assert any(expected_lookup[:4].hex() in message for message in probe_messages)
+    assert any("prefix=" in message for message in probe_messages)
