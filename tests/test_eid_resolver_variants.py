@@ -17,6 +17,7 @@ from custom_components.googlefindmy.eid_resolver import (
     iter_rotation_windows,
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
+    FHNA_COUNTER_MASK,
     MODERN_EID_LENGTH,
     ROTATION_PERIOD,
     EidVariant,
@@ -70,6 +71,20 @@ def test_iter_rotation_windows_alignment_and_neighbors() -> None:
     assert with_neighbors == (2048, 1024, 3072)
 
 
+def test_iter_rotation_windows_skips_negative_neighbors() -> None:
+    """Neighbor expansion must never produce negative windows."""
+
+    windows = iter_rotation_windows(
+        target_time=0,
+        rotation_period=ROTATION_PERIOD,
+        window_range=(0,),
+        include_neighbors=True,
+    )
+    assert 0 in windows
+    assert ROTATION_PERIOD in windows
+    assert all(ts >= 0 for ts in windows)
+
+
 @pytest.mark.asyncio
 async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cache refresh should cover both curves, truncation, and byte-order options."""
@@ -107,6 +122,103 @@ async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytes
 
     bases = {meta["timestamp_basis"] for meta in resolver._lookup_metadata.values()}
     assert {"unix", "pair_date", "secrets_creation_date"}.issubset(bases)
+
+
+@pytest.mark.asyncio
+async def test_refresh_cache_skips_negative_neighbor_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zero-valued candidates should not generate negative neighbor windows."""
+
+    resolver = _build_resolver(monkeypatch)
+    identity = DeviceIdentity(
+        registry_id="zeroed-id",
+        canonical_id="canonical-id",
+        identity_key=b"\x03" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+        pair_date=0,
+        secrets_creation_date=0,
+    )
+
+    call_log: list[int] = []
+    original_generate = GoogleFindMyEIDResolver._generate_variant
+
+    def _guarded_generate(
+        self: GoogleFindMyEIDResolver,
+        key_bytes: bytes,
+        *,
+        time_counter: int,
+        variant: EidVariant,
+    ) -> bytes:
+        assert 0 <= time_counter <= FHNA_COUNTER_MASK
+        call_log.append(time_counter)
+        return original_generate(self, key_bytes, time_counter=time_counter, variant=variant)
+
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_generate_variant", _guarded_generate)
+
+    async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
+    monkeypatch.setattr(time, "time", lambda: float(ROTATION_PERIOD))
+
+    await resolver._refresh_cache()
+
+    assert call_log
+    assert min(call_log) >= 0
+    assert all(ts <= FHNA_COUNTER_MASK for ts in call_log)
+
+
+@pytest.mark.asyncio
+async def test_refresh_cache_converts_millisecond_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Millisecond timestamps should normalize to seconds when plausible."""
+
+    resolver = _build_resolver(monkeypatch)
+    ms_candidate = 1_700_000_000_000
+    identity = DeviceIdentity(
+        registry_id="ms-id",
+        canonical_id="canonical-id",
+        identity_key=b"\x04" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+        pair_date=None,
+        secrets_creation_date=ms_candidate,
+    )
+
+    call_log: list[int] = []
+    original_generate = GoogleFindMyEIDResolver._generate_variant
+
+    def _guarded_generate(
+        self: GoogleFindMyEIDResolver,
+        key_bytes: bytes,
+        *,
+        time_counter: int,
+        variant: EidVariant,
+    ) -> bytes:
+        assert 0 <= time_counter <= FHNA_COUNTER_MASK
+        call_log.append(time_counter)
+        return original_generate(self, key_bytes, time_counter=time_counter, variant=variant)
+
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_generate_variant", _guarded_generate)
+
+    async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
+
+    await resolver._refresh_cache()
+
+    assert call_log
+    assert all(ts <= FHNA_COUNTER_MASK for ts in call_log)
+    assert any(
+        meta["timestamp_basis"] == "secrets_creation_date" and meta["rotation_timestamp"] <= FHNA_COUNTER_MASK
+        for meta in resolver._lookup_metadata.values()
+    )
 
 
 @pytest.mark.asyncio

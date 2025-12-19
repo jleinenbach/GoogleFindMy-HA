@@ -149,13 +149,27 @@ def _derive_scalar(  # noqa: PLR0913
     byteorder: Literal["big", "little"],
     curve_order: int,
     strict: bool,
+    include_zero_endpoint: bool = False,
 ) -> int:
-    """Derive a scalar in ``[1, curve_order - 1]`` from the Table 10 PRF output."""
+    """Derive a scalar from the Table 10 PRF output.
+
+    Modern P-256 trackers require an open interval ``[1, curve_order - 1]`` to
+    avoid the point at infinity, while legacy FHNA accessories project directly
+    into the closed interval ``[0, curve_order - 1]``. The `include_zero_endpoint`
+    toggle preserves the legacy modulo-n behavior (Table 10) instead of the
+    P-256-adjusted projection used by modern trackers.
+    """
 
     r_dash: bytes = _prf_table10(identity_key, time_counter_u32, k, strict=strict)
     r_dash_int: int = int.from_bytes(r_dash, byteorder=byteorder, signed=False)
-    scalar: int = (r_dash_int % (curve_order - 1)) + 1
-    return scalar
+    order: int = int(curve_order)
+
+    if include_zero_endpoint:
+        mod_n_scalar: int = r_dash_int % order
+        return mod_n_scalar
+
+    projected_scalar: int = (r_dash_int % (order - 1)) + 1
+    return projected_scalar
 
 
 def _serialize_legacy_x(scalar_r: int) -> bytes:
@@ -194,13 +208,15 @@ def generate_eid_variant(
     counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
 
     if variant is EidVariant.LEGACY_SECP160R1_X20_BE:
+        curve_order: int = int(_CURVE.order)
         scalar = _derive_scalar(
             eik,
             counter_u32,
             k=k,
             byteorder="big",
-            curve_order=int(_CURVE.order),
+            curve_order=curve_order,
             strict=strict,
+            include_zero_endpoint=True,
         )
         return _serialize_legacy_x(scalar)
 
