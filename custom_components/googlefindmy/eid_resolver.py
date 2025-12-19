@@ -350,6 +350,12 @@ class GoogleFindMyEIDResolver:
                         eid_length=MODERN_EID_LENGTH,
                         scalar_endianness="big",
                     )
+                    modern_eid_le = self._generate_variant(
+                        key_bytes,
+                        timestamp=window_ts,
+                        eid_length=MODERN_EID_LENGTH,
+                        scalar_endianness="little",
+                    )
                     _register_variant(
                         legacy_eid,
                         "fhna_secp160r1_rx20",
@@ -376,6 +382,20 @@ class GoogleFindMyEIDResolver:
                         "fhna_secp256r1_rx32",
                         window_ts,
                         scalar_endianness="big",
+                        reversed_flag=True,
+                    )
+                    _register_variant(
+                        modern_eid_le,
+                        "fhna_secp256r1_le_rx32",
+                        window_ts,
+                        scalar_endianness="little",
+                        reversed_flag=False,
+                    )
+                    _register_variant(
+                        modern_eid_le[::-1],
+                        "fhna_secp256r1_le_rx32",
+                        window_ts,
+                        scalar_endianness="little",
                         reversed_flag=True,
                     )
 
