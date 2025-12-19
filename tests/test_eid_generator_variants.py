@@ -32,7 +32,7 @@ PRF_INPUT_HEX = "ffffffffffffffffffffff0a1234540000000000000000000000000a1234540
 PRF_OUTPUT_HEX = "52c746bf4ab7c7c35f0ddb3b2c8632d129f0a0453f76767a29f033d00dee96ba"
 
 GOLDEN_VECTORS: dict[EidVariant, str] = {
-    EidVariant.LEGACY_SECP160R1_X20_BE: "86add72d6e7dea8bbdecb5dc8a5c3fa90e3eb6cc",
+    EidVariant.LEGACY_SECP160R1_X20_BE: "7bf149821dafae98259bfe53a87283c41d7b1b1c",
     EidVariant.MODERN_P256_X32_BE: "72d4e4be2c6f3c1c5328f10d884ab58e0a474b06584d9c893b1e099853289cd9",
     EidVariant.MODERN_P256_X20_TRUNC_BE: "72d4e4be2c6f3c1c5328f10d884ab58e0a474b06",
     EidVariant.MODERN_P256_X32_LE_SCALAR: "acc9009d7630b76c89cfb17f126fe640508ba7e184528341cbdb217053dd4050",
@@ -80,18 +80,55 @@ def test_prf_is_deterministic_and_matches_golden_vector() -> None:
 
 
 def test_scalar_derivation_respects_curve_ranges() -> None:
-    """Derived scalars must remain within the open interval (0, order)."""
+    """Derived scalars must stay within each variant's expected interval."""
 
     prf_input = build_table10_prf_input(SAMPLE_COUNTER, k=FHNA_K)
     prf_output = prf_aes_256_ecb(SAMPLE_EIK, prf_input)
     prf_int = int.from_bytes(prf_output, "big", signed=False)
 
     legacy_curve = load_curve()
-    legacy_scalar = (prf_int % (int(legacy_curve.order) - 1)) + 1
-    assert 1 <= legacy_scalar < int(legacy_curve.order)
+    legacy_order: int = int(legacy_curve.order)
+    legacy_scalar = prf_int % legacy_order
+    assert 0 <= legacy_scalar < legacy_order
 
     modern_scalar = (prf_int % (P256_ORDER - 1)) + 1
     assert 1 <= modern_scalar < P256_ORDER
+    assert legacy_scalar != modern_scalar
+
+
+def test_legacy_scalar_reduction_rejects_p256_projection() -> None:
+    """Legacy EIDs must use modulo-n reduction, not the modern (n-1)+1 projection.
+
+    This regression test is intentionally verbose so a future AI-assisted edit
+    can diagnose the failure: if the assertion below flips, it means the legacy
+    branch started using the P-256 scalar projection, which shifts every
+    derived key by one and produces invalid EIDs for SECP160R1 accessories.
+    """
+
+    prf_input = build_table10_prf_input(SAMPLE_COUNTER, k=FHNA_K)
+    prf_output = prf_aes_256_ecb(SAMPLE_EIK, prf_input)
+    prf_int = int.from_bytes(prf_output, "big", signed=False)
+
+    legacy_curve = load_curve()
+    legacy_order: int = int(legacy_curve.order)
+    mod_n_scalar = prf_int % legacy_order
+    p256_projection_scalar = (prf_int % (legacy_order - 1)) + 1
+
+    mod_n_x_int = int((mod_n_scalar * legacy_curve.generator).x())
+    projected_x_int = int((p256_projection_scalar * legacy_curve.generator).x())
+
+    legacy_eid = generate_eid_variant(
+        SAMPLE_EIK,
+        SAMPLE_COUNTER,
+        EidVariant.LEGACY_SECP160R1_X20_BE,
+    )
+
+    assert legacy_eid == mod_n_x_int.to_bytes(LEGACY_EID_LENGTH, "big"), (
+        "Legacy EID derivation must keep the modulo-n scalar; using the P-256 "
+        "projection ((r % (n-1)) + 1) would shift the scalar and break the "
+        "derived SECP160R1 EIDs."
+    )
+    assert mod_n_x_int != projected_x_int
 
 
 def test_generate_eid_variants_match_golden_vectors() -> None:

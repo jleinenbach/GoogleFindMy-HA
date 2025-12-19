@@ -26,6 +26,7 @@ from homeassistant.helpers.storage import Store
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto.eid_generator import (
+    FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
     ROTATION_PERIOD,
@@ -105,7 +106,12 @@ def iter_rotation_windows(
         if include_neighbors:
             previous_window = timestamp - rotation_period
             next_window = timestamp + rotation_period
-            windows.extend((timestamp, previous_window, next_window))
+            if timestamp >= 0:
+                windows.append(timestamp)
+            if previous_window >= 0:
+                windows.append(previous_window)
+            if next_window >= 0:
+                windows.append(next_window)
         else:
             windows.append(timestamp)
 
@@ -165,6 +171,28 @@ class EIDGenerationLock:
             time_basis=str(payload.get("time_basis") or "") or None,
             created_at=int(payload.get("created_at") or int(time.time())),
         )
+
+
+def _normalize_counter_candidate(candidate_value: int, *, basis: str) -> int | None:
+    """Return a sane u32 counter candidate or ``None`` when unusable."""
+
+    if not isinstance(candidate_value, int) or candidate_value < 0:
+        return None
+
+    if candidate_value <= FHNA_COUNTER_MASK:
+        return candidate_value
+
+    candidate_seconds = candidate_value // 1000
+    if 0 < candidate_seconds <= FHNA_COUNTER_MASK:
+        _LOGGER.debug(
+            "Converted %s basis %s from milliseconds to seconds: %s",
+            candidate_value,
+            basis,
+            candidate_seconds,
+        )
+        return candidate_seconds
+
+    return None
 
 
 @dataclass(slots=True)
@@ -300,7 +328,7 @@ class GoogleFindMyEIDResolver:
                 self._pending_refresh = False
                 await self._refresh_cache()
 
-    async def _refresh_cache(self) -> None:  # noqa: PLR0912
+    async def _refresh_cache(self) -> None:  # noqa: PLR0912, PLR0915
         """Rebuild the EID lookup table for all active devices."""
 
         self._ensure_cache_defaults()
@@ -319,6 +347,7 @@ class GoogleFindMyEIDResolver:
             ("unix", "unix"),
             ("pair_date", "pair_date"),
             ("secrets_creation_date", "secrets_creation_date"),
+            ("entity_time", "entity_time"),
         )
 
         for identity in identities:
@@ -383,22 +412,47 @@ class GoogleFindMyEIDResolver:
                     candidate_value = now_unix
                 elif basis == "pair_date":
                     candidate_value = identity.pair_date
+                elif basis == "entity_time":
+                    candidate_value = getattr(identity, "entity_time", None)
                 else:
                     candidate_value = identity.secrets_creation_date
 
-                if isinstance(candidate_value, int):
-                    rotation_start = candidate_value - (candidate_value % ROTATION_PERIOD)
-                    for offset in (-1, 0, 1):
-                        ts = rotation_start + (offset * ROTATION_PERIOD)
-                        counters.setdefault(ts, label)
+                normalized = (
+                    _normalize_counter_candidate(candidate_value, basis=basis)
+                    if isinstance(candidate_value, int)
+                    else None
+                )
+                if normalized is None:
+                    continue
+
+                for ts in iter_rotation_windows(
+                    normalized,
+                    rotation_period=ROTATION_PERIOD,
+                    window_range=(0,),
+                    include_neighbors=True,
+                ):
+                    if ts < 0 or ts > FHNA_COUNTER_MASK:
+                        continue
+                    counters.setdefault(ts, label)
 
             for window_ts, time_basis in counters.items():
                 for variant in variants:
-                    eid_bytes = self._generate_variant(
-                        key_bytes,
-                        time_counter=window_ts,
-                        variant=variant,
-                    )
+                    try:
+                        eid_bytes = self._generate_variant(
+                            key_bytes,
+                            time_counter=window_ts,
+                            variant=variant,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive guard
+                        _LOGGER.debug(
+                            "Skipping EID generation for registry_id=%s basis=%s window_ts=%s variant=%s: %s",
+                            identity.registry_id,
+                            time_basis,
+                            window_ts,
+                            variant.value,
+                            exc,
+                        )
+                        continue
                     _register_variant(
                         eid_bytes,
                         variant=variant,
