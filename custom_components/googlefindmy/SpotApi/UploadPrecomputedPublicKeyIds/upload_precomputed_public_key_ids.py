@@ -8,7 +8,8 @@ import time
 from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
-    generate_eid,
+    EidVariant,
+    generate_eid_variant,
 )
 from custom_components.googlefindmy.FMDNCrypto.mcu_utils import is_mcu_tracker
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -97,7 +98,7 @@ def get_next_eids(
     start_offset = start_date - pair_date
     current_time_offset = start_offset - (start_offset % ROTATION_PERIOD)
 
-    static_eid = generate_eid(eik, 0)
+    static_eid = generate_eid_variant(eik, 0, EidVariant.LEGACY_SECP160R1_X20_BE)
 
     while current_time_offset <= start_offset + duration_seconds:
         timestamp = pair_date + current_time_offset

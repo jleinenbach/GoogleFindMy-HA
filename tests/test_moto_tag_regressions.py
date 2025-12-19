@@ -144,8 +144,12 @@ def test_little_endian_generation_registers_variants() -> None:
     )
     timestamp = 1_700_000_000
 
-    be_eid = eid_generator.generate_eid_p256(identity_key, timestamp)
-    le_eid = eid_generator.generate_eid_p256_le(identity_key, timestamp)
+    be_eid = eid_generator.generate_eid_variant(
+        identity_key, timestamp, eid_generator.EidVariant.MODERN_P256_X32_BE
+    )
+    le_eid = eid_generator.generate_eid_variant(
+        identity_key, timestamp, eid_generator.EidVariant.MODERN_P256_X32_LE_SCALAR
+    )
 
     assert be_eid != le_eid
     assert len(be_eid) == len(le_eid)

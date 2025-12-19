@@ -29,9 +29,8 @@ from .FMDNCrypto.eid_generator import (
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
     ROTATION_PERIOD,
-    generate_eid,
-    generate_eid_p256,
-    generate_eid_p256_le,
+    EidVariant,
+    generate_eid_variant,
 )
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
@@ -61,6 +60,7 @@ SERVICE_DATA_OFFSET = 8
 AESGCM_NONCE_LENGTH = 12
 
 EID_LENGTH = LEGACY_EID_LENGTH
+LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 class EIDMatch(NamedTuple):
@@ -118,9 +118,11 @@ class EIDGenerationLock:
 
     device_id: str
     canonical_id: str
+    variant: str
+    advertisement_reversed: bool
     eid_length: int
     frame_type: int | None = None
-    scalar_endianness: str = "big"
+    time_basis: str | None = None
     created_at: int = field(default_factory=lambda: int(time.time()))
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,9 +131,11 @@ class EIDGenerationLock:
         return {
             "device_id": self.device_id,
             "canonical_id": self.canonical_id,
+            "variant": self.variant,
+            "advertisement_reversed": self.advertisement_reversed,
             "eid_length": self.eid_length,
             "frame_type": self.frame_type,
-            "scalar_endianness": self.scalar_endianness,
+            "time_basis": self.time_basis,
             "created_at": self.created_at,
         }
 
@@ -139,12 +143,26 @@ class EIDGenerationLock:
     def from_dict(cls, payload: Mapping[str, Any]) -> EIDGenerationLock:
         """Deserialize a stored lock."""
 
+        variant = payload.get("variant") or ""
+        advertisement_reversed = bool(payload.get("advertisement_reversed") or False)
+        if not variant:
+            scalar_endianness = str(payload.get("scalar_endianness") or "big")
+            length = int(payload["eid_length"])
+            if length == LEGACY_EID_LENGTH:
+                variant = EidVariant.LEGACY_SECP160R1_X20_BE.value
+            elif scalar_endianness == "little":
+                variant = EidVariant.MODERN_P256_X32_LE_SCALAR.value
+            else:
+                variant = EidVariant.MODERN_P256_X32_BE.value
+
         return cls(
             device_id=str(payload["device_id"]),
             canonical_id=str(payload.get("canonical_id") or ""),
+            variant=variant,
+            advertisement_reversed=advertisement_reversed,
             eid_length=int(payload["eid_length"]),
             frame_type=payload.get("frame_type"),
-            scalar_endianness=str(payload.get("scalar_endianness") or "big"),
+            time_basis=str(payload.get("time_basis") or "") or None,
             created_at=int(payload.get("created_at") or int(time.time())),
         )
 
@@ -157,13 +175,14 @@ class GoogleFindMyEIDResolver:
     _lookup: dict[bytes, EIDMatch] = field(init=False, default_factory=dict)
     _lookup_metadata: dict[bytes, dict[str, Any]] = field(init=False, default_factory=dict)
     _known_offsets: dict[str, int] = field(init=False, default_factory=dict)
-    _known_endianness: dict[str, bool] = field(init=False, default_factory=dict)
+    _known_advertisement_reversed: dict[str, bool] = field(init=False, default_factory=dict)
     _known_timebases: dict[str, str] = field(init=False, default_factory=dict)
     _persisted_locks: dict[str, EIDGenerationLock] = field(init=False, default_factory=dict)
     _decryption_status: dict[str, str] = field(init=False, default_factory=dict)
     _last_lock_confirmation: dict[str, int] = field(init=False, default_factory=dict)
     _provisioning_warn_at: dict[str, float] = field(init=False, default_factory=dict)
     _locks: dict[str, EIDGenerationLock] = field(init=False, default_factory=dict)
+    _lock_miss_counts: dict[str, int] = field(init=False, default_factory=dict)
     _store: Store[list[dict[str, Any]] | None] = field(init=False)
     _unsub_interval: CALLBACK_TYPE | None = field(init=False, default=None)
     _unsub_alignment: CALLBACK_TYPE | None = field(init=False, default=None)
@@ -184,8 +203,8 @@ class GoogleFindMyEIDResolver:
 
         if not hasattr(self, "_known_offsets"):
             self._known_offsets = {}
-        if not hasattr(self, "_known_endianness"):
-            self._known_endianness = {}
+        if not hasattr(self, "_known_advertisement_reversed"):
+            self._known_advertisement_reversed = {}
         if not hasattr(self, "_known_timebases"):
             self._known_timebases = {}
         if not hasattr(self, "_persisted_locks"):
@@ -198,6 +217,8 @@ class GoogleFindMyEIDResolver:
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
             self._locks = {}
+        if not hasattr(self, "_lock_miss_counts"):
+            self._lock_miss_counts = {}
 
     def _start_alignment_timer(self) -> None:
         """Schedule the first refresh on the next rotation boundary."""
@@ -248,6 +269,24 @@ class GoogleFindMyEIDResolver:
 
         await self._store.async_save([lock.to_dict() for lock in self._locks.values()])
 
+    def _purge_stale_locks(self, *, now: int) -> None:
+        """Drop expired generation locks to keep cache fresh."""
+
+        expired: list[str] = []
+        for device_id, lock in list(self._locks.items()):
+            if now - lock.created_at > LOCK_TTL_SECONDS:
+                expired.append(device_id)
+        for device_id in expired:
+            self._locks.pop(device_id, None)
+            self._persisted_locks.pop(device_id, None)
+            self._lock_miss_counts.pop(device_id, None)
+            self._known_offsets.pop(device_id, None)
+            self._known_advertisement_reversed.pop(device_id, None)
+            self._known_timebases.pop(device_id, None)
+            self._last_lock_confirmation.pop(device_id, None)
+        if expired:
+            _LOGGER.debug("Purged %d stale EID locks: %s", len(expired), expired)
+
     async def async_refresh(self) -> None:
         """Trigger a cache refresh immediately."""
         if self._refresh_lock.locked():
@@ -261,7 +300,7 @@ class GoogleFindMyEIDResolver:
                 self._pending_refresh = False
                 await self._refresh_cache()
 
-    async def _refresh_cache(self) -> None:
+    async def _refresh_cache(self) -> None:  # noqa: PLR0912
         """Rebuild the EID lookup table for all active devices."""
 
         self._ensure_cache_defaults()
@@ -271,15 +310,16 @@ class GoogleFindMyEIDResolver:
         identities = await self._collect_device_secrets()
 
         now_unix = int(time.time())
-        rotation_start = now_unix - (now_unix % ROTATION_PERIOD)
-        windows = (
-            rotation_start - ROTATION_PERIOD,
-            rotation_start,
-            rotation_start + ROTATION_PERIOD,
-        )
+        self._purge_stale_locks(now=now_unix)
 
         lookup: dict[bytes, EIDMatch] = {}
         lookup_metadata: dict[bytes, dict[str, Any]] = {}
+
+        counter_bases: tuple[tuple[str, str], ...] = (
+            ("unix", "unix"),
+            ("pair_date", "pair_date"),
+            ("secrets_creation_date", "secrets_creation_date"),
+        )
 
         for identity in identities:
             if (
@@ -292,7 +332,14 @@ class GoogleFindMyEIDResolver:
             key_bytes = bytes(identity.identity_key)
             lock = self._locks.get(identity.registry_id)
 
-            def _register_variant(eid_bytes: bytes, name: str, ts: int, *, scalar_endianness: str, reversed_flag: bool) -> None:
+            def _register_variant(
+                eid_bytes: bytes,
+                *,
+                variant: EidVariant,
+                ts: int,
+                time_basis: str,
+                reversed_flag: bool,
+            ) -> None:
                 offset = int(ts - now_unix)
                 match = EIDMatch(
                     device_id=identity.registry_id,
@@ -307,95 +354,63 @@ class GoogleFindMyEIDResolver:
 
                 lookup[eid_bytes] = match
                 lookup_metadata[eid_bytes] = {
-                    "variant": name,
+                    "variant": variant.value,
                     "rotation_timestamp": ts,
                     "time_offset": offset,
-                    "timestamp_basis": "unix",
-                    "scalar_endianness": scalar_endianness,
-                    "is_reversed": reversed_flag,
+                    "timestamp_basis": time_basis,
+                    "advertisement_reversed": reversed_flag,
                 }
 
-            for window_ts in windows:
-                if lock is not None:
+            variants: tuple[EidVariant, ...]
+            if lock is not None:
+                try:
+                    locked_variant = EidVariant(lock.variant)
+                except ValueError:
+                    locked_variant = EidVariant.MODERN_P256_X32_BE
+                variants = (locked_variant,)
+            else:
+                variants = (
+                    EidVariant.LEGACY_SECP160R1_X20_BE,
+                    EidVariant.MODERN_P256_X32_BE,
+                    EidVariant.MODERN_P256_X20_TRUNC_BE,
+                    EidVariant.MODERN_P256_X32_LE_SCALAR,
+                )
+
+            counters: dict[int, str] = {}
+            for basis, label in counter_bases:
+                candidate_value: int | None
+                if basis == "unix":
+                    candidate_value = now_unix
+                elif basis == "pair_date":
+                    candidate_value = identity.pair_date
+                else:
+                    candidate_value = identity.secrets_creation_date
+
+                if isinstance(candidate_value, int):
+                    rotation_start = candidate_value - (candidate_value % ROTATION_PERIOD)
+                    for offset in (-1, 0, 1):
+                        ts = rotation_start + (offset * ROTATION_PERIOD)
+                        counters.setdefault(ts, label)
+
+            for window_ts, time_basis in counters.items():
+                for variant in variants:
                     eid_bytes = self._generate_variant(
                         key_bytes,
-                        timestamp=window_ts,
-                        eid_length=lock.eid_length,
-                        scalar_endianness=lock.scalar_endianness,
+                        time_counter=window_ts,
+                        variant=variant,
                     )
                     _register_variant(
                         eid_bytes,
-                        "locked",
-                        window_ts,
-                        scalar_endianness=lock.scalar_endianness,
+                        variant=variant,
+                        ts=window_ts,
+                        time_basis=time_basis,
                         reversed_flag=False,
                     )
                     _register_variant(
                         eid_bytes[::-1],
-                        "locked",
-                        window_ts,
-                        scalar_endianness=lock.scalar_endianness,
-                        reversed_flag=True,
-                    )
-                else:
-                    legacy_eid = self._generate_variant(
-                        key_bytes,
-                        timestamp=window_ts,
-                        eid_length=LEGACY_EID_LENGTH,
-                        scalar_endianness="big",
-                    )
-                    modern_eid = self._generate_variant(
-                        key_bytes,
-                        timestamp=window_ts,
-                        eid_length=MODERN_EID_LENGTH,
-                        scalar_endianness="big",
-                    )
-                    modern_eid_le = self._generate_variant(
-                        key_bytes,
-                        timestamp=window_ts,
-                        eid_length=MODERN_EID_LENGTH,
-                        scalar_endianness="little",
-                    )
-                    _register_variant(
-                        legacy_eid,
-                        "fhna_secp160r1_rx20",
-                        window_ts,
-                        scalar_endianness="big",
-                        reversed_flag=False,
-                    )
-                    _register_variant(
-                        legacy_eid[::-1],
-                        "fhna_secp160r1_rx20",
-                        window_ts,
-                        scalar_endianness="big",
-                        reversed_flag=True,
-                    )
-                    _register_variant(
-                        modern_eid,
-                        "fhna_secp256r1_rx32",
-                        window_ts,
-                        scalar_endianness="big",
-                        reversed_flag=False,
-                    )
-                    _register_variant(
-                        modern_eid[::-1],
-                        "fhna_secp256r1_rx32",
-                        window_ts,
-                        scalar_endianness="big",
-                        reversed_flag=True,
-                    )
-                    _register_variant(
-                        modern_eid_le,
-                        "fhna_secp256r1_le_rx32",
-                        window_ts,
-                        scalar_endianness="little",
-                        reversed_flag=False,
-                    )
-                    _register_variant(
-                        modern_eid_le[::-1],
-                        "fhna_secp256r1_le_rx32",
-                        window_ts,
-                        scalar_endianness="little",
+                        variant=variant,
+                        ts=window_ts,
+                        time_basis=time_basis,
                         reversed_flag=True,
                     )
 
@@ -407,21 +422,30 @@ class GoogleFindMyEIDResolver:
             len(lookup),
         )
 
+    @staticmethod
+    def _infer_variant_from_length(eid_length: int) -> str:
+        """Infer a reasonable variant string from the observed EID length."""
+
+        if eid_length == LEGACY_EID_LENGTH:
+            return EidVariant.LEGACY_SECP160R1_X20_BE.value
+        if eid_length == MODERN_EID_LENGTH:
+            return EidVariant.MODERN_P256_X32_BE.value
+        return EidVariant.MODERN_P256_X20_TRUNC_BE.value
+
     def _generate_variant(
         self,
         key_bytes: bytes,
         *,
-        timestamp: int,
-        eid_length: int,
-        scalar_endianness: str,
+        time_counter: int,
+        variant: EidVariant,
     ) -> bytes:
         """Generate an EID for a specific profile."""
 
-        if eid_length == LEGACY_EID_LENGTH:
-            return generate_eid(key_bytes, timestamp)
-        if scalar_endianness == "little":
-            return generate_eid_p256_le(key_bytes, timestamp)
-        return generate_eid_p256(key_bytes, timestamp)
+        return generate_eid_variant(
+            key_bytes,
+            time_counter,
+            variant,
+        )
 
     async def _collect_device_secrets(self) -> list[DeviceIdentity]:
         """Retrieve active tracker identities from all loaded coordinators."""
@@ -664,11 +688,23 @@ class GoogleFindMyEIDResolver:
                 continue
 
             if match.device_id not in self._locks:
+                metadata: dict[str, Any] = self._lookup_metadata.get(c) or {}
+                variant_str = str(metadata.get("variant") or "")
+                try:
+                    variant_value = (
+                        variant_str or self._infer_variant_from_length(len(c))
+                    )
+                except Exception:
+                    variant_value = EidVariant.MODERN_P256_X32_BE.value
+                time_basis = metadata.get("timestamp_basis")
                 lock = EIDGenerationLock(
                     device_id=match.device_id,
                     canonical_id=match.canonical_id,
+                    variant=variant_value,
+                    advertisement_reversed=match.is_reversed,
                     eid_length=len(c),
                     frame_type=observed_frame,
+                    time_basis=time_basis if isinstance(time_basis, str) else None,
                 )
                 self._locks[match.device_id] = lock
                 self._persisted_locks[match.device_id] = lock
@@ -686,13 +722,11 @@ class GoogleFindMyEIDResolver:
                         _LOGGER.debug("Failed to schedule lock persistence for %s", match.device_id)
 
             self._known_offsets[match.device_id] = match.time_offset
-            self._known_endianness[match.device_id] = match.is_reversed
+            self._known_advertisement_reversed[match.device_id] = match.is_reversed
 
-            metadata = self._lookup_metadata.get(c)
-            if isinstance(metadata, dict):
-                timestamp_basis = metadata.get("timestamp_basis")
-                if isinstance(timestamp_basis, str):
-                    self._known_timebases[match.device_id] = timestamp_basis
+            timestamp_basis = metadata.get("timestamp_basis")
+            if isinstance(timestamp_basis, str):
+                self._known_timebases[match.device_id] = timestamp_basis
 
             _LOGGER.info(
                 "HIT: device=%s canonical=%s reversed=%s offset=%s eid_prefix=%s",

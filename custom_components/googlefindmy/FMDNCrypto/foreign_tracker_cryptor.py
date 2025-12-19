@@ -38,8 +38,11 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     load_point_class,
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
-    calculate_r,
+    FHNA_K,
+    EidVariant,
+    build_table10_prf_input,
     generate_eid,
+    prf_aes_256_ecb,
 )
 
 # ---------------------------------------------------------------------------
@@ -154,6 +157,16 @@ def decrypt_aes_eax(m_dash: bytes, tag: bytes, nonce: bytes, key: bytes) -> byte
 # ---------------------------------------------------------------------------
 
 
+def calculate_r(identity_key: bytes, time_counter_u32: int) -> int:
+    """Derive the scalar ``r`` for SECP160r1 from the Table 10 PRF output."""
+
+    prf_input = build_table10_prf_input(time_counter_u32, k=FHNA_K)
+    prf_output = prf_aes_256_ecb(identity_key, prf_input)
+    r_dash_int = int.from_bytes(prf_output, byteorder="big", signed=False)
+    order: int = int(_CURVE.order)
+    return (r_dash_int % (order - 1)) + 1
+
+
 def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
     """Encrypt a message for a tracker identity using ECDH + AES-EAX-256.
 
@@ -246,7 +259,11 @@ def decrypt(
     r = calculate_r(identity_key, beacon_time_counter) % order
 
     # R and S points
-    Rx = generate_eid(identity_key, beacon_time_counter)
+    Rx = generate_eid(
+        identity_key,
+        beacon_time_counter,
+        variant=EidVariant.LEGACY_SECP160R1_X20_BE,
+    )
     R = int.from_bytes(Rx, byteorder="big")
     _ = rx_to_ry(R, curve.curve)
     Sx_int = int.from_bytes(Sx, byteorder="big")
@@ -289,7 +306,11 @@ def _get_random_bytes(length: int) -> bytes:
 def _create_random_eid(identity_key: bytes) -> bytes:
     # Uses generate_eid to create a random EID
     beacon_time_counter: int = int.from_bytes(_get_random_bytes(4), byteorder="big")
-    return generate_eid(identity_key, beacon_time_counter)
+    return generate_eid(
+        identity_key,
+        beacon_time_counter,
+        variant=EidVariant.LEGACY_SECP160R1_X20_BE,
+    )
 
 
 async def _async_cli() -> None:  # pragma: no cover - manual testing only

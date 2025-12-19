@@ -117,7 +117,13 @@ def test_register_esp32(monkeypatch) -> None:
     monkeypatch.setattr(module.secrets, "token_bytes", fake_token_bytes)
     monkeypatch.setattr(module.time, "time", lambda: float(fake_time_value))
     monkeypatch.setattr(module, "get_owner_key", lambda: fake_owner_key)
-    monkeypatch.setattr(module, "generate_eid", lambda _eik, _counter: fake_eid)
+    generate_calls: list[tuple[bytes, int, object]] = []
+
+    def fake_generate_eid_variant(eik: bytes, counter: int, variant: object) -> bytes:
+        generate_calls.append((eik, counter, variant))
+        return fake_eid
+
+    monkeypatch.setattr(module, "generate_eid_variant", fake_generate_eid_variant)
     monkeypatch.setattr(module, "encrypt_aes_gcm", fake_encrypt)
     monkeypatch.setattr(module, "flip_bits", fake_flip_bits)
     monkeypatch.setattr(module, "spot_request", fake_spot_request)
@@ -137,6 +143,9 @@ def test_register_esp32(monkeypatch) -> None:
     assert request_instance.ringKey == b"stub-ring"
     assert request_instance.recoveryKey == b"stub-recovery"
     assert request_instance.unwantedTrackingKey == b"stub-tracking"
+    assert generate_calls == [
+        (fake_eik, 0, module.EidVariant.LEGACY_SECP160R1_X20_BE)
+    ]
 
     expected_truncated_eid = fake_eid[:10]
     public_key_entries = request_instance.e2eePublicKeyRegistration.publicKeyIdList.publicKeyIdInfo
@@ -161,4 +170,3 @@ def test_register_esp32(monkeypatch) -> None:
         encrypted_user_secrets.encryptedIdentityKey
         == b"flip-cipher-" + fake_owner_key + fake_eik
     )
-

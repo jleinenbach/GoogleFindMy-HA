@@ -14,7 +14,8 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
-    generate_eid,
+    EidVariant,
+    generate_eid_variant,
 )
 
 
@@ -67,7 +68,7 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(time, "time", lambda: float(now_unix))
 
-    eid = generate_eid(identity_key, base_counter)
+    eid = generate_eid_variant(identity_key, base_counter, EidVariant.LEGACY_SECP160R1_X20_BE)
     payload = bytes([FMDN_FRAME_TYPE]) + eid + b"\x00"
 
     await resolver._refresh_cache()
