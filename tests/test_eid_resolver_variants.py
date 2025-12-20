@@ -117,6 +117,7 @@ async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytes
             EidVariant.MODERN_P256_X32_BE.value,
             EidVariant.MODERN_P256_X20_TRUNC_BE.value,
             EidVariant.MODERN_P256_X32_LE_SCALAR.value,
+            EidVariant.MODERN_P256_X20_TRUNC_LE.value,
         }
     )
 

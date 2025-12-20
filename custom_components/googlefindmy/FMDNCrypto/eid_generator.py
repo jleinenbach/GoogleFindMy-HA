@@ -53,6 +53,7 @@ class EidVariant(str, Enum):
     MODERN_P256_X32_BE = "modern_p256_x32_be"
     MODERN_P256_X20_TRUNC_BE = "modern_p256_x20_trunc_be"
     MODERN_P256_X32_LE_SCALAR = "modern_p256_x32_le_scalar"
+    MODERN_P256_X20_TRUNC_LE = "modern_p256_x20_trunc_le"
 
 
 def _normalize_time_counter(time_counter_u32: int, *, strict: bool) -> int:
@@ -251,6 +252,16 @@ def generate_eid_variant(
             strict=strict,
         )
         return _serialize_p256_x(scalar)
+
+    if variant is EidVariant.MODERN_P256_X20_TRUNC_LE:
+        full = generate_eid_variant(
+            eik,
+            counter_u32,
+            EidVariant.MODERN_P256_X32_LE_SCALAR,
+            k=k,
+            strict=strict,
+        )
+        return full[:LEGACY_EID_LENGTH]
 
     raise ValueError(f"Unsupported EID variant: {variant}")
 
