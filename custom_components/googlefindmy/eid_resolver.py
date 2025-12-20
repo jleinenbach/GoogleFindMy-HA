@@ -13,7 +13,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
@@ -549,21 +549,45 @@ class GoogleFindMyEIDResolver:
 
     async def _normalize_identities(
         self,
-        identities: list[DeviceIdentity],
+        identities: Sequence[DeviceIdentity | Mapping[str, Any]],
         *,
         cache: TokenCache | None,
     ) -> list[DeviceIdentity]:
         """Ensure each device identity has a usable plaintext key."""
         normalized: list[DeviceIdentity] = []
         for identity in identities:
-            if identity.identity_key is None:
-                result = await self._try_decrypt_identity_key(identity, cache=cache)
-                if result is None:
+            if isinstance(identity, Mapping):
+                registry_id = identity.get("registry_id")
+                canonical_id = identity.get("canonical_id")
+                if not isinstance(registry_id, str) or not isinstance(canonical_id, str):
                     continue
-                normalized.append(replace(identity, identity_key=result.key))
+
+                target_identity = DeviceIdentity(
+                    registry_id=registry_id,
+                    canonical_id=canonical_id,
+                    identity_key=identity.get("identity_key"),
+                    encrypted_identity_key=identity.get("encrypted_identity_key"),
+                    owner_key_version=identity.get("owner_key_version"),
+                    device_type=identity.get("device_type"),
+                    config_entry_id=identity.get("config_entry_id"),
+                    fast_pair_model_id=identity.get("fast_pair_model_id"),
+                    pair_date=identity.get("pair_date"),
+                    secrets_creation_date=identity.get("secrets_creation_date"),
+                    time_anchors_debug=identity.get("time_anchors_debug"),
+                )
+            elif isinstance(identity, DeviceIdentity):
+                target_identity = identity
+            else:
                 continue
 
-            normalized.append(identity)
+            if target_identity.identity_key is None:
+                result = await self._try_decrypt_identity_key(target_identity, cache=cache)
+                if result is None:
+                    continue
+                normalized.append(replace(target_identity, identity_key=result.key))
+                continue
+
+            normalized.append(target_identity)
 
         return normalized
 

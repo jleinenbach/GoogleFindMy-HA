@@ -1,3 +1,4 @@
+# tests/test_platinum_compliance.py
 """Automated compliance checks for the Platinum quality level."""
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
         "documentation",
         "integration_type",
         "iot_class",
+        "quality_scale",
         "issue_tracker",
         "loggers",
         "requirements",
@@ -37,6 +39,7 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     assert manifest["integration_type"] == "hub"
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["version"] == INTEGRATION_VERSION
+    assert manifest["quality_scale"] == "platinum"
     assert "recorder" in manifest.get("after_dependencies", [])
     assert "http" in manifest.get("dependencies", [])
     assert "custom_components.googlefindmy" in manifest.get("loggers", [])
