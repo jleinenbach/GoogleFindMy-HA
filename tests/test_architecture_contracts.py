@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import fields
 
 import pytest
 
@@ -27,7 +28,7 @@ def test_device_identity_definition() -> None:
     """Ensure DeviceIdentity can carry required anchor metadata."""
 
     required_fields = {"pair_date", "secrets_creation_date"}
-    available_fields = tuple(getattr(DeviceIdentity, "_fields", ()))
+    available_fields = tuple(field.name for field in fields(DeviceIdentity))
     missing = required_fields.difference(available_fields)
 
     assert not missing, (
@@ -41,7 +42,7 @@ def test_decoder_output_fits_identity() -> None:
     """Ensure decoder output keys align with DeviceIdentity constructor."""
 
     stub_payload = {key: None for key in _DEVICE_STUB_KEYS}
-    identity_fields = set(getattr(DeviceIdentity, "_fields", ()))
+    identity_fields = {field.name for field in fields(DeviceIdentity)}
     shared_fields = identity_fields.intersection(stub_payload)
 
     base_kwargs = {

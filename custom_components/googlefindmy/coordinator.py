@@ -67,7 +67,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -693,19 +693,6 @@ class DeviceIdentity:
     registry_id: str
     canonical_id: str
     identity_key: bytes | None
-    _fields: ClassVar[tuple[str, ...]] = (
-        "registry_id",
-        "canonical_id",
-        "identity_key",
-        "encrypted_identity_key",
-        "owner_key_version",
-        "device_type",
-        "config_entry_id",
-        "fast_pair_model_id",
-        "pair_date",
-        "secrets_creation_date",
-        "time_anchors_debug",
-    )
     encrypted_identity_key: bytes | None = None
     owner_key_version: int | None = None
     device_type: int | None = None
