@@ -377,10 +377,10 @@ class GoogleFindMyEIDResolver:
         lookup_metadata: dict[bytes, dict[str, Any]] = {}
 
         counter_bases: tuple[tuple[str, str], ...] = (
-            ("unix", "unix"),
-            ("pair_date", "pair_date"),
             ("secrets_creation_date", "secrets_creation_date"),
+            ("pair_date", "pair_date"),
             ("entity_time", "entity_time"),
+            ("unix", "unix"),
         )
 
         max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
@@ -424,8 +424,22 @@ class GoogleFindMyEIDResolver:
                     is_reversed=reversed_flag,
                 )
                 existing = lookup.get(eid_bytes)
+                metadata = lookup_metadata.get(eid_bytes)
+                existing_bases: set[str] | None = None
+                if metadata is not None:
+                    existing_bases = set(metadata.get("timestamp_bases") or ())
+                    if (basis := metadata.get("timestamp_basis")) and isinstance(
+                        basis, str
+                    ):
+                        existing_bases.add(basis)
+                    existing_bases.add(time_basis)
+
                 if existing is not None and abs(existing.time_offset) <= abs(offset):
+                    if metadata is not None and existing_bases is not None:
+                        metadata["timestamp_bases"] = existing_bases
                     return
+
+                base_set = existing_bases or {time_basis}
 
                 lookup[eid_bytes] = match
                 lookup_metadata[eid_bytes] = {
@@ -433,6 +447,7 @@ class GoogleFindMyEIDResolver:
                     "rotation_timestamp": ts,
                     "time_offset": offset,
                     "timestamp_basis": time_basis,
+                    "timestamp_bases": base_set,
                     "advertisement_reversed": reversed_flag,
                 }
 
@@ -452,17 +467,31 @@ class GoogleFindMyEIDResolver:
                     EidVariant.MODERN_P256_X20_TRUNC_LE,
                 )
 
-            counters: dict[int, str] = {}
+            counter_windows: list[tuple[int, str]] = []
             for basis, label in counter_bases:
-                candidate_value: int | None
+                candidate_value: int | None = None
                 if basis == "unix":
                     candidate_value = now_unix
                 elif basis == "pair_date":
-                    candidate_value = identity.pair_date
+                    anchor_value = (
+                        _normalize_counter_candidate(identity.pair_date, basis=basis)
+                        if isinstance(identity.pair_date, int)
+                        else None
+                    )
+                    if isinstance(anchor_value, int):
+                        candidate_value = now_unix - anchor_value
                 elif basis == "entity_time":
                     candidate_value = getattr(identity, "entity_time", None)
                 else:
-                    candidate_value = identity.secrets_creation_date
+                    anchor_value = (
+                        _normalize_counter_candidate(
+                            identity.secrets_creation_date, basis=basis
+                        )
+                        if isinstance(identity.secrets_creation_date, int)
+                        else None
+                    )
+                    if isinstance(anchor_value, int):
+                        candidate_value = now_unix - anchor_value
 
                 normalized = (
                     _normalize_counter_candidate(candidate_value, basis=basis)
@@ -486,9 +515,9 @@ class GoogleFindMyEIDResolver:
                 ):
                     if ts < 0 or ts > FHNA_COUNTER_MASK:
                         continue
-                    counters.setdefault(ts, label)
+                    counter_windows.append((ts, label))
 
-            for window_ts, time_basis in counters.items():
+            for window_ts, time_basis in counter_windows:
                 for variant in variants:
                     try:
                         eid_bytes = self._generate_variant(

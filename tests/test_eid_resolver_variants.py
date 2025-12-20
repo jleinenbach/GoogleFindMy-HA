@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from types import SimpleNamespace
 
@@ -27,9 +28,14 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
     _ = monkeypatch
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
-    resolver.hass = SimpleNamespace(async_create_task=lambda coro: asyncio.create_task(coro), data={})
+    resolver.hass = SimpleNamespace(
+        async_create_task=lambda coro: asyncio.create_task(coro),
+        data={},
+    )
+
     async def _async_noop(payload=None):
         return None
+
     resolver._lookup = {}
     resolver._lookup_metadata = {}
     resolver._known_offsets = {}
@@ -86,6 +92,65 @@ def test_iter_rotation_windows_skips_negative_neighbors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_refresh_cache_uses_relative_timebases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Relative bases must use elapsed time since the anchor."""
+
+    resolver = _build_resolver(monkeypatch)
+    base_now = 10_000
+    pair_date_anchor = 100
+    secrets_anchor = 250
+    identity = DeviceIdentity(
+        registry_id="registry-id",
+        canonical_id="canonical-id",
+        identity_key=b"\x05" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+        pair_date=pair_date_anchor,
+        secrets_creation_date=secrets_anchor,
+    )
+
+    async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
+        return [identity]
+
+    monkeypatch.setattr(time, "time", lambda: float(base_now))
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
+
+    await resolver._refresh_cache()
+
+    def _collect_windows(label: str) -> list[int]:
+        return [
+            meta["rotation_timestamp"]
+            for meta in resolver._lookup_metadata.values()
+            if label in meta.get("timestamp_bases", {meta["timestamp_basis"]})
+        ]
+
+    pair_date_windows = _collect_windows("pair_date")
+    secrets_windows = _collect_windows("secrets_creation_date")
+
+    def _expected_range(anchor: int) -> tuple[int, int]:
+        provisioning_counter = max(0, base_now - anchor)
+        drift_seconds = provisioning_counter * 0.00005
+        drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
+        max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
+        total_window = min(3 + drift_windows, max_window)
+        elapsed = base_now - anchor
+        rotation_start = elapsed - (elapsed % ROTATION_PERIOD)
+        window_delta = total_window * ROTATION_PERIOD
+        return rotation_start - window_delta, rotation_start + window_delta
+
+    pair_min, pair_max = _expected_range(pair_date_anchor)
+    secrets_min, secrets_max = _expected_range(secrets_anchor)
+
+    assert pair_date_windows
+    assert secrets_windows
+    assert all(pair_min <= ts <= pair_max for ts in pair_date_windows)
+    assert all(secrets_min <= ts <= secrets_max for ts in secrets_windows)
+
+
+@pytest.mark.asyncio
 async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytest.MonkeyPatch) -> None:
     """Cache refresh should cover both curves, truncation, and byte-order options."""
 
@@ -121,7 +186,9 @@ async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytes
         }
     )
 
-    bases = {meta["timestamp_basis"] for meta in resolver._lookup_metadata.values()}
+    bases = set[str]()
+    for meta in resolver._lookup_metadata.values():
+        bases.update(meta.get("timestamp_bases", {meta["timestamp_basis"]}))
     assert {"unix", "pair_date", "secrets_creation_date"}.issubset(bases)
 
 
