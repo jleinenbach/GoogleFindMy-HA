@@ -36,6 +36,7 @@ GOLDEN_VECTORS: dict[EidVariant, str] = {
     EidVariant.MODERN_P256_X32_BE: "72d4e4be2c6f3c1c5328f10d884ab58e0a474b06584d9c893b1e099853289cd9",
     EidVariant.MODERN_P256_X20_TRUNC_BE: "72d4e4be2c6f3c1c5328f10d884ab58e0a474b06",
     EidVariant.MODERN_P256_X32_LE_SCALAR: "acc9009d7630b76c89cfb17f126fe640508ba7e184528341cbdb217053dd4050",
+    EidVariant.MODERN_P256_X20_TRUNC_LE: "acc9009d7630b76c89cfb17f126fe640508ba7e1",
 }
 
 
@@ -138,7 +139,7 @@ def test_generate_eid_variants_match_golden_vectors() -> None:
         eid = generate_eid_variant(SAMPLE_EIK, SAMPLE_COUNTER, variant)
         assert eid.hex() == expected_hex
 
-        if variant is EidVariant.LEGACY_SECP160R1_X20_BE or variant is EidVariant.MODERN_P256_X20_TRUNC_BE:
+        if variant in (EidVariant.LEGACY_SECP160R1_X20_BE, EidVariant.MODERN_P256_X20_TRUNC_BE, EidVariant.MODERN_P256_X20_TRUNC_LE):
             assert len(eid) == LEGACY_EID_LENGTH
         else:
             assert len(eid) == MODERN_EID_LENGTH

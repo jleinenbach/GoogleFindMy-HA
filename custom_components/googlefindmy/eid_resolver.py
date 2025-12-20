@@ -154,7 +154,9 @@ class EIDGenerationLock:
         if not variant:
             scalar_endianness = str(payload.get("scalar_endianness") or "big")
             length = int(payload["eid_length"])
-            if length == LEGACY_EID_LENGTH:
+            if length == LEGACY_EID_LENGTH and scalar_endianness == "little":
+                variant = EidVariant.MODERN_P256_X20_TRUNC_LE.value
+            elif length == LEGACY_EID_LENGTH:
                 variant = EidVariant.LEGACY_SECP160R1_X20_BE.value
             elif scalar_endianness == "little":
                 variant = EidVariant.MODERN_P256_X32_LE_SCALAR.value
@@ -403,6 +405,7 @@ class GoogleFindMyEIDResolver:
                     EidVariant.MODERN_P256_X32_BE,
                     EidVariant.MODERN_P256_X20_TRUNC_BE,
                     EidVariant.MODERN_P256_X32_LE_SCALAR,
+                    EidVariant.MODERN_P256_X20_TRUNC_LE,
                 )
 
             counters: dict[int, str] = {}
