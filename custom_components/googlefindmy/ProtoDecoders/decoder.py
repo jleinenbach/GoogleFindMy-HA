@@ -831,18 +831,39 @@ def get_devices_with_location(
 
             # Anchor timestamps used for relative EID timebases
             # - pairDate is a scalar proto3 field: default 0 means "unset"
-            pair_date = _normalize_timestamp(getattr(registration, "pairDate", None))
+            raw_pair_date: Any = getattr(registration, "pairDate", None)
+            try:
+                if isinstance(raw_pair_date, (int, float)) and raw_pair_date > 0:
+                    pair_date = int(raw_pair_date)
+            except (TypeError, ValueError):
+                pair_date = None
 
             # - creationDate is a Timestamp message: avoid treating an unset/default Timestamp as epoch (0)
-            creation_date_obj: Any | None = None
+            raw_creation_date_seconds: Any = None
             try:
                 if encrypted_user_secrets.HasField("creationDate"):
-                    creation_date_obj = getattr(encrypted_user_secrets, "creationDate", None)
+                    creation_date_obj: Any | None = getattr(
+                        encrypted_user_secrets, "creationDate", None
+                    )
+                    raw_creation_date_seconds = getattr(
+                        creation_date_obj, "seconds", None
+                    )
             except (ValueError, AttributeError):
-                # Fallback for unexpected protobuf implementations
                 creation_date_obj = getattr(encrypted_user_secrets, "creationDate", None)
+                raw_creation_date_seconds = (
+                    getattr(creation_date_obj, "seconds", None)
+                    if creation_date_obj is not None
+                    else None
+                )
 
-            secrets_creation_date = _normalize_timestamp(creation_date_obj)
+            try:
+                if (
+                    isinstance(raw_creation_date_seconds, (int, float))
+                    and raw_creation_date_seconds > 0
+                ):
+                    secrets_creation_date = int(raw_creation_date_seconds)
+            except (TypeError, ValueError):
+                secrets_creation_date = None
 
         # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
         if not encrypted_identity_key:
@@ -914,6 +935,8 @@ def get_devices_with_location(
             row["owner_key_version"] = owner_key_version
             row["device_type"] = device_type
             row["fast_pair_model_id"] = fast_pair_model_id
+            row["pair_date"] = pair_date
+            row["secrets_creation_date"] = secrets_creation_date
             # Apply anchor/metadata union after identity fields are set (and after location merge below)
 
             if best:
