@@ -431,8 +431,8 @@ class GoogleFindMyEIDResolver:
                 for ts in iter_rotation_windows(
                     normalized,
                     rotation_period=ROTATION_PERIOD,
-                    window_range=(0,),
-                    include_neighbors=True,
+                    window_range=range(-3, 4),
+                    include_neighbors=False,
                 ):
                     if ts < 0 or ts > FHNA_COUNTER_MASK:
                         continue
