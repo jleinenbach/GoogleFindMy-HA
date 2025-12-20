@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -352,6 +353,8 @@ class GoogleFindMyEIDResolver:
             ("entity_time", "entity_time"),
         )
 
+        max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
+
         for identity in identities:
             if (
                 not identity.config_entry_id
@@ -362,6 +365,12 @@ class GoogleFindMyEIDResolver:
 
             key_bytes = bytes(identity.identity_key)
             lock = self._locks.get(identity.registry_id)
+            provisioning_counter = 0
+            if isinstance(identity.pair_date, int):
+                provisioning_counter = max(0, now_unix - identity.pair_date)
+            drift_seconds = provisioning_counter * 0.00005
+            drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
+            total_window = min(3 + drift_windows, max_window)
 
             def _register_variant(
                 eid_bytes: bytes,
@@ -431,7 +440,7 @@ class GoogleFindMyEIDResolver:
                 for ts in iter_rotation_windows(
                     normalized,
                     rotation_period=ROTATION_PERIOD,
-                    window_range=range(-3, 4),
+                    window_range=range(-total_window, total_window + 1),
                     include_neighbors=False,
                 ):
                     if ts < 0 or ts > FHNA_COUNTER_MASK:
