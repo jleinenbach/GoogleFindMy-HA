@@ -6,6 +6,7 @@ from dataclasses import fields
 
 import pytest
 
+from custom_components.googlefindmy import eid_resolver
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.ProtoDecoders.decoder import _DEVICE_STUB_KEYS
 
@@ -86,3 +87,13 @@ def test_decoder_output_fits_identity() -> None:
             "`coordinator.py`. You renamed a key in one place but not the "
             "other."
         )
+
+
+def test_resolver_safety_constants_exist() -> None:
+    """Ensure Deep Scan safety constants remain present and conservative."""
+
+    value = getattr(eid_resolver, "MIN_UNIX_WINDOW_SIZE", None)
+    assert isinstance(value, int) and value >= 128, (
+        "CRITICAL SAFETY: The Deep Scan constant `MIN_UNIX_WINDOW_SIZE` is "
+        "missing or dangerously small."
+    )

@@ -23,6 +23,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
@@ -60,6 +61,7 @@ MODERN_FRAME_TYPE = 0x41
 RAW_HEADER_LENGTH = 1
 SERVICE_DATA_OFFSET = 8
 AESGCM_NONCE_LENGTH = 12
+MIN_UNIX_WINDOW_SIZE = 128
 
 EID_LENGTH = LEGACY_EID_LENGTH
 LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -398,7 +400,12 @@ class GoogleFindMyEIDResolver:
                 provisioning_counter = max(0, now_unix - identity.pair_date)
             drift_seconds = provisioning_counter * 0.00005
             drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
-            total_window = min(3 + drift_windows, max_window)
+            tz_offset = dt_util.now().utcoffset()
+            tz_windows = (
+                math.ceil(abs(tz_offset.total_seconds()) / ROTATION_PERIOD)
+                if tz_offset
+                else 0
+            )
 
             def _register_variant(
                 eid_bytes: bytes,
@@ -464,6 +471,12 @@ class GoogleFindMyEIDResolver:
                 )
                 if normalized is None:
                     continue
+
+                if basis == "unix":
+                    smart_window = 3 + drift_windows + tz_windows
+                    total_window = max(MIN_UNIX_WINDOW_SIZE, smart_window)
+                else:
+                    total_window = min(3 + drift_windows, max_window)
 
                 for ts in iter_rotation_windows(
                     normalized,
