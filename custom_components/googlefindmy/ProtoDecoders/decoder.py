@@ -254,9 +254,13 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "id",
     "device_id",
     "encrypted_identity_key",
+    "encrypted_account_key",
+    "public_key_address",
     "owner_key_version",
     "device_type",
     "fast_pair_model_id",
+    "manufacturer",
+    "model",
     "latitude",
     "longitude",
     "altitude",
@@ -283,9 +287,13 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "id": canonic_id,
         "device_id": canonic_id,
         "encrypted_identity_key": None,
+        "encrypted_account_key": None,
+        "public_key_address": None,
         "owner_key_version": None,
         "device_type": None,
         "fast_pair_model_id": None,
+        "manufacturer": None,
+        "model": None,
         "latitude": None,
         "longitude": None,
         "altitude": None,
@@ -762,8 +770,12 @@ def get_devices_with_location(
         owner_key_version = None
         device_type = None
         fast_pair_model_id: str | None = None
+        manufacturer: str | None = None
+        model: str | None = None
         pair_date: int | None = None
         secrets_creation_date: int | None = None
+        encrypted_account_key: str | None = None
+        public_key_address: str | None = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -829,6 +841,16 @@ def get_devices_with_location(
                 except UnicodeDecodeError:
                     fast_pair_model_id = raw_fast_pair_model_id.hex()
 
+            raw_manufacturer = getattr(registration, "manufacturer", None)
+            if isinstance(raw_manufacturer, str):
+                raw_manufacturer = raw_manufacturer.strip()
+                manufacturer = raw_manufacturer or None
+
+            raw_model = getattr(registration, "model", None)
+            if isinstance(raw_model, str):
+                raw_model = raw_model.strip()
+                model = raw_model or None
+
             # Anchor timestamps used for relative EID timebases
             # - pairDate is a scalar proto3 field: default 0 means "unset"
             raw_pair_date: Any = getattr(registration, "pairDate", None)
@@ -864,6 +886,22 @@ def get_devices_with_location(
                     secrets_creation_date = int(raw_creation_date_seconds)
             except (TypeError, ValueError):
                 secrets_creation_date = None
+
+            raw_encrypted_account_key = getattr(
+                encrypted_user_secrets, "encryptedAccountKey", None
+            )
+            if isinstance(raw_encrypted_account_key, (bytes, bytearray)) and (
+                raw_encrypted_account_key
+            ):
+                encrypted_account_key = bytes(raw_encrypted_account_key).hex()
+
+            raw_public_key_address = getattr(
+                encrypted_user_secrets, "encryptedSha256AccountKeyPublicAddress", None
+            )
+            if isinstance(raw_public_key_address, (bytes, bytearray)) and (
+                raw_public_key_address
+            ):
+                public_key_address = bytes(raw_public_key_address).hex()
 
         # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
         if not encrypted_identity_key:
@@ -935,8 +973,12 @@ def get_devices_with_location(
             row["owner_key_version"] = owner_key_version
             row["device_type"] = device_type
             row["fast_pair_model_id"] = fast_pair_model_id
+            row["manufacturer"] = manufacturer
+            row["model"] = model
             row["pair_date"] = pair_date
             row["secrets_creation_date"] = secrets_creation_date
+            row["encrypted_account_key"] = encrypted_account_key
+            row["public_key_address"] = public_key_address
             # Apply anchor/metadata union after identity fields are set (and after location merge below)
 
             if best:

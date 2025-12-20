@@ -119,6 +119,28 @@ def iter_rotation_windows(
     return tuple(dict.fromkeys(windows))
 
 
+def _normalize_optional_string(value: object) -> str | None:
+    """Return a trimmed string or ``None`` when empty or missing."""
+
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return None
+
+
+def _normalize_encrypted_blob(value: object) -> bytes | None:
+    """Normalize encrypted payloads encoded as bytes or hex strings."""
+
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str):
+        try:
+            return bytes.fromhex(value)
+        except ValueError:
+            return None
+    return None
+
+
 @dataclass(slots=True)
 class EIDGenerationLock:
     """Persisted per-device generation profile."""
@@ -204,11 +226,17 @@ class GoogleFindMyEIDResolver:
 
     hass: HomeAssistant
     _lookup: dict[bytes, EIDMatch] = field(init=False, default_factory=dict)
-    _lookup_metadata: dict[bytes, dict[str, Any]] = field(init=False, default_factory=dict)
+    _lookup_metadata: dict[bytes, dict[str, Any]] = field(
+        init=False, default_factory=dict
+    )
     _known_offsets: dict[str, int] = field(init=False, default_factory=dict)
-    _known_advertisement_reversed: dict[str, bool] = field(init=False, default_factory=dict)
+    _known_advertisement_reversed: dict[str, bool] = field(
+        init=False, default_factory=dict
+    )
     _known_timebases: dict[str, str] = field(init=False, default_factory=dict)
-    _persisted_locks: dict[str, EIDGenerationLock] = field(init=False, default_factory=dict)
+    _persisted_locks: dict[str, EIDGenerationLock] = field(
+        init=False, default_factory=dict
+    )
     _decryption_status: dict[str, str] = field(init=False, default_factory=dict)
     _last_lock_confirmation: dict[str, int] = field(init=False, default_factory=dict)
     _provisioning_warn_at: dict[str, float] = field(init=False, default_factory=dict)
@@ -554,13 +582,27 @@ class GoogleFindMyEIDResolver:
         cache: TokenCache | None,
     ) -> list[DeviceIdentity]:
         """Ensure each device identity has a usable plaintext key."""
+
         normalized: list[DeviceIdentity] = []
         for identity in identities:
             if isinstance(identity, Mapping):
                 registry_id = identity.get("registry_id")
                 canonical_id = identity.get("canonical_id")
-                if not isinstance(registry_id, str) or not isinstance(canonical_id, str):
+                if not isinstance(registry_id, str) or not isinstance(
+                    canonical_id, str
+                ):
                     continue
+
+                manufacturer = _normalize_optional_string(identity.get("manufacturer"))
+                model = _normalize_optional_string(identity.get("model"))
+                encrypted_account_key = _normalize_encrypted_blob(
+                    identity.get("encrypted_account_key")
+                    or identity.get("encryptedAccountKey")
+                )
+                public_key_address = _normalize_encrypted_blob(
+                    identity.get("public_key_address")
+                    or identity.get("encryptedSha256AccountKeyPublicAddress")
+                )
 
                 target_identity = DeviceIdentity(
                     registry_id=registry_id,
@@ -571,8 +613,12 @@ class GoogleFindMyEIDResolver:
                     device_type=identity.get("device_type"),
                     config_entry_id=identity.get("config_entry_id"),
                     fast_pair_model_id=identity.get("fast_pair_model_id"),
+                    manufacturer=manufacturer,
+                    model=model,
                     pair_date=identity.get("pair_date"),
                     secrets_creation_date=identity.get("secrets_creation_date"),
+                    encrypted_account_key=encrypted_account_key,
+                    public_key_address=public_key_address,
                     time_anchors_debug=identity.get("time_anchors_debug"),
                 )
             elif isinstance(identity, DeviceIdentity):
@@ -581,7 +627,9 @@ class GoogleFindMyEIDResolver:
                 continue
 
             if target_identity.identity_key is None:
-                result = await self._try_decrypt_identity_key(target_identity, cache=cache)
+                result = await self._try_decrypt_identity_key(
+                    target_identity, cache=cache
+                )
                 if result is None:
                     continue
                 normalized.append(replace(target_identity, identity_key=result.key))
@@ -634,7 +682,9 @@ class GoogleFindMyEIDResolver:
                     else encrypted_identity_key
                 )
                 try:
-                    decrypted = await asyncio.to_thread(decrypt_eik, wrapping_key, candidate_key)
+                    decrypted = await asyncio.to_thread(
+                        decrypt_eik, wrapping_key, candidate_key
+                    )
                 except InvalidTag:
                     envelope = self._unwrap_aesgcm_envelope(
                         envelope=candidate_key,
@@ -644,7 +694,9 @@ class GoogleFindMyEIDResolver:
                         aad_value=identity.registry_id,
                     )
                     if envelope is not None:
-                        self._decryption_status[identity.registry_id] = envelope.metadata.get("status", "")
+                        self._decryption_status[identity.registry_id] = (
+                            envelope.metadata.get("status", "")
+                        )
                         return envelope
                     continue
                 except Exception:  # noqa: BLE001
@@ -705,7 +757,9 @@ class GoogleFindMyEIDResolver:
 
         async def _fetch(*, force_refresh: bool) -> OwnerKeyInfo | None:
             try:
-                return await async_get_owner_key(cache=cache, force_refresh=force_refresh)
+                return await async_get_owner_key(
+                    cache=cache, force_refresh=force_refresh
+                )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
                     "Failed to retrieve owner key for %s (force_refresh=%s): %s",
@@ -756,7 +810,10 @@ class GoogleFindMyEIDResolver:
                 )
                 return None
 
-            _LOGGER.debug("RESOLVER NOT READY: empty cache; scheduling refresh for prefix=%s", eid_prefix)
+            _LOGGER.debug(
+                "RESOLVER NOT READY: empty cache; scheduling refresh for prefix=%s",
+                eid_prefix,
+            )
             refresh = getattr(self, "async_refresh", None)
             create_task = getattr(self.hass, "async_create_task", None)
             if callable(refresh) and callable(create_task):
@@ -781,8 +838,8 @@ class GoogleFindMyEIDResolver:
                 metadata: dict[str, Any] = self._lookup_metadata.get(c) or {}
                 variant_str = str(metadata.get("variant") or "")
                 try:
-                    variant_value = (
-                        variant_str or self._infer_variant_from_length(len(c))
+                    variant_value = variant_str or self._infer_variant_from_length(
+                        len(c)
                     )
                 except Exception:
                     variant_value = EidVariant.MODERN_P256_X32_BE.value
@@ -809,7 +866,10 @@ class GoogleFindMyEIDResolver:
                         elif asyncio.iscoroutine(scheduled):
                             asyncio.create_task(scheduled)
                     except Exception:  # pragma: no cover - defensive
-                        _LOGGER.debug("Failed to schedule lock persistence for %s", match.device_id)
+                        _LOGGER.debug(
+                            "Failed to schedule lock persistence for %s",
+                            match.device_id,
+                        )
 
             self._known_offsets[match.device_id] = match.time_offset
             self._known_advertisement_reversed[match.device_id] = match.is_reversed
@@ -828,7 +888,9 @@ class GoogleFindMyEIDResolver:
             )
             return match
 
-        _LOGGER.debug("RESOLVER MISS: prefix=%s cache_size=%d", eid_prefix, len(self._lookup))
+        _LOGGER.debug(
+            "RESOLVER MISS: prefix=%s cache_size=%d", eid_prefix, len(self._lookup)
+        )
         return None
 
     def _extract_candidates(self, payload: bytes) -> tuple[list[bytes], int | None]:
@@ -846,18 +908,35 @@ class GoogleFindMyEIDResolver:
             frame_type = payload[7]
             if frame_type == FMDN_FRAME_TYPE:
                 observed_frame = frame_type
-                candidates.append(payload[SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH])
-            elif frame_type == MODERN_FRAME_TYPE and length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH:
+                candidates.append(
+                    payload[
+                        SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH
+                    ]
+                )
+            elif (
+                frame_type == MODERN_FRAME_TYPE
+                and length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH
+            ):
                 observed_frame = frame_type
-                candidates.append(payload[SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + MODERN_EID_LENGTH])
+                candidates.append(
+                    payload[
+                        SERVICE_DATA_OFFSET : SERVICE_DATA_OFFSET + MODERN_EID_LENGTH
+                    ]
+                )
 
         if not candidates and length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH:
             frame_type = payload[0]
             if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
                 observed_frame = frame_type
-                expected_len = LEGACY_EID_LENGTH if frame_type == FMDN_FRAME_TYPE else MODERN_EID_LENGTH
+                expected_len = (
+                    LEGACY_EID_LENGTH
+                    if frame_type == FMDN_FRAME_TYPE
+                    else MODERN_EID_LENGTH
+                )
                 if length >= RAW_HEADER_LENGTH + expected_len:
-                    candidates.append(payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + expected_len])
+                    candidates.append(
+                        payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + expected_len]
+                    )
 
         if not candidates and length > LEGACY_EID_LENGTH:
             if (

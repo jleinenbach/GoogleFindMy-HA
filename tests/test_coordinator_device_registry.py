@@ -1120,7 +1120,11 @@ def test_frozen_registry_removes_hub_link_with_frozenset(
 
     assert created == 1
     assert frozen_registry.updated
-    removal_payload = frozen_registry.updated[-1]
+    removal_payload = next(
+        payload
+        for payload in frozen_registry.updated
+        if payload["remove_config_entry_id"] == entry.entry_id
+    )
     assert removal_payload["remove_config_entry_id"] == entry.entry_id
     assert removal_payload["remove_config_subentry_id"] is None
 
@@ -1288,6 +1292,50 @@ def test_existing_device_name_refresh_does_not_readd_hub_link(
     assert payload["remove_config_entry_id"] is None
     assert existing.via_device_id is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
+
+
+def test_device_registry_info_is_updated(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Tracker devices update manufacturer/model from decoded metadata."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-meta")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._service_device_id = "svc-device-1"
+
+    existing = _FakeDeviceEntry(
+        identifiers={(DOMAIN, f"{entry.entry_id}:tracker-1")},
+        config_entry_id=entry.entry_id,
+        name="Tracker One",
+        manufacturer="Google",
+        model="Find My Device",
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    fake_registry.devices.append(existing)
+
+    devices = [
+        {
+            "id": "tracker-1",
+            "name": "Tracker One",
+            "manufacturer": "Acme Corp",
+            "model": "Road Runner 1",
+        }
+    ]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    assert fake_registry.updated
+    payload = fake_registry.updated[-1]
+    assert payload["manufacturer"] == "Acme Corp"
+    assert payload["model"] == "Road Runner 1"
+
+    refreshed = fake_registry.async_get(existing.id)
+    assert refreshed is not None
+    assert refreshed.manufacturer == "Acme Corp"
+    assert refreshed.model == "Road Runner 1"
 
 
 def test_stub_registry_tracks_mapping_view(stub_registry: Any) -> None:
