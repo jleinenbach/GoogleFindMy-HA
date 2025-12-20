@@ -13,13 +13,21 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import _DEVICE_STUB_KE
 def test_decoder_exports_required_keys() -> None:
     """Ensure the decoder promises to emit required anchor keys."""
 
-    required_keys = {"pair_date", "secrets_creation_date"}
+    required_keys = {
+        "pair_date",
+        "secrets_creation_date",
+        "manufacturer",
+        "model",
+        "encrypted_account_key",
+        "public_key_address",
+    }
     missing_keys = required_keys.difference(_DEVICE_STUB_KEYS)
 
     assert not missing_keys, (
         "CRITICAL CONTRACT VIOLATION: The decoder is no longer exporting "
-        "`pair_date` or `secrets_creation_date`. The EID resolver relies on "
-        "these keys. Please add them back to `_DEVICE_STUB_KEYS` in "
+        "`pair_date`, `secrets_creation_date`, or device metadata keys. The "
+        "EID resolver relies on these keys. Please add them back to "
+        "`_DEVICE_STUB_KEYS` in "
         "`decoder.py`."
     )
 
@@ -27,14 +35,22 @@ def test_decoder_exports_required_keys() -> None:
 def test_device_identity_definition() -> None:
     """Ensure DeviceIdentity can carry required anchor metadata."""
 
-    required_fields = {"pair_date", "secrets_creation_date"}
+    required_fields = {
+        "pair_date",
+        "secrets_creation_date",
+        "manufacturer",
+        "model",
+        "encrypted_account_key",
+        "public_key_address",
+    }
     available_fields = tuple(field.name for field in fields(DeviceIdentity))
     missing = required_fields.difference(available_fields)
 
     assert not missing, (
         "CRITICAL SCHEMA MISMATCH: `DeviceIdentity` in `coordinator.py` is "
-        "missing time anchor fields. The Resolver cannot access `pair_date` "
-        "without them. Update the NamedTuple definition."
+        "missing metadata fields. The Resolver cannot access "
+        "`pair_date`, `secrets_creation_date`, `manufacturer`, `model`, or "
+        "encrypted keys without them. Update the NamedTuple definition."
     )
 
 

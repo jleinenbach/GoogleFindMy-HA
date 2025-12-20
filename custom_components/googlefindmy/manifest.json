@@ -13,10 +13,12 @@
   ],
   "documentation": "https://github.com/BSkando/GoogleFindMy-HA",
   "integration_type": "hub",
-  "quality_scale": "platinum",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
-  "loggers": ["custom_components.googlefindmy"],
+  "loggers": [
+    "custom_components.googlefindmy"
+  ],
+  "quality_scale": "platinum",
   "requirements": [
     "aiohttp>=3.11.8",
     "beautifulsoup4>=4.12.3",

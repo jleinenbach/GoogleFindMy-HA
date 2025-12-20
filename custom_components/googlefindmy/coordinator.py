@@ -681,11 +681,17 @@ class DeviceIdentity:
         device_type: SpotDeviceType enum value reported by the tracker, when known.
         config_entry_id: Parent config entry ID that owns the tracker.
         fast_pair_model_id: Fast Pair model identifier advertised by the tracker.
+        manufacturer: Tracker manufacturer string extracted from registration metadata.
+        model: Tracker model string extracted from registration metadata.
         pair_date: Hypothesized tracker pairing epoch (seconds) derived from registrations
             or cached secrets; treated as advisory when reconciling EID timelines.
         secrets_creation_date: Creation time for the encrypted user secrets bundle, if
             present; surfaced for debugging because the exact server-side semantics are
             not yet confirmed.
+        encrypted_account_key: Encrypted account key blob (hex-decoded) used for future
+            account-key recovery flows.
+        public_key_address: Encrypted SHA256 public address associated with the account
+            key; surfaced for debugging and potential resolver extensions.
         time_anchors_debug: Optional debug payload with server-provided anchor hints used
             to reason about EID drift; shape may vary and is forwarded best-effort.
     """
@@ -698,8 +704,12 @@ class DeviceIdentity:
     device_type: int | None = None
     config_entry_id: str | None = None
     fast_pair_model_id: str | None = None
+    manufacturer: str | None = None
+    model: str | None = None
     pair_date: int | None = None
     secrets_creation_date: int | None = None
+    encrypted_account_key: bytes | None = None
+    public_key_address: bytes | None = None
     time_anchors_debug: Any | None = None
 
 
@@ -3573,6 +3583,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
             raw_label = (d.get("name") or "").strip()
             device_label = raw_label or dev_id or "<unknown>"
+            raw_manufacturer = d.get("manufacturer")
+            manufacturer = (
+                raw_manufacturer.strip()
+                if isinstance(raw_manufacturer, str) and raw_manufacturer.strip()
+                else "Google"
+            )
+            raw_model = d.get("model")
+            model = (
+                raw_model.strip()
+                if isinstance(raw_model, str) and raw_model.strip()
+                else "Find My Device"
+            )
             device_updated = False
 
             # Build identifiers
@@ -3604,6 +3626,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             tracker_config_subentry_id is not None
                             and not _has_tracker_link(legacy_dev)
                         )
+                        needs_manufacturer = (
+                            getattr(legacy_dev, "manufacturer", None) != manufacturer
+                        )
+                        needs_model = getattr(legacy_dev, "model", None) != model
                         raw_name = (d.get("name") or "").strip()
                         use_name = (
                             raw_name
@@ -3641,6 +3667,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                                 update_kwargs["new_identifiers"] = new_idents
                             if needs_name:
                                 update_kwargs["name"] = use_name
+                            if needs_manufacturer:
+                                update_kwargs["manufacturer"] = manufacturer
+                            if needs_model:
+                                update_kwargs["model"] = model
                             if needs_parent_clear:
                                 update_kwargs["via_device_id"] = None
                             if tracker_config_subentry_id is not None:
@@ -3695,6 +3725,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             )
                             updated_identifiers.add(ns_ident)
                             reuse_update_kwargs["new_identifiers"] = updated_identifiers
+                        if getattr(dev, "manufacturer", None) != manufacturer:
+                            reuse_update_kwargs["manufacturer"] = manufacturer
+                        if getattr(dev, "model", None) != model:
+                            reuse_update_kwargs["model"] = model
                         reuse_update_kwargs.setdefault("add_config_entry_id", entry_id)
                         reuse_update_kwargs.setdefault(
                             "add_config_subentry_id", tracker_config_subentry_id
@@ -3708,8 +3742,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 create_kwargs: dict[str, Any] = {
                     "config_entry_id": entry_id,
                     "identifiers": {ns_ident},
-                    "manufacturer": "Google",
-                    "model": "Find My Device",
+                    "manufacturer": manufacturer,
+                    "model": model,
                     "name": use_name,
                 }
 
@@ -3763,6 +3797,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     and not getattr(dev, "name_by_user", None)
                     and dev.name != use_name
                 )
+                manufacturer_needs_update = (
+                    getattr(dev, "manufacturer", None) != manufacturer
+                )
+                model_needs_update = getattr(dev, "model", None) != model
+                if manufacturer_needs_update:
+                    update_existing_kwargs["manufacturer"] = manufacturer
+                if model_needs_update:
+                    update_existing_kwargs["model"] = model
                 if name_needs_update:
                     update_existing_kwargs["name"] = use_name
 
@@ -3780,6 +3822,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     name_needs_update
                     or needs_config_subentry_update
                     or needs_parent_clear
+                    or manufacturer_needs_update
+                    or model_needs_update
                 )
 
                 if needs_update and callable(update_device) and device_id:
@@ -4416,6 +4460,28 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     out.append(key)
             return out
         return []
+
+    @staticmethod
+    def _normalize_optional_string(raw: object) -> str | None:
+        """Return a stripped string when available, otherwise ``None``."""
+
+        if isinstance(raw, str):
+            value = raw.strip()
+            return value or None
+        return None
+
+    @staticmethod
+    def _normalize_encrypted_blob(raw: object) -> bytes | None:
+        """Normalize encrypted payloads encoded as bytes or hex strings."""
+
+        if isinstance(raw, (bytes, bytearray)):
+            return bytes(raw)
+        if isinstance(raw, str):
+            try:
+                return bytes.fromhex(raw)
+            except ValueError:
+                return None
+        return None
 
     def _schedule_eid_resolver_refresh(self) -> None:
         """Refresh the global EID resolver when active device sets change."""
@@ -5133,6 +5199,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 last_time_anchors_debug,
             )
 
+            manufacturer = self._normalize_optional_string(
+                merged_device_data.get("manufacturer")
+            )
+            model = self._normalize_optional_string(merged_device_data.get("model"))
+            encrypted_account_key = self._normalize_encrypted_blob(
+                merged_device_data.get("encrypted_account_key")
+                or merged_device_data.get("encryptedAccountKey")
+            )
+            public_key_address = self._normalize_encrypted_blob(
+                merged_device_data.get("public_key_address")
+                or merged_device_data.get("encryptedSha256AccountKeyPublicAddress")
+            )
+
             if not identity_candidates and identity_key is not None:
                 identity_candidates = [identity_key]
             elif not identity_candidates and registry_key is not None:
@@ -5216,8 +5295,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             device_type=device_type,
                             config_entry_id=entry_id,
                             fast_pair_model_id=fast_pair_model_id,
+                            manufacturer=manufacturer,
+                            model=model,
                             pair_date=pair_date,
                             secrets_creation_date=secrets_creation_date,
+                            encrypted_account_key=encrypted_account_key,
+                            public_key_address=public_key_address,
                             time_anchors_debug=anchors_debug,
                         )
                     )
@@ -5232,8 +5315,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         device_type=device_type,
                         config_entry_id=entry_id,
                         fast_pair_model_id=fast_pair_model_id,
+                        manufacturer=manufacturer,
+                        model=model,
                         pair_date=pair_date,
                         secrets_creation_date=secrets_creation_date,
+                        encrypted_account_key=encrypted_account_key,
+                        public_key_address=public_key_address,
                         time_anchors_debug=anchors_debug,
                     )
                 )
