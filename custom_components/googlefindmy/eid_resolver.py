@@ -226,20 +226,18 @@ def _normalize_counter_candidate(candidate_value: object, *, basis: str) -> int 
     if not isinstance(candidate_value, int) or candidate_value < 0:
         return None
 
-    if candidate_value <= FHNA_COUNTER_MASK:
-        return candidate_value
-
+    max_millis = FHNA_COUNTER_MASK
     candidate_seconds = candidate_value // 1000
-    if 0 < candidate_seconds <= FHNA_COUNTER_MASK:
+    if candidate_value > max_millis and candidate_value % 1000 == 0 and candidate_seconds > 0:
         _LOGGER.debug(
             "Converted %s basis %s from milliseconds to seconds: %s",
             candidate_value,
             basis,
             candidate_seconds,
         )
-        return candidate_seconds
+        return candidate_seconds & FHNA_COUNTER_MASK
 
-    return None
+    return candidate_value
 
 
 @dataclass(slots=True)
@@ -412,18 +410,12 @@ class GoogleFindMyEIDResolver:
             if lock is not None:
                 rotation_ts = lock.rotation_timestamp
                 is_legacy = rotation_ts is None
-                is_poisoned = (
-                    isinstance(rotation_ts, int)
-                    and not isinstance(rotation_ts, bool)
-                    and rotation_ts > FHNA_COUNTER_MASK
-                )
 
-                if is_legacy or is_poisoned:
+                if is_legacy:
                     _LOGGER.warning(
-                        "Discarding invalid/legacy lock for %s (legacy=%s, poisoned=%s). Force re-discovery.",
+                        "Discarding invalid/legacy lock for %s (legacy=%s). Force re-discovery.",
                         identity.registry_id,
                         is_legacy,
-                        is_poisoned,
                     )
                     self._locks.pop(identity.registry_id, None)
                     self._persisted_locks.pop(identity.registry_id, None)
@@ -507,7 +499,7 @@ class GoogleFindMyEIDResolver:
                 for step in (-1, 0, 1):
                     offset_periods = periods_elapsed + step
                     window_ts = rotation_ts + (offset_periods * ROTATION_PERIOD)
-                    if window_ts < 0 or window_ts > FHNA_COUNTER_MASK:
+                    if window_ts < 0:
                         continue
                     counter_windows.append((window_ts, "lock_tracking"))
             else:
@@ -609,7 +601,7 @@ class GoogleFindMyEIDResolver:
                         window_range=range(-total_window, total_window + 1),
                         include_neighbors=False,
                     ):
-                        if ts < 0 or ts > FHNA_COUNTER_MASK:
+                        if ts < 0:
                             continue
                         counter_windows.append((ts, label))
 
@@ -677,6 +669,7 @@ class GoogleFindMyEIDResolver:
             key_bytes,
             time_counter,
             variant,
+            strict=False,
         )
 
     async def _collect_device_secrets(self) -> list[DeviceIdentity]:
