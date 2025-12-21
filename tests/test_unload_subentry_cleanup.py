@@ -8,7 +8,7 @@ import inspect
 from collections.abc import Awaitable, Sequence
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
@@ -518,6 +518,57 @@ async def test_async_unload_entry_preserves_registry_and_user_names(
 ) -> None:
     """Reload/unload must not drop registry entries or user-defined labels."""
 
+    class _DeviceStub:
+        def __init__(
+            self,
+            *,
+            device_id: str,
+            config_entry_id: str,
+            identifiers: set[tuple[str, str]],
+            manufacturer: str,
+            model: str,
+            name: str,
+            config_subentry_id: str,
+        ) -> None:
+            self.id = device_id
+            self.config_entry_id = config_entry_id
+            self.identifiers = identifiers
+            self.manufacturer = manufacturer
+            self.model = model
+            self.name = name
+            self.config_subentry_id = config_subentry_id
+            self.name_by_user: str | None = None
+
+    class _DeviceRegistryStub:
+        def __init__(self) -> None:
+            self.devices: dict[str, _DeviceStub] = {}
+
+        def async_get_or_create(
+            self,
+            *,
+            config_entry_id: str,
+            identifiers: set[tuple[str, str]],
+            manufacturer: str,
+            model: str,
+            name: str,
+            config_subentry_id: str,
+        ) -> _DeviceStub:
+            device_id = f"device-{len(self.devices)}"
+            device = _DeviceStub(
+                device_id=device_id,
+                config_entry_id=config_entry_id,
+                identifiers=identifiers,
+                manufacturer=manufacturer,
+                model=model,
+                name=name,
+                config_subentry_id=config_subentry_id,
+            )
+            self.devices[device_id] = device
+            return device
+
+        def async_get(self, device_id: str) -> _DeviceStub | None:
+            return self.devices.get(device_id)
+
     entry = _EntryStub()
     subentry = entry.add_subentry("core", ("dev-1",))
     entry._gfm_parent_platforms_forwarded = True
@@ -548,18 +599,19 @@ async def test_async_unload_entry_preserves_registry_and_user_names(
         _noop_purge,
     )
 
-    device_registry = dr.async_get(hass)
-    device = device_registry.async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, "device-to-keep")},
-        manufacturer="Google",
-        model="Find My Device",
-        name="API Name",
-        config_subentry_id=subentry.subentry_id,
-    )
-    device.name_by_user = "Custom Label"
+    device_registry = _DeviceRegistryStub()
+    with patch("homeassistant.helpers.device_registry.async_get", return_value=device_registry):
+        device = device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, "device-to-keep")},
+            manufacturer="Google",
+            model="Find My Device",
+            name="API Name",
+            config_subentry_id=subentry.subentry_id,
+        )
+        device.name_by_user = "Custom Label"
 
-    result = await integration.async_unload_entry(hass, entry)
+        result = await integration.async_unload_entry(hass, entry)
 
     assert result is True
     assert entry.subentries == {subentry.subentry_id: subentry}
