@@ -1009,8 +1009,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         - Includes source labeling (`source_label`/`source_rank`) for transparency.
         """
         row = self._current_row()
-        attributes = _as_ha_attributes(row)
-        return attributes if attributes is not None else {}
+        attributes = _as_ha_attributes(row) or {}
+
+        # Expose the stable tracker identifier for interoperability with
+        # third-party integrations that cannot rely on rotating MAC addresses.
+        attributes["google_device_id"] = self.device_id
+
+        return attributes
 
     @callback
     def _handle_coordinator_update(self) -> None:

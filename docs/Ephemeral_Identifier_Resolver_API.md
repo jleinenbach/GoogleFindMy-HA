@@ -4,6 +4,31 @@ This document describes the **Ephemeral Identifier (EID) Resolver API** exposed 
 
 ---
 
+## Stable device identifier (state API)
+
+Third-party consumers must anchor on the `google_device_id` state attribute when they want to correlate Google Find My trackers with external data sources.
+
+* **Why?** BLE MAC addresses and other transport identifiers rotate for privacy and are intentionally omitted from state. Relying on them causes duplicate devices whenever a tracker reboots or rotates.
+* **What to use instead?** `google_device_id` is the stable, obfuscated identifier already used in the Home Assistant device registry. It does not change across reboots or rotation cycles.
+* **Availability.** Every tracker entity publishes `google_device_id` in its state attributes alongside diagnostic metadata.
+
+### Example: template usage
+
+Use `google_device_id` as the join key when correlating Google Find My Device trackers with other data sources:
+
+```jinja
+{% set tracker_id = state_attr("device_tracker.find_my_keys", "google_device_id") %}
+{% if tracker_id %}
+  {{ "Found stable tracker ID: " ~ tracker_id }}
+{% else %}
+  {{ "Tracker not yet initialized" }}
+{% endif %}
+```
+
+When deduplicating devices or wiring interoperability (for example, a Bermuda BLE scanner that resolves EIDs to trackers), prefer `google_device_id` over `mac`, `source_type`, or any other rotating attribute.
+
+---
+
 ## Overview
 
 Some Google Find My–compatible devices periodically broadcast **rotating BLE identifiers** (EIDs). These identifiers:
