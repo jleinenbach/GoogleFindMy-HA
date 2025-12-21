@@ -1,3 +1,4 @@
+# tests/test_connectivity_sensor.py
 from __future__ import annotations
 
 from types import SimpleNamespace

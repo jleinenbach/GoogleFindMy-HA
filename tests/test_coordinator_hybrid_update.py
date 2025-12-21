@@ -1,3 +1,4 @@
+# tests/test_coordinator_hybrid_update.py
 """Regression test for hybrid low-accuracy polling updates."""
 
 from __future__ import annotations
