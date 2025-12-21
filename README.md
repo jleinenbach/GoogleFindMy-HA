@@ -170,6 +170,10 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 - Home Assistant supports connecting multiple Google accounts, but **only one config entry per email address stays active**. When duplicate entries share the same Google account, the integration automatically disables and unloads the non-authoritative entries to prevent device duplication and token conflicts.
 - The disabled entries remain visible in **Settings → Devices & Services** with an integration-managed disabled state so you can review or remove them manually. Reactivating a disabled duplicate requires removing the authoritative entry first or supplying credentials for a different Google account.
 
+### Interoperability and third-party linking
+
+Third-party consumers should anchor on the `google_device_id` state attribute when associating Find My trackers with external data sources (for example, Bermuda BLE Trilogy listeners). MAC addresses rotate for privacy and are intentionally omitted from state; `google_device_id` is the stable, registry-aligned identifier that will not change across reboots. See [docs/Ephemeral_Identifier_Resolver_API.md](docs/Ephemeral_Identifier_Resolver_API.md#stable-device-identifier-state-api) for usage guidance and templating examples.
+
 ## Configuration Options
 
 Accessible via the ⚙️ cogwheel button on the main Google Find My Device Integration page.
