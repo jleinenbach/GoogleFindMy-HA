@@ -42,6 +42,14 @@ notification from reappearing after restarts when no new hardware has been added
 [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
 tracks the canonical post-scheduling gate that platform guides should mirror.
 
+### Async test execution contract
+
+Within `tests/`, **never** call `asyncio.run()` to drive coroutines. Home Assistant’s
+test harness already provides a managed event loop via `pytest-asyncio`; starting a
+new loop inside a test causes fixture clashes and resource leaks. Mark coroutine tests
+with `@pytest.mark.asyncio` (or set `pytestmark = pytest.mark.asyncio` in the module)
+and `await` the coroutine directly.
+
 ### Nova API cache provider registration
 
 When decrypting FCM background location payloads, **always** register the active entry cache with

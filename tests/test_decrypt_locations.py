@@ -16,11 +16,13 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
     OwnerKeyInfo,
 )
 
+pytestmark = pytest.mark.asyncio
+
 ALTITUDE_METERS = 1337
 ACCURACY_METERS = 5.0
 
 
-def test_async_decrypt_location_response_locations_allows_future_owner_timestamp(
+async def test_async_decrypt_location_response_locations_allows_future_owner_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Owner reports within a realistic future drift window are preserved."""
@@ -60,10 +62,8 @@ def test_async_decrypt_location_response_locations_allows_future_owner_timestamp
     encrypted_report.encryptedLocation = b"ignored"
     encrypted_report.isOwnReport = True
 
-    result = asyncio.run(
-        decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=object()
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
     )
 
     assert len(result) == 1
@@ -74,7 +74,7 @@ def test_async_decrypt_location_response_locations_allows_future_owner_timestamp
     assert entry["accuracy"] == ACCURACY_METERS
 
 
-def test_async_decrypt_location_response_locations_aligns_missing_network_timestamps(
+async def test_async_decrypt_location_response_locations_aligns_missing_network_timestamps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Recent timestamps stay aligned when historic timestamps are missing."""
@@ -143,10 +143,8 @@ def test_async_decrypt_location_response_locations_aligns_missing_network_timest
     recent_enc.encryptedLocation = b"recent"
     recent_enc.isOwnReport = True
 
-    result = asyncio.run(
-        decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=object()
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
     )
 
     assert len(result) == 1
@@ -157,7 +155,7 @@ def test_async_decrypt_location_response_locations_aligns_missing_network_timest
     assert entry["is_own_report"] is True
 
 
-def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
+async def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pairing and secrets anchors propagate even without reports."""
@@ -178,10 +176,8 @@ def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
     registration.encryptedUserSecrets.creationDate.seconds = int(base_now - 60)
     registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 32
 
-    result = asyncio.run(
-        decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=object()
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
     )
 
     assert len(result) == 1
@@ -197,7 +193,7 @@ def test_async_decrypt_location_response_locations_returns_metadata_when_empty(
     assert secrets_meta.get("creationDate") == int(base_now - 60)
 
 
-def test_async_decrypt_location_response_unwraps_60_byte_eik(
+async def test_async_decrypt_location_response_unwraps_60_byte_eik(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Regression Test: Unwrap 60-byte EIKs so HKDF/location decryption never sees "Key length 60"."""
@@ -271,10 +267,8 @@ def test_async_decrypt_location_response_unwraps_60_byte_eik(
     encrypted_report.isOwnReport = True
 
     cache = object()
-    result = asyncio.run(
-        decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=cache
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=cache
     )
 
     assert len(result) == 1
@@ -297,7 +291,7 @@ def test_async_decrypt_location_response_unwraps_60_byte_eik(
     assert "[DIAG-ALERT] Key length" not in caplog.text
 
 
-def test_async_decrypt_location_response_locations_normalizes_anchor_units(
+async def test_async_decrypt_location_response_locations_normalizes_anchor_units(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Anchor extraction normalizes millisecond-like inputs and preserves keys."""
@@ -319,10 +313,8 @@ def test_async_decrypt_location_response_locations_normalizes_anchor_units(
     registration.encryptedUserSecrets.creationDate.nanos = 500_000_000
     registration.encryptedUserSecrets.encryptedIdentityKey = b"\x10" * 32
 
-    result = asyncio.run(
-        decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=object()
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
     )
 
     assert len(result) == 1
@@ -338,7 +330,7 @@ def test_async_decrypt_location_response_locations_normalizes_anchor_units(
     ) == pytest.approx(base_now - 75)
 
 
-def test_async_decrypt_location_response_reads_registration_anchors(
+async def test_async_decrypt_location_response_reads_registration_anchors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Registration anchors propagate even when deviceTypeInformation is absent."""
@@ -366,10 +358,8 @@ def test_async_decrypt_location_response_reads_registration_anchors(
     semantic.status = Common_pb2.Status.SEMANTIC
     semantic.semanticLocation.locationName = "semantic-anchor"
 
-    result = asyncio.run(
-        decrypt_locations.async_decrypt_location_response_locations(
-            update, cache=object()
-        )
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
     )
 
     assert len(result) == 1
@@ -384,7 +374,7 @@ def test_async_decrypt_location_response_reads_registration_anchors(
     assert registration_meta.get("pairDate") == int(base_now - 500)
 
 
-def test_pair_date_microseconds_normalization_and_future_rejection(
+async def test_pair_date_microseconds_normalization_and_future_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PairDate with microseconds normalizes while future drift is discarded."""

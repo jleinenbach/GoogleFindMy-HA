@@ -7993,12 +7993,6 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     if inspect.isawaitable(result):
                         await result
 
-            if getattr(runtime_data, "subentry_manager", None) is not None:
-                try:
-                    await runtime_data.subentry_manager.async_remove_all()
-                except Exception as err:
-                    _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
-
             cache = getattr(runtime_data, "token_cache", None)
             if cache is not None:
                 fallback_cache = _unregister_instance(entry.entry_id)

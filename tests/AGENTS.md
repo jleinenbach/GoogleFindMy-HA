@@ -221,10 +221,12 @@ package error when the test collection runs.
 
 `pytest-asyncio` ships with the repository and `pytest` manages the event
 loop according to the [`asyncio_mode = "auto"`](../pyproject.toml)
-configuration. Prefer decorating new coroutine tests with
-`@pytest.mark.asyncio` instead of wrapping them in `asyncio.run(...)`; this
-keeps event-loop handling centralized and avoids duplicated scaffolding in
-each test module.
+configuration. **Never call `asyncio.run()` inside tests.** It creates a
+competing event loop and breaks Home Assistant’s managed loop fixtures.
+Always author coroutine tests as `async def` with `@pytest.mark.asyncio`
+(`pytestmark = pytest.mark.asyncio` at module scope is also fine) and
+`await` the coroutine directly. This keeps event-loop handling centralized
+and avoids duplicated scaffolding in each test module.
 
 ### Async setup entry harness expectations
 

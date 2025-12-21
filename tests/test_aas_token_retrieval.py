@@ -13,6 +13,8 @@ from custom_components.googlefindmy.Auth import aas_token_retrieval
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
+pytestmark = pytest.mark.asyncio
+
 
 class _DummyCache:
     """Minimal async cache implementing the TokenCache interface used in tests."""
@@ -42,7 +44,7 @@ class _DummyCache:
         return result
 
 
-def test_exchange_oauth_for_aas_logs_inputs(
+async def test_exchange_oauth_for_aas_logs_inputs(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Ensure the exchange logs a masked username and token diagnostics."""
@@ -61,10 +63,8 @@ def test_exchange_oauth_for_aas_logs_inputs(
 
     caplog.set_level(logging.DEBUG, logger=aas_token_retrieval.__name__)
 
-    result = asyncio.run(
-        aas_token_retrieval._exchange_oauth_for_aas(
-            "user@example.com", "oauth-secret-value", 0x1234
-        )
+    result = await aas_token_retrieval._exchange_oauth_for_aas(
+        "user@example.com", "oauth-secret-value", 0x1234
     )
 
     assert result["Token"] == "aas-token"
@@ -89,7 +89,7 @@ def test_exchange_oauth_for_aas_logs_inputs(
     assert "gpsoauth exchange response received" in messages
 
 
-def test_exchange_oauth_for_aas_missing_token_logs_warning(
+async def test_exchange_oauth_for_aas_missing_token_logs_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A missing Token key results in a warning and a RuntimeError."""
@@ -102,10 +102,8 @@ def test_exchange_oauth_for_aas_missing_token_logs_warning(
     caplog.set_level(logging.WARNING, logger=aas_token_retrieval.__name__)
 
     with pytest.raises(RuntimeError, match="Missing 'Token' in gpsoauth response"):
-        asyncio.run(
-            aas_token_retrieval._exchange_oauth_for_aas(
-                "user@example.com", "oauth-secret-value", 0xDEADBEEF
-            )
+        await aas_token_retrieval._exchange_oauth_for_aas(
+            "user@example.com", "oauth-secret-value", 0xDEADBEEF
         )
 
     warnings = [
@@ -121,7 +119,7 @@ def test_exchange_oauth_for_aas_missing_token_logs_warning(
     assert getattr(warning, "user") == "u***@example.com"
 
 
-def test_async_get_aas_token_short_circuits_for_cached_master(
+async def test_async_get_aas_token_short_circuits_for_cached_master(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A cached AAS token must be reused without calling gpsoauth.exchange_token."""
@@ -132,7 +130,7 @@ def test_async_get_aas_token_short_circuits_for_cached_master(
         await cache.set(username_string, "user@example.com")
         await cache.set(CONF_OAUTH_TOKEN, "aas_et/MASTER_TOKEN")
 
-    asyncio.run(_prepare())
+    await _prepare()
 
     called = False
 
@@ -145,14 +143,14 @@ def test_async_get_aas_token_short_circuits_for_cached_master(
 
     monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", _fail_exchange)
 
-    result = asyncio.run(aas_token_retrieval.async_get_aas_token(cache=cache))
+    result = await aas_token_retrieval.async_get_aas_token(cache=cache)
 
     assert result == "aas_et/MASTER_TOKEN"
     assert not called
-    assert asyncio.run(cache.get(DATA_AAS_TOKEN)) == "aas_et/MASTER_TOKEN"
+    assert await cache.get(DATA_AAS_TOKEN) == "aas_et/MASTER_TOKEN"
 
 
-def test_get_or_generate_android_id_ignores_boolean_cache(
+async def test_get_or_generate_android_id_ignores_boolean_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Boolean android_id placeholders should be ignored and replaced."""
@@ -162,13 +160,11 @@ def test_get_or_generate_android_id_ignores_boolean_cache(
     async def _prepare() -> None:
         await cache.set("android_id_user@example.com", True)
 
-    asyncio.run(_prepare())
+    await _prepare()
     monkeypatch.setattr(aas_token_retrieval.random, "randint", lambda *_: 0xABCDEF12)
 
-    android_id = asyncio.run(
-        aas_token_retrieval._get_or_generate_android_id(
-            "user@example.com", cache=cache
-        )
+    android_id = await aas_token_retrieval._get_or_generate_android_id(
+        "user@example.com", cache=cache
     )
 
     assert android_id == 0xABCDEF12

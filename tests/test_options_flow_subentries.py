@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
+import pytest
 from homeassistant.config_entries import ConfigSubentry
 from homeassistant.helpers import frame
 
@@ -19,6 +20,8 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
 )
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
+
+pytestmark = pytest.mark.asyncio
 
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
@@ -129,38 +132,42 @@ class _HassStub:
     """Home Assistant stub exposing config entry helpers to the flow."""
 
     def __init__(self, entry: _EntryStub) -> None:
+        self._entry = entry
+
+    @classmethod
+    async def create(cls, entry: _EntryStub) -> _HassStub:
+        hass = cls(entry)
         prepare_flow_hass_config_entries(
-            self,
+            hass,
             lambda: _ManagerStub(entry),
             frame_module=frame,
         )
+        return hass
 
     def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
         return asyncio.create_task(coro)
 
 
-def _build_flow(entry: _EntryStub) -> config_flow.OptionsFlowHandler:
+async def _build_flow(entry: _EntryStub) -> config_flow.OptionsFlowHandler:
     flow = config_flow.OptionsFlowHandler()
-    flow.hass = _HassStub(entry)  # type: ignore[assignment]
+    flow.hass = await _HassStub.create(entry)  # type: ignore[assignment]
     flow.config_entry = entry  # type: ignore[attr-defined]
     return flow
 
 
-def test_settings_updates_feature_flags_for_selected_subentry() -> None:
+async def test_settings_updates_feature_flags_for_selected_subentry() -> None:
     """Settings step should persist feature flags to the chosen subentry."""
 
     entry = _EntryStub()
     entry.add_subentry(key=TRACKER_SUBENTRY_KEY, title="Core")
-    flow = _build_flow(entry)
+    flow = await _build_flow(entry)
 
-    result = asyncio.run(
-        flow.async_step_settings(
-            {
-                "subentry": TRACKER_SUBENTRY_KEY,
-                OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
-                OPT_CONTRIBUTOR_MODE: "high_traffic",
-            }
-        )
+    result = await flow.async_step_settings(
+        {
+            "subentry": TRACKER_SUBENTRY_KEY,
+            OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
+            OPT_CONTRIBUTOR_MODE: "high_traffic",
+        }
     )
 
     assert result["type"] == "create_entry"
@@ -171,7 +178,7 @@ def test_settings_updates_feature_flags_for_selected_subentry() -> None:
     assert payload["feature_flags"][OPT_CONTRIBUTOR_MODE] == "high_traffic"
 
 
-def test_visibility_assigns_devices_to_target_subentry() -> None:
+async def test_visibility_assigns_devices_to_target_subentry() -> None:
     """Visibility step should attach restored devices to the chosen subentry."""
 
     entry = _EntryStub()
@@ -180,11 +187,9 @@ def test_visibility_assigns_devices_to_target_subentry() -> None:
         OPT_IGNORED_DEVICES: {"dev-1": {"name": "Device 1"}},
     }
 
-    flow = _build_flow(entry)
-    result = asyncio.run(
-        flow.async_step_visibility(
-            {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
-        )
+    flow = await _build_flow(entry)
+    result = await flow.async_step_visibility(
+        {"subentry": TRACKER_SUBENTRY_KEY, "unignore_devices": ["dev-1"]}
     )
 
     assert result["type"] == "create_entry"
@@ -195,7 +200,7 @@ def test_visibility_assigns_devices_to_target_subentry() -> None:
     assert payload["visible_device_ids"] == ("dev-1",)
 
 
-def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
+async def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
     """Repair move step should remove devices from other subentries."""
 
     entry = _EntryStub()
@@ -206,7 +211,7 @@ def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
         {"device_id": "dev-2", "name": "Device 2"},
     ]
 
-    flow = _build_flow(entry)
+    flow = await _build_flow(entry)
 
     async def _invoke() -> dict[str, Any]:
         result = await flow.async_step_repairs_move(
@@ -215,7 +220,7 @@ def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
         await asyncio.sleep(0)
         return result
 
-    result = asyncio.run(_invoke())
+    result = await _invoke()
 
     assert result["type"] == "abort"
     manager = flow.hass.config_entries  # type: ignore[assignment]
@@ -229,7 +234,7 @@ def test_repairs_move_assigns_devices_to_selected_subentry() -> None:
     assert manager.reloads == [entry.entry_id]
 
 
-def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
+async def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
     """Deleting a subentry moves devices to fallback and removes the source."""
 
     entry = _EntryStub()
@@ -238,7 +243,7 @@ def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
     )
     fallback = entry.add_subentry(key="keep", title="Keep", visible_device_ids=[])
 
-    flow = _build_flow(entry)
+    flow = await _build_flow(entry)
 
     async def _invoke_delete() -> dict[str, Any]:
         result = await flow.async_step_repairs_delete(
@@ -247,7 +252,7 @@ def test_repairs_delete_moves_devices_and_removes_subentry() -> None:
         await asyncio.sleep(0)
         return result
 
-    result = asyncio.run(_invoke_delete())
+    result = await _invoke_delete()
 
     assert result["type"] == "abort"
     manager = flow.hass.config_entries  # type: ignore[assignment]
