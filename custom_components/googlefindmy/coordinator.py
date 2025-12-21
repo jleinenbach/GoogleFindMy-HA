@@ -212,9 +212,13 @@ _PREDICTION_BUFFER_S = 45
 
 # Fields consumed by get_active_device_identities from cached payloads/anchors.
 _PERSISTED_METADATA_KEYS: tuple[str, ...] = (
+    "battery_level",
+    "device_type",
     "pair_date",
+    "encrypted_account_key",
     "secrets_creation_date",
     "device_registration",
+    "public_key_address",
     "device_type_information",
     "encrypted_user_secrets",
     "identity_key",
