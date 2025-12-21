@@ -57,6 +57,10 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
         return [identity]
 
     monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
+    monkeypatch.setattr(
         GoogleFindMyEIDResolver,
         "_collect_device_secrets",
         _collect,

@@ -61,7 +61,18 @@ MODERN_FRAME_TYPE = 0x41
 RAW_HEADER_LENGTH = 1
 SERVICE_DATA_OFFSET = 8
 AESGCM_NONCE_LENGTH = 12
-MIN_UNIX_WINDOW_SIZE = 128
+
+# Strategy Configuration
+# ENABLE_ABSOLUTE_UNIX_BASIS: If True, scans for EIDs based on absolute Unix time (Deep Scan).
+# Proven unreliable for standard trackers (Motorola/Pebblebee), so disabled by default.
+ENABLE_ABSOLUTE_UNIX_BASIS: bool = False
+
+# MIN_UNIX_WINDOW_SIZE: Safety net for absolute scans. 128 * 1024s ~= 36h.
+MIN_UNIX_WINDOW_SIZE: int = 128
+
+# MIN_RELATIVE_WINDOW_SIZE: Safety net for relative scans (pair_date).
+# 5 * 1024s ~= 85 mins. Essential to absorb 1h Daylight Saving Time (DST) shifts.
+MIN_RELATIVE_WINDOW_SIZE: int = 5
 
 EID_LENGTH = LEGACY_EID_LENGTH
 LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -200,7 +211,7 @@ class EIDGenerationLock:
         )
 
 
-def _normalize_counter_candidate(candidate_value: int, *, basis: str) -> int | None:
+def _normalize_counter_candidate(candidate_value: object, *, basis: str) -> int | None:
     """Return a sane u32 counter candidate or ``None`` when unusable."""
 
     if not isinstance(candidate_value, int) or candidate_value < 0:
@@ -376,13 +387,6 @@ class GoogleFindMyEIDResolver:
         lookup: dict[bytes, EIDMatch] = {}
         lookup_metadata: dict[bytes, dict[str, Any]] = {}
 
-        counter_bases: tuple[tuple[str, str], ...] = (
-            ("secrets_creation_date", "secrets_creation_date"),
-            ("pair_date", "pair_date"),
-            ("entity_time", "entity_time"),
-            ("unix", "unix"),
-        )
-
         max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
 
         for identity in identities:
@@ -467,45 +471,88 @@ class GoogleFindMyEIDResolver:
                     EidVariant.MODERN_P256_X20_TRUNC_LE,
                 )
 
+            # 1. Define explicit time bases to allow iteration over all strategies.
+            # - "unix": Absolute time (Strategy A)
+            # - "pair_date" / "secrets...": Relative time (Strategy B & C)
+            counter_bases: tuple[tuple[str, str], ...] = (
+                ("unix", "unix"),
+                ("pair_date", "pair_date"),
+                ("secrets_creation_date", "secrets_creation_date"),
+            )
+
+            # 2. Logic Restoration (v3.31): Smart Drift Calculation.
+            # We determine the device's "age" using the freshest available anchor
+            # to estimate the crystal drift (50ppm) more accurately.
+            anchor_candidates = []
+            if isinstance(identity.pair_date, int) and identity.pair_date > 0:
+                anchor_candidates.append(identity.pair_date)
+            if (
+                isinstance(identity.secrets_creation_date, int)
+                and identity.secrets_creation_date > 0
+            ):
+                anchor_candidates.append(identity.secrets_creation_date)
+
+            best_anchor = max(anchor_candidates) if anchor_candidates else 0
+            provisioning_counter = max(0, now_unix - best_anchor) if best_anchor > 0 else 0
+
+            # Calculate expected drift based on age (50ppm)
+            drift_seconds = provisioning_counter * 0.00005
+            drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
+
             counter_windows: list[tuple[int, str]] = []
+
+            # 3. Execution Loop: Apply specific math per strategy
             for basis, label in counter_bases:
                 candidate_value: int | None = None
-                if basis == "unix":
-                    candidate_value = now_unix
-                elif basis == "pair_date":
-                    anchor_value = (
-                        _normalize_counter_candidate(identity.pair_date, basis=basis)
-                        if isinstance(identity.pair_date, int)
-                        else None
-                    )
-                    if isinstance(anchor_value, int):
-                        candidate_value = now_unix - anchor_value
-                elif basis == "entity_time":
-                    candidate_value = getattr(identity, "entity_time", None)
-                else:
-                    anchor_value = (
-                        _normalize_counter_candidate(
-                            identity.secrets_creation_date, basis=basis
-                        )
-                        if isinstance(identity.secrets_creation_date, int)
-                        else None
-                    )
-                    if isinstance(anchor_value, int):
-                        candidate_value = now_unix - anchor_value
+                total_window: int = 0
 
-                normalized = (
-                    _normalize_counter_candidate(candidate_value, basis=basis)
-                    if isinstance(candidate_value, int)
-                    else None
-                )
+                if basis == "unix":
+                    # STRATEGY A: Absolute Time (Fallback)
+                    # Targets devices with a Real-Time Clock (RTC).
+                    # Disabled by default as it causes false negatives on simple trackers.
+                    if not ENABLE_ABSOLUTE_UNIX_BASIS:
+                        continue
+
+                    candidate_value = now_unix
+
+                    # Calculate timezone offset to catch wall-clock synced devices
+                    try:
+                        tz_offset = dt_util.now().utcoffset()
+                        tz_windows = (
+                            int(math.ceil(abs(tz_offset.total_seconds()) / ROTATION_PERIOD))
+                            if tz_offset
+                            else 0
+                        )
+                    except Exception:
+                        tz_windows = 0
+
+                    # Use massive window (Deep Scan) + Drift + Timezone
+                    total_window = max(MIN_UNIX_WINDOW_SIZE, 3 + drift_windows + tz_windows)
+
+                else:
+                    # STRATEGY B & C: Relative Time (Primary)
+                    # Applies to "pair_date" and "secrets_creation_date".
+                    # Targets standard trackers counting seconds since boot/pairing.
+                    # MATH FIX: We calculate ELAPSED time (now - anchor) to match v3.31 logic.
+
+                    raw_anchor = getattr(identity, basis, None)
+                    anchor_value = _normalize_counter_candidate(raw_anchor, basis=basis)
+
+                    if anchor_value is None:
+                        continue
+
+                    # Critical: Relative calculation (now - anchor)
+                    candidate_value = now_unix - anchor_value
+
+                    # ROBUSTNESS: Add safety buffer for DST shifts.
+                    # If the server jumps 1h (DST), the relative diff changes by 3600s.
+                    # MIN_RELATIVE_WINDOW_SIZE (5) absorbs this jump.
+                    total_window = min(MIN_RELATIVE_WINDOW_SIZE + drift_windows, max_window)
+
+                # 4. Generate windows for the calculated candidate
+                normalized = _normalize_counter_candidate(candidate_value, basis=basis)
                 if normalized is None:
                     continue
-
-                if basis == "unix":
-                    smart_window = 3 + drift_windows + tz_windows
-                    total_window = max(MIN_UNIX_WINDOW_SIZE, smart_window)
-                else:
-                    total_window = min(3 + drift_windows, max_window)
 
                 for ts in iter_rotation_windows(
                     normalized,

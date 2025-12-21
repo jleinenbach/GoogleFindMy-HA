@@ -13,6 +13,7 @@ import pytest
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.eid_resolver import (
     LOCK_TTL_SECONDS,
+    MIN_RELATIVE_WINDOW_SIZE,
     EIDGenerationLock,
     GoogleFindMyEIDResolver,
     iter_rotation_windows,
@@ -135,7 +136,7 @@ async def test_refresh_cache_uses_relative_timebases(monkeypatch: pytest.MonkeyP
         drift_seconds = provisioning_counter * 0.00005
         drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
         max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
-        total_window = min(3 + drift_windows, max_window)
+        total_window = min(MIN_RELATIVE_WINDOW_SIZE + drift_windows, max_window)
         elapsed = base_now - anchor
         rotation_start = elapsed - (elapsed % ROTATION_PERIOD)
         window_delta = total_window * ROTATION_PERIOD
@@ -155,6 +156,10 @@ async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytes
     """Cache refresh should cover both curves, truncation, and byte-order options."""
 
     resolver = _build_resolver(monkeypatch)
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
     identity = DeviceIdentity(
         registry_id="registry-id",
         canonical_id="canonical-id",
@@ -294,6 +299,10 @@ async def test_resolve_eid_persists_variant_and_format(monkeypatch: pytest.Monke
     """Resolver hits should persist the chosen variant and advertisement format."""
 
     resolver = _build_resolver(monkeypatch)
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
     identity = DeviceIdentity(
         registry_id="registry-id",
         canonical_id="canonical-id",

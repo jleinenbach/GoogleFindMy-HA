@@ -62,6 +62,10 @@ async def test_resolver_extracts_service_data_legacy(monkeypatch: pytest.MonkeyP
     async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
         return [identity]
 
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
     monkeypatch.setattr(
         GoogleFindMyEIDResolver,
@@ -118,6 +122,10 @@ async def test_resolver_saves_locks_via_store(monkeypatch: pytest.MonkeyPatch) -
     async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
         return [identity]
 
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
     monkeypatch.setattr(
         GoogleFindMyEIDResolver,
@@ -171,6 +179,10 @@ async def test_resolver_handles_raw_eid(monkeypatch: pytest.MonkeyPatch) -> None
     async def _collect(_self: GoogleFindMyEIDResolver) -> list[DeviceIdentity]:
         return [identity]
 
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
     monkeypatch.setattr(
         GoogleFindMyEIDResolver,
