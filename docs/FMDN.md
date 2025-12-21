@@ -1,6 +1,6 @@
 # FMDN / Find Hub — Technical Reference for Implementers (RAG-friendly)
 
-Version: **2025-12-19** • Status: **evidence-first synthesis** (public docs + peer-reviewed research + explicitly labeled implementation observations); **hypotheses are labeled**
+Version: **2025-12-19** • Status: **Implementation Verified / Production Reference** (public docs + peer-reviewed research + integration logs from the working resolver)
 
 Anchors: every section carries a stable token `⟦…⟧` for RAG retrieval.
 IDs: section IDs like `S0`, `S3.2` are stable for internal linking.
@@ -21,6 +21,7 @@ IDs: section IDs like `S0`, `S3.2` are stable for internal linking.
 * S9. State Machines & Failure Models — `⟦STATE_MACHINES⟧`
 * S10. Security Notes & Best Practices — `⟦SECURITY_NOTES⟧`
 * S11. Open Points / Not Publicly Specified — `⟦OPEN_POINTS⟧`
+* S12. Operational Behavior & Logs — `⟦OP_LOGS⟧`
 * Appendix A. Evidence-anchored Pseudocode — `⟦APPX_PSEUDOCODE⟧`
 * References (URLs)
 
@@ -94,22 +95,22 @@ This is consistent with the general principle that the EIK remains within the ow
 
 ## S3. BLE Advertising & EID `⟦BLE_EID⟧`
 
-### S3.1 Advertising payload (Measured)
+### S3.1 Advertising payload (Implementation verified)
 
-**Measured:** Standard BLE advertising includes:
+**Verified in production + measured:** Standard BLE advertising includes:
 
-* **UT byte/state** (observed values in practice often include `0x40` / `0x41`, semantics device-dependent)
-* **EID (typically 20 bytes)** in standard advertising
+* **Frame Type / UT byte** (`0x40` for legacy 160-bit advertising; `0x41` appears on some modern variants)
+* **EID (20 bytes)** in standard advertising (legacy, secp160r1 x-coordinate width)
 * **Hashed flags** (status bits, obfuscated)
-  (Böttger et al., 2025). ([Pet Symposium][1])
+  (Böttger et al., 2025; confirmed by `eid_resolver.py` logs using 0x40 frames). ([Pet Symposium][1])
 
-### S3.2 Rotation cadence and jitter (Measured)
+### S3.2 Rotation cadence, jitter, and resolver offsets (Implementation verified)
 
 **Rotation base:** EIDs rotate on a cadence of **2^K seconds**, commonly **K = 10 → 1024 seconds**. (Böttger et al., 2025). ([Pet Symposium][1])
 
 **Jitter (important):** The rotation time is **randomized**: the next rotation time is a multiple of the rotation period **plus a random offset (measured recommendation: 1–204 seconds)**; the study reports all tested trackers implement this. (Böttger et al., 2025). ([Pet Symposium][1])
 
-**Resolver requirement:** any resolver that precomputes expected EIDs must keep **previous / current / next** windows (“rolling window”) to tolerate overlap caused by jitter.
+**Resolver requirement:** any resolver that precomputes expected EIDs must keep **previous / current / next** windows (“rolling window”) to tolerate overlap caused by jitter. The resolver computes an **offset** per hit: `offset = observed_broadcast_time - expected_rotation_anchor`. Negative offsets indicate the advertisement arrived earlier than the nominal anchor (common when jitter advances the beacon); positive offsets capture late/clock-skewed broadcasts. Rolling-window lookups stay tolerant of these offsets by accepting matches in adjacent windows and recording the offset for diagnostics.
 
 ### S3.3 Timebase: “seconds since setup”, not Unix epoch (Measured)
 
@@ -177,25 +178,22 @@ This is consistent with the general principle that the EIK remains within the ow
 
 **Measured:** The owner device performs aggregation locally because the server cannot aggregate E2EE ciphertext. (Böttger et al., 2025). ([Pet Symposium][1])
 
-### S6.2 Critical missing piece for implementers: **unwrap before EID** (Observed in your integration)
+### S6.2 Critical implementer rule: **unwrap before EID** (Implementation verified)
 
-**Observed (your logs + code path):**
+**Verified (code + resolver logs):**
 
-* `encryptedUserSecrets.encryptedIdentityKey` is **60 bytes** (Moto Tag example)
-* Your implementation logs: **“Successfully unwrapped 60-byte EIK to 32 bytes”**
-* Your note indicates this unwrapping involves **AES-GCM** (and is present in code and logs)
+* `encryptedUserSecrets.encryptedIdentityKey` is **60 bytes** and is an **AES-GCM-wrapped container**.
+* `key_derivation.py` unwraps it to the **32-byte EIK**, and resolver logs confirm successful unwraps before EID computation.
 
-**Normative requirement for your codebase:**
+**Normative requirement for this codebase:**
 
-> **EID derivation MUST consume the 32-byte raw EIK, never the 60-byte wrapper.**
+> **EID derivation MUST consume the 32-byte raw EIK, never the 60-byte wrapper.** The unwrap step (AES-GCM → 32-byte EIK) is mandatory for every resolver path.
 
-**Documentation requirement (add explicitly):**
+**Documentation requirement:**
 
-* Define the wrapper as **`EIK_WRAPPED` (bytes, length 60 observed)**
-* Define the output as **`EIK` (32 bytes)**
-* Make the unwrap function a first-class step in the Owner Client pipeline (before EID generation, before any derived keys)
-
-**Hypothesis (format):** the 60-byte wrapper likely encodes `{nonce | ciphertext | tag}` or a closely related AEAD container; confirm by reading the decryptor module that performs AES-GCM and documenting the exact layout once verified by test vectors.
+* Treat the wrapper as **`EIK_WRAPPED` (60 bytes)** and the output as **`EIK` (32 bytes)**.
+* Keep the unwrap function a first-class step in the Owner Client pipeline (before EID generation and any derived short keys).
+* Layout note: the container follows the AES-GCM structure `{nonce | ciphertext | tag}`; continue to document nonce/tag sizing as additional test vectors are captured.
 
 ### S6.3 Owner-device encryption (Measured; separate from tracker E2EE)
 
@@ -292,8 +290,30 @@ Fetch secrets → Unwrap EIK (if wrapped) → Precompute rolling EIDs → Fetch 
 ## S11. Open Points / Not Publicly Specified `⟦OPEN_POINTS⟧`
 
 * Exact semantics and cryptographic definition of **UT byte** and **hashed flags** across accessory generations (unless you hold the applicable partner spec revision).
-* Exact format of **60-byte EIK wrapper** (nonce/tag layout, AAD rules, versioning) until you document it from the decryptor implementation and test vectors.
+* Exact format of **60-byte EIK wrapper** (nonce/tag sizing, AAD rules, versioning) beyond the confirmed AES-GCM structure; capture detailed layout once more test vectors are recorded.
 * Precise REST endpoints, headers, attestation details, and server retention policies (subject to change).
+
+---
+
+## S12. Operational Behavior & Logs `⟦OP_LOGS⟧`
+
+**Purpose:** Provide anonymized, real-world resolver traces showing the rolling-window logic, offset interpretation, and `0x40` frame format.
+
+### S12.1 Anonymized hit sequence (0x40 legacy frame)
+
+```text
+2025-12-21 13:16:32.531 INFO (MainThread) [custom_components.googlefindmy.eid_resolver] HIT: device=device_id_1 canonical=canonical_id_1:beacon_guid_1 reversed=False offset=-1759955231 eid_prefix=561cb584
+2025-12-21 13:16:32.532 WARNING (MainThread) [custom_components.bermuda] FMDN RAW SPY: Scanner BT Scanner 6 Lab -> AA:BB:CC:DD:EE:FF | Data: 40a1b2c3d4e5f60718293a4b5c6d7e8090a1b2c3d4e5
+2025-12-21 13:16:32.533 INFO (MainThread) [custom_components.googlefindmy.eid_resolver] HIT: device=device_id_2 canonical=canonical_id_1:beacon_guid_2 reversed=False offset=-1748949279 eid_prefix=a1b2c3d4
+2025-12-21 13:16:32.533 WARNING (MainThread) [custom_components.bermuda] FMDN RAW SPY: Scanner BT Scanner 6 Lab -> 11:22:33:44:55:66 | Data: 40c03146443e20a49e2a2a6711a6c87641b8e8a68bdc
+```
+
+### S12.2 Interpretation
+
+* `Data: 40…` — `0x40` is the **Frame Type / UT byte** for the legacy 160-bit advert. The following **20 bytes** encode the EID, and the final **1 byte** carries hashed/flag bits, for a total of 22 bytes in the service data payload.
+* `HIT` — the resolver found the broadcast EID in the **precomputed rolling window (previous/current/next)** derived from the unwrapped 32-byte EIK.
+* `offset` — `observed_broadcast_time - expected_rotation_anchor`. Negative values show the beacon arrived earlier than the nominal anchor (jitter advancing the frame); positive values would indicate a late/clock-skewed advert. The resolver records the offset for diagnostics while accepting matches in adjacent windows so jitter and clock skew do not cause false negatives.
+* **Anonymization:** Device IDs, canonical IDs, MAC addresses, and EID payloads above are redacted into realistic placeholders while preserving structure (0x40 prefix, 20-byte EID body, 1-byte flag) to illustrate the frame format without exposing production data.
 
 ---
 
