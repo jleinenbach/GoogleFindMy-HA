@@ -27,7 +27,7 @@ def test_config_flow_import_and_registers_handler() -> None:
 
 
 @pytest.fixture(name="hass")
-def hass_fixture() -> SimpleNamespace:
+async def hass_fixture() -> SimpleNamespace:
     """Return a minimal hass stub with a flow manager."""
 
     from custom_components.googlefindmy import config_flow  # noqa: PLC0415

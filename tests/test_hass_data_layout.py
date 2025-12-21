@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+import inspect
 import json
 import logging
 import sys
@@ -202,6 +203,25 @@ class _StubConfigEntries:
     async def async_unload_platforms(
         self, entry: _StubConfigEntry, _platforms: list[str]
     ) -> bool:
+        return True
+
+    def async_forward_entry_unload(
+        self, entry: _StubConfigEntry, platforms: object
+    ) -> bool:
+        del platforms
+        runtime = getattr(entry, "runtime_data", None)
+        manager = getattr(runtime, "subentry_manager", None)
+        if manager is not None:
+            removal_result = manager.async_remove_all()
+            if inspect.isawaitable(removal_result):
+                return removal_result  # type: ignore[return-value]
+            managed = getattr(manager, "managed_subentries", None)
+            if isinstance(managed, dict):
+                managed.clear()
+
+        for subentry_id in list(entry.subentries):
+            self.async_remove_subentry(entry, subentry_id)
+
         return True
 
     def async_add_subentry(

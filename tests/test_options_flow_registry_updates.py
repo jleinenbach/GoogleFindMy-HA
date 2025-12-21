@@ -30,6 +30,8 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
 
+pytestmark = pytest.mark.asyncio
+
 
 def _stable_subentry_id(entry_id: str, key: str) -> str:
     """Return deterministic config_subentry ids for options-repair tests."""
@@ -161,12 +163,22 @@ class _HassStub:
     ) -> None:
         self.entity_registry = entity_registry
         self.device_registry = device_registry
+        self.data: dict[str, Any] = {}
+
+    @classmethod
+    async def create(
+        cls,
+        entry: _EntryStub,
+        entity_registry: _RegistryTracker,
+        device_registry: _RegistryTracker,
+    ) -> _HassStub:
+        hass = cls(entry, entity_registry, device_registry)
         prepare_flow_hass_config_entries(
-            self,
+            hass,
             lambda: _ManagerWithRegistries(entry, entity_registry, device_registry),
             frame_module=frame,
         )
-        self.data: dict[str, Any] = {}
+        return hass
 
     def async_create_task(
         self, coro: Any, *, name: str | None = None
@@ -234,7 +246,7 @@ def _build_flow(entry: _EntryStub, hass: _HassStub) -> config_flow.OptionsFlowHa
     return flow
 
 
-def test_repairs_move_updates_registries_for_devices() -> None:
+async def test_repairs_move_updates_registries_for_devices() -> None:
     """Moving devices should update both entity and device registries."""
 
     entry = _EntryStub()
@@ -249,7 +261,7 @@ def test_repairs_move_updates_registries_for_devices() -> None:
     device_registry.apply(target.subentry_id, ("dev-1",))
     device_registry.apply(other.subentry_id, ("dev-2",))
 
-    hass = _HassStub(entry, entity_registry, device_registry)
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
     flow = _build_flow(entry, hass)
 
     entry.runtime_data.coordinator.data = [
@@ -264,7 +276,7 @@ def test_repairs_move_updates_registries_for_devices() -> None:
         await asyncio.sleep(0)
         return result
 
-    result = asyncio.run(_invoke())
+    result = await _invoke()
 
     assert result["type"] == "abort"
     manager = hass.config_entries
@@ -282,7 +294,7 @@ def test_repairs_move_updates_registries_for_devices() -> None:
     assert manager.reloads == [entry.entry_id]
 
 
-def test_repairs_delete_removes_registry_entries() -> None:
+async def test_repairs_delete_removes_registry_entries() -> None:
     """Deleting a subentry should clear registry assignments for that subentry."""
 
     entry = _EntryStub()
@@ -299,7 +311,7 @@ def test_repairs_delete_removes_registry_entries() -> None:
     device_registry.apply(removable.subentry_id, ("dev-3", "dev-4"))
     device_registry.apply(fallback.subentry_id, ("dev-5",))
 
-    hass = _HassStub(entry, entity_registry, device_registry)
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
     flow = _build_flow(entry, hass)
 
     async def _invoke_delete() -> dict[str, Any]:
@@ -309,7 +321,7 @@ def test_repairs_delete_removes_registry_entries() -> None:
         await asyncio.sleep(0)
         return result
 
-    result = asyncio.run(_invoke_delete())
+    result = await _invoke_delete()
 
     assert result["type"] == "abort"
     manager = hass.config_entries
@@ -330,13 +342,13 @@ def test_repairs_delete_removes_registry_entries() -> None:
     assert device_registry.removals == [removable.subentry_id]
 
 
-def test_coordinator_propagates_visible_devices_to_registries() -> None:
+async def test_coordinator_propagates_visible_devices_to_registries() -> None:
     """Coordinator updates must synchronize subentry visibility and registries."""
 
     entry = _EntryStub()
     entity_registry = _RegistryTracker()
     device_registry = _RegistryTracker()
-    hass = _HassStub(entry, entity_registry, device_registry)
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
 
     registry_devices = {
         "ha-dev-1": SimpleNamespace(
@@ -388,10 +400,8 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
         },
     )
 
-    asyncio.run(
-        subentry_manager.async_sync(
-            [core_definition, service_definition, secondary_definition]
-        )
+    await subentry_manager.async_sync(
+        [core_definition, service_definition, secondary_definition]
     )
 
     coordinator.attach_subentry_manager(subentry_manager)
@@ -430,13 +440,13 @@ def test_coordinator_propagates_visible_devices_to_registries() -> None:
     assert secondary_metadata.visible_device_ids == ("dev-2",)
 
 
-def test_coordinator_default_features_map_to_core_group() -> None:
+async def test_coordinator_default_features_map_to_core_group() -> None:
     """Default feature list should expose lowercase domains and map to core group."""
 
     entry = _EntryStub()
     entity_registry = _RegistryTracker()
     device_registry = _RegistryTracker()
-    hass = _HassStub(entry, entity_registry, device_registry)
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     _prepare_coordinator_baseline(coordinator, hass, entry)
@@ -458,7 +468,7 @@ async def test_options_settings_repairs_missing_service_subentry() -> None:  # n
     entry = _EntryStub()
     entity_registry = _RegistryTracker()
     device_registry = _RegistryTracker()
-    hass = _HassStub(entry, entity_registry, device_registry)
+    hass = await _HassStub.create(entry, entity_registry, device_registry)
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     _prepare_coordinator_baseline(coordinator, hass, entry)

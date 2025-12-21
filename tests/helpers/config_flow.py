@@ -268,7 +268,10 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                asyncio.run(result)
+                raise AssertionError(
+                    "async_setup returned an awaitable outside a running event loop; "
+                    "run the caller under pytest-asyncio and await the coroutine."
+                ) from None
             else:
                 loop.create_task(result)
 

@@ -184,7 +184,10 @@ def install_config_entries_stubs(target: ModuleType) -> None:
                                 try:
                                     loop = asyncio.get_running_loop()
                                 except RuntimeError:  # pragma: no cover - fallback path
-                                    asyncio.run(outcome)
+                                    raise AssertionError(
+                                        "async_reload returned an awaitable outside a running event loop; "
+                                        "ensure calls happen under pytest-asyncio and await the coroutine."
+                                    ) from None
                                 else:
                                     loop.create_task(outcome)
                 return

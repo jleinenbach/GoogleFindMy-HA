@@ -624,7 +624,8 @@ async def test_manual_tokens_abort_when_account_exists(
     assert len(hass.config_entries.entries) == 1
 
 
-def test_device_selection_creates_and_updates_subentry() -> None:
+@pytest.mark.asyncio
+async def test_device_selection_creates_and_updates_subentry() -> None:
     """Device-selection step must manage feature subentries with stable IDs."""
 
     class _StubEntry:
@@ -736,7 +737,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
     if OPT_ENABLE_STATS_ENTITIES is not None:
         first_input[OPT_ENABLE_STATS_ENTITIES] = True
 
-    result = asyncio.run(flow.async_step_device_selection(first_input))
+    result = await flow.async_step_device_selection(first_input)
     assert result["type"] == "create_entry"
 
     manager = hass.config_entries
@@ -771,7 +772,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
 
     previous_created = len(manager.created)
     manager.updated.clear()
-    result2 = asyncio.run(flow.async_step_device_selection(second_input))
+    result2 = await flow.async_step_device_selection(second_input)
     assert result2["type"] == "create_entry"
     assert len(manager.created) == previous_created
     assert manager.updated, "Expected tracker subentry to be updated on second run"
@@ -1158,7 +1159,10 @@ async def test_async_step_reconfigure_defers_reload_and_logs_exception(
     )
 
 
-def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_updates_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reconfigure flows should reuse device selection and update existing entries."""
 
     class _Entry:
@@ -1279,7 +1283,7 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
         )
         return initial, result
 
-    initial_result, final_result = asyncio.run(_exercise())
+    initial_result, final_result = await _exercise()
 
     assert initial_result["type"] == "form"
     assert final_result["type"] == "abort"
@@ -1295,7 +1299,8 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
     assert hass.config_entries.reloaded == [entry.entry_id]
 
 
-def test_async_step_reconfigure_legacy_update_preserves_options(
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_legacy_update_preserves_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Legacy async_update_entry fallback must still persist options."""
@@ -1419,7 +1424,7 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
         )
         return initial, result
 
-    initial_result, final_result = asyncio.run(_exercise())
+    initial_result, final_result = await _exercise()
 
     assert initial_result["type"] == "form"
     assert final_result["type"] == "abort"
@@ -1593,4 +1598,3 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         stale_tracker.subentry_id,
         stale_service.subentry_id,
     }
-

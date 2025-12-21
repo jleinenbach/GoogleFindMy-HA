@@ -88,7 +88,7 @@ def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:
 
 
 @pytest.fixture(name="hass")
-def hass_fixture() -> SimpleNamespace:
+async def hass_fixture() -> SimpleNamespace:
     """Return a minimal Home Assistant stub with a flow manager."""
 
     from custom_components.googlefindmy import config_flow  # noqa: PLC0415
