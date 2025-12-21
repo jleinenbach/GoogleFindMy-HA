@@ -409,6 +409,26 @@ class GoogleFindMyEIDResolver:
             key_bytes = bytes(identity.identity_key)
             lock = self._locks.get(identity.registry_id)
 
+            if lock is not None:
+                rotation_ts = lock.rotation_timestamp
+                is_legacy = rotation_ts is None
+                is_poisoned = (
+                    isinstance(rotation_ts, int)
+                    and not isinstance(rotation_ts, bool)
+                    and rotation_ts > FHNA_COUNTER_MASK
+                )
+
+                if is_legacy or is_poisoned:
+                    _LOGGER.warning(
+                        "Discarding invalid/legacy lock for %s (legacy=%s, poisoned=%s). Force re-discovery.",
+                        identity.registry_id,
+                        is_legacy,
+                        is_poisoned,
+                    )
+                    self._locks.pop(identity.registry_id, None)
+                    self._persisted_locks.pop(identity.registry_id, None)
+                    lock = None
+
             def _register_variant(
                 eid_bytes: bytes,
                 *,
