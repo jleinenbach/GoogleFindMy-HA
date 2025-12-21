@@ -163,6 +163,7 @@ class EIDGenerationLock:
     variant: str
     advertisement_reversed: bool
     eid_length: int
+    rotation_timestamp: int | None = None
     frame_type: int | None = None
     time_basis: str | None = None
     created_at: int = field(default_factory=lambda: int(time.time()))
@@ -176,6 +177,7 @@ class EIDGenerationLock:
             "variant": self.variant,
             "advertisement_reversed": self.advertisement_reversed,
             "eid_length": self.eid_length,
+            "rotation_timestamp": self.rotation_timestamp,
             "frame_type": self.frame_type,
             "time_basis": self.time_basis,
             "created_at": self.created_at,
@@ -187,6 +189,12 @@ class EIDGenerationLock:
 
         variant = payload.get("variant") or ""
         advertisement_reversed = bool(payload.get("advertisement_reversed") or False)
+        rotation_timestamp = payload.get("rotation_timestamp")
+        rotation_ts = (
+            int(rotation_timestamp)
+            if isinstance(rotation_timestamp, int) and not isinstance(rotation_timestamp, bool)
+            else None
+        )
         if not variant:
             scalar_endianness = str(payload.get("scalar_endianness") or "big")
             length = int(payload["eid_length"])
@@ -205,6 +213,7 @@ class EIDGenerationLock:
             variant=variant,
             advertisement_reversed=advertisement_reversed,
             eid_length=int(payload["eid_length"]),
+            rotation_timestamp=rotation_ts,
             frame_type=payload.get("frame_type"),
             time_basis=str(payload.get("time_basis") or "") or None,
             created_at=int(payload.get("created_at") or int(time.time())),
@@ -399,17 +408,6 @@ class GoogleFindMyEIDResolver:
 
             key_bytes = bytes(identity.identity_key)
             lock = self._locks.get(identity.registry_id)
-            provisioning_counter = 0
-            if isinstance(identity.pair_date, int):
-                provisioning_counter = max(0, now_unix - identity.pair_date)
-            drift_seconds = provisioning_counter * 0.00005
-            drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
-            tz_offset = dt_util.now().utcoffset()
-            tz_windows = (
-                math.ceil(abs(tz_offset.total_seconds()) / ROTATION_PERIOD)
-                if tz_offset
-                else 0
-            )
 
             def _register_variant(
                 eid_bytes: bytes,
@@ -474,95 +472,123 @@ class GoogleFindMyEIDResolver:
             # 1. Define explicit time bases to allow iteration over all strategies.
             # - "unix": Absolute time (Strategy A)
             # - "pair_date" / "secrets...": Relative time (Strategy B & C)
-            counter_bases: tuple[tuple[str, str], ...] = (
-                ("unix", "unix"),
-                ("pair_date", "pair_date"),
-                ("secrets_creation_date", "secrets_creation_date"),
-            )
-
-            # 2. Logic Restoration (v3.31): Smart Drift Calculation.
-            # We determine the device's "age" using the freshest available anchor
-            # to estimate the crystal drift (50ppm) more accurately.
-            anchor_candidates = []
-            if isinstance(identity.pair_date, int) and identity.pair_date > 0:
-                anchor_candidates.append(identity.pair_date)
-            if (
-                isinstance(identity.secrets_creation_date, int)
-                and identity.secrets_creation_date > 0
-            ):
-                anchor_candidates.append(identity.secrets_creation_date)
-
-            best_anchor = max(anchor_candidates) if anchor_candidates else 0
-            provisioning_counter = max(0, now_unix - best_anchor) if best_anchor > 0 else 0
-
-            # Calculate expected drift based on age (50ppm)
-            drift_seconds = provisioning_counter * 0.00005
-            drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
-
             counter_windows: list[tuple[int, str]] = []
 
-            # 3. Execution Loop: Apply specific math per strategy
-            for basis, label in counter_bases:
-                candidate_value: int | None = None
-                total_window: int = 0
-
-                if basis == "unix":
-                    # STRATEGY A: Absolute Time (Fallback)
-                    # Targets devices with a Real-Time Clock (RTC).
-                    # Disabled by default as it causes false negatives on simple trackers.
-                    if not ENABLE_ABSOLUTE_UNIX_BASIS:
+            rotation_ts = (
+                lock.rotation_timestamp
+                if lock is not None
+                and isinstance(lock.rotation_timestamp, int)
+                and not isinstance(lock.rotation_timestamp, bool)
+                else None
+            )
+            if rotation_ts is not None:
+                for step in (0, 1, 2):
+                    window_ts = rotation_ts + (step * ROTATION_PERIOD)
+                    if window_ts < 0 or window_ts > FHNA_COUNTER_MASK:
                         continue
+                    counter_windows.append((window_ts, "lock_tracking"))
+            else:
+                counter_bases: tuple[tuple[str, str], ...] = (
+                    ("unix", "unix"),
+                    ("pair_date", "pair_date"),
+                    ("secrets_creation_date", "secrets_creation_date"),
+                )
 
-                    candidate_value = now_unix
-
-                    # Calculate timezone offset to catch wall-clock synced devices
-                    try:
-                        tz_offset = dt_util.now().utcoffset()
-                        tz_windows = (
-                            int(math.ceil(abs(tz_offset.total_seconds()) / ROTATION_PERIOD))
-                            if tz_offset
-                            else 0
-                        )
-                    except Exception:
-                        tz_windows = 0
-
-                    # Use massive window (Deep Scan) + Drift + Timezone
-                    total_window = max(MIN_UNIX_WINDOW_SIZE, 3 + drift_windows + tz_windows)
-
-                else:
-                    # STRATEGY B & C: Relative Time (Primary)
-                    # Applies to "pair_date" and "secrets_creation_date".
-                    # Targets standard trackers counting seconds since boot/pairing.
-                    # MATH FIX: We calculate ELAPSED time (now - anchor) to match v3.31 logic.
-
-                    raw_anchor = getattr(identity, basis, None)
-                    anchor_value = _normalize_counter_candidate(raw_anchor, basis=basis)
-
-                    if anchor_value is None:
-                        continue
-
-                    # Critical: Relative calculation (now - anchor)
-                    candidate_value = now_unix - anchor_value
-
-                    # ROBUSTNESS: Add safety buffer for DST shifts.
-                    # If the server jumps 1h (DST), the relative diff changes by 3600s.
-                    # MIN_RELATIVE_WINDOW_SIZE (5) absorbs this jump.
-                    total_window = min(MIN_RELATIVE_WINDOW_SIZE + drift_windows, max_window)
-
-                # 4. Generate windows for the calculated candidate
-                normalized = _normalize_counter_candidate(candidate_value, basis=basis)
-                if normalized is None:
-                    continue
-
-                for ts in iter_rotation_windows(
-                    normalized,
-                    rotation_period=ROTATION_PERIOD,
-                    window_range=range(-total_window, total_window + 1),
-                    include_neighbors=False,
+                # 2. Logic Restoration (v3.31): Smart Drift Calculation.
+                # We determine the device's "age" using the freshest available anchor
+                # to estimate the crystal drift (50ppm) more accurately.
+                anchor_candidates = []
+                if isinstance(identity.pair_date, int) and identity.pair_date > 0:
+                    anchor_candidates.append(identity.pair_date)
+                if (
+                    isinstance(identity.secrets_creation_date, int)
+                    and identity.secrets_creation_date > 0
                 ):
-                    if ts < 0 or ts > FHNA_COUNTER_MASK:
+                    anchor_candidates.append(identity.secrets_creation_date)
+
+                best_anchor = max(anchor_candidates) if anchor_candidates else 0
+                provisioning_counter = (
+                    max(0, now_unix - best_anchor) if best_anchor > 0 else 0
+                )
+
+                # Calculate expected drift based on age (50ppm)
+                drift_seconds = provisioning_counter * 0.00005
+                drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
+
+                # 3. Execution Loop: Apply specific math per strategy
+                for basis, label in counter_bases:
+                    candidate_value: int | None = None
+                    total_window: int = 0
+
+                    if basis == "unix":
+                        # STRATEGY A: Absolute Time (Fallback)
+                        # Targets devices with a Real-Time Clock (RTC).
+                        # Disabled by default as it causes false negatives on simple trackers.
+                        if not ENABLE_ABSOLUTE_UNIX_BASIS:
+                            continue
+
+                        candidate_value = now_unix
+
+                        # Calculate timezone offset to catch wall-clock synced devices
+                        try:
+                            tz_offset = dt_util.now().utcoffset()
+                            tz_windows = (
+                                int(
+                                    math.ceil(
+                                        abs(tz_offset.total_seconds()) / ROTATION_PERIOD
+                                    )
+                                )
+                                if tz_offset
+                                else 0
+                            )
+                        except Exception:
+                            tz_windows = 0
+
+                        # Use massive window (Deep Scan) + Drift + Timezone
+                        total_window = max(
+                            MIN_UNIX_WINDOW_SIZE, 3 + drift_windows + tz_windows
+                        )
+
+                    else:
+                        # STRATEGY B & C: Relative Time (Primary)
+                        # Applies to "pair_date" and "secrets_creation_date".
+                        # Targets standard trackers counting seconds since boot/pairing.
+                        # MATH FIX: We calculate ELAPSED time (now - anchor) to match v3.31 logic.
+
+                        raw_anchor = getattr(identity, basis, None)
+                        anchor_value = _normalize_counter_candidate(
+                            raw_anchor, basis=basis
+                        )
+
+                        if anchor_value is None:
+                            continue
+
+                        # Critical: Relative calculation (now - anchor)
+                        candidate_value = now_unix - anchor_value
+
+                        # ROBUSTNESS: Add safety buffer for DST shifts.
+                        # If the server jumps 1h (DST), the relative diff changes by 3600s.
+                        # MIN_RELATIVE_WINDOW_SIZE (5) absorbs this jump.
+                        total_window = min(
+                            MIN_RELATIVE_WINDOW_SIZE + drift_windows, max_window
+                        )
+
+                    # 4. Generate windows for the calculated candidate
+                    normalized = _normalize_counter_candidate(
+                        candidate_value, basis=basis
+                    )
+                    if normalized is None:
                         continue
-                    counter_windows.append((ts, label))
+
+                    for ts in iter_rotation_windows(
+                        normalized,
+                        rotation_period=ROTATION_PERIOD,
+                        window_range=range(-total_window, total_window + 1),
+                        include_neighbors=False,
+                    ):
+                        if ts < 0 or ts > FHNA_COUNTER_MASK:
+                            continue
+                        counter_windows.append((ts, label))
 
             for window_ts, time_basis in counter_windows:
                 for variant in variants:
@@ -933,12 +959,17 @@ class GoogleFindMyEIDResolver:
                 except Exception:
                     variant_value = EidVariant.MODERN_P256_X32_BE.value
                 time_basis = metadata.get("timestamp_basis")
+                rotation_timestamp = metadata.get("rotation_timestamp")
                 lock = EIDGenerationLock(
                     device_id=match.device_id,
                     canonical_id=match.canonical_id,
                     variant=variant_value,
                     advertisement_reversed=match.is_reversed,
                     eid_length=len(c),
+                    rotation_timestamp=int(rotation_timestamp)
+                    if isinstance(rotation_timestamp, int)
+                    and not isinstance(rotation_timestamp, bool)
+                    else None,
                     frame_type=observed_frame,
                     time_basis=time_basis if isinstance(time_basis, str) else None,
                 )
