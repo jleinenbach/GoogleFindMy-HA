@@ -103,6 +103,141 @@ class _IdentityProvider(Protocol):
     def get_active_device_identities(self) -> list[DeviceIdentity]: ...
 
 
+@dataclass(slots=True, frozen=True)
+class WorkItem:
+    """Normalized device identity with optional lock context."""
+
+    registry_id: str
+    config_entry_id: str
+    canonical_id: str
+    key_bytes: bytes
+    identity: DeviceIdentity
+    lock: EIDGenerationLock | None
+    locked_variant: EidVariant | None
+    rotation_ts: int | None
+    basis_hint: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class WindowCandidate:
+    """Single timestamp candidate for EID generation."""
+
+    timestamp: int
+    semantic_offset: int
+    time_basis: str
+    candidate_value: int
+
+
+@dataclass(slots=True, frozen=True)
+class WindowSpec:
+    """Time-basis specific window candidates derived from a work item."""
+
+    time_basis: str
+    candidate_value: int
+    windows: tuple[WindowCandidate, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class VariantSpec:
+    """Variant generation request for a given window."""
+
+    key_bytes: bytes
+    variant: EidVariant
+    window: WindowCandidate
+    include_reverse: bool = True
+
+
+@dataclass(slots=True, frozen=True)
+class GeneratedEid:
+    """Result of generating a single EID variant."""
+
+    eid_bytes: bytes
+    is_reversed: bool
+    variant: EidVariant
+    window: WindowCandidate
+
+
+@dataclass(slots=True, frozen=True)
+class RotationParams:
+    """Collection of rotation-related constants for generation."""
+
+    rotation_period: int
+    min_unix_window: int
+    min_relative_window: int
+    max_window: int
+
+
+@dataclass(slots=True)
+class CacheBuilder:
+    """Immutable-safe cache builder enforcing lookup/metadata invariants."""
+
+    lookup: dict[bytes, EIDMatch] = field(default_factory=dict)
+    metadata: dict[bytes, dict[str, Any]] = field(default_factory=dict)
+
+    def register_eid(
+        self,
+        eid_bytes: bytes,
+        *,
+        match: EIDMatch,
+        variant: EidVariant,
+        window: WindowCandidate,
+        advertisement_reversed: bool,
+    ) -> None:
+        """Register an EID and metadata, resolving collisions deterministically."""
+
+        existing = self.lookup.get(eid_bytes)
+        existing_metadata = self.metadata.get(eid_bytes)
+        existing_bases: set[str] | None = None
+        if existing_metadata is not None:
+            existing_bases = set(existing_metadata.get("timestamp_bases") or ())
+            if (basis := existing_metadata.get("timestamp_basis")) and isinstance(
+                basis, str
+            ):
+                existing_bases.add(basis)
+            existing_bases.add(window.time_basis)
+
+        if existing is not None and abs(existing.time_offset) <= abs(
+            match.time_offset
+        ):
+            if existing_metadata is not None and existing_bases is not None:
+                existing_metadata["timestamp_bases"] = existing_bases
+            return
+
+        timestamp_bases = existing_bases or {window.time_basis}
+        self.lookup[eid_bytes] = match
+        self.metadata[eid_bytes] = {
+            "variant": variant.value,
+            "rotation_timestamp": window.timestamp,
+            "time_offset": match.time_offset,
+            "timestamp_basis": window.time_basis,
+            "timestamp_bases": timestamp_bases,
+            "advertisement_reversed": advertisement_reversed,
+        }
+        if __debug__:
+            assert set(self.lookup.keys()).issuperset(
+                self.metadata.keys()
+            ), "metadata keys diverged after registration"
+
+    def finalize(self) -> tuple[dict[bytes, EIDMatch], dict[bytes, dict[str, Any]]]:
+        """Return the finalized lookup tables after invariant validation."""
+
+        lookup_keys = set(self.lookup.keys())
+        metadata_keys = set(self.metadata.keys())
+        if lookup_keys != metadata_keys:
+            missing_metadata = lookup_keys - metadata_keys
+            missing_lookup = metadata_keys - lookup_keys
+            _LOGGER.warning(
+                "EID cache invariant violation: metadata_missing=%s lookup_missing=%s",
+                missing_metadata,
+                missing_lookup,
+            )
+            for key in missing_metadata:
+                self.metadata[key] = {}
+            for key in missing_lookup:
+                self.lookup.pop(key, None)
+        return self.lookup, self.metadata
+
+
 def iter_rotation_windows(
     target_time: int,
     *,
@@ -352,15 +487,30 @@ class GoogleFindMyEIDResolver:
         """Schedule persistence of EID locks."""
 
         try:
-            if hasattr(self.hass, "async_create_background_task"):
-                self.hass.async_create_background_task(
-                    self._async_save_locks(),
-                    name="googlefindmy_eid_resolver_save",
-                )
-            else:
-                self.hass.async_create_task(
-                    self._async_save_locks(),
-                    name="googlefindmy_eid_resolver_save",
+            task_name = "googlefindmy_eid_resolver_save"
+            create_task = getattr(self.hass, "async_create_background_task", None) or getattr(
+                self.hass, "async_create_task"
+            )
+            if create_task is None:
+                raise AttributeError("hass is missing async_create_task helper")
+            lock_save = self._async_save_locks()
+            try:
+                scheduled = create_task(lock_save, name=task_name)
+            except TypeError:
+                scheduled = create_task(lock_save)
+            if scheduled is None:
+                asyncio.create_task(lock_save)
+                _LOGGER.warning("EID lock save was not scheduled (task helper returned None)")
+            elif asyncio.iscoroutine(scheduled):
+                asyncio.create_task(scheduled)
+            elif not isinstance(scheduled, asyncio.Task):
+                try:
+                    lock_save.close()
+                except Exception:  # pragma: no cover - defensive close
+                    pass
+                _LOGGER.warning(
+                    "EID lock save task helper returned non-awaitable %s; coroutine closed",
+                    type(scheduled).__name__,
                 )
         except Exception as err:  # pragma: no cover - defensive log
             _LOGGER.error("Failed to schedule EID lock persistence: %s", err)
@@ -396,303 +546,442 @@ class GoogleFindMyEIDResolver:
                 self._pending_refresh = False
                 await self._refresh_cache()
 
-    async def _refresh_cache(self) -> None:  # noqa: PLR0912, PLR0915
+    def reset_device_offset(self, registry_id: str) -> None:
+        """Reset resolver state for a single device to force rediscovery."""
+
+        self._ensure_cache_defaults()
+        changed = False
+
+        for attr in (
+            "_locks",
+            "_persisted_locks",
+            "_known_offsets",
+            "_known_timebases",
+            "_known_advertisement_reversed",
+            "_lock_miss_counts",
+            "_last_lock_confirmation",
+        ):
+            mapping = getattr(self, attr, None)
+            if isinstance(mapping, dict) and registry_id in mapping:
+                mapping.pop(registry_id, None)
+                changed = True
+
+        if not changed:
+            return
+
+        try:
+            self._schedule_lock_save()
+        except Exception as err:  # pragma: no cover - defensive log
+            _LOGGER.debug(
+                "Failed to schedule lock persistence after reset for %s: %s",
+                registry_id,
+                err,
+            )
+
+        refresh = getattr(self, "async_refresh", None)
+        create_task = getattr(self.hass, "async_create_task", None)
+        if callable(refresh) and callable(create_task):
+            try:
+                refresh_coro = refresh()
+                scheduled = create_task(
+                    refresh_coro, name="googlefindmy_eid_refresh_after_reset"
+                )
+                if scheduled is None:
+                    refresh_coro.close()
+                elif asyncio.iscoroutine(scheduled):
+                    asyncio.create_task(scheduled)
+            except Exception as err:  # pragma: no cover - defensive log
+                _LOGGER.debug(
+                    "Failed to schedule refresh after reset for %s: %s",
+                    registry_id,
+                    err,
+                )
+
+    def _build_rotation_params(self) -> RotationParams:
+        """Return the rotation constants for deterministic refresh calculations."""
+
+        return RotationParams(
+            rotation_period=ROTATION_PERIOD,
+            min_unix_window=MIN_UNIX_WINDOW_SIZE,
+            min_relative_window=MIN_RELATIVE_WINDOW_SIZE,
+            max_window=math.ceil((24 * 60 * 60) / ROTATION_PERIOD),
+        )
+
+    def _prepare_work_item(
+        self,
+        identity: DeviceIdentity,
+    ) -> WorkItem | None:
+        """Normalize an identity and lock into a work item."""
+
+        basis_hint = self._known_timebases.get(identity.registry_id)
+        if (
+            not identity.config_entry_id
+            or identity.identity_key is None
+            or identity.registry_id is None
+        ):
+            return None
+
+        clean_canonical_id = identity.canonical_id
+        if ":" in clean_canonical_id:
+            clean_canonical_id = clean_canonical_id.split(":")[-1]
+
+        key_bytes = bytes(identity.identity_key)
+        lock = self._locks.get(identity.registry_id)
+        locked_variant: EidVariant | None = None
+        rotation_ts: int | None = None
+
+        if lock is not None:
+            raw_rotation_ts = lock.rotation_timestamp
+            rotation_ts = (
+                raw_rotation_ts
+                if isinstance(raw_rotation_ts, int)
+                and not isinstance(raw_rotation_ts, bool)
+                else None
+            )
+            lock_time_basis = _normalize_optional_string(lock.time_basis)
+            if lock_time_basis:
+                basis_hint = lock_time_basis
+                self._known_timebases[identity.registry_id] = lock_time_basis
+
+            is_legacy = rotation_ts is None
+            try:
+                locked_variant = EidVariant(lock.variant)
+            except ValueError:
+                locked_variant = EidVariant.MODERN_P256_X32_BE
+
+            if is_legacy:
+                valid_hint = lock_time_basis if lock_time_basis in {"unix", "pair_date", "secrets_creation_date"} else None
+                _LOGGER.warning(
+                    "Discarding invalid/legacy lock for %s (legacy=%s). Force re-discovery.",
+                    identity.registry_id,
+                    is_legacy,
+                )
+                self._locks.pop(identity.registry_id, None)
+                self._persisted_locks.pop(identity.registry_id, None)
+                if valid_hint:
+                    basis_hint = valid_hint
+                    self._known_timebases[identity.registry_id] = valid_hint
+                else:
+                    self._known_timebases.pop(identity.registry_id, None)
+                lock = None
+            elif lock.canonical_id != clean_canonical_id:
+                _LOGGER.debug(
+                    "Updating canonical_id to UUID-only for %s: %s -> %s",
+                    identity.registry_id,
+                    lock.canonical_id,
+                    clean_canonical_id,
+                )
+                lock.canonical_id = clean_canonical_id
+                self._schedule_lock_save()
+
+        return WorkItem(
+            registry_id=identity.registry_id,
+            config_entry_id=str(identity.config_entry_id),
+            canonical_id=clean_canonical_id,
+            key_bytes=key_bytes,
+            identity=identity,
+            lock=lock,
+            locked_variant=locked_variant,
+            rotation_ts=rotation_ts,
+            basis_hint=basis_hint,
+        )
+
+    def _collect_work_items(
+        self,
+        identities: Iterable[DeviceIdentity],
+    ) -> list[WorkItem]:
+        """Normalize all identities into work items."""
+
+        items: list[WorkItem] = []
+        for identity in identities:
+            work_item = self._prepare_work_item(identity)
+            if work_item is not None:
+                items.append(work_item)
+        return items
+
+    def _compute_time_windows(
+        self,
+        work_item: WorkItem,
+        *,
+        now_unix: int,
+        params: RotationParams,
+    ) -> tuple[list[WindowSpec], bool]:
+        """Compute time windows for a work item and report hint validity."""
+
+        lock_windows = self._compute_lock_windows(work_item, now_unix=now_unix, params=params)
+        if lock_windows:
+            return lock_windows, False
+
+        return self._compute_relative_windows(work_item, now_unix=now_unix, params=params)
+
+    def _compute_lock_windows(
+        self,
+        work_item: WorkItem,
+        *,
+        now_unix: int,
+        params: RotationParams,
+    ) -> list[WindowSpec]:
+        """Return windows derived from a valid lock rotation timestamp."""
+
+        if work_item.rotation_ts is None or work_item.lock is None:
+            return []
+
+        counter_windows: list[WindowCandidate] = []
+        time_since_lock = max(0, now_unix - work_item.lock.created_at)
+        periods_elapsed = time_since_lock // params.rotation_period
+        for step in range(-2, 3):
+            offset_periods = periods_elapsed + step
+            window_ts = work_item.rotation_ts + (offset_periods * params.rotation_period)
+            if window_ts < 0:
+                continue
+            semantic_offset = window_ts - now_unix
+            counter_windows.append(
+                WindowCandidate(
+                    timestamp=window_ts,
+                    semantic_offset=semantic_offset,
+                    time_basis="lock_tracking",
+                    candidate_value=work_item.rotation_ts,
+                )
+            )
+
+        if not counter_windows:
+            return []
+
+        return [
+            WindowSpec(
+                time_basis="lock_tracking",
+                candidate_value=work_item.rotation_ts,
+                windows=tuple(counter_windows),
+            )
+        ]
+
+    def _compute_relative_windows(
+        self,
+        work_item: WorkItem,
+        *,
+        now_unix: int,
+        params: RotationParams,
+    ) -> tuple[list[WindowSpec], bool]:
+        """Return relative/absolute windows and whether the basis hint was invalid."""
+
+        counter_windows: list[WindowSpec] = []
+        counter_bases: tuple[tuple[str, str], ...] = (
+            ("unix", "unix"),
+            ("pair_date", "pair_date"),
+            ("secrets_creation_date", "secrets_creation_date"),
+        )
+        anchor_candidates: list[int] = []
+        if isinstance(work_item.identity.pair_date, int) and work_item.identity.pair_date > 0:
+            anchor_candidates.append(work_item.identity.pair_date)
+        if (
+            isinstance(work_item.identity.secrets_creation_date, int)
+            and work_item.identity.secrets_creation_date > 0
+        ):
+            anchor_candidates.append(work_item.identity.secrets_creation_date)
+        best_anchor = max(anchor_candidates) if anchor_candidates else 0
+        provisioning_counter = max(0, now_unix - best_anchor) if best_anchor > 0 else 0
+        drift_seconds = provisioning_counter * 0.00005
+        drift_windows = math.ceil(drift_seconds / params.rotation_period)
+
+        available_bases = {basis for basis, _ in counter_bases}
+        known_basis = (
+            work_item.basis_hint if work_item.basis_hint in available_bases else None
+        )
+        invalid_hint = bool(work_item.basis_hint and known_basis is None)
+        filtered_bases = (
+            tuple((basis, label) for basis, label in counter_bases if basis == known_basis)
+            if known_basis
+            else counter_bases
+        )
+
+        for basis, label in filtered_bases:
+            candidate_value: int | None = None
+            total_window: int = 0
+
+            if basis == "unix":
+                if not ENABLE_ABSOLUTE_UNIX_BASIS:
+                    continue
+                candidate_value = now_unix
+                try:
+                    tz_offset = dt_util.now().utcoffset()
+                    tz_windows = (
+                        int(math.ceil(abs(tz_offset.total_seconds()) / params.rotation_period))
+                        if tz_offset
+                        else 0
+                    )
+                except Exception:
+                    tz_windows = 0
+                total_window = max(params.min_unix_window, 3 + drift_windows + tz_windows)
+            else:
+                raw_anchor = getattr(work_item.identity, basis, None)
+                anchor_value = _normalize_counter_candidate(raw_anchor, basis=basis)
+                if anchor_value is None:
+                    continue
+                candidate_value = now_unix - anchor_value
+                total_window = min(params.min_relative_window + drift_windows, params.max_window)
+
+            normalized = _normalize_counter_candidate(candidate_value, basis=basis)
+            if normalized is None:
+                continue
+
+            window_candidates: list[WindowCandidate] = []
+            for ts in iter_rotation_windows(
+                normalized,
+                rotation_period=params.rotation_period,
+                window_range=range(-total_window, total_window + 1),
+                include_neighbors=False,
+            ):
+                if ts < 0:
+                    continue
+                semantic_offset = ts - normalized
+                window_candidates.append(
+                    WindowCandidate(
+                        timestamp=ts,
+                        semantic_offset=semantic_offset,
+                        time_basis=label,
+                        candidate_value=normalized,
+                    )
+                )
+            if window_candidates:
+                counter_windows.append(
+                    WindowSpec(
+                        time_basis=label,
+                        candidate_value=normalized,
+                        windows=tuple(window_candidates),
+                    )
+                )
+
+        return counter_windows, invalid_hint
+
+    def _compute_variants(
+        self,
+        work_item: WorkItem,
+        window: WindowSpec,
+    ) -> tuple[VariantSpec, ...]:
+        """Return the variants to generate for a window."""
+
+        if work_item.locked_variant is not None:
+            return tuple(
+                VariantSpec(
+                    key_bytes=work_item.key_bytes,
+                    variant=work_item.locked_variant,
+                    window=window_candidate,
+                )
+                for window_candidate in window.windows
+            )
+
+        return tuple(
+            VariantSpec(
+                key_bytes=work_item.key_bytes,
+                variant=variant,
+                window=window_candidate,
+            )
+            for variant in (
+                EidVariant.LEGACY_SECP160R1_X20_BE,
+                EidVariant.MODERN_P256_X32_BE,
+                EidVariant.MODERN_P256_X20_TRUNC_BE,
+                EidVariant.MODERN_P256_X32_LE_SCALAR,
+                EidVariant.MODERN_P256_X20_TRUNC_LE,
+            )
+            for window_candidate in window.windows
+        )
+
+    def _generate_eids_from_spec(
+        self,
+        variant_spec: VariantSpec,
+    ) -> Iterable[GeneratedEid]:
+        """Generate EIDs for a variant specification."""
+
+        try:
+            eid_bytes = self._generate_variant(
+                variant_spec.key_bytes,
+                time_counter=variant_spec.window.timestamp,
+                variant=variant_spec.variant,
+            )
+        except Exception as exc:  # pragma: no cover - defensive guard
+            _LOGGER.debug(
+                "Skipping EID generation for variant=%s basis=%s window_ts=%s: %s",
+                variant_spec.variant.value,
+                variant_spec.window.time_basis,
+                variant_spec.window.timestamp,
+                exc,
+            )
+            return []
+
+        generated: list[GeneratedEid] = [
+            GeneratedEid(
+                eid_bytes=eid_bytes,
+                is_reversed=False,
+                variant=variant_spec.variant,
+                window=variant_spec.window,
+            )
+        ]
+        if variant_spec.include_reverse:
+            generated.append(
+                GeneratedEid(
+                    eid_bytes=eid_bytes[::-1],
+                    is_reversed=True,
+                    variant=variant_spec.variant,
+                    window=variant_spec.window,
+                )
+            )
+        return generated
+
+    async def _refresh_cache(self) -> None:
         """Rebuild the EID lookup table for all active devices."""
 
         self._ensure_cache_defaults()
         if self._load_task is not None:
             await asyncio.shield(self._load_task)
 
-        identities = await self._collect_device_secrets()
-
         now_unix = int(time.time())
         self._purge_stale_locks(now=now_unix)
+        rotation_params = self._build_rotation_params()
 
-        lookup: dict[bytes, EIDMatch] = {}
-        lookup_metadata: dict[bytes, dict[str, Any]] = {}
+        identities = await self._collect_device_secrets()
+        _LOGGER.debug("Refresh start: %d identities discovered", len(identities))
+        work_items = self._collect_work_items(identities)
+        _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
+        builder = CacheBuilder()
 
-        max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
-
-        for identity in identities:
-            basis_hint = self._known_timebases.get(identity.registry_id)
-            if (
-                not identity.config_entry_id
-                or identity.identity_key is None
-                or identity.registry_id is None
-            ):
-                continue
-
-            clean_canonical_id = identity.canonical_id
-            if ":" in clean_canonical_id:
-                clean_canonical_id = clean_canonical_id.split(":")[-1]
-
-            key_bytes = bytes(identity.identity_key)
-            lock = self._locks.get(identity.registry_id)
-            locked_variant: EidVariant | None = None
-
-            rotation_ts: int | None = None
-            if lock is not None:
-                raw_rotation_ts = lock.rotation_timestamp
-                rotation_ts = (
-                    raw_rotation_ts
-                    if isinstance(raw_rotation_ts, int)
-                    and not isinstance(raw_rotation_ts, bool)
-                    else None
-                )
-                lock_time_basis = _normalize_optional_string(lock.time_basis)
-                if lock_time_basis:
-                    basis_hint = lock_time_basis
-                    self._known_timebases[identity.registry_id] = lock_time_basis
-
-                is_legacy = rotation_ts is None
-                try:
-                    locked_variant = EidVariant(lock.variant)
-                except ValueError:
-                    locked_variant = EidVariant.MODERN_P256_X32_BE
-
-                if is_legacy:
-                    _LOGGER.warning(
-                        "Discarding invalid/legacy lock for %s (legacy=%s). Force re-discovery.",
-                        identity.registry_id,
-                        is_legacy,
-                    )
-                    self._locks.pop(identity.registry_id, None)
-                    self._persisted_locks.pop(identity.registry_id, None)
-                    lock = None
-                elif lock.canonical_id != clean_canonical_id:
-                    _LOGGER.debug(
-                        "Updating canonical_id to UUID-only for %s: %s -> %s",
-                        identity.registry_id,
-                        lock.canonical_id,
-                        clean_canonical_id,
-                    )
-                    lock.canonical_id = clean_canonical_id
-                    self._schedule_lock_save()
-
-            def _register_variant(  # noqa: PLR0913
-                eid_bytes: bytes,
-                *,
-                variant: EidVariant,
-                ts: int,
-                time_basis: str,
-                reversed_flag: bool,
-                computed_offset_seconds: int,
-            ) -> None:
-                offset = computed_offset_seconds
-                match = EIDMatch(
-                    device_id=identity.registry_id,
-                    config_entry_id=str(identity.config_entry_id),
-                    canonical_id=clean_canonical_id,
-                    time_offset=offset,
-                    is_reversed=reversed_flag,
-                )
-                existing = lookup.get(eid_bytes)
-                metadata = lookup_metadata.get(eid_bytes)
-                existing_bases: set[str] | None = None
-                if metadata is not None:
-                    existing_bases = set(metadata.get("timestamp_bases") or ())
-                    if (basis := metadata.get("timestamp_basis")) and isinstance(
-                        basis, str
-                    ):
-                        existing_bases.add(basis)
-                    existing_bases.add(time_basis)
-
-                if existing is not None and abs(existing.time_offset) <= abs(offset):
-                    if metadata is not None and existing_bases is not None:
-                        metadata["timestamp_bases"] = existing_bases
-                    return
-
-                base_set = existing_bases or {time_basis}
-
-                lookup[eid_bytes] = match
-                lookup_metadata[eid_bytes] = {
-                    "variant": variant.value,
-                    "rotation_timestamp": ts,
-                    "time_offset": offset,
-                    "timestamp_basis": time_basis,
-                    "timestamp_bases": base_set,
-                    "advertisement_reversed": reversed_flag,
-                }
-
-            variants: tuple[EidVariant, ...]
-            if locked_variant is not None:
-                variants = (locked_variant,)
-            else:
-                variants = (
-                    EidVariant.LEGACY_SECP160R1_X20_BE,
-                    EidVariant.MODERN_P256_X32_BE,
-                    EidVariant.MODERN_P256_X20_TRUNC_BE,
-                    EidVariant.MODERN_P256_X32_LE_SCALAR,
-                    EidVariant.MODERN_P256_X20_TRUNC_LE,
-                )
-
-            # 1. Define explicit time bases to allow iteration over all strategies.
-            # - "unix": Absolute time (Strategy A)
-            # - "pair_date" / "secrets...": Relative time (Strategy B & C)
-            counter_windows: list[tuple[int, str, int]] = []
-
-            if rotation_ts is not None and lock is not None:
-                time_since_lock = max(0, now_unix - lock.created_at)
-                periods_elapsed = time_since_lock // ROTATION_PERIOD
-                for step in range(-2, 3):
-                    offset_periods = periods_elapsed + step
-                    window_ts = rotation_ts + (offset_periods * ROTATION_PERIOD)
-                    if window_ts < 0:
-                        continue
-                    semantic_offset = window_ts - now_unix
-                    counter_windows.append((window_ts, "lock_tracking", semantic_offset))
-            else:
-                counter_bases: tuple[tuple[str, str], ...] = (
-                    ("unix", "unix"),
-                    ("pair_date", "pair_date"),
-                    ("secrets_creation_date", "secrets_creation_date"),
-                )
-
-                # 2. Logic Restoration (v3.31): Smart Drift Calculation.
-                # We determine the device's "age" using the freshest available anchor
-                # to estimate the crystal drift (50ppm) more accurately.
-                anchor_candidates = []
-                if isinstance(identity.pair_date, int) and identity.pair_date > 0:
-                    anchor_candidates.append(identity.pair_date)
-                if (
-                    isinstance(identity.secrets_creation_date, int)
-                    and identity.secrets_creation_date > 0
-                ):
-                    anchor_candidates.append(identity.secrets_creation_date)
-
-                best_anchor = max(anchor_candidates) if anchor_candidates else 0
-                provisioning_counter = (
-                    max(0, now_unix - best_anchor) if best_anchor > 0 else 0
-                )
-
-                # Calculate expected drift based on age (50ppm)
-                drift_seconds = provisioning_counter * 0.00005
-                drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
-
-                # 3. Execution Loop: Apply specific math per strategy
-                known_basis = basis_hint
-                filtered_bases = (
-                    tuple((basis, label) for basis, label in counter_bases if basis == known_basis)
-                    if known_basis
-                    else counter_bases
-                )
-
-                for basis, label in filtered_bases:
-                    candidate_value: int | None = None
-                    total_window: int = 0
-
-                    if basis == "unix":
-                        # STRATEGY A: Absolute Time (Fallback)
-                        # Targets devices with a Real-Time Clock (RTC).
-                        # Disabled by default as it causes false negatives on simple trackers.
-                        if not ENABLE_ABSOLUTE_UNIX_BASIS:
-                            continue
-
-                        candidate_value = now_unix
-
-                        # Calculate timezone offset to catch wall-clock synced devices
-                        try:
-                            tz_offset = dt_util.now().utcoffset()
-                            tz_windows = (
-                                int(
-                                    math.ceil(
-                                        abs(tz_offset.total_seconds()) / ROTATION_PERIOD
-                                    )
-                                )
-                                if tz_offset
-                                else 0
-                            )
-                        except Exception:
-                            tz_windows = 0
-
-                        # Use massive window (Deep Scan) + Drift + Timezone
-                        total_window = max(
-                            MIN_UNIX_WINDOW_SIZE, 3 + drift_windows + tz_windows
+        for work_item in work_items:
+            windows, invalid_hint = self._compute_time_windows(
+                work_item, now_unix=now_unix, params=rotation_params
+            )
+            if invalid_hint:
+                self._known_timebases.pop(work_item.registry_id, None)
+            _LOGGER.debug(
+                "Refresh stage: %s produced %d window groups", work_item.registry_id, len(windows)
+            )
+            for window in windows:
+                variants = self._compute_variants(work_item, window)
+                for variant_spec in variants:
+                    for generated in self._generate_eids_from_spec(variant_spec):
+                        match = EIDMatch(
+                            device_id=work_item.registry_id,
+                            config_entry_id=work_item.config_entry_id,
+                            canonical_id=work_item.canonical_id,
+                            time_offset=generated.window.semantic_offset,
+                            is_reversed=generated.is_reversed,
+                        )
+                        builder.register_eid(
+                            generated.eid_bytes,
+                            match=match,
+                            variant=generated.variant,
+                            window=generated.window,
+                            advertisement_reversed=generated.is_reversed,
                         )
 
-                    else:
-                        # STRATEGY B & C: Relative Time (Primary)
-                        # Applies to "pair_date" and "secrets_creation_date".
-                        # Targets standard trackers counting seconds since boot/pairing.
-                        # MATH FIX: We calculate ELAPSED time (now - anchor) to match v3.31 logic.
-
-                        raw_anchor = getattr(identity, basis, None)
-                        anchor_value = _normalize_counter_candidate(
-                            raw_anchor, basis=basis
-                        )
-
-                        if anchor_value is None:
-                            continue
-
-                        # Critical: Relative calculation (now - anchor)
-                        candidate_value = now_unix - anchor_value
-
-                        # ROBUSTNESS: Add safety buffer for DST shifts.
-                        # If the server jumps 1h (DST), the relative diff changes by 3600s.
-                        # MIN_RELATIVE_WINDOW_SIZE (5) absorbs this jump.
-                        total_window = min(
-                            MIN_RELATIVE_WINDOW_SIZE + drift_windows, max_window
-                        )
-
-                    # 4. Generate windows for the calculated candidate
-                    normalized = _normalize_counter_candidate(
-                        candidate_value, basis=basis
-                    )
-                    if normalized is None:
-                        continue
-
-                    for ts in iter_rotation_windows(
-                        normalized,
-                        rotation_period=ROTATION_PERIOD,
-                        window_range=range(-total_window, total_window + 1),
-                        include_neighbors=False,
-                    ):
-                        if ts < 0:
-                            continue
-                        semantic_offset = ts - normalized
-                        counter_windows.append((ts, label, semantic_offset))
-
-            for window_ts, time_basis, semantic_offset in counter_windows:
-                for variant in variants:
-                    try:
-                        eid_bytes = self._generate_variant(
-                            key_bytes,
-                            time_counter=window_ts,
-                            variant=variant,
-                        )
-                    except Exception as exc:  # pragma: no cover - defensive guard
-                        _LOGGER.debug(
-                            "Skipping EID generation for registry_id=%s basis=%s window_ts=%s variant=%s: %s",
-                            identity.registry_id,
-                            time_basis,
-                            window_ts,
-                            variant.value,
-                            exc,
-                        )
-                        continue
-                    _register_variant(
-                        eid_bytes,
-                        variant=variant,
-                        ts=window_ts,
-                        time_basis=time_basis,
-                        reversed_flag=False,
-                        computed_offset_seconds=semantic_offset,
-                    )
-                    _register_variant(
-                        eid_bytes[::-1],
-                        variant=variant,
-                        ts=window_ts,
-                        time_basis=time_basis,
-                        reversed_flag=True,
-                        computed_offset_seconds=semantic_offset,
-                    )
-
-        self._lookup = lookup
-        self._lookup_metadata = lookup_metadata
+        self._lookup, self._lookup_metadata = builder.finalize()
+        _LOGGER.debug(
+            "Refresh stage: finalize complete (lookup=%d, metadata=%d)",
+            len(self._lookup),
+            len(self._lookup_metadata),
+        )
         _LOGGER.debug(
             "Refreshed EID cache for %d devices (%d cached EIDs)",
-            len(identities),
-            len(lookup),
+            len(work_items),
+            len(self._lookup),
         )
 
     @staticmethod
