@@ -76,6 +76,62 @@ async def test_lock_confirmation_updates_on_match(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_purge_stale_locks_keeps_recently_confirmed_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recently confirmed lock must not be purged by confirmation TTL."""
+
+    resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+    resolver.hass = _fake_hass()
+    resolver._lookup = {}
+    resolver._lookup_metadata = {}
+    resolver._refresh_lock = asyncio.Lock()
+    resolver._pending_refresh = False
+    resolver._load_task = None
+    resolver._unsub_interval = None
+    resolver._unsub_alignment = None
+    resolver._ensure_cache_defaults()
+
+    device_id = "device-id"
+    eid_bytes = b"\x01" * 20
+    resolver._lookup[eid_bytes] = EIDMatch(
+        device_id=device_id,
+        config_entry_id="entry-id",
+        canonical_id="canonical-id",
+        time_offset=0,
+        is_reversed=False,
+    )
+    resolver._lookup_metadata[eid_bytes] = {
+        "timestamp_basis": "pair_date",
+        "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
+    }
+    resolver._locks[device_id] = EIDGenerationLock(
+        device_id=device_id,
+        canonical_id="canonical-id",
+        variant=EidVariant.MODERN_P256_X32_BE.value,
+        advertisement_reversed=False,
+        eid_length=len(eid_bytes),
+        rotation_timestamp=100,
+        created_at=50,
+    )
+    initial_confirmation = 10
+    resolver._last_lock_confirmation[device_id] = initial_confirmation
+
+    now = 1_000
+    monkeypatch.setattr(time, "time", lambda: float(now))
+    match = resolver.resolve_eid(eid_bytes)
+    assert match is not None
+
+    purge_time = now + 120  # Well within the confirmation TTL window
+    resolver._purge_stale_locks(now=purge_time)
+
+    assert device_id in resolver._locks, (
+        "FAIL: active lock was purged despite recent confirmation. "
+        "_purge_stale_locks must respect _last_lock_confirmation timestamps."
+    )
+
+
+@pytest.mark.asyncio
 async def test_stale_lock_removed_by_confirmation_ttl() -> None:
     """BUG C: stale locks must clear when they are no longer confirmed."""
 
@@ -112,7 +168,7 @@ async def test_stale_lock_removed_by_confirmation_ttl() -> None:
     )
     resolver._locks[device_id] = lock
     resolver._persisted_locks[device_id] = lock
-    resolver._known_offsets[device_id] = 4
+    resolver._known_offsets[(device_id, "pair_date")] = 4
     resolver._known_advertisement_reversed[device_id] = True
     resolver._known_timebases[device_id] = "pair_date"
     resolver._lock_miss_counts[device_id] = 2
@@ -131,7 +187,7 @@ async def test_stale_lock_removed_by_confirmation_ttl() -> None:
         "Add LOCK_CONFIRMATION_TTL_SECONDS logic to purge and remove related caches."
     )
     assert device_id not in resolver._persisted_locks
-    assert device_id not in resolver._known_offsets
+    assert not any(key[0] == device_id for key in resolver._known_offsets)
     assert device_id not in resolver._known_advertisement_reversed
     assert device_id not in resolver._known_timebases
     assert device_id not in resolver._lock_miss_counts
