@@ -72,7 +72,7 @@ async def test_reset_device_offset_clears_state_and_schedules_refresh(
         )
     }
     resolver._persisted_locks = dict(resolver._locks)
-    resolver._known_offsets = {"reg-1": -1}
+    resolver._known_offsets = {("reg-1", "pair_date"): -1}
     resolver._known_timebases = {"reg-1": "pair_date"}
     resolver._known_advertisement_reversed = {"reg-1": True}
     resolver._lock_miss_counts = {"reg-1": 2}
@@ -121,7 +121,7 @@ def test_reset_device_offset_noop_when_unknown(monkeypatch: pytest.MonkeyPatch) 
     resolver = _build_resolver(monkeypatch)
     resolver._locks = {"other": MagicMock()}
     resolver._persisted_locks = dict(resolver._locks)
-    resolver._known_offsets = {"other": 0}
+    resolver._known_offsets = {("other", "pair_date"): 0}
     resolver._known_timebases = {"other": "pair_date"}
     resolver._known_advertisement_reversed = {"other": False}
     resolver._lock_miss_counts = {"other": 1}
@@ -144,7 +144,7 @@ def test_reset_device_offset_noop_when_unknown(monkeypatch: pytest.MonkeyPatch) 
 
     assert resolver._locks == {"other": resolver._locks["other"]}
     assert resolver._persisted_locks == {"other": resolver._locks["other"]}
-    assert resolver._known_offsets == {"other": 0}
+    assert resolver._known_offsets == {("other", "pair_date"): 0}
     assert resolver._known_timebases == {"other": "pair_date"}
     assert resolver._known_advertisement_reversed == {"other": False}
     assert resolver._lock_miss_counts == {"other": 1}

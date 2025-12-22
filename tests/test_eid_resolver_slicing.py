@@ -16,7 +16,12 @@ def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolv
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace()
     resolver._lookup = {lookup_key: match}
-    resolver._lookup_metadata = {}
+    resolver._lookup_metadata = {
+        lookup_key: {
+            "timestamp_basis": "pair_date",
+            "variant": match.time_offset,
+        }
+    }
     resolver._known_offsets = {}
     resolver._known_advertisement_reversed = {}
     resolver._known_timebases = {}
@@ -48,7 +53,7 @@ def test_resolve_eid_slices_raw_payload() -> None:
     resolved = resolver.resolve_eid(payload)
 
     assert resolved == match
-    assert resolver._known_offsets.get("device-raw") == 0
+    assert resolver._known_offsets.get(("device-raw", "pair_date")) == 0
     assert resolver._known_advertisement_reversed.get("device-raw") is False
 
 
@@ -68,7 +73,7 @@ def test_resolve_eid_accepts_pure_eid() -> None:
     resolved = resolver.resolve_eid(eid)
 
     assert resolved == match
-    assert resolver._known_offsets.get("device-pure") == 5
+    assert resolver._known_offsets.get(("device-pure", "pair_date")) == 5
     assert resolver._known_advertisement_reversed.get("device-pure") is True
 
 
