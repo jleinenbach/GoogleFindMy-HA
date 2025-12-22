@@ -83,3 +83,27 @@ def test_probe_logs_sliced_key(
 
     probe_messages = _probe_message(caplog.records)
     assert any("prefix=" in message for message in probe_messages)
+
+
+def test_resolve_eid_logs_candidate_prefix_not_raw_prefix(
+    resolver: GoogleFindMyEIDResolver, caplog: pytest.LogCaptureFixture
+) -> None:
+    candidate = b"\x11\x22\x33\x44" + (b"\x55" * (EID_LENGTH - 4))
+    raw_payload = b"\x40" + candidate
+    match = EIDMatch(
+        device_id="device-logging",
+        config_entry_id="entry-logging",
+        canonical_id="canonical-logging",
+        time_offset=0,
+        is_reversed=False,
+    )
+    resolver._lookup = {candidate: match}
+
+    caplog.set_level(logging.DEBUG)
+
+    assert resolver.resolve_eid(raw_payload) is match
+
+    messages = [record.message for record in caplog.records]
+    assert any("candidate_prefix=11223344" in message for message in messages)
+    assert any("raw_prefix=40112233" in message for message in messages)
+    assert all("eid_prefix" not in message for message in messages)
