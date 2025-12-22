@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,7 +23,10 @@ async def test_tracking_mode_predicts_next_rotation(
     """Ensure locked devices use deterministic tracking windows."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
-    resolver.hass = MagicMock()
+    resolver.hass = SimpleNamespace(
+        async_create_task=lambda coro, name=None: asyncio.create_task(coro),
+        async_create_background_task=lambda coro, name=None: asyncio.create_task(coro),
+    )
     resolver._locks = {}
     resolver._ensure_cache_defaults()
     resolver._refresh_lock = asyncio.Lock()
@@ -31,6 +34,10 @@ async def test_tracking_mode_predicts_next_rotation(
     resolver._load_task = None
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
+    async def _noop_save(payload: object) -> None:
+        return None
+
+    resolver._store = SimpleNamespace(async_save=_noop_save)
 
     identity = DeviceIdentity(
         registry_id="device-id",
@@ -47,6 +54,8 @@ async def test_tracking_mode_predicts_next_rotation(
         rotation_timestamp=5_000,
         created_at=1_700_000_000,
     )
+    current_time = 1_700_000_000 + (10 * ROTATION_PERIOD)
+    resolver._last_lock_confirmation[identity.registry_id] = current_time
 
     generated_counters: list[int] = []
 
@@ -65,7 +74,7 @@ async def test_tracking_mode_predicts_next_rotation(
 
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_generate_variant", _generate_variant)
-    monkeypatch.setattr(time, "time", lambda: 1_700_000_000 + (10 * ROTATION_PERIOD))
+    monkeypatch.setattr(time, "time", lambda: float(current_time))
 
     await resolver._refresh_cache()
 
