@@ -76,6 +76,9 @@ MIN_RELATIVE_WINDOW_SIZE: int = 5
 
 EID_LENGTH = LEGACY_EID_LENGTH
 LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
+LOCK_CONFIRMATION_TTL_SECONDS = 90 * 60
+LOCK_MISS_THRESHOLD = 3
+TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 
 
 class EIDMatch(NamedTuple):
@@ -397,6 +400,9 @@ class GoogleFindMyEIDResolver:
     _provisioning_warn_at: dict[str, float] = field(init=False, default_factory=dict)
     _locks: dict[str, EIDGenerationLock] = field(init=False, default_factory=dict)
     _lock_miss_counts: dict[str, int] = field(init=False, default_factory=dict)
+    _truncated_frame_log_at: dict[tuple[int, int], float] = field(
+        init=False, default_factory=dict
+    )
     _store: Store[list[dict[str, Any]] | None] = field(init=False)
     _unsub_interval: CALLBACK_TYPE | None = field(init=False, default=None)
     _unsub_alignment: CALLBACK_TYPE | None = field(init=False, default=None)
@@ -433,6 +439,65 @@ class GoogleFindMyEIDResolver:
             self._locks = {}
         if not hasattr(self, "_lock_miss_counts"):
             self._lock_miss_counts = {}
+        if not hasattr(self, "_truncated_frame_log_at"):
+            self._truncated_frame_log_at = {}
+
+    def _clear_lock_state(self, device_id: str) -> bool:
+        """Remove all cached state associated with a device lock."""
+
+        removed = False
+        for attr in (
+            "_locks",
+            "_persisted_locks",
+            "_lock_miss_counts",
+            "_known_offsets",
+            "_known_advertisement_reversed",
+            "_known_timebases",
+            "_last_lock_confirmation",
+        ):
+            mapping = getattr(self, attr, None)
+            if isinstance(mapping, dict) and device_id in mapping:
+                mapping.pop(device_id, None)
+                removed = True
+        return removed
+
+    def _update_lock_health(self, device_id: str, *, now: int) -> bool:
+        """Track consecutive unconfirmed refresh cycles for locked devices."""
+
+        lock = self._locks.get(device_id)
+        if lock is None:
+            return False
+
+        last_confirmation = self._last_lock_confirmation.get(device_id)
+        confirmed_recently = (
+            isinstance(last_confirmation, int)
+            and not isinstance(last_confirmation, bool)
+            and (now - last_confirmation) < ROTATION_PERIOD
+        )
+
+        if confirmed_recently:
+            if self._lock_miss_counts.get(device_id):
+                self._lock_miss_counts[device_id] = 0
+            return False
+
+        self._lock_miss_counts[device_id] = self._lock_miss_counts.get(device_id, 0) + 1
+
+        miss_count = self._lock_miss_counts[device_id]
+        if miss_count < LOCK_MISS_THRESHOLD:
+            return False
+
+        if self._clear_lock_state(device_id):
+            _LOGGER.warning(
+                "Lock self-heal: clearing lock for %s after %d unconfirmed refresh cycles "
+                "(last_confirmation=%s)",
+                device_id,
+                miss_count,
+                last_confirmation,
+            )
+            self._schedule_lock_save()
+            return True
+
+        return False
 
     def _start_alignment_timer(self) -> None:
         """Schedule the first refresh on the next rotation boundary."""
@@ -518,20 +583,44 @@ class GoogleFindMyEIDResolver:
     def _purge_stale_locks(self, *, now: int) -> None:
         """Drop expired generation locks to keep cache fresh."""
 
-        expired: list[str] = []
+        expired_by_confirmation: dict[str, int | None] = {}
+        expired_by_created: list[str] = []
         for device_id, lock in list(self._locks.items()):
+            last_confirmation = self._last_lock_confirmation.get(device_id)
+            confirmation_age = (
+                now - last_confirmation
+                if isinstance(last_confirmation, int)
+                and not isinstance(last_confirmation, bool)
+                else None
+            )
+            if confirmation_age is None:
+                if now - lock.created_at > LOCK_CONFIRMATION_TTL_SECONDS:
+                    expired_by_confirmation[device_id] = None
+                    continue
+            elif confirmation_age > LOCK_CONFIRMATION_TTL_SECONDS:
+                expired_by_confirmation[device_id] = confirmation_age
+                continue
+
             if now - lock.created_at > LOCK_TTL_SECONDS:
-                expired.append(device_id)
-        for device_id in expired:
-            self._locks.pop(device_id, None)
-            self._persisted_locks.pop(device_id, None)
-            self._lock_miss_counts.pop(device_id, None)
-            self._known_offsets.pop(device_id, None)
-            self._known_advertisement_reversed.pop(device_id, None)
-            self._known_timebases.pop(device_id, None)
-            self._last_lock_confirmation.pop(device_id, None)
-        if expired:
-            _LOGGER.debug("Purged %d stale EID locks: %s", len(expired), expired)
+                expired_by_created.append(device_id)
+
+        removed: list[str] = []
+        for device_id, confirmation_age in expired_by_confirmation.items():
+            if self._clear_lock_state(device_id):
+                removed.append(device_id)
+                _LOGGER.debug(
+                    "Purged stale EID lock for %s after %s seconds without confirmation",
+                    device_id,
+                    confirmation_age if confirmation_age is not None else "unknown",
+                )
+        for device_id in expired_by_created:
+            if device_id in expired_by_confirmation:
+                continue
+            if self._clear_lock_state(device_id):
+                removed.append(device_id)
+        if removed:
+            self._schedule_lock_save()
+            _LOGGER.debug("Purged %d stale EID locks: %s", len(removed), removed)
 
     async def async_refresh(self) -> None:
         """Trigger a cache refresh immediately."""
@@ -550,21 +639,7 @@ class GoogleFindMyEIDResolver:
         """Reset resolver state for a single device to force rediscovery."""
 
         self._ensure_cache_defaults()
-        changed = False
-
-        for attr in (
-            "_locks",
-            "_persisted_locks",
-            "_known_offsets",
-            "_known_timebases",
-            "_known_advertisement_reversed",
-            "_lock_miss_counts",
-            "_last_lock_confirmation",
-        ):
-            mapping = getattr(self, attr, None)
-            if isinstance(mapping, dict) and registry_id in mapping:
-                mapping.pop(registry_id, None)
-                changed = True
+        changed = self._clear_lock_state(registry_id)
 
         if not changed:
             return
@@ -610,6 +685,8 @@ class GoogleFindMyEIDResolver:
     def _prepare_work_item(
         self,
         identity: DeviceIdentity,
+        *,
+        now_unix: int,
     ) -> WorkItem | None:
         """Normalize an identity and lock into a work item."""
 
@@ -629,6 +706,11 @@ class GoogleFindMyEIDResolver:
         lock = self._locks.get(identity.registry_id)
         locked_variant: EidVariant | None = None
         rotation_ts: int | None = None
+
+        if lock is not None:
+            if self._update_lock_health(identity.registry_id, now=now_unix):
+                lock = self._locks.get(identity.registry_id)
+                basis_hint = self._known_timebases.get(identity.registry_id)
 
         if lock is not None:
             raw_rotation_ts = lock.rotation_timestamp
@@ -689,12 +771,14 @@ class GoogleFindMyEIDResolver:
     def _collect_work_items(
         self,
         identities: Iterable[DeviceIdentity],
+        *,
+        now_unix: int,
     ) -> list[WorkItem]:
         """Normalize all identities into work items."""
 
         items: list[WorkItem] = []
         for identity in identities:
-            work_item = self._prepare_work_item(identity)
+            work_item = self._prepare_work_item(identity, now_unix=now_unix)
             if work_item is not None:
                 items.append(work_item)
         return items
@@ -940,7 +1024,7 @@ class GoogleFindMyEIDResolver:
 
         identities = await self._collect_device_secrets()
         _LOGGER.debug("Refresh start: %d identities discovered", len(identities))
-        work_items = self._collect_work_items(identities)
+        work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
         builder = CacheBuilder()
 
@@ -1303,8 +1387,11 @@ class GoogleFindMyEIDResolver:
             if match is None:
                 continue
 
+            metadata: dict[str, Any] = self._lookup_metadata.get(c) or {}
+            now = int(time.time())
+            self._last_lock_confirmation[match.device_id] = now
+
             if match.device_id not in self._locks:
-                metadata: dict[str, Any] = self._lookup_metadata.get(c) or {}
                 variant_str = str(metadata.get("variant") or "")
                 try:
                     variant_value = variant_str or self._infer_variant_from_length(
@@ -1326,14 +1413,15 @@ class GoogleFindMyEIDResolver:
                     else None,
                     frame_type=observed_frame,
                     time_basis=time_basis if isinstance(time_basis, str) else None,
+                    created_at=now,
                 )
                 self._locks[match.device_id] = lock
                 self._persisted_locks[match.device_id] = lock
-                self._last_lock_confirmation[match.device_id] = int(time.time())
                 self._schedule_lock_save()
 
             self._known_offsets[match.device_id] = match.time_offset
             self._known_advertisement_reversed[match.device_id] = match.is_reversed
+            self._lock_miss_counts[match.device_id] = 0
 
             timestamp_basis = metadata.get("timestamp_basis")
             if isinstance(timestamp_basis, str):
@@ -1362,10 +1450,15 @@ class GoogleFindMyEIDResolver:
         length = len(payload)
         candidates: list[bytes] = []
         observed_frame: int | None = None
+        allow_sliding_window = True
 
         if length in (LEGACY_EID_LENGTH, MODERN_EID_LENGTH):
-            candidates.append(payload)
-            return candidates, None
+            if not (
+                length == MODERN_EID_LENGTH
+                and payload[0] in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE)
+            ):
+                candidates.append(payload)
+                return candidates, None
 
         if length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH:
             frame_type = payload[7]
@@ -1414,15 +1507,21 @@ class GoogleFindMyEIDResolver:
                         candidates.append(
                             payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
                         )
+                        return candidates, observed_frame
                     elif RAW_HEADER_LENGTH + LEGACY_EID_LENGTH <= length <= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1:
                         payload_start = _legacy_payload_start()
                         candidates.append(
                             payload[payload_start : payload_start + LEGACY_EID_LENGTH]
                         )
                     else:
-                        return candidates, observed_frame
+                        allow_sliding_window = length >= modern_required_length - 1
+                        self._log_truncated_frame(
+                            frame_type=frame_type,
+                            payload_len=length - RAW_HEADER_LENGTH,
+                            raw_len=length,
+                        )
 
-        if not candidates and length > LEGACY_EID_LENGTH:
+        if not candidates and length > LEGACY_EID_LENGTH and allow_sliding_window:
             window = min(length - LEGACY_EID_LENGTH + 1, 64)
             for i in range(window):
                 slice_20 = payload[i : i + LEGACY_EID_LENGTH]
@@ -1433,6 +1532,24 @@ class GoogleFindMyEIDResolver:
                     candidates.append(slice_32)
 
         return candidates, observed_frame
+
+    def _log_truncated_frame(self, *, frame_type: int, payload_len: int, raw_len: int) -> None:
+        """Rate-limit warnings for truncated framed payloads."""
+
+        now = time.time()
+        key = (frame_type, payload_len)
+        last_log = self._truncated_frame_log_at.get(key)
+        if last_log is not None and now - last_log < TRUNCATED_FRAME_LOG_WINDOW_SECONDS:
+            return
+
+        self._truncated_frame_log_at[key] = now
+        _LOGGER.warning(
+            "Truncated or unexpected framed BLE payload: frame=0x%02x payload_len=%s raw_len=%s; "
+            "falling back to sliding-window extraction.",
+            frame_type,
+            payload_len,
+            raw_len,
+        )
 
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
