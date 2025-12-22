@@ -70,8 +70,6 @@ async def test_tracking_mode_predicts_next_rotation(
     await resolver._refresh_cache()
 
     expected_counters = {
-        5_000 + (9 * ROTATION_PERIOD),
-        5_000 + (10 * ROTATION_PERIOD),
-        5_000 + (11 * ROTATION_PERIOD),
+        5_000 + ((10 + step) * ROTATION_PERIOD) for step in range(-2, 3)
     }
     assert set(generated_counters) == expected_counters
