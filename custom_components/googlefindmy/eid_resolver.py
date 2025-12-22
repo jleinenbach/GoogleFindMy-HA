@@ -1346,26 +1346,26 @@ class GoogleFindMyEIDResolver:
 
         raw = bytes(eid_bytes)
         candidates, observed_frame = self._extract_candidates(raw)
+        raw_prefix = raw[:4].hex()
+        candidate_prefixes = [candidate[:4].hex() for candidate in candidates]
 
         if not candidates:
             return None
-
-        eid_prefix = raw[:4].hex()
 
         if not self._lookup:
             is_locked = self._refresh_lock.locked()
             if self._pending_refresh or is_locked:
                 _LOGGER.debug(
-                    "RESOLVER NOT READY: cache priming (pending=%s locked=%s prefix=%s)",
+                    "RESOLVER NOT READY: cache priming (pending=%s locked=%s raw_prefix=%s)",
                     self._pending_refresh,
                     is_locked,
-                    eid_prefix,
+                    raw_prefix,
                 )
                 return None
 
             _LOGGER.debug(
-                "RESOLVER NOT READY: empty cache; scheduling refresh for prefix=%s",
-                eid_prefix,
+                "RESOLVER NOT READY: empty cache; scheduling refresh for raw_prefix=%s",
+                raw_prefix,
             )
             refresh = getattr(self, "async_refresh", None)
             create_task = getattr(self.hass, "async_create_task", None)
@@ -1382,21 +1382,19 @@ class GoogleFindMyEIDResolver:
                     self._pending_refresh = False
             return None
 
-        for c in candidates:
-            match = self._lookup.get(c)
+        for candidate_prefix, candidate in zip(candidate_prefixes, candidates):
+            match = self._lookup.get(candidate)
             if match is None:
                 continue
 
-            metadata: dict[str, Any] = self._lookup_metadata.get(c) or {}
+            metadata: dict[str, Any] = self._lookup_metadata.get(candidate) or {}
             now = int(time.time())
             self._last_lock_confirmation[match.device_id] = now
 
             if match.device_id not in self._locks:
                 variant_str = str(metadata.get("variant") or "")
                 try:
-                    variant_value = variant_str or self._infer_variant_from_length(
-                        len(c)
-                    )
+                    variant_value = variant_str or self._infer_variant_from_length(len(candidate))
                 except Exception:
                     variant_value = EidVariant.MODERN_P256_X32_BE.value
                 time_basis = metadata.get("timestamp_basis")
@@ -1406,7 +1404,7 @@ class GoogleFindMyEIDResolver:
                     canonical_id=match.canonical_id,
                     variant=variant_value,
                     advertisement_reversed=match.is_reversed,
-                    eid_length=len(c),
+                    eid_length=len(candidate),
                     rotation_timestamp=int(rotation_timestamp)
                     if isinstance(rotation_timestamp, int)
                     and not isinstance(rotation_timestamp, bool)
@@ -1428,17 +1426,29 @@ class GoogleFindMyEIDResolver:
                 self._known_timebases[match.device_id] = timestamp_basis
 
             _LOGGER.info(
-                "HIT: device=%s canonical=%s reversed=%s offset=%s eid_prefix=%s",
+                (
+                    "HIT: device=%s canonical=%s reversed=%s offset=%s "
+                    "candidate_prefix=%s raw_prefix=%s"
+                ),
                 match.device_id,
                 match.canonical_id,
                 match.is_reversed,
                 match.time_offset,
-                eid_prefix,
+                candidate_prefix,
+                raw_prefix,
             )
             return match
 
+        max_prefixes = 8
+        prefix_log = ", ".join(candidate_prefixes[:max_prefixes])
+        if len(candidate_prefixes) > max_prefixes:
+            prefix_log = f"{prefix_log}, ..."
+
         _LOGGER.debug(
-            "RESOLVER MISS: prefix=%s cache_size=%d", eid_prefix, len(self._lookup)
+            "RESOLVER MISS: candidate_prefixes=%s raw_prefix=%s cache_size=%d",
+            prefix_log or "<none>",
+            raw_prefix,
+            len(self._lookup),
         )
         return None
 
