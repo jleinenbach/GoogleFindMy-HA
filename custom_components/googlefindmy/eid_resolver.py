@@ -496,7 +496,7 @@ class GoogleFindMyEIDResolver:
             if rotation_ts is not None and lock is not None:
                 time_since_lock = max(0, now_unix - lock.created_at)
                 periods_elapsed = time_since_lock // ROTATION_PERIOD
-                for step in (-2, 0, 3):
+                for step in (-2, 3):
                     offset_periods = periods_elapsed + step
                     window_ts = rotation_ts + (offset_periods * ROTATION_PERIOD)
                     if window_ts < 0:
