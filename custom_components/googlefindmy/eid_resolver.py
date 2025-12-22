@@ -404,11 +404,22 @@ class GoogleFindMyEIDResolver:
             ):
                 continue
 
+            clean_canonical_id = identity.canonical_id
+            if ":" in clean_canonical_id:
+                clean_canonical_id = clean_canonical_id.split(":")[-1]
+
             key_bytes = bytes(identity.identity_key)
             lock = self._locks.get(identity.registry_id)
 
+            rotation_ts: int | None = None
             if lock is not None:
-                rotation_ts = lock.rotation_timestamp
+                raw_rotation_ts = lock.rotation_timestamp
+                rotation_ts = (
+                    raw_rotation_ts
+                    if isinstance(raw_rotation_ts, int)
+                    and not isinstance(raw_rotation_ts, bool)
+                    else None
+                )
                 is_legacy = rotation_ts is None
 
                 if is_legacy:
@@ -420,6 +431,25 @@ class GoogleFindMyEIDResolver:
                     self._locks.pop(identity.registry_id, None)
                     self._persisted_locks.pop(identity.registry_id, None)
                     lock = None
+                elif lock.canonical_id != clean_canonical_id:
+                    _LOGGER.debug(
+                        "Updating canonical_id to UUID-only for %s: %s -> %s",
+                        identity.registry_id,
+                        lock.canonical_id,
+                        clean_canonical_id,
+                    )
+                    lock.canonical_id = clean_canonical_id
+                    save_task = getattr(self.hass, "async_create_task", None)
+                    if callable(save_task) and hasattr(self, "_async_save_locks"):
+                        try:
+                            save_coro = self._async_save_locks()
+                            scheduled = save_task(save_coro)
+                            if scheduled is None:
+                                save_coro.close()
+                            elif asyncio.iscoroutine(scheduled):
+                                asyncio.create_task(scheduled)
+                        except Exception:  # pragma: no cover
+                            pass
 
             def _register_variant(
                 eid_bytes: bytes,
@@ -433,7 +463,7 @@ class GoogleFindMyEIDResolver:
                 match = EIDMatch(
                     device_id=identity.registry_id,
                     config_entry_id=str(identity.config_entry_id),
-                    canonical_id=identity.canonical_id,
+                    canonical_id=clean_canonical_id,
                     time_offset=offset,
                     is_reversed=reversed_flag,
                 )
@@ -486,17 +516,10 @@ class GoogleFindMyEIDResolver:
             # - "pair_date" / "secrets...": Relative time (Strategy B & C)
             counter_windows: list[tuple[int, str]] = []
 
-            rotation_ts = (
-                lock.rotation_timestamp
-                if lock is not None
-                and isinstance(lock.rotation_timestamp, int)
-                and not isinstance(lock.rotation_timestamp, bool)
-                else None
-            )
             if rotation_ts is not None and lock is not None:
                 time_since_lock = max(0, now_unix - lock.created_at)
                 periods_elapsed = time_since_lock // ROTATION_PERIOD
-                for step in (-2, 3):
+                for step in range(-2, 3):
                     offset_periods = periods_elapsed + step
                     window_ts = rotation_ts + (offset_periods * ROTATION_PERIOD)
                     if window_ts < 0:
