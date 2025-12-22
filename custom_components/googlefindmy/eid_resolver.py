@@ -348,6 +348,23 @@ class GoogleFindMyEIDResolver:
 
         await self._store.async_save([lock.to_dict() for lock in self._locks.values()])
 
+    def _schedule_lock_save(self) -> None:
+        """Schedule persistence of EID locks."""
+
+        try:
+            if hasattr(self.hass, "async_create_background_task"):
+                self.hass.async_create_background_task(
+                    self._async_save_locks(),
+                    name="googlefindmy_eid_resolver_save",
+                )
+            else:
+                self.hass.async_create_task(
+                    self._async_save_locks(),
+                    name="googlefindmy_eid_resolver_save",
+                )
+        except Exception as err:  # pragma: no cover - defensive log
+            _LOGGER.error("Failed to schedule EID lock persistence: %s", err)
+
     def _purge_stale_locks(self, *, now: int) -> None:
         """Drop expired generation locks to keep cache fresh."""
 
@@ -397,6 +414,7 @@ class GoogleFindMyEIDResolver:
         max_window = math.ceil((24 * 60 * 60) / ROTATION_PERIOD)
 
         for identity in identities:
+            basis_hint = self._known_timebases.get(identity.registry_id)
             if (
                 not identity.config_entry_id
                 or identity.identity_key is None
@@ -410,6 +428,7 @@ class GoogleFindMyEIDResolver:
 
             key_bytes = bytes(identity.identity_key)
             lock = self._locks.get(identity.registry_id)
+            locked_variant: EidVariant | None = None
 
             rotation_ts: int | None = None
             if lock is not None:
@@ -420,7 +439,16 @@ class GoogleFindMyEIDResolver:
                     and not isinstance(raw_rotation_ts, bool)
                     else None
                 )
+                lock_time_basis = _normalize_optional_string(lock.time_basis)
+                if lock_time_basis:
+                    basis_hint = lock_time_basis
+                    self._known_timebases[identity.registry_id] = lock_time_basis
+
                 is_legacy = rotation_ts is None
+                try:
+                    locked_variant = EidVariant(lock.variant)
+                except ValueError:
+                    locked_variant = EidVariant.MODERN_P256_X32_BE
 
                 if is_legacy:
                     _LOGGER.warning(
@@ -439,27 +467,18 @@ class GoogleFindMyEIDResolver:
                         clean_canonical_id,
                     )
                     lock.canonical_id = clean_canonical_id
-                    save_task = getattr(self.hass, "async_create_task", None)
-                    if callable(save_task) and hasattr(self, "_async_save_locks"):
-                        try:
-                            save_coro = self._async_save_locks()
-                            scheduled = save_task(save_coro)
-                            if scheduled is None:
-                                save_coro.close()
-                            elif asyncio.iscoroutine(scheduled):
-                                asyncio.create_task(scheduled)
-                        except Exception:  # pragma: no cover
-                            pass
+                    self._schedule_lock_save()
 
-            def _register_variant(
+            def _register_variant(  # noqa: PLR0913
                 eid_bytes: bytes,
                 *,
                 variant: EidVariant,
                 ts: int,
                 time_basis: str,
                 reversed_flag: bool,
+                computed_offset_seconds: int,
             ) -> None:
-                offset = int(ts - now_unix)
+                offset = computed_offset_seconds
                 match = EIDMatch(
                     device_id=identity.registry_id,
                     config_entry_id=str(identity.config_entry_id),
@@ -496,11 +515,7 @@ class GoogleFindMyEIDResolver:
                 }
 
             variants: tuple[EidVariant, ...]
-            if lock is not None:
-                try:
-                    locked_variant = EidVariant(lock.variant)
-                except ValueError:
-                    locked_variant = EidVariant.MODERN_P256_X32_BE
+            if locked_variant is not None:
                 variants = (locked_variant,)
             else:
                 variants = (
@@ -514,7 +529,7 @@ class GoogleFindMyEIDResolver:
             # 1. Define explicit time bases to allow iteration over all strategies.
             # - "unix": Absolute time (Strategy A)
             # - "pair_date" / "secrets...": Relative time (Strategy B & C)
-            counter_windows: list[tuple[int, str]] = []
+            counter_windows: list[tuple[int, str, int]] = []
 
             if rotation_ts is not None and lock is not None:
                 time_since_lock = max(0, now_unix - lock.created_at)
@@ -524,7 +539,8 @@ class GoogleFindMyEIDResolver:
                     window_ts = rotation_ts + (offset_periods * ROTATION_PERIOD)
                     if window_ts < 0:
                         continue
-                    counter_windows.append((window_ts, "lock_tracking"))
+                    semantic_offset = window_ts - now_unix
+                    counter_windows.append((window_ts, "lock_tracking", semantic_offset))
             else:
                 counter_bases: tuple[tuple[str, str], ...] = (
                     ("unix", "unix"),
@@ -554,7 +570,14 @@ class GoogleFindMyEIDResolver:
                 drift_windows = math.ceil(drift_seconds / ROTATION_PERIOD)
 
                 # 3. Execution Loop: Apply specific math per strategy
-                for basis, label in counter_bases:
+                known_basis = basis_hint
+                filtered_bases = (
+                    tuple((basis, label) for basis, label in counter_bases if basis == known_basis)
+                    if known_basis
+                    else counter_bases
+                )
+
+                for basis, label in filtered_bases:
                     candidate_value: int | None = None
                     total_window: int = 0
 
@@ -626,9 +649,10 @@ class GoogleFindMyEIDResolver:
                     ):
                         if ts < 0:
                             continue
-                        counter_windows.append((ts, label))
+                        semantic_offset = ts - normalized
+                        counter_windows.append((ts, label, semantic_offset))
 
-            for window_ts, time_basis in counter_windows:
+            for window_ts, time_basis, semantic_offset in counter_windows:
                 for variant in variants:
                     try:
                         eid_bytes = self._generate_variant(
@@ -652,6 +676,7 @@ class GoogleFindMyEIDResolver:
                         ts=window_ts,
                         time_basis=time_basis,
                         reversed_flag=False,
+                        computed_offset_seconds=semantic_offset,
                     )
                     _register_variant(
                         eid_bytes[::-1],
@@ -659,6 +684,7 @@ class GoogleFindMyEIDResolver:
                         ts=window_ts,
                         time_basis=time_basis,
                         reversed_flag=True,
+                        computed_offset_seconds=semantic_offset,
                     )
 
         self._lookup = lookup
@@ -1015,20 +1041,7 @@ class GoogleFindMyEIDResolver:
                 self._locks[match.device_id] = lock
                 self._persisted_locks[match.device_id] = lock
                 self._last_lock_confirmation[match.device_id] = int(time.time())
-                save_task = getattr(self.hass, "async_create_task", None)
-                if callable(save_task) and hasattr(self, "_store"):
-                    try:
-                        save_coro = self._async_save_locks()
-                        scheduled = save_task(save_coro)
-                        if scheduled is None:
-                            save_coro.close()
-                        elif asyncio.iscoroutine(scheduled):
-                            asyncio.create_task(scheduled)
-                    except Exception:  # pragma: no cover - defensive
-                        _LOGGER.debug(
-                            "Failed to schedule lock persistence for %s",
-                            match.device_id,
-                        )
+                self._schedule_lock_save()
 
             self._known_offsets[match.device_id] = match.time_offset
             self._known_advertisement_reversed[match.device_id] = match.is_reversed
@@ -1052,7 +1065,9 @@ class GoogleFindMyEIDResolver:
         )
         return None
 
-    def _extract_candidates(self, payload: bytes) -> tuple[list[bytes], int | None]:
+    def _extract_candidates(  # noqa: PLR0912
+        self, payload: bytes
+    ) -> tuple[list[bytes], int | None]:
         """Extract possible EID slices from a BLE payload."""
 
         length = len(payload)
@@ -1087,24 +1102,38 @@ class GoogleFindMyEIDResolver:
             frame_type = payload[0]
             if frame_type in (FMDN_FRAME_TYPE, MODERN_FRAME_TYPE):
                 observed_frame = frame_type
-                expected_len = (
-                    LEGACY_EID_LENGTH
-                    if frame_type == FMDN_FRAME_TYPE
-                    else MODERN_EID_LENGTH
-                )
-                if length >= RAW_HEADER_LENGTH + expected_len:
+                modern_required_length = RAW_HEADER_LENGTH + MODERN_EID_LENGTH
+
+                def _legacy_payload_start() -> int:
+                    """Return the starting index for a legacy-length payload slice."""
+
+                    if (
+                        length == RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+                        and payload[RAW_HEADER_LENGTH] == 0
+                        and payload[-1] != 0
+                    ):
+                        return RAW_HEADER_LENGTH + 1
+                    return RAW_HEADER_LENGTH
+
+                if frame_type == FMDN_FRAME_TYPE and length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH:
+                    payload_start = _legacy_payload_start()
                     candidates.append(
-                        payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + expected_len]
+                        payload[payload_start : payload_start + LEGACY_EID_LENGTH]
                     )
+                elif frame_type == MODERN_FRAME_TYPE:
+                    if length >= modern_required_length:
+                        candidates.append(
+                            payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
+                        )
+                    elif RAW_HEADER_LENGTH + LEGACY_EID_LENGTH <= length <= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1:
+                        payload_start = _legacy_payload_start()
+                        candidates.append(
+                            payload[payload_start : payload_start + LEGACY_EID_LENGTH]
+                        )
+                    else:
+                        return candidates, observed_frame
 
         if not candidates and length > LEGACY_EID_LENGTH:
-            if (
-                length > RAW_HEADER_LENGTH
-                and payload[0] == MODERN_FRAME_TYPE
-                and length < RAW_HEADER_LENGTH + MODERN_EID_LENGTH
-            ):
-                return candidates, observed_frame
-
             window = min(length - LEGACY_EID_LENGTH + 1, 64)
             for i in range(window):
                 slice_20 = payload[i : i + LEGACY_EID_LENGTH]
