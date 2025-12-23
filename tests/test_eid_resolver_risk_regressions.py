@@ -262,3 +262,229 @@ def test_soft_gate_keeps_discovery_windows(monkeypatch: pytest.MonkeyPatch) -> N
         "Ensure `_compute_time_windows` keeps lock_tracking first and still includes discovery windows "
         "after deduplication so self-healing remains deterministic."
     )
+
+
+def test_resolve_eid_does_not_store_lock_tracking_as_known_timebasis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3/Task A: resolve_eid must sanitize anchor bases before persistence."""
+
+    resolver = _resolver()
+    eid = b"\x11" * 20
+    resolver._lookup[eid] = EIDMatch(
+        device_id="dev",
+        config_entry_id="entry",
+        canonical_id="can",
+        time_offset=7,
+        is_reversed=False,
+    )
+    resolver._lookup_metadata[eid] = {
+        "timestamp_basis": "lock_tracking",
+        "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
+    }
+
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    assert resolver.resolve_eid(eid) is not None
+
+    assert resolver._known_timebases.get("dev") != "lock_tracking", (
+        "FAIL: resolve_eid stored 'lock_tracking' into _known_timebases. "
+        "Fix: sanitize metadata['timestamp_basis'] in resolve_eid() so only "
+        "{'unix','pair_date','secrets_creation_date'} are persisted as anchor bases."
+    )
+    assert ("dev", "lock_tracking") not in resolver._known_offsets, (
+        "FAIL: resolve_eid stored an offset under ('dev','lock_tracking'). "
+        "Fix: only store known offsets when the basis is a valid anchor basis."
+    )
+
+
+def test_resolve_eid_missing_timestamp_basis_uses_previous_valid_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4/Task A: missing basis must fall back to a prior valid anchor basis."""
+
+    resolver = _resolver()
+    resolver._known_timebases["dev"] = "pair_date"
+
+    eid = b"\x22" * 20
+    resolver._lookup[eid] = EIDMatch(
+        device_id="dev",
+        config_entry_id="entry",
+        canonical_id="can",
+        time_offset=3,
+        is_reversed=False,
+    )
+    resolver._lookup_metadata[eid] = {
+        "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
+    }
+
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    assert resolver.resolve_eid(eid) is not None
+
+    assert resolver._known_offsets.get(("dev", "pair_date")) == 3, (
+        "FAIL: resolve_eid did not store basis-aware known_offset when timestamp_basis was missing. "
+        "Fix: in resolve_eid(), if metadata basis is missing/invalid, fall back to a previously known "
+        "valid anchor basis for that device (e.g., _known_timebases[device_id]) before storing offsets."
+    )
+
+
+def test_resolve_eid_normalizes_variant_and_never_persists_invalid_lock_variant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6/Task B: invalid metadata variant must not poison persisted locks."""
+
+    resolver = _resolver()
+    eid = b"\x33" * 20
+    resolver._lookup[eid] = EIDMatch(
+        device_id="dev",
+        config_entry_id="entry",
+        canonical_id="can",
+        time_offset=0,
+        is_reversed=False,
+    )
+    resolver._lookup_metadata[eid] = {
+        "timestamp_basis": "pair_date",
+        "variant": "0",  # intentionally invalid for EidVariant in many implementations
+    }
+
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    assert resolver.resolve_eid(eid) is not None
+
+    lock = resolver._locks.get("dev")
+    assert lock is not None
+    try:
+        EidVariant(lock.variant)
+    except Exception as err:  # pragma: no cover - explicit assert helper
+        raise AssertionError(
+            "FAIL: resolve_eid persisted an invalid EIDGenerationLock.variant. "
+            "Fix: normalize/validate metadata['variant'] in resolve_eid(); "
+            "if it is not parseable as EidVariant, ignore it and infer from EID length. "
+            f"Observed error: {err!r}"
+        )
+
+
+def test_purge_known_offsets_for_device_is_defensive_against_malformed_keys() -> None:
+    """AC2/Task D: purge helper must tolerate malformed offset keys."""
+
+    resolver = _resolver()
+    resolver._known_offsets = {
+        ("dev", "pair_date"): 1,
+        "dev": 999,
+        ("dev",): 888,
+        ("other", "pair_date"): 2,
+    }
+
+    removed = resolver._purge_known_offsets_for_device("dev")
+    assert removed is True
+    assert ("dev", "pair_date") not in resolver._known_offsets
+    assert ("other", "pair_date") in resolver._known_offsets
+
+
+def test_dedupe_keeps_best_window_and_aligns_candidate_value() -> None:
+    """AC5/Task C: dedupe must align spec candidate values with kept windows."""
+
+    resolver = _resolver()
+
+    w1 = WindowCandidate(
+        timestamp=10,
+        semantic_offset=5,
+        time_basis="pair_date",
+        candidate_value=100,
+    )
+    w2 = WindowCandidate(
+        timestamp=10,
+        semantic_offset=0,
+        time_basis="pair_date",
+        candidate_value=200,
+    )
+
+    specs = [
+        WindowSpec(time_basis="pair_date", candidate_value=100, windows=(w1,)),
+        WindowSpec(time_basis="pair_date", candidate_value=999, windows=(w2,)),
+    ]
+
+    out = resolver._dedupe_windows(specs)
+    assert out and len(out[0].windows) == 1
+    kept = out[0].windows[0]
+
+    assert kept.semantic_offset == 0, (
+        "FAIL: _dedupe_windows did not keep the best semantic_offset candidate. "
+        "Fix: when duplicates share (basis,timestamp), choose the smallest abs(semantic_offset)."
+    )
+    assert out[0].candidate_value == kept.candidate_value, (
+        "FAIL: _dedupe_windows produced WindowSpec.candidate_value that does not match the kept WindowCandidate. "
+        "Fix: set basis_candidate_value[basis] from the kept WindowCandidate.candidate_value, not spec.candidate_value."
+    )
+
+
+def test_unix_hint_is_ignored_when_absolute_unix_disabled() -> None:
+    """AC4: unix basis hint must not collapse windows when absolute unix scan is disabled."""
+
+    resolver = _resolver()
+    params = resolver._build_rotation_params()
+    identity = _identity()
+
+    resolver._known_timebases[identity.registry_id] = "unix"
+
+    work_item = WorkItem(
+        registry_id=identity.registry_id,
+        config_entry_id=identity.config_entry_id,
+        canonical_id=identity.canonical_id,
+        key_bytes=b"\xCC" * 16,
+        identity=identity,
+        lock=None,
+        locked_variant=None,
+        rotation_ts=None,
+        basis_hint="unix",
+    )
+
+    counter_windows, invalid_hint = resolver._compute_relative_windows(
+        work_item,
+        now_unix=10_000,
+        params=params,
+        min_relative_window=params.min_relative_window,
+        allow_unix_basis=True,
+    )
+
+    assert counter_windows, (
+        "FAIL: unix basis hint collapsed window generation when ENABLE_ABSOLUTE_UNIX_BASIS is False. "
+        "Fix: exclude 'unix' from available bases when absolute unix scanning is disabled so the hint "
+        "becomes invalid and pair_date/secrets_creation_date windows are generated."
+    )
+    assert invalid_hint is True, (
+        "FAIL: unix basis hint should be treated as invalid when absolute unix scanning is disabled. "
+        "Fix: remove unix from available_bases / counter_bases under ENABLE_ABSOLUTE_UNIX_BASIS=False."
+    )
+
+
+def test_resolve_eid_does_not_poison_anchor_offsets_with_lock_tracking_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock-tracking hits must not overwrite anchor-based known offsets/timebases."""
+
+    resolver = _resolver()
+    resolver._known_timebases["dev"] = "pair_date"
+    resolver._known_offsets[("dev", "pair_date")] = 123
+
+    eid = b"\x11" * 20
+    resolver._lookup[eid] = EIDMatch(
+        device_id="dev",
+        config_entry_id="entry",
+        canonical_id="can",
+        time_offset=7,
+        is_reversed=False,
+    )
+    resolver._lookup_metadata[eid] = {
+        "timestamp_basis": "lock_tracking",
+        "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
+    }
+
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    assert resolver.resolve_eid(eid) is not None
+
+    assert resolver._known_timebases.get("dev") == "pair_date"
+    assert ("dev", "lock_tracking") not in resolver._known_offsets
+    assert resolver._known_offsets.get(("dev", "pair_date")) == 123, (
+        "FAIL: lock-tracking hit overwrote anchor-based known offset. "
+        "Fix: if timestamp_basis is explicitly invalid (e.g., lock_tracking), "
+        "do not persist match.time_offset under any anchor basis."
+    )
