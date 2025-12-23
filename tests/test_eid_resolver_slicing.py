@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from custom_components.googlefindmy.eid_resolver import (
     EIDMatch,
+    EidVariant,
     GoogleFindMyEIDResolver,
 )
 
@@ -19,7 +20,7 @@ def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolv
     resolver._lookup_metadata = {
         lookup_key: {
             "timestamp_basis": "pair_date",
-            "variant": match.time_offset,
+            "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
         }
     }
     resolver._known_offsets = {}

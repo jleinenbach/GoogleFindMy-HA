@@ -83,6 +83,8 @@ LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
 LOCK_CONFIRMATION_TTL_SECONDS = 90 * 60
 LOCK_MISS_THRESHOLD = 3
 TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
+VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
+KNOWN_OFFSET_KEY_LENGTH = 2
 
 
 class EIDMatch(NamedTuple):
@@ -283,6 +285,15 @@ def _normalize_optional_string(value: object) -> str | None:
     return None
 
 
+def _normalize_anchor_basis(value: object) -> str | None:
+    """Return a valid anchor basis or ``None``."""
+
+    if not isinstance(value, str):
+        return None
+    basis = value.strip()
+    return basis if basis in VALID_ANCHOR_BASES else None
+
+
 def _normalize_encrypted_blob(value: object) -> bytes | None:
     """Normalize encrypted payloads encoded as bytes or hex strings."""
 
@@ -474,7 +485,15 @@ class GoogleFindMyEIDResolver:
         if not isinstance(mapping, dict) or not mapping:
             return False
 
-        to_delete = [key for key in mapping if key[0] == device_id]
+        to_delete: list[tuple[str, str]] = []
+        for key in list(mapping.keys()):
+            if (
+                isinstance(key, tuple)
+                and len(key) == KNOWN_OFFSET_KEY_LENGTH
+                and isinstance(key[0], str)
+                and key[0] == device_id
+            ):
+                to_delete.append(key)
         for key in to_delete:
             mapping.pop(key, None)
 
@@ -915,6 +934,10 @@ class GoogleFindMyEIDResolver:
             ("pair_date", "pair_date"),
             ("secrets_creation_date", "secrets_creation_date"),
         )
+        if not ENABLE_ABSOLUTE_UNIX_BASIS:
+            counter_bases = tuple(
+                (basis, label) for basis, label in counter_bases if basis != "unix"
+            )
         if not allow_unix_basis:
             counter_bases = tuple(
                 (basis, label) for basis, label in counter_bases if basis != "unix"
@@ -1045,14 +1068,14 @@ class GoogleFindMyEIDResolver:
                 if key not in key_index:
                     key_index[key] = len(basis_windows[spec.time_basis])
                     basis_windows[spec.time_basis].append(window)
-                    basis_candidate_value.setdefault(spec.time_basis, spec.candidate_value)
+                    basis_candidate_value.setdefault(spec.time_basis, window.candidate_value)
                     continue
 
                 idx = key_index[key]
                 current = basis_windows[spec.time_basis][idx]
                 if abs(window.semantic_offset) < abs(current.semantic_offset):
                     basis_windows[spec.time_basis][idx] = window
-                    basis_candidate_value[spec.time_basis] = spec.candidate_value
+                    basis_candidate_value[spec.time_basis] = window.candidate_value
 
         return [
             WindowSpec(
@@ -1194,6 +1217,37 @@ class GoogleFindMyEIDResolver:
             len(work_items),
             len(self._lookup),
         )
+
+    def _normalize_variant_value(self, raw: object, *, eid_len: int) -> str:
+        """Return a valid `EidVariant` value string for persistence."""
+
+        try:
+            return EidVariant(raw).value
+        except Exception:
+            pass
+
+        if isinstance(raw, str):
+            stripped = raw.strip()
+            if stripped:
+                try:
+                    return EidVariant(stripped).value
+                except Exception:
+                    if stripped.isdigit():
+                        try:
+                            return EidVariant(int(stripped)).value
+                        except Exception:
+                            pass
+        elif isinstance(raw, int) and not isinstance(raw, bool):
+            try:
+                return EidVariant(raw).value
+            except Exception:
+                pass
+
+        inferred = self._infer_variant_from_length(eid_len)
+        try:
+            return EidVariant(inferred).value
+        except Exception:
+            return inferred
 
     @staticmethod
     def _infer_variant_from_length(eid_length: int) -> str:
@@ -1517,14 +1571,22 @@ class GoogleFindMyEIDResolver:
             metadata: dict[str, Any] = self._lookup_metadata.get(candidate) or {}
             now = int(time.time())
             self._last_lock_confirmation[match.device_id] = now
-            time_basis = metadata.get("timestamp_basis")
+            previous_basis = _normalize_anchor_basis(self._known_timebases.get(match.device_id))
+            raw_time_basis = metadata.get("timestamp_basis")
+            anchor_basis = _normalize_anchor_basis(raw_time_basis)
+            basis_explicitly_invalid = raw_time_basis is not None and anchor_basis is None
+            if anchor_basis is None:
+                if raw_time_basis is None:
+                    anchor_basis = previous_basis
+            elif raw_time_basis != anchor_basis:
+                self._known_timebases.pop(match.device_id, None)
+            if anchor_basis is None and not basis_explicitly_invalid:
+                self._known_timebases.pop(match.device_id, None)
             if match.device_id not in self._locks:
-                variant_str = str(metadata.get("variant") or "")
-                try:
-                    variant_value = variant_str or self._infer_variant_from_length(len(candidate))
-                except Exception:
-                    variant_value = EidVariant.MODERN_P256_X32_BE.value
-                time_basis = metadata.get("timestamp_basis")
+                variant_value = self._normalize_variant_value(
+                    metadata.get("variant"),
+                    eid_len=len(candidate),
+                )
                 rotation_timestamp = metadata.get("rotation_timestamp")
                 lock = EIDGenerationLock(
                     device_id=match.device_id,
@@ -1537,7 +1599,7 @@ class GoogleFindMyEIDResolver:
                     and not isinstance(rotation_timestamp, bool)
                     else None,
                     frame_type=observed_frame,
-                    time_basis=time_basis if isinstance(time_basis, str) else None,
+                    time_basis=anchor_basis,
                     created_at=now,
                 )
                 self._locks[match.device_id] = lock
@@ -1547,9 +1609,9 @@ class GoogleFindMyEIDResolver:
             self._known_advertisement_reversed[match.device_id] = match.is_reversed
             self._lock_miss_counts[match.device_id] = 0
 
-            if isinstance(time_basis, str):
-                self._known_offsets[(match.device_id, time_basis)] = match.time_offset
-                self._known_timebases[match.device_id] = time_basis
+            if anchor_basis is not None and not basis_explicitly_invalid:
+                self._known_offsets[(match.device_id, anchor_basis)] = match.time_offset
+                self._known_timebases[match.device_id] = anchor_basis
 
             _LOGGER.info(
                 (
