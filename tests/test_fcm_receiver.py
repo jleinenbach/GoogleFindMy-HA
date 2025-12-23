@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+import custom_components.googlefindmy.Auth.fcm_receiver_ha as fcm_receiver_module
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.const import DOMAIN
 
@@ -344,7 +345,7 @@ async def test_credentials_update_clears_latched_fatal_error(
         captured_tasks.append(task)
         return task
 
-    monkeypatch.setattr(asyncio, "create_task", _capture_task)
+    monkeypatch.setattr(fcm_receiver_module.asyncio, "create_task", _capture_task)
 
     token_routes: list[tuple[str, set[str]]] = []
     monkeypatch.setattr(
@@ -371,4 +372,8 @@ async def test_credentials_update_clears_latched_fatal_error(
 
     assert entry_id not in receiver._fatal_errors
     assert receiver._fatal_error is None
-    assert token_routes[0] == ("token-abc", {entry_id})
+    assert token_routes == [
+        ("token-abc", {entry_id}),
+        ("token-abc", {entry_id}),
+        ("save", {entry_id}),
+    ]

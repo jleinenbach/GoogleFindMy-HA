@@ -272,6 +272,7 @@ class FcmReceiverHA:
     ) -> None:
         """Clear any latched fatal registration error for a config entry."""
 
+        removed = False
         if entry_id in self._fatal_errors:
             if reason:
                 _LOGGER.debug(
@@ -281,8 +282,10 @@ class FcmReceiverHA:
                 _LOGGER.debug("[entry=%s] Clearing latched FCM fatal error", entry_id)
 
             self._fatal_errors.pop(entry_id, None)
+            removed = True
 
-        self._fatal_error = next(iter(self._fatal_errors.values()), None)
+        if removed:
+            self._fatal_error = next(iter(self._fatal_errors.values()), None)
 
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
