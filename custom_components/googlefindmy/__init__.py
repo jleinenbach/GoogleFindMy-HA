@@ -7759,14 +7759,6 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         runtime_data.subentry_retry_attempts.clear()
         _cleanup_cloud_discovery_runtime(runtime_data)
 
-    resolver = bucket.get(DATA_EID_RESOLVER)
-    if isinstance(resolver, GoogleFindMyEIDResolver):
-        if not entries_bucket:
-            resolver.stop()
-            bucket.pop(DATA_EID_RESOLVER, None)
-        else:
-            hass.async_create_task(resolver.async_refresh())
-
     subentries = _collect_entry_subentries(entry)
 
     forwarded_parent_platforms_flag = getattr(
@@ -8032,6 +8024,14 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 )
         except Exception as err:
             _LOGGER.debug("Owner-index cleanup failed: %s", err)
+
+        resolver = bucket.get(DATA_EID_RESOLVER)
+        if isinstance(resolver, GoogleFindMyEIDResolver):
+            if not entries_bucket:
+                resolver.stop()
+                bucket.pop(DATA_EID_RESOLVER, None)
+            else:
+                hass.async_create_task(resolver.async_refresh())
 
         try:
             await _maybe_close_spot_transport(entries_bucket)
