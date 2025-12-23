@@ -1,8 +1,9 @@
 # tests/test_fcm_receiver.py
 from __future__ import annotations
 
+import asyncio
 import importlib
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -285,3 +286,89 @@ def test_domain_provider_sets_default_entry_on_selected_receiver() -> None:
 async def _async_release(receiver: FcmReceiverHA, hass: Any, entry: _DummyEntry) -> None:
     receiver.request_stop()
     await _async_release_shared_fcm(hass, entry)
+
+
+@pytest.mark.asyncio
+async def test_register_clears_latched_fatal_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    receiver = FcmReceiverHA()
+    entry_id = "entry-id"
+    receiver._fatal_errors[entry_id] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is True
+    assert entry_id not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    assert token_routes == [("token-123", {entry_id})]
+    assert persisted_tokens == [(entry_id, "token-123")]
+
+
+@pytest.mark.asyncio
+async def test_credentials_update_clears_latched_fatal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receiver = FcmReceiverHA()
+    entry_id = "entry-credentials"
+    receiver._fatal_errors[entry_id] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+
+    loop = asyncio.get_running_loop()
+    captured_tasks: list[asyncio.Task[object]] = []
+
+    def _capture_task(
+        coro: Awaitable[object], *, name: str | None = None
+    ) -> asyncio.Task[object]:
+        task = loop.create_task(coro, name=name)
+        captured_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", _capture_task)
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        token_routes.append((token_arg, {entry_arg}))
+
+    async def _save(entry_arg: str) -> None:
+        token_routes.append(("save", {entry_arg}))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "_async_save_credentials_for_entry", _save)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-abc")
+
+    receiver._on_credentials_updated_for_entry(
+        entry_id, {"fcm": {"registration": {"token": "token-abc"}}}
+    )
+
+    await asyncio.gather(*captured_tasks)
+
+    assert entry_id not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    assert token_routes[0] == ("token-abc", {entry_id})

@@ -267,6 +267,23 @@ class FcmReceiverHA:
         self._entry_health: dict[str, bool] = {}
         self._entry_last_connected_wall: dict[str, float] = {}
 
+    def _clear_fatal_error_for_entry(
+        self, entry_id: str, *, reason: str | None = None
+    ) -> None:
+        """Clear any latched fatal registration error for a config entry."""
+
+        if entry_id in self._fatal_errors:
+            if reason:
+                _LOGGER.debug(
+                    "[entry=%s] Clearing latched FCM fatal error (%s)", entry_id, reason
+                )
+            else:
+                _LOGGER.debug("[entry=%s] Clearing latched FCM fatal error", entry_id)
+
+            self._fatal_errors.pop(entry_id, None)
+
+        self._fatal_error = next(iter(self._fatal_errors.values()), None)
+
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
         """Attach the entry_id to a cache instance when possible."""
@@ -789,6 +806,9 @@ class FcmReceiverHA:
                 if token:
                     self._update_token_routing(token, {entry_id})
                     await self._persist_routing_token(entry_id, token)
+                self._clear_fatal_error_for_entry(
+                    entry_id, reason="Registration succeeded"
+                )
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
             return False
@@ -951,6 +971,9 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
+                self._clear_fatal_error_for_entry(
+                    entry_id, reason="Entry unregistered"
+                )
 
     # -------------------- Incoming notifications --------------------
 
@@ -1503,6 +1526,9 @@ class FcmReceiverHA:
         if token:
             self._update_token_routing(token, {entry_id})
             asyncio.create_task(self._persist_routing_token(entry_id, token))
+        self._clear_fatal_error_for_entry(
+            entry_id, reason="Credentials updated for entry"
+        )
 
         asyncio.create_task(self._async_save_credentials_for_entry(entry_id))
         _LOGGER.info("[entry=%s] FCM credentials updated", entry_id)
