@@ -488,3 +488,20 @@ def test_resolve_eid_does_not_poison_anchor_offsets_with_lock_tracking_basis(
         "Fix: if timestamp_basis is explicitly invalid (e.g., lock_tracking), "
         "do not persist match.time_offset under any anchor basis."
     )
+
+
+def test_normalize_counter_candidate_rejects_bool() -> None:
+    """AC7: bool values must be rejected even though bool is a subclass of int."""
+
+    assert _normalize_counter_candidate(True, basis="pair_date") is None, (
+        "FAIL: _normalize_counter_candidate accepted True as valid counter. "
+        "Fix: add explicit `isinstance(candidate_value, bool)` check."
+    )
+    assert _normalize_counter_candidate(False, basis="pair_date") is None, (
+        "FAIL: _normalize_counter_candidate accepted False as valid counter. "
+        "Fix: add explicit `isinstance(candidate_value, bool)` check."
+    )
+
+    # Valid integers should still work
+    assert _normalize_counter_candidate(1000, basis="pair_date") == 1000
+    assert _normalize_counter_candidate(0, basis="pair_date") == 0

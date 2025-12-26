@@ -86,6 +86,11 @@ TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 KNOWN_OFFSET_KEY_LENGTH = 2
 
+# LOCK_TRACKING_WINDOW_STEPS: Number of rotation periods to scan around the
+# expected counter when tracking a locked device. ±2 periods covers ~34 minutes
+# of clock drift at 1024s rotation.
+LOCK_TRACKING_WINDOW_STEPS = 2
+
 
 class EIDMatch(NamedTuple):
     """Resolved mapping between an EID and a Home Assistant device."""
@@ -376,7 +381,11 @@ class EIDGenerationLock:
 def _normalize_counter_candidate(candidate_value: object, *, basis: str) -> int | None:
     """Return a sane u32 counter candidate or ``None`` when unusable."""
 
-    if not isinstance(candidate_value, int) or candidate_value < 0:
+    if (
+        not isinstance(candidate_value, int)
+        or isinstance(candidate_value, bool)
+        or candidate_value < 0
+    ):
         return None
 
     max_millis = FHNA_COUNTER_MASK
@@ -891,7 +900,7 @@ class GoogleFindMyEIDResolver:
         expected_counter = work_item.rotation_ts + (
             periods_elapsed * params.rotation_period
         )
-        for step in range(-2, 3):
+        for step in range(-LOCK_TRACKING_WINDOW_STEPS, LOCK_TRACKING_WINDOW_STEPS + 1):
             offset_periods = periods_elapsed + step
             window_ts = work_item.rotation_ts + (offset_periods * params.rotation_period)
             if window_ts < 0:
@@ -1753,29 +1762,35 @@ class GoogleFindMyEIDResolver:
             raw_len,
         )
 
+    @staticmethod
+    def _cancel_callback(unsub: CALLBACK_TYPE | None, name: str) -> None:
+        """Cancel a callback or close a coroutine, logging any errors."""
+        if unsub is None:
+            return
+        try:
+            if callable(unsub):
+                unsub()
+            elif asyncio.iscoroutine(unsub):
+                unsub.close()
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("Failed to cancel %s: %s", name, err)
+
     def stop(self) -> None:
         """Cancel background timers and clear cached state."""
 
-        if self._unsub_alignment is not None:
-            unsub = self._unsub_alignment
-            self._unsub_alignment = None
-            try:
-                if callable(unsub):
-                    unsub()
-                elif asyncio.iscoroutine(unsub):
-                    unsub.close()
-            except Exception as err:  # pragma: no cover - defensive
-                _LOGGER.debug("Failed to cancel alignment timer: %s", err)
-        if self._unsub_interval is not None:
-            unsub = self._unsub_interval
-            self._unsub_interval = None
-            try:
-                if callable(unsub):
-                    unsub()
-                elif asyncio.iscoroutine(unsub):
-                    unsub.close()
-            except Exception as err:  # pragma: no cover - defensive
-                _LOGGER.debug("Failed to cancel refresh interval: %s", err)
+        self._cancel_callback(self._unsub_alignment, "alignment timer")
+        self._unsub_alignment = None
+
+        self._cancel_callback(self._unsub_interval, "refresh interval")
+        self._unsub_interval = None
+
+        if self._load_task is not None:
+            load_task = self._load_task
+            self._load_task = None
+            if not load_task.done():
+                load_task.cancel()
+
         self._lookup.clear()
         self._lookup_metadata.clear()
         self._locks.clear()
+        self._persisted_locks.clear()
