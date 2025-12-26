@@ -21,6 +21,22 @@ import warnings
 from enum import Enum
 from typing import Final, Literal
 
+__all__ = [
+    "EidVariant",
+    "EIK_LENGTH",
+    "FHNA_K",
+    "K",
+    "LEGACY_EID_LENGTH",
+    "MODERN_EID_LENGTH",
+    "P256_ORDER",
+    "ROTATION_PERIOD",
+    "build_table10_prf_input",
+    "generate_eid",
+    "generate_eid_variant",
+    "get_masked_counter",
+    "prf_aes_256_ecb",
+]
+
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -42,6 +58,7 @@ P256_ORDER: Final[int] = (
     0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 )
 _CURVE: CurveParametersProtocol = load_curve()
+_P256_CURVE: Final[ec.SECP256R1] = ec.SECP256R1()
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,20 +104,36 @@ def _align_to_rotation(
     """Return the rotation-aligned counter per Table 10."""
 
     aligned: int = counter_u32 & ~rotation_mask
-    return aligned, aligned != counter_u32
+    was_modified: bool = aligned != counter_u32
+    return aligned, was_modified
 
 
 def build_table10_prf_input(
-    time_counter_u32: int, *, k: int = K, strict: bool = True
+    time_counter_u32: int,
+    *,
+    k: int = K,
+    strict: bool = True,
+    _normalized: bool = False,
 ) -> bytes:
-    """Return the 32-byte Table 10 PRF input buffer (FHN spec v1.3 — Table 10)."""
+    """Return the 32-byte Table 10 PRF input buffer (FHN spec v1.3 — Table 10).
 
+    Args:
+        time_counter_u32: Raw or pre-normalized 32-bit time counter.
+        k: Rotation exponent (must equal FHNA_K).
+        strict: Enforce u32 range when True.
+        _normalized: Internal flag to skip redundant normalization when the
+            caller has already validated the counter.
+    """
     if k != FHNA_K:
         raise ValueError(f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}")
 
-    counter_u32: int = _normalize_time_counter(time_counter_u32, strict=strict)
-    masked_counter, was_aligned = _align_to_rotation(counter_u32)
-    if was_aligned:
+    counter_u32: int = (
+        time_counter_u32
+        if _normalized
+        else _normalize_time_counter(time_counter_u32, strict=strict)
+    )
+    masked_counter, was_modified = _align_to_rotation(counter_u32)
+    if was_modified:
         _LOGGER.debug("Counter %s masked to rotation-aligned %s", counter_u32, masked_counter)
 
     counter_bytes = masked_counter.to_bytes(4, byteorder="big", signed=False)
@@ -126,7 +159,8 @@ def prf_aes_256_ecb(eik: bytes, prf_input: bytes) -> bytes:
 
     cipher = Cipher(algorithms.AES(eik), modes.ECB())
     encryptor = cipher.encryptor()
-    return encryptor.update(prf_input) + encryptor.finalize()
+    ciphertext: bytes = encryptor.update(prf_input) + encryptor.finalize()
+    return ciphertext
 
 
 def _prf_table10(
@@ -135,10 +169,12 @@ def _prf_table10(
     k: int = K,
     *,
     strict: bool = True,
+    _normalized: bool = False,
 ) -> bytes:
     """Derive the Table 10 pseudorandom output for the provided counter."""
-
-    prf_input = build_table10_prf_input(time_counter_u32, k=k, strict=strict)
+    prf_input = build_table10_prf_input(
+        time_counter_u32, k=k, strict=strict, _normalized=_normalized
+    )
     return prf_aes_256_ecb(identity_key, prf_input)
 
 
@@ -151,6 +187,7 @@ def _derive_scalar(  # noqa: PLR0913
     curve_order: int,
     strict: bool,
     include_zero_endpoint: bool = False,
+    _normalized: bool = False,
 ) -> int:
     """Derive a scalar from the Table 10 PRF output.
 
@@ -160,16 +197,16 @@ def _derive_scalar(  # noqa: PLR0913
     toggle preserves the legacy modulo-n behavior (Table 10) instead of the
     P-256-adjusted projection used by modern trackers.
     """
-
-    r_dash: bytes = _prf_table10(identity_key, time_counter_u32, k, strict=strict)
+    r_dash: bytes = _prf_table10(
+        identity_key, time_counter_u32, k, strict=strict, _normalized=_normalized
+    )
     r_dash_int: int = int.from_bytes(r_dash, byteorder=byteorder, signed=False)
-    order: int = int(curve_order)
 
     if include_zero_endpoint:
-        mod_n_scalar: int = r_dash_int % order
+        mod_n_scalar: int = r_dash_int % curve_order
         return mod_n_scalar
 
-    projected_scalar: int = (r_dash_int % (order - 1)) + 1
+    projected_scalar: int = (r_dash_int % (curve_order - 1)) + 1
     return projected_scalar
 
 
@@ -186,9 +223,9 @@ def _serialize_legacy_x(scalar_r: int) -> bytes:
 
 def _serialize_p256_x(scalar_r: int) -> bytes:
     """Return the big-endian x-coordinate for ``R = r * G`` on secp256r1."""
-
-    curve = ec.SECP256R1()
-    public_numbers = ec.derive_private_key(scalar_r, curve).public_key().public_numbers()
+    public_numbers = (
+        ec.derive_private_key(scalar_r, _P256_CURVE).public_key().public_numbers()
+    )
 
     x_int: int = int(public_numbers.x)
     return x_int.to_bytes(MODERN_EID_LENGTH, byteorder="big")
@@ -203,71 +240,77 @@ def generate_eid_variant(
     strict: bool = True,
 ) -> bytes:
     """Return the explicit EID variant for the given counter and EIK."""
-
     if len(eik) != EIK_LENGTH:
         raise ValueError(f"Ephemeral Identity Key must be {EIK_LENGTH} bytes")
     counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
 
-    if variant is EidVariant.LEGACY_SECP160R1_X20_BE:
-        curve_order: int = int(_CURVE.order)
-        scalar = _derive_scalar(
-            eik,
-            counter_u32,
-            k=k,
-            byteorder="big",
-            curve_order=curve_order,
-            strict=strict,
-            include_zero_endpoint=True,
-        )
-        return _serialize_legacy_x(scalar)
+    match variant:
+        case EidVariant.LEGACY_SECP160R1_X20_BE:
+            curve_order: int = int(_CURVE.order)
+            scalar = _derive_scalar(
+                eik,
+                counter_u32,
+                k=k,
+                byteorder="big",
+                curve_order=curve_order,
+                strict=strict,
+                include_zero_endpoint=True,
+                _normalized=True,
+            )
+            return _serialize_legacy_x(scalar)
 
-    if variant is EidVariant.MODERN_P256_X32_BE:
-        scalar = _derive_scalar(
-            eik,
-            counter_u32,
-            k=k,
-            byteorder="big",
-            curve_order=P256_ORDER,
-            strict=strict,
-        )
-        return _serialize_p256_x(scalar)
+        case EidVariant.MODERN_P256_X32_BE:
+            scalar = _derive_scalar(
+                eik,
+                counter_u32,
+                k=k,
+                byteorder="big",
+                curve_order=P256_ORDER,
+                strict=strict,
+                _normalized=True,
+            )
+            return _serialize_p256_x(scalar)
 
-    if variant is EidVariant.MODERN_P256_X20_TRUNC_BE:
-        full = generate_eid_variant(
-            eik,
-            counter_u32,
-            EidVariant.MODERN_P256_X32_BE,
-            k=k,
-            strict=strict,
-        )
-        return full[:LEGACY_EID_LENGTH]
+        case EidVariant.MODERN_P256_X20_TRUNC_BE:
+            full = generate_eid_variant(
+                eik,
+                counter_u32,
+                EidVariant.MODERN_P256_X32_BE,
+                k=k,
+                strict=strict,
+            )
+            return full[:LEGACY_EID_LENGTH]
 
-    if variant is EidVariant.MODERN_P256_X32_LE_SCALAR:
-        scalar = _derive_scalar(
-            eik,
-            counter_u32,
-            k=k,
-            byteorder="little",
-            curve_order=P256_ORDER,
-            strict=strict,
-        )
-        return _serialize_p256_x(scalar)
+        case EidVariant.MODERN_P256_X32_LE_SCALAR:
+            scalar = _derive_scalar(
+                eik,
+                counter_u32,
+                k=k,
+                byteorder="little",
+                curve_order=P256_ORDER,
+                strict=strict,
+                _normalized=True,
+            )
+            return _serialize_p256_x(scalar)
 
-    if variant is EidVariant.MODERN_P256_X20_TRUNC_LE:
-        full = generate_eid_variant(
-            eik,
-            counter_u32,
-            EidVariant.MODERN_P256_X32_LE_SCALAR,
-            k=k,
-            strict=strict,
-        )
-        return full[:LEGACY_EID_LENGTH]
+        case EidVariant.MODERN_P256_X20_TRUNC_LE:
+            full = generate_eid_variant(
+                eik,
+                counter_u32,
+                EidVariant.MODERN_P256_X32_LE_SCALAR,
+                k=k,
+                strict=strict,
+            )
+            return full[:LEGACY_EID_LENGTH]
 
-    raise ValueError(f"Unsupported EID variant: {variant}")
+        case _:
+            raise ValueError(f"Unsupported EID variant: {variant}")
 
 
 def get_masked_counter(time_counter_u32: int, k: int, *, strict: bool = True) -> bytes:
     """Return the rotation-aligned counter bytes for diagnostics."""
+    if k != FHNA_K:
+        raise ValueError(f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}")
 
     counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
     rotation_mask: int = ((1 << k) - 1) & FHNA_COUNTER_MASK
@@ -295,3 +338,25 @@ def generate_eid(
         stacklevel=2,
     )
     return generate_eid_variant(eik, time_counter_u32, variant, k=k, strict=strict)
+
+
+if __name__ == "__main__":
+    # Developer test harness for EID generation.
+    # Usage: python -m custom_components.googlefindmy.FMDNCrypto.eid_generator
+    from custom_components.googlefindmy.example_data_provider import get_example_data
+
+    sample_eik = bytes.fromhex(get_example_data("sample_identity_key"))
+
+    print("EID Generation Demo (FHN Accessory Specification v1.3 — Table 10)")
+    print("=" * 70)
+    print(f"EIK (hex): {sample_eik.hex()}")
+    print(f"Rotation period: {ROTATION_PERIOD} seconds")
+    print()
+
+    for variant in EidVariant:
+        print(f"Variant: {variant.value}")
+        for i in range(3):
+            timestamp = i * ROTATION_PERIOD
+            eid = generate_eid_variant(sample_eik, timestamp, variant)
+            print(f"  t={timestamp:>6}: {eid.hex()}")
+        print()
