@@ -9,6 +9,7 @@ import pytest
 
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.eid_resolver import (
+    LOCK_TRACKING_WINDOW_STEPS,
     ROTATION_PERIOD,
     EIDGenerationLock,
     EidVariant,
@@ -79,6 +80,7 @@ async def test_tracking_mode_predicts_next_rotation(
     await resolver._refresh_cache()
 
     expected_counters = {
-        5_000 + ((10 + step) * ROTATION_PERIOD) for step in range(-2, 3)
+        5_000 + ((10 + step) * ROTATION_PERIOD)
+        for step in range(-LOCK_TRACKING_WINDOW_STEPS, LOCK_TRACKING_WINDOW_STEPS + 1)
     }
     assert set(generated_counters) == expected_counters
