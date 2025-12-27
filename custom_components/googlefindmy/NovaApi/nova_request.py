@@ -86,9 +86,70 @@ NOVA_INITIAL_BACKOFF_S = 4.0
 NOVA_BACKOFF_FACTOR = 2.0
 NOVA_MAX_RETRY_AFTER_S = 60.0
 
+# ---------------------------------------------------------------------------
+# HTTP Status Codes (RFC 9110)
+# ---------------------------------------------------------------------------
+# Reference: https://httpwg.org/specs/rfc9110.html#status.codes
+#
+# Retry behavior follows industry best practices:
+# - https://www.baeldung.com/cs/http-error-status-codes-retry
+# - https://www.restapitutorial.com/advanced/responses/retries
+# ---------------------------------------------------------------------------
+
+# 2xx Success
 HTTP_OK = 200
-HTTP_UNAUTHORIZED = 401
-HTTP_TOO_MANY_REQUESTS = 429
+
+# 4xx Client Errors
+HTTP_BAD_REQUEST = 400          # Malformed request syntax - DO NOT RETRY
+HTTP_UNAUTHORIZED = 401         # Auth failed - RETRY after token refresh
+HTTP_FORBIDDEN = 403            # Permission denied - DO NOT RETRY
+HTTP_NOT_FOUND = 404            # Resource not found - DO NOT RETRY
+HTTP_METHOD_NOT_ALLOWED = 405   # HTTP method not supported - DO NOT RETRY
+HTTP_REQUEST_TIMEOUT = 408      # Server timeout waiting for request - RETRY OK
+HTTP_CONFLICT = 409             # Request conflicts with server state - DO NOT RETRY
+HTTP_GONE = 410                 # Resource permanently removed - DO NOT RETRY
+HTTP_PRECONDITION_FAILED = 412  # Precondition in headers not met - DO NOT RETRY
+HTTP_PAYLOAD_TOO_LARGE = 413    # Request body too large - DO NOT RETRY
+HTTP_UNPROCESSABLE_ENTITY = 422 # Semantic errors in request - DO NOT RETRY
+HTTP_TOO_MANY_REQUESTS = 429    # Rate limited - RETRY with backoff
+
+# 5xx Server Errors
+HTTP_INTERNAL_SERVER_ERROR = 500  # Generic server error - RETRY OK
+HTTP_NOT_IMPLEMENTED = 501        # Server doesn't support functionality - DO NOT RETRY
+HTTP_BAD_GATEWAY = 502            # Invalid response from upstream - RETRY OK
+HTTP_SERVICE_UNAVAILABLE = 503    # Server overloaded/maintenance - RETRY OK (check Retry-After)
+HTTP_GATEWAY_TIMEOUT = 504        # Upstream timeout - RETRY OK
+HTTP_VERSION_NOT_SUPPORTED = 505  # HTTP version not supported - DO NOT RETRY
+HTTP_LOOP_DETECTED = 508          # Infinite loop in request processing - DO NOT RETRY
+
+# ---------------------------------------------------------------------------
+# Retry-eligible status codes for Nova API
+# ---------------------------------------------------------------------------
+# These codes indicate transient failures that may succeed on retry:
+# - 408: Request Timeout (network issues)
+# - 429: Too Many Requests (rate limiting)
+# - 500: Internal Server Error (transient server issues)
+# - 502: Bad Gateway (upstream issues)
+# - 503: Service Unavailable (overload/maintenance)
+# - 504: Gateway Timeout (upstream timeout)
+#
+# These codes should NOT be retried (permanent errors):
+# - 400: Bad Request (malformed request)
+# - 403: Forbidden (no permission)
+# - 404: Not Found (resource doesn't exist)
+# - 501: Not Implemented (server doesn't support this)
+# - 505: HTTP Version Not Supported (config issue)
+# - 508: Loop Detected (server config issue)
+# ---------------------------------------------------------------------------
+HTTP_RETRY_ELIGIBLE = frozenset({
+    HTTP_REQUEST_TIMEOUT,
+    HTTP_TOO_MANY_REQUESTS,
+    HTTP_INTERNAL_SERVER_ERROR,
+    HTTP_BAD_GATEWAY,
+    HTTP_SERVICE_UNAVAILABLE,
+    HTTP_GATEWAY_TIMEOUT,
+})
+
 RECENT_REFRESH_WINDOW_S = 2.0
 
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
@@ -987,9 +1048,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")
 
-                    # Retry-eligible status codes: 408, 429, and specific 5xx errors
-                    # Note: 501, 505, 506, 507, 508 are permanent errors and should not be retried
-                    if status in (408, HTTP_TOO_MANY_REQUESTS, 500, 502, 503, 504):
+                    if status in HTTP_RETRY_ELIGIBLE:
                         if retries_used < NOVA_MAX_RETRIES:
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
