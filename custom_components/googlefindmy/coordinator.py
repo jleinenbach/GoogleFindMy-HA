@@ -5653,12 +5653,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         _FCM_ERROR_RETRY_THRESHOLD,
                         fatal_error,
                     )
-            else:
-                # No error - reset counter on successful check
-                if self._fcm_error_count > 0:
-                    _LOGGER.debug("FCM error cleared after %d attempts", self._fcm_error_count)
-                    self._fcm_error_count = 0
-                    self._fcm_last_error = None
+            # No error - reset counter on successful check
+            elif self._fcm_error_count > 0:
+                _LOGGER.debug("FCM error cleared after %d attempts", self._fcm_error_count)
+                self._fcm_error_count = 0
+                self._fcm_last_error = None
 
             # One-time wait for FCM on first run.
             # FIX: Better user feedback during FCM initialization (#116)
