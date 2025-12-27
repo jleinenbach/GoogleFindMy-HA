@@ -261,6 +261,7 @@ class NovaHTTPError(NovaError):
 _STATE: dict[str, Any] = {
     "hass": None,
     "async_refresh_lock": None,
+    "async_refresh_lock_loop_id": None,
     "cache_provider": None,
 }
 
@@ -326,7 +327,6 @@ def _get_cache_provider() -> TokenCache | None:
     return resolve_cache_from_provider()
 
 # --- Refresh Locks ---
-_async_refresh_lock_loop_id: int | None = None
 
 
 def _get_async_refresh_lock() -> asyncio.Lock:
@@ -335,7 +335,6 @@ def _get_async_refresh_lock() -> asyncio.Lock:
     Creates a new lock if the event loop has changed (e.g., after HA restart)
     to avoid 'attached to a different loop' errors.
     """
-    global _async_refresh_lock_loop_id
     try:
         current_loop = asyncio.get_running_loop()
         current_loop_id = id(current_loop)
@@ -343,9 +342,9 @@ def _get_async_refresh_lock() -> asyncio.Lock:
         # No running loop - create lock anyway, will be used when loop starts
         current_loop_id = None
 
-    if _STATE["async_refresh_lock"] is None or _async_refresh_lock_loop_id != current_loop_id:
+    if _STATE["async_refresh_lock"] is None or _STATE["async_refresh_lock_loop_id"] != current_loop_id:
         _STATE["async_refresh_lock"] = asyncio.Lock()
-        _async_refresh_lock_loop_id = current_loop_id
+        _STATE["async_refresh_lock_loop_id"] = current_loop_id
     return cast(asyncio.Lock, _STATE["async_refresh_lock"])
 
 
