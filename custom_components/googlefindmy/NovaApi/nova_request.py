@@ -152,12 +152,25 @@ def _get_cache_provider():
 # --- Refresh Locks ---
 _sync_refresh_lock = threading.Lock()
 _async_refresh_lock: asyncio.Lock | None = None
+_async_refresh_lock_loop_id: int | None = None
 
 def _get_async_refresh_lock() -> asyncio.Lock:
-    """Lazily initialize and return the async refresh lock."""
-    global _async_refresh_lock
-    if _async_refresh_lock is None:
+    """Lazily initialize and return the async refresh lock.
+
+    Creates a new lock if the event loop has changed (e.g., after HA restart)
+    to avoid 'attached to a different loop' errors.
+    """
+    global _async_refresh_lock, _async_refresh_lock_loop_id
+    try:
+        current_loop = asyncio.get_running_loop()
+        current_loop_id = id(current_loop)
+    except RuntimeError:
+        # No running loop - create lock anyway, will be used when loop starts
+        current_loop_id = None
+
+    if _async_refresh_lock is None or _async_refresh_lock_loop_id != current_loop_id:
         _async_refresh_lock = asyncio.Lock()
+        _async_refresh_lock_loop_id = current_loop_id
     return _async_refresh_lock
 
 # ------------------------ TTL policy (shared core) ------------------------
@@ -536,10 +549,13 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
     """
     # Guard against misuse in the running event loop.
     try:
-        if asyncio.get_running_loop().is_running():
-            raise RuntimeError("Sync nova_request() must not be called from the event loop.")
-    except RuntimeError:
-        pass
+        asyncio.get_running_loop()
+        # If we reach here, an event loop is running - this is not allowed
+        raise RuntimeError("Sync nova_request() must not be called from the event loop.")
+    except RuntimeError as e:
+        if "must not be called" in str(e):
+            raise
+        # No event loop running - this is the expected case for sync usage
 
     url = f"https://android.googleapis.com/nova/{api_scope}"
 
@@ -603,7 +619,7 @@ def nova_request(api_scope: str, hex_payload: str) -> str:
                 lvl = logging.INFO if not refreshed_once else logging.WARNING
                 _LOGGER.log(lvl, "Nova API sync request to %s: 401 Unauthorized. Refreshing token.", api_scope)
                 with _sync_refresh_lock:
-                    current_issued = get_cached_value(policy.k_issued)
+                    current_issued = safe_get_cached_value(policy.k_issued)
                     if current_issued and time.time() - float(current_issued) < 2:
                         _LOGGER.debug("Another task already refreshed the token; re-evaluating.")
                     else:
@@ -684,7 +700,7 @@ async def async_nova_request(
             if cache:
                 # Use explicitly passed cache for multi-account isolation
                 user = await cache.async_get_cached_value("username")
-                user = str(user) if isinstance(user, str) else None
+                user = user if isinstance(user, str) else None
             else:
                 user = await async_get_username()
         except Exception:  # noqa: BLE001
@@ -775,7 +791,7 @@ async def async_nova_request(
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")
 
-                    if status in (408, 429) or 500 <= status < 600:
+                    if status in (408, 429, 500, 502, 503, 504):
                         if retries_used < NOVA_MAX_RETRIES:
                             delay = _compute_delay(attempt, response.headers.get("Retry-After"))
                             _LOGGER.info(
