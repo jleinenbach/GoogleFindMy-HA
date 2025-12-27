@@ -89,8 +89,6 @@ NOVA_MAX_RETRY_AFTER_S = 60.0
 HTTP_OK = 200
 HTTP_UNAUTHORIZED = 401
 HTTP_TOO_MANY_REQUESTS = 429
-HTTP_SERVER_ERROR_MIN = 500
-HTTP_SERVER_ERROR_MAX = 600
 RECENT_REFRESH_WINDOW_S = 2.0
 
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
@@ -267,14 +265,26 @@ def _get_cache_provider() -> TokenCache | None:
     return resolve_cache_from_provider()
 
 # --- Refresh Locks ---
-_async_refresh_lock: asyncio.Lock | None = None
+_async_refresh_lock_loop_id: int | None = None
 
 
 def _get_async_refresh_lock() -> asyncio.Lock:
-    """Lazily initialize and return the async refresh lock."""
+    """Lazily initialize and return the async refresh lock.
 
-    if _STATE["async_refresh_lock"] is None:
+    Creates a new lock if the event loop has changed (e.g., after HA restart)
+    to avoid 'attached to a different loop' errors.
+    """
+    global _async_refresh_lock_loop_id
+    try:
+        current_loop = asyncio.get_running_loop()
+        current_loop_id = id(current_loop)
+    except RuntimeError:
+        # No running loop - create lock anyway, will be used when loop starts
+        current_loop_id = None
+
+    if _STATE["async_refresh_lock"] is None or _async_refresh_lock_loop_id != current_loop_id:
         _STATE["async_refresh_lock"] = asyncio.Lock()
+        _async_refresh_lock_loop_id = current_loop_id
     return cast(asyncio.Lock, _STATE["async_refresh_lock"])
 
 
@@ -977,9 +987,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
 
                         raise NovaAuthError(status, "Unauthorized after token refresh")
 
-                    if status in (408, HTTP_TOO_MANY_REQUESTS) or (
-                        HTTP_SERVER_ERROR_MIN <= status < HTTP_SERVER_ERROR_MAX
-                    ):
+                    # Retry-eligible status codes: 408, 429, and specific 5xx errors
+                    # Note: 501, 505, 506, 507, 508 are permanent errors and should not be retried
+                    if status in (408, HTTP_TOO_MANY_REQUESTS, 500, 502, 503, 504):
                         if retries_used < NOVA_MAX_RETRIES:
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
@@ -1002,16 +1012,17 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 retries_used + 1,
                                 status,
                             )
-                    if status == HTTP_TOO_MANY_REQUESTS:
-                        raise NovaRateLimitError(
-                            f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
-                        )
-                    raise NovaHTTPError(
-                        status,
-                        f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
-                    )
+                            if status == HTTP_TOO_MANY_REQUESTS:
+                                raise NovaRateLimitError(
+                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
+                                )
+                            raise NovaHTTPError(
+                                status,
+                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
+                            )
 
-                raise NovaAuthError(status, text_snippet)
+                    # All other 4xx/5xx errors (e.g., 403, 501, 505) are not retried
+                    raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
                 raise
