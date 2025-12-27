@@ -6,7 +6,7 @@ import logging
 import random
 import socket
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 if TYPE_CHECKING:
     class _UnaryStreamContext(Protocol):
@@ -70,11 +70,18 @@ from custom_components.googlefindmy.SpotApi.spot_grpc_transport import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_SPOT_MAX_RETRIES = 3
-_SPOT_INITIAL_BACKOFF_S = 1.0
-_SPOT_BACKOFF_FACTOR = 2.0
-_USER_AGENT = "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT"
+_SPOT_MAX_RETRIES: Final[int] = 3
+_SPOT_INITIAL_BACKOFF_S: Final[float] = 1.0
+_SPOT_BACKOFF_FACTOR: Final[float] = 2.0
+_SPOT_MAX_BACKOFF_S: Final[float] = 60.0
+_SPOT_REQUEST_TIMEOUT_S: Final[float] = 30.0
+_USER_AGENT: Final[str] = "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT"
+
+# WARNING: This mutates global grpclib state and affects all users in the process.
+# Ideally this should be set per-channel, but grpclib doesn't support that cleanly.
 cast(Any, grpclib_client).USER_AGENT = _USER_AGENT
+
+# Indirection for test mocking
 _async_sleep = asyncio.sleep
 
 
@@ -110,7 +117,7 @@ def _compute_delay(attempt: int) -> float:
     """Compute exponential backoff with jitter bounded to sixty seconds."""
 
     base = (_SPOT_BACKOFF_FACTOR ** (attempt - 1)) * _SPOT_INITIAL_BACKOFF_S
-    return min(random.uniform(0.0, base), 60.0)
+    return min(random.uniform(0.0, base), _SPOT_MAX_BACKOFF_S)
 
 
 async def _pick_auth_token_async(
@@ -130,7 +137,7 @@ async def _pick_auth_token_async(
             spot_token = await async_get_spot_token(username, cache=cache)
         except InvalidAasTokenError:
             raise
-        except Exception as err:  # pragma: no cover - defensive logging only
+        except Exception as err:  # pragma: no cover - defensive fallback to ADM
             _LOGGER.debug("SPOT token retrieval failed: %s", err)
         else:
             if spot_token:
@@ -143,7 +150,9 @@ async def _pick_auth_token_async(
     raise RuntimeError("No valid SPOT or ADM token available for the current user.")
 
 
-async def _invalidate_token_async(kind: str, username: str, *, cache: TokenCache | None = None) -> None:
+async def _invalidate_token_async(
+    kind: str, username: str, *, cache: TokenCache | None = None
+) -> None:
     """Invalidate cached tokens in the entry-scoped cache only."""
 
     if cache is None:
@@ -151,7 +160,7 @@ async def _invalidate_token_async(kind: str, username: str, *, cache: TokenCache
 
     if kind == "spot":
         await cache.set(f"spot_token_{username}", None)
-    if kind == "adm":
+    elif kind == "adm":
         await cache.set(f"adm_token_{username}", None)
     await cache.set(DATA_AAS_TOKEN, None)
 
@@ -181,6 +190,12 @@ async def async_spot_request(
     - Retry bounded times for transient statuses and rate limits.
     - Refresh authentication once before surfacing permanent failures.
     - Treat empty replies as transport anomalies before raising trailers-only.
+
+    Retry budget:
+    - Up to _SPOT_MAX_RETRIES (3) retries for transient errors.
+    - One auth refresh attempt on UNAUTHENTICATED/PERMISSION_DENIED.
+    - One AAS token clear attempt on InvalidAasTokenError (counts toward retry budget).
+    - Maximum total attempts: _SPOT_MAX_RETRIES + 1 (initial) + 1 (auth refresh).
     """
 
     active_transport = transport or SPOT_GRPC_TRANSPORT
@@ -203,6 +218,12 @@ async def async_spot_request(
             if not aas_cleared_once:
                 aas_cleared_once = True
                 await _clear_aas_token_async(cache=cache)
+                # Count this as a retry to prevent infinite loops
+                retries_used += 1
+                if retries_used > _SPOT_MAX_RETRIES:
+                    raise SpotAuthPermanentError(
+                        "AAS token invalid; retry budget exhausted."
+                    ) from err
                 continue
             raise SpotAuthPermanentError("AAS token invalid after refresh.") from err
 
@@ -211,7 +232,7 @@ async def async_spot_request(
         method = UnaryUnaryMethod(channel, method_path, bytes, bytes)
 
         try:
-            async with method.open(metadata=metadata, timeout=30.0) as stream:
+            async with method.open(metadata=metadata, timeout=_SPOT_REQUEST_TIMEOUT_S) as stream:
                 await stream.send_message(payload, end=True)
                 reply_bytes = await stream.recv_message()
         except grpclib_exceptions.GRPCError as err:
