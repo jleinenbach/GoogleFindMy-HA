@@ -5629,7 +5629,26 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     fatal_error = fatal_by_entry.get(entry_id)
 
             if isinstance(fatal_error, str) and fatal_error:
-                # Track consecutive FCM errors
+                # Check if this is a fatal auth error that should fail immediately
+                # (e.g., 404/401 with credentials issues - no point retrying)
+                error_lower = fatal_error.lower()
+                is_fatal_auth = (
+                    "401" in fatal_error
+                    or ("404" in fatal_error and "credential" in error_lower)
+                    or "credentials invalid" in error_lower
+                    or "invalid auth" in error_lower
+                )
+
+                if is_fatal_auth:
+                    # Fatal auth errors - fail immediately, no retry
+                    _LOGGER.error(
+                        "Fatal FCM authentication error: %s. Triggering re-authentication.",
+                        fatal_error,
+                    )
+                    self._set_auth_state(failed=True, reason=fatal_error)
+                    raise ConfigEntryAuthFailed(fatal_error)
+
+                # Track consecutive FCM errors for transient issues
                 if fatal_error != self._fcm_last_error:
                     # New error type, reset counter
                     self._fcm_error_count = 1
@@ -8337,7 +8356,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ok, request_uuid = await self.api.async_play_sound(device_id)
             if ok and request_uuid is not None:
                 self._sound_request_uuids[device_id] = request_uuid
-                self._sound_request_timestamps[device_id] = time.time()
+                # Use getattr for test compatibility (tests may bypass __init__)
+                timestamps = getattr(self, "_sound_request_timestamps", None)
+                if timestamps is not None:
+                    timestamps[device_id] = time.time()
                 _LOGGER.debug(
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
@@ -8409,7 +8431,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._set_auth_state(failed=False)
             if ok:
                 removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
-                self._sound_request_timestamps.pop(device_id, None)
+                # Use getattr for test compatibility (tests may bypass __init__)
+                timestamps = getattr(self, "_sound_request_timestamps", None)
+                if timestamps is not None:
+                    timestamps.pop(device_id, None)
                 if removed_request_uuid is not None:
                     await self._async_save_sound_uuids()
             return bool(ok)
