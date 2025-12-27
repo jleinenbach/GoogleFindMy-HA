@@ -70,7 +70,6 @@ from custom_components.googlefindmy.SpotApi.spot_grpc_transport import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Constants
 _SPOT_MAX_RETRIES: Final[int] = 3
 _SPOT_INITIAL_BACKOFF_S: Final[float] = 1.0
 _SPOT_BACKOFF_FACTOR: Final[float] = 2.0
@@ -78,7 +77,8 @@ _SPOT_MAX_BACKOFF_S: Final[float] = 60.0
 _SPOT_REQUEST_TIMEOUT_S: Final[float] = 30.0
 _USER_AGENT: Final[str] = "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT"
 
-# Set global user agent for grpclib
+# WARNING: This mutates global grpclib state and affects all users in the process.
+# Ideally this should be set per-channel, but grpclib doesn't support that cleanly.
 cast(Any, grpclib_client).USER_AGENT = _USER_AGENT
 
 # Indirection for test mocking
@@ -113,12 +113,9 @@ class SpotRequestFailedAfterRetries(SpotError):
     """Transient failures exhausted the retry budget."""
 
 
-class SpotTokenRetrievalError(SpotError):
-    """Token retrieval failed with a non-recoverable error."""
-
-
 def _compute_delay(attempt: int) -> float:
     """Compute exponential backoff with jitter bounded to sixty seconds."""
+
     base = (_SPOT_BACKOFF_FACTOR ** (attempt - 1)) * _SPOT_INITIAL_BACKOFF_S
     return min(random.uniform(0.0, base), _SPOT_MAX_BACKOFF_S)
 
@@ -126,21 +123,8 @@ def _compute_delay(attempt: int) -> float:
 async def _pick_auth_token_async(
     *, prefer_adm: bool = False, cache: TokenCache
 ) -> tuple[str, str, str]:
-    """Select an authentication token using the entry-scoped cache.
+    """Select an authentication token using the entry-scoped cache."""
 
-    Args:
-        prefer_adm: If True, skip SPOT token and try ADM directly.
-        cache: The entry-scoped token cache.
-
-    Returns:
-        A tuple of (token, token_kind, username).
-
-    Raises:
-        MissingTokenCacheError: If cache is None.
-        InvalidAasTokenError: If AAS token is invalid (re-raised for caller handling).
-        RuntimeError: If username is not configured or no valid token is available.
-        SpotTokenRetrievalError: If token retrieval fails with an unexpected error.
-    """
     if cache is None:
         raise MissingTokenCacheError()
 
@@ -153,10 +137,8 @@ async def _pick_auth_token_async(
             spot_token = await async_get_spot_token(username, cache=cache)
         except InvalidAasTokenError:
             raise
-        except (OSError, TimeoutError, ConnectionError) as err:
-            _LOGGER.debug("SPOT token retrieval failed due to network error: %s", err)
-        except ValueError as err:
-            _LOGGER.debug("SPOT token retrieval failed due to invalid data: %s", err)
+        except Exception as err:  # pragma: no cover - defensive fallback to ADM
+            _LOGGER.debug("SPOT token retrieval failed: %s", err)
         else:
             if spot_token:
                 return spot_token, "spot", username
@@ -171,16 +153,8 @@ async def _pick_auth_token_async(
 async def _invalidate_token_async(
     kind: str, username: str, *, cache: TokenCache | None = None
 ) -> None:
-    """Invalidate cached tokens in the entry-scoped cache only.
+    """Invalidate cached tokens in the entry-scoped cache only."""
 
-    Args:
-        kind: Token kind ('spot' or 'adm').
-        username: The username associated with the token.
-        cache: The entry-scoped token cache.
-
-    Raises:
-        MissingTokenCacheError: If cache is None.
-    """
     if cache is None:
         raise MissingTokenCacheError()
 
@@ -192,14 +166,8 @@ async def _invalidate_token_async(
 
 
 async def _clear_aas_token_async(*, cache: TokenCache | None = None) -> None:
-    """Clear the cached AAS token in the entry-scoped cache.
+    """Clear the cached AAS token in the entry-scoped cache."""
 
-    Args:
-        cache: The entry-scoped token cache.
-
-    Raises:
-        MissingTokenCacheError: If cache is None.
-    """
     if cache is None:
         raise MissingTokenCacheError()
 
@@ -213,7 +181,8 @@ async def async_spot_request(
     cache: TokenCache,
     transport: SpotGrpcTransport | None = None,
 ) -> bytes:
-    """Perform a SPOT unary gRPC request using grpclib.
+    """
+    Perform a SPOT unary gRPC request using grpclib.
 
     Design intent:
     - Reuse the shared grpclib channel for HTTP/2 multiplexing.
@@ -225,26 +194,10 @@ async def async_spot_request(
     Retry budget:
     - Up to _SPOT_MAX_RETRIES (3) retries for transient errors.
     - One auth refresh attempt on UNAUTHENTICATED/PERMISSION_DENIED.
-    - One AAS token clear attempt on InvalidAasTokenError.
-    - Maximum total attempts: _SPOT_MAX_RETRIES + 1 (initial) + auth refreshes.
-
-    Args:
-        api_scope: The SPOT API scope (method name).
-        payload: The serialized request payload.
-        cache: The entry-scoped token cache.
-        transport: Optional custom transport (defaults to shared global transport).
-
-    Returns:
-        The raw response bytes.
-
-    Raises:
-        SpotAuthPermanentError: Authentication failed after refresh.
-        SpotRateLimitError: Rate limited after retries.
-        SpotGrpcStatusError: Non-retriable gRPC status error.
-        SpotNetworkError: Transport/network error after retries.
-        SpotTrailersOnlyError: OK status but empty response payload.
-        SpotRequestFailedAfterRetries: Transient failures exhausted retry budget.
+    - One AAS token clear attempt on InvalidAasTokenError (counts toward retry budget).
+    - Maximum total attempts: _SPOT_MAX_RETRIES + 1 (initial) + 1 (auth refresh).
     """
+
     active_transport = transport or SPOT_GRPC_TRANSPORT
     method_path = f"/google.internal.spot.v1.SpotService/{api_scope}"
 
@@ -274,16 +227,12 @@ async def async_spot_request(
                 continue
             raise SpotAuthPermanentError("AAS token invalid after refresh.") from err
 
-        metadata: Collection[tuple[str, str]] = (
-            ("authorization", f"Bearer {token}"),
-        )
+        metadata: Collection[tuple[str, str]] = (("authorization", f"Bearer {token}"),)
         channel = await active_transport.get_channel()
         method = UnaryUnaryMethod(channel, method_path, bytes, bytes)
 
         try:
-            async with method.open(
-                metadata=metadata, timeout=_SPOT_REQUEST_TIMEOUT_S
-            ) as stream:
+            async with method.open(metadata=metadata, timeout=_SPOT_REQUEST_TIMEOUT_S) as stream:
                 await stream.send_message(payload, end=True)
                 reply_bytes = await stream.recv_message()
         except grpclib_exceptions.GRPCError as err:
@@ -294,9 +243,7 @@ async def async_spot_request(
                     refreshed_once = True
                     await _invalidate_token_async(token_kind, token_user, cache=cache)
                     continue
-                raise SpotAuthPermanentError(
-                    "Authentication failed after refresh."
-                ) from err
+                raise SpotAuthPermanentError("Authentication failed after refresh.") from err
 
             if status == Status.RESOURCE_EXHAUSTED:
                 if retries_used < _SPOT_MAX_RETRIES:
@@ -356,12 +303,11 @@ async def async_spot_request(
                 continue
             raise SpotTrailersOnlyError("OK status but empty reply payload.")
 
-        # reply_bytes is guaranteed to be bytes per grpclib protocol
-        return reply_bytes
+        assert isinstance(reply_bytes, (bytes, bytearray))
+        return bytes(reply_bytes)
 
 
 def spot_request(*_args: object, **_kwargs: object) -> bytes:
     """Deprecated sync shim preserved for legacy call sites."""
-    raise RuntimeError(
-        "spot_request is no longer synchronous; use async_spot_request with cache="
-    )
+
+    raise RuntimeError("spot_request is no longer synchronous; use async_spot_request with cache=")
