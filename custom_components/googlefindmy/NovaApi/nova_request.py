@@ -1080,7 +1080,11 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
                             )
 
-                    # All other 4xx/5xx errors (e.g., 403, 501, 505) are not retried
+                    # Non-retryable errors: distinguish between client (4xx) and server (5xx)
+                    # - 4xx: Client errors (e.g., 403 Forbidden, 404 Not Found) → NovaAuthError
+                    # - 5xx: Server errors (e.g., 501 Not Implemented, 505) → NovaHTTPError
+                    if status >= HTTP_INTERNAL_SERVER_ERROR:
+                        raise NovaHTTPError(status, text_snippet)
                     raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
