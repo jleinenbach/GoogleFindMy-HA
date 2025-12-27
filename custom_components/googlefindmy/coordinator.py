@@ -197,6 +197,15 @@ _COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
 _COOLDOWN_OWNER_MIN_S = 60  # at least 1 minute
 _COOLDOWN_OWNER_MAX_S = 15 * 60  # at most 15 minutes
 
+# Sound UUID expiry after restart (prevents phantom re-triggers)
+_SOUND_UUID_MAX_AGE_S = 30 * 60  # 30 minutes
+
+# Minimum position change (meters) to accept location update without timestamp
+_LOCATION_SIGNIFICANT_CHANGE_M = 50.0
+
+# FCM error retry threshold before triggering re-auth
+_FCM_ERROR_RETRY_THRESHOLD = 3
+
 # Maximum delay before falling back to polling even when push is unavailable.
 # [FIX: Reduce 300s -> 15s to allow degraded-mode polling quickly]
 _PUSH_NOT_READY_TIMEOUT_S = 15
@@ -868,6 +877,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         # Play Sound UUID tracking (needed to properly cancel sound requests)
         self._sound_request_uuids: dict[str, str] = {}  # device_id -> request_uuid
+        self._sound_request_timestamps: dict[str, float] = {}  # device_id -> creation timestamp
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
@@ -939,6 +949,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._auth_error_active: bool = False
         self._auth_error_since: float = 0.0
         self._auth_error_message: str | None = None
+
+        # FIX: FCM error counter to avoid triggering re-auth on transient errors (#114)
+        self._fcm_error_count: int = 0
+        self._fcm_last_error: str | None = None
 
         # Reload guard: defer core subentry repairs once after reload-driven attach
         self._skip_repair_during_reload_refresh: bool = False
@@ -4769,7 +4783,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         def _decrypt_identity_key(
             ciphertext: bytes, canonical_id: str
         ) -> tuple[bytes | None, int | None]:
-            """Attempt to decrypt the encrypted identity key using cached material."""
+            """Attempt to decrypt the encrypted identity key using cached material.
+
+            FIX: Differentiate between expected and unexpected decrypt errors (#132).
+            Expected errors (key rotation, padding issues) are logged at DEBUG level.
+            Unexpected errors are logged at WARNING and recorded in diagnostics.
+            """
 
             owner_key, owner_version = _get_cached_owner_key()
             if owner_key is None:
@@ -4778,11 +4797,42 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             try:
                 decrypted = decrypt_eik(owner_key, ciphertext)
             except Exception as err:  # noqa: BLE001 - defensive
-                _LOGGER.debug(
-                    "Failed to decrypt identity key for %s: %s",
-                    canonical_id,
-                    err,
-                )
+                err_type = type(err).__name__
+
+                # FIX: Use exception type matching instead of keyword search (#132)
+                # Expected exceptions from decrypt_eik and underlying crypto:
+                # - ValueError: invalid length, IV problems, key size issues
+                # - InvalidTag: AES-GCM authentication failed (wrong key, corrupted data)
+                # - InvalidKey: cryptography library key validation failure
+                expected_exception_types = ("ValueError", "InvalidTag", "InvalidKey")
+                is_expected = err_type in expected_exception_types
+
+                if is_expected:
+                    _LOGGER.debug(
+                        "Identity key decryption failed for %s (%s): %s",
+                        canonical_id,
+                        err_type,
+                        err,
+                    )
+                else:
+                    # Unexpected error - log at WARNING and record in diagnostics
+                    _LOGGER.warning(
+                        "Unexpected decryption error for %s: %s (%s)",
+                        canonical_id,
+                        err_type,
+                        err,
+                    )
+                    # Record in diagnostics buffer for troubleshooting
+                    diag = getattr(self, "_diag", None)
+                    if diag is not None:
+                        diag.add_warning(
+                            "decrypt_error",
+                            {
+                                "device_id": canonical_id,
+                                "error_type": err_type,
+                                "error_msg": str(err)[:100] if str(err) else "unknown",
+                            },
+                        )
                 return None, None
 
             if not isinstance(decrypted, (bytes, bytearray)):
@@ -5499,9 +5549,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     def _note_fcm_deferral(self, now_mono: float) -> None:
         """Advance a quiet escalation timeline while FCM is not ready.
 
+        FIX: Use less aggressive log levels to reduce log spam (#124).
         Emits at most:
-            - one WARNING after ~60s
-            - one ERROR   after ~300s
+            - one INFO after ~2 minutes (was WARNING after 60s)
+            - one WARNING after ~5 minutes (was ERROR after 300s)
         Resets when readiness returns.
         """
         if self._fcm_defer_started_mono == 0.0:
@@ -5513,19 +5564,23 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             )
             return
         elapsed = now_mono - self._fcm_defer_started_mono
-        if elapsed >= 60 and self._fcm_last_stage < 1:
+        # Stage 1: After 2 minutes, log at INFO level (not WARNING)
+        if elapsed >= 120 and self._fcm_last_stage < 1:
             self._fcm_last_stage = 1
-            _LOGGER.warning(
-                "Polling deferred: FCM/push not ready 60s after (re)start. Polls and actions remain gated."
+            _LOGGER.info(
+                "Push transport connection taking longer than expected (2 min). "
+                "Push updates may be delayed, but polling continues."
             )
             self._set_fcm_status(
                 FcmStatus.DEGRADED,
-                reason="Push transport waiting for connection (60s elapsed)",
+                reason="Push transport waiting for connection (2 min elapsed)",
             )
+        # Stage 2: After 5 minutes, log at WARNING level (not ERROR)
         if elapsed >= 300 and self._fcm_last_stage < 2:
             self._fcm_last_stage = 2
-            _LOGGER.error(
-                "Polling still deferred: FCM/push not ready after 5 minutes. Check credentials/network."
+            _LOGGER.warning(
+                "Push transport not connected after 5 minutes. "
+                "Check network connectivity and credentials if this persists."
             )
             self._set_fcm_status(
                 FcmStatus.DISCONNECTED,
@@ -5560,6 +5615,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         try:
             # Check for fatal FCM errors (for example, 404/401 during registration) to trigger re-auth
+            # FIX: Only trigger re-auth after multiple consecutive failures (#114)
             entry = self.config_entry
             runtime = getattr(entry, "runtime_data", None)
             fcm_receiver = getattr(runtime, "fcm_receiver", None)
@@ -5573,23 +5629,67 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     fatal_error = fatal_by_entry.get(entry_id)
 
             if isinstance(fatal_error, str) and fatal_error:
-                self._set_auth_state(failed=True, reason=fatal_error)
-                raise ConfigEntryAuthFailed(fatal_error)
+                # Track consecutive FCM errors
+                if fatal_error != self._fcm_last_error:
+                    # New error type, reset counter
+                    self._fcm_error_count = 1
+                    self._fcm_last_error = fatal_error
+                else:
+                    self._fcm_error_count += 1
+
+                # Only trigger re-auth after _FCM_ERROR_RETRY_THRESHOLD consecutive failures
+                if self._fcm_error_count >= _FCM_ERROR_RETRY_THRESHOLD:
+                    _LOGGER.error(
+                        "FCM error persisted after %d attempts: %s. Triggering re-authentication.",
+                        self._fcm_error_count,
+                        fatal_error,
+                    )
+                    self._set_auth_state(failed=True, reason=fatal_error)
+                    raise ConfigEntryAuthFailed(fatal_error)
+                else:
+                    _LOGGER.warning(
+                        "FCM error detected (%d/%d): %s. Will retry before triggering re-auth.",
+                        self._fcm_error_count,
+                        _FCM_ERROR_RETRY_THRESHOLD,
+                        fatal_error,
+                    )
+            else:
+                # No error - reset counter on successful check
+                if self._fcm_error_count > 0:
+                    _LOGGER.debug("FCM error cleared after %d attempts", self._fcm_error_count)
+                    self._fcm_error_count = 0
+                    self._fcm_last_error = None
 
             # One-time wait for FCM on first run.
+            # FIX: Better user feedback during FCM initialization (#116)
             if not self._startup_complete:
                 fcm_evt = getattr(self, "fcm_ready_event", None)
                 if isinstance(fcm_evt, asyncio.Event) and not fcm_evt.is_set():
-                    _LOGGER.debug(
-                        "First run: waiting for FCM provider to become ready..."
+                    _LOGGER.info(
+                        "Waiting for push notification service (FCM)... "
+                        "This may take up to 15 seconds on first start."
                     )
                     try:
-                        await asyncio.wait_for(fcm_evt.wait(), timeout=15.0)
-                        _LOGGER.debug("FCM provider is ready; proceeding.")
-                    except TimeoutError:
-                        _LOGGER.warning(
-                            "FCM provider not ready after 15s; proceeding anyway."
-                        )
+                        # Wait in 5-second increments with progress logging
+                        for attempt in range(3):
+                            try:
+                                await asyncio.wait_for(fcm_evt.wait(), timeout=5.0)
+                                _LOGGER.info("Push notification service is ready.")
+                                break
+                            except TimeoutError:
+                                if attempt < 2:
+                                    _LOGGER.debug(
+                                        "FCM not ready yet, waiting... (%d/3)",
+                                        attempt + 1,
+                                    )
+                        else:
+                            # All 3 attempts exhausted
+                            _LOGGER.warning(
+                                "Push notification service not ready after 15s; "
+                                "continuing in degraded mode. Push updates may be delayed."
+                            )
+                    except Exception as fcm_wait_err:
+                        _LOGGER.debug("FCM wait error: %s", fcm_wait_err)
                 self._startup_complete = True
 
             if self._is_fcm_ready_soft():
@@ -6537,11 +6637,42 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 _LOGGER.debug("No cached Play Sound UUIDs found; keeping current map")
                 return
 
-            loaded_sound_request_uuids = {
-                str(device_id): str(request_uuid)
-                for device_id, request_uuid in sound_request_uuids.items()
-                if isinstance(device_id, str) and isinstance(request_uuid, str)
-            }
+            # FIX: Filter out stale UUIDs to prevent Play Sound re-trigger after restart (#108)
+            # Sound requests older than _SOUND_UUID_MAX_AGE_S are considered expired
+            max_age_seconds = _SOUND_UUID_MAX_AGE_S
+            now = time.time()
+            loaded_sound_request_uuids: dict[str, str] = {}
+            loaded_sound_request_timestamps: dict[str, float] = {}
+
+            for device_id, data in sound_request_uuids.items():
+                if not isinstance(device_id, str):
+                    continue
+
+                # Support new format: {"uuid": str, "ts": float}
+                if isinstance(data, dict):
+                    uuid_val = data.get("uuid")
+                    ts_val = data.get("ts", 0)
+                    if not isinstance(uuid_val, str) or not uuid_val:
+                        continue
+                    # Discard if older than max_age_seconds
+                    if now - float(ts_val) > max_age_seconds:
+                        _LOGGER.debug(
+                            "Discarding expired Play Sound UUID for %s (age: %.0fs)",
+                            device_id,
+                            now - float(ts_val),
+                        )
+                        continue
+                    loaded_sound_request_uuids[device_id] = uuid_val
+                    loaded_sound_request_timestamps[device_id] = float(ts_val)
+                # Support legacy format: str (UUID only, no timestamp)
+                elif isinstance(data, str) and data:
+                    # Legacy entries without timestamp are discarded on restart
+                    # to prevent potential re-triggers
+                    _LOGGER.debug(
+                        "Discarding legacy Play Sound UUID for %s (no timestamp)",
+                        device_id,
+                    )
+                    continue
 
             if self._sound_request_uuids and not loaded_sound_request_uuids:
                 _LOGGER.debug(
@@ -6553,8 +6684,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 **loaded_sound_request_uuids,
                 **self._sound_request_uuids,
             }
+            merged_sound_request_timestamps = {
+                **loaded_sound_request_timestamps,
+                **self._sound_request_timestamps,
+            }
             if merged_sound_request_uuids != self._sound_request_uuids:
                 self._sound_request_uuids = merged_sound_request_uuids
+                self._sound_request_timestamps = merged_sound_request_timestamps
                 _LOGGER.debug(
                     "Loaded Play Sound UUIDs from cache: %s", self._sound_request_uuids
                 )
@@ -6574,10 +6710,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             _LOGGER.debug("Failed to save statistics to cache: %s", err)
 
     async def _async_save_sound_uuids(self) -> None:
-        """Persist Play Sound request UUIDs to entry-scoped cache."""
+        """Persist Play Sound request UUIDs to entry-scoped cache.
+
+        FIX: Store with timestamps to allow expiry filtering on reload (#108).
+        Format: {device_id: {"uuid": str, "ts": float}}
+        The timestamp is set when the UUID is first created, not on every save.
+        """
         try:
+            # Convert internal format to timestamped format for persistence
+            # Use the original creation timestamp, not current time
+            now = time.time()
+            timestamped_uuids = {
+                device_id: {
+                    "uuid": uuid_val,
+                    "ts": self._sound_request_timestamps.get(device_id, now),
+                }
+                for device_id, uuid_val in self._sound_request_uuids.items()
+            }
             await self._cache.async_set_cached_value(
-                "sound_request_uuids", self._sound_request_uuids.copy()
+                "sound_request_uuids", timestamped_uuids
             )
         except Exception as err:
             _LOGGER.debug("Failed to save Play Sound UUIDs to cache: %s", err)
@@ -7278,7 +7429,40 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ):
                 allow_location_update = False
         elif existing_seen is not None and incoming_seen is None:
-            allow_location_update = False
+            # FIX: Don't block updates without timestamp if position changed significantly
+            # This prevents the "tracker jumps back to previous location" issue (#128, #127, #131)
+            # Note: The timestamp preservation is handled later (lines ~7485-7491) so we only
+            # need to set allow_location_update here - no need to modify incoming dict.
+            incoming_lat = self._coerce_float(incoming.get("latitude"))
+            incoming_lon = self._coerce_float(incoming.get("longitude"))
+            existing_lat = self._coerce_float(existing.get("latitude"))
+            existing_lon = self._coerce_float(existing.get("longitude"))
+
+            if (
+                incoming_lat is not None
+                and incoming_lon is not None
+                and existing_lat is not None
+                and existing_lon is not None
+            ):
+                try:
+                    dist = self._haversine_distance(
+                        existing_lat, existing_lon, incoming_lat, incoming_lon
+                    )
+                    # Allow update if position changed by more than _LOCATION_SIGNIFICANT_CHANGE_M
+                    if dist > _LOCATION_SIGNIFICANT_CHANGE_M:
+                        allow_location_update = True
+                        _LOGGER.debug(
+                            "Allowing location update for %s without timestamp "
+                            "(position changed by %.1fm)",
+                            device_id,
+                            dist,
+                        )
+                    else:
+                        allow_location_update = False
+                except Exception:
+                    allow_location_update = False
+            else:
+                allow_location_update = False
         elif (
             existing_seen is None
             and incoming_seen is None
@@ -7522,6 +7706,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._locate_inflight.discard(device_id)
         self._locate_cooldown_until.pop(device_id, None)
         removed_uuid = self._sound_request_uuids.pop(device_id, None)
+        self._sound_request_timestamps.pop(device_id, None)
         self._device_poll_cooldown_until.pop(device_id, None)
         self._present_device_ids.discard(device_id)
 
@@ -8153,6 +8338,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ok, request_uuid = await self.api.async_play_sound(device_id)
             if ok and request_uuid is not None:
                 self._sound_request_uuids[device_id] = request_uuid
+                self._sound_request_timestamps[device_id] = time.time()
                 _LOGGER.debug(
                     "Stored Play Sound UUID for %s: %s", device_id, request_uuid
                 )
@@ -8224,6 +8410,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             self._set_auth_state(failed=False)
             if ok:
                 removed_request_uuid = self._sound_request_uuids.pop(device_id, None)
+                self._sound_request_timestamps.pop(device_id, None)
                 if removed_request_uuid is not None:
                     await self._async_save_sound_uuids()
             return bool(ok)
