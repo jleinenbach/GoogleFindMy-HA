@@ -245,6 +245,8 @@ _ANCHOR_METADATA_KEYS: tuple[str, ...] = (
     "identity_key",
     "identity_key_candidates",
     "encrypted_identity_key_candidates",
+    "encrypted_identity_key",
+    "owner_key_version",
     "time_anchors_debug",
     "metadata_only",
 )
@@ -406,11 +408,24 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
                     union[ts_key] = ts_val
 
         # identity key material (bytes)
-        for b_key in ("identity_key",):
-            if union.get(b_key) is None:
-                b_val = cand.get(b_key)
-                if isinstance(b_val, (bytes, bytearray)) and b_val:
-                    union[b_key] = bytes(b_val)
+        if union.get("identity_key") is None:
+            ik_val = cand.get("identity_key")
+            if isinstance(ik_val, (bytes, bytearray)) and ik_val:
+                union["identity_key"] = bytes(ik_val)
+
+        # encrypted_identity_key (convert bytes to hex string for consistency)
+        if union.get("encrypted_identity_key") is None:
+            eik_val = cand.get("encrypted_identity_key")
+            if isinstance(eik_val, (bytes, bytearray)) and eik_val:
+                union["encrypted_identity_key"] = bytes(eik_val).hex()
+            elif isinstance(eik_val, str) and eik_val:
+                union["encrypted_identity_key"] = eik_val
+
+        # owner_key_version (int)
+        if union.get("owner_key_version") is None:
+            okv = cand.get("owner_key_version")
+            if isinstance(okv, int) and okv > 0:
+                union["owner_key_version"] = okv
 
         # list unions
         for list_key in ("identity_key_candidates", "encrypted_identity_key_candidates"):
