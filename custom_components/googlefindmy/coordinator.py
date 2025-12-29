@@ -1991,7 +1991,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     def _entry_id(self) -> str | None:
         """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
-        entry = self.config_entry
+        entry = getattr(self, "config_entry", None)
         return getattr(entry, "entry_id", None)
 
     def _config_entry_exists(self, entry_id: str | None = None) -> bool:
@@ -6917,8 +6917,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 return
 
-            device_entry = async_get_device(identifiers={(DOMAIN, device_id)})
+            # [FIX] Use entry-scoped identifier format (2025+) first, fall back to legacy
+            # Devices are registered with (DOMAIN, f"{entry_id}:{device_id}") when entry_id
+            # exists, but we were only looking up with (DOMAIN, device_id). This caused
+            # phone devices to never get their identity_key and secrets_creation_date
+            # persisted to the device registry, breaking EID generation.
+            entry_id_local = self._entry_id()
+            device_entry = None
+            if entry_id_local:
+                device_entry = async_get_device(
+                    identifiers={(DOMAIN, f"{entry_id_local}:{device_id}")}
+                )
             if device_entry is None:
+                # Fall back to legacy identifier format
+                device_entry = async_get_device(identifiers={(DOMAIN, device_id)})
+            if device_entry is None:
+                _LOGGER.debug(
+                    "Device %s not found in registry (tried entry-scoped and legacy formats)",
+                    device_id,
+                )
                 return
 
             custom_fields: Mapping[str, Any] | None = getattr(
