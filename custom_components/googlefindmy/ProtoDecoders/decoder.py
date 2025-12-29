@@ -904,35 +904,67 @@ def get_devices_with_location(
                 public_key_address = bytes(raw_public_key_address).hex()
 
         # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
+        # Phones (IDENTIFIER_ANDROID) and similar devices may not have keys in the
+        # device listing payload, but keys ARE available via the Locate flow (FCM).
+        # Only warn for tracker-like devices that unexpectedly lack keys.
         if not encrypted_identity_key:
             ids_str = ", ".join(
                 [str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids]
             )
-            _LOGGER.warning(
-                "DEBUG STRUCTURE: Missing Key for '%s' (IDs: %s)", device_name, ids_str
-            )
 
-            # Level 1
-            fields = [f.name for f, _ in device.ListFields()]
-            _LOGGER.warning(" -> Device fields: %s", fields)
+            # Check if this is a phone/Android device (keys come from Locate flow)
+            is_android_device = False
+            try:
+                is_android_device = (
+                    device.identifierInformation.type
+                    == DeviceUpdate_pb2.IDENTIFIER_ANDROID
+                )
+            except Exception:
+                pass
 
-            if device.HasField("information"):
-                info = device.information
-                _LOGGER.warning(" -> Info fields: %s", [f.name for f, _ in info.ListFields()])
+            # Check if device has reduced fields (no 'information' block)
+            has_information_block = device.HasField("information")
 
-                if info.HasField("deviceRegistration"):
-                    reg = info.deviceRegistration
+            # Phone devices legitimately don't have keys in list_devices - this is expected.
+            # The keys are provided via the Locate flow (FCM response) instead.
+            if is_android_device or not has_information_block:
+                _LOGGER.debug(
+                    "Device '%s' has no key in listing (expected for phones/Android devices); "
+                    "keys will be obtained via Locate flow. (IDs: %s)",
+                    device_name,
+                    ids_str,
+                )
+            else:
+                # For tracker devices that should have keys but don't, log at WARNING
+                _LOGGER.warning(
+                    "DEBUG STRUCTURE: Missing Key for '%s' (IDs: %s)",
+                    device_name,
+                    ids_str,
+                )
+
+                # Level 1
+                fields = [f.name for f, _ in device.ListFields()]
+                _LOGGER.warning(" -> Device fields: %s", fields)
+
+                if device.HasField("information"):
+                    info = device.information
                     _LOGGER.warning(
-                        " -> Registration fields: %s",
-                        [f.name for f, _ in reg.ListFields()],
+                        " -> Info fields: %s", [f.name for f, _ in info.ListFields()]
                     )
 
-                    if reg.HasField("encryptedUserSecrets"):
-                        sec = reg.encryptedUserSecrets
+                    if info.HasField("deviceRegistration"):
+                        reg = info.deviceRegistration
                         _LOGGER.warning(
-                            " -> Secrets fields: %s",
-                            [f.name for f, _ in sec.ListFields()],
+                            " -> Registration fields: %s",
+                            [f.name for f, _ in reg.ListFields()],
                         )
+
+                        if reg.HasField("encryptedUserSecrets"):
+                            sec = reg.encryptedUserSecrets
+                            _LOGGER.warning(
+                                " -> Secrets fields: %s",
+                                [f.name for f, _ in sec.ListFields()],
+                            )
         # ------------------------------------
 
         # If decryption yielded results, select the best one and keep normalized list.
