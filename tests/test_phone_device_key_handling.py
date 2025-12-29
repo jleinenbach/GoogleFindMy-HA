@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 import pytest
 

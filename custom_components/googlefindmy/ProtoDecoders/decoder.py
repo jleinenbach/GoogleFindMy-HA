@@ -220,8 +220,8 @@ def get_canonic_ids(
         for canonic_id in canonic_ids:
             cid = getattr(canonic_id, "id", None)
             if isinstance(cid, str) and cid:
-                _LOGGER.warning(
-                    "DEBUG ID extraction: Found ID '%s' for device '%s'",
+                _LOGGER.debug(
+                    "ID extraction: Found ID '%s' for device '%s'",
                     cid,
                     device_name,
                 )
@@ -425,10 +425,9 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
                     b = bytes(item)
                     if b not in existing:
                         existing.append(b)
-                else:
-                    # allow non-bytes items (diagnostics) but still dedup
-                    if item not in existing:
-                        existing.append(item)
+                # allow non-bytes items (diagnostics) but still dedup
+                elif item not in existing:
+                    existing.append(item)
             union[list_key] = existing
 
         # dict blobs (diagnostics)
