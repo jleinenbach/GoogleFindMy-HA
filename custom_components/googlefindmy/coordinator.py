@@ -239,6 +239,31 @@ _PERSISTED_METADATA_KEYS: tuple[str, ...] = (
 )
 
 
+def _update_preserve_metadata(
+    target: dict[str, Any], source: Mapping[str, Any]
+) -> None:
+    """Merge source into target without overwriting persisted metadata keys with None.
+
+    This prevents a payload with None values (e.g., from a phone device listing
+    that lacks key material) from clobbering valid data already in the target
+    (e.g., from a prior FCM locate response).
+
+    For keys in _PERSISTED_METADATA_KEYS:
+      - Only update if source value is not None
+    For all other keys:
+      - Normal dict.update() semantics apply
+    """
+    for key, value in source.items():
+        if key in _PERSISTED_METADATA_KEYS:
+            # Preserve existing non-None values: only overwrite if new value is not None
+            if value is not None:
+                target[key] = value
+            # If value is None and key already exists with a value, keep the existing
+        else:
+            # Normal update for non-metadata keys
+            target[key] = value
+
+
 def _clamp(value: float, lo: float, hi: float) -> float:
     """Clamp value between lo and hi (inclusive)."""
     try:
@@ -5157,7 +5182,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         continue
                     payload = source.get(key)
                     if isinstance(payload, Mapping):
-                        merged_device_data.update(payload)
+                        _update_preserve_metadata(merged_device_data, payload)
 
             _LOGGER.debug(
                 "Building Identity for %s: cached_data=%s", canonical_id, merged_device_data
@@ -7510,14 +7535,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         merged = dict(existing)
         if allow_location_update:
-            merged.update(incoming)
+            _update_preserve_metadata(merged, incoming)
         else:
-            merged.update(
+            _update_preserve_metadata(
+                merged,
                 {
                     key: value
                     for key, value in incoming.items()
                     if key not in location_fields
-                }
+                },
             )
 
         # Keep monotonic last_seen timestamps when payloads arrive without a newer value.
