@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import custom_components.googlefindmy.coordinator as coordinator_module
-from custom_components.googlefindmy.const import DOMAIN, DATA_EID_RESOLVER
+from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 from custom_components.googlefindmy.FMDNCrypto import eid_generator
 from custom_components.googlefindmy.KeyBackup import cloud_key_decryptor
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (

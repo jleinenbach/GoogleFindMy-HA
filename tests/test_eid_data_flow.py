@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
-from custom_components.googlefindmy.const import DOMAIN, DATA_EID_RESOLVER
+from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 
 # ============================================================================
 # Test fixtures and helpers
