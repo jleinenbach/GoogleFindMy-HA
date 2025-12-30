@@ -586,7 +586,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 raw_encrypted_identity_key, cache=cache
             )
 
-        _LOGGER.warning(
+        _LOGGER.debug(
             "[DIAG-SECRETS] Structure Analysis:\n"
             "  - DeviceReg String: %s\n"
             "  - Secrets Container Type: %s\n"
@@ -644,7 +644,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 prefix_bytes = secrets_blob[prefix_start:offset]
                 suffix_start = offset + len(raw_encrypted_identity_key)
                 suffix_bytes = secrets_blob[suffix_start : suffix_start + 10]
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "[DIAG-SECRETS-BYTE-SCAN] Cloud key located inside encryptedUserSecrets at offset %d."
                     " Prefix (%d bytes): %s | Suffix (%d bytes): %s",
                     offset,
@@ -654,7 +654,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     suffix_bytes.hex(),
                 )
             else:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "[DIAG-SECRETS-BYTE-SCAN] Cloud key NOT found inside encryptedUserSecrets blob."
                     " This suggests the blob holds a distinct container or wrapped value."
                 )
