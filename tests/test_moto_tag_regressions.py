@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 import custom_components.googlefindmy.coordinator as coordinator_module
+from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 from custom_components.googlefindmy.FMDNCrypto import eid_generator
 from custom_components.googlefindmy.KeyBackup import cloud_key_decryptor
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
@@ -113,8 +115,11 @@ def test_persistence_writes_moto_tag_material(monkeypatch: pytest.MonkeyPatch) -
         coordinator_module.GoogleFindMyCoordinator
     )
     coordinator._device_location_data = {}
-    coordinator.hass = SimpleNamespace(async_create_task=mock_create_task)
-    coordinator.eid_resolver = mock_eid_resolver
+
+    # Set up hass with eid_resolver in hass.data[DOMAIN][DATA_EID_RESOLVER]
+    # (the correct location for the domain-level singleton)
+    hass_data: dict[str, Any] = {DOMAIN: {DATA_EID_RESOLVER: mock_eid_resolver}}
+    coordinator.hass = SimpleNamespace(async_create_task=mock_create_task, data=hass_data)
 
     payload = {
         "identity_key": b"\xaa" * 32,

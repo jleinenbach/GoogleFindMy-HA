@@ -6960,7 +6960,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             # The EID resolver refresh ensures that newly-received identity keys from
             # decrypt_locations are immediately used for EID generation.
             if "identity_key" in anchor_payload:
-                eid_resolver = getattr(self, "eid_resolver", None)
+                # FIX: Get eid_resolver from hass.data[DOMAIN][DATA_EID_RESOLVER],
+                # NOT from self.eid_resolver (which was never set on the coordinator).
+                # This was causing phones with offline detection to never trigger
+                # EID resolver refresh, even though identity_key was being received.
+                hass_obj = getattr(self, "hass", None)
+                if hass_obj is None:
+                    return
+                domain_bucket = hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
+                if not isinstance(domain_bucket, dict):
+                    return
+                eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
                 if eid_resolver is not None:
                     _LOGGER.debug(
                         "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
@@ -6968,9 +6978,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     )
                     refresh_task = getattr(eid_resolver, "async_trigger_immediate_refresh", None)
                     if callable(refresh_task):
-                        hass_obj = getattr(self, "hass", None)
-                        if hass_obj is not None:
-                            hass_obj.async_create_task(refresh_task())
+                        hass_obj.async_create_task(refresh_task())
 
         def _normalize_anchor_value(value: Any) -> int | Any:
             normalized = normalize_epoch_seconds(value)
