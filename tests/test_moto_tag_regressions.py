@@ -83,44 +83,38 @@ async def test_moto_tag_decryption_unwraps_and_injects_metadata(
 
 
 def test_persistence_writes_moto_tag_material(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Updated anchors should persist identity metadata to the registry."""
+    """Updated anchors should persist identity metadata to _device_location_data.
 
-    class _StubDevice:
-        def __init__(self) -> None:
-            self.id = "registry-id"
-            self.custom_fields: dict[str, object] = {}
+    Note: Previously this tested writing to DeviceRegistry custom_fields, but that
+    parameter does not exist in Home Assistant's DeviceRegistry API. The fix stores
+    EID metadata in the in-memory _device_location_data cache instead, and triggers
+    an EID resolver refresh when identity_key is present.
+    """
+    # Track EID resolver refresh calls
+    refresh_called = False
+    created_tasks: list[object] = []
 
-    class _StubRegistry:
-        def __init__(self) -> None:
-            self.device = _StubDevice()
-            self.updated_payload: dict[str, object] | None = None
+    async def mock_refresh() -> None:
+        nonlocal refresh_called
+        refresh_called = True
 
-        def async_get_device(self, identifiers: set[tuple[str, str]]):
-            return (
-                self.device if ("googlefindmy", "dev-anchor") in identifiers else None
-            )
+    def mock_create_task(coro: object) -> MagicMock:
+        created_tasks.append(coro)
+        # Close the coroutine to avoid warnings
+        if hasattr(coro, "close"):
+            coro.close()  # type: ignore[union-attr]
+        return MagicMock()
 
-        def async_update_device(
-            self,
-            registry_id: str | None = None,
-            *,
-            custom_fields: dict[str, object],
-            device_id: str | None = None,
-        ):
-            registry_value = registry_id or device_id
-            assert registry_value == self.device.id
-            self.device.custom_fields = custom_fields
-            self.updated_payload = custom_fields
-
-    registry = _StubRegistry()
+    # Create a mock EID resolver with async_trigger_immediate_refresh
+    mock_eid_resolver = MagicMock()
+    mock_eid_resolver.async_trigger_immediate_refresh = mock_refresh
 
     coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
         coordinator_module.GoogleFindMyCoordinator
     )
     coordinator._device_location_data = {}
-    coordinator.hass = SimpleNamespace()
-
-    monkeypatch.setattr(coordinator_module.dr, "async_get", lambda _hass: registry)
+    coordinator.hass = SimpleNamespace(async_create_task=mock_create_task)
+    coordinator.eid_resolver = mock_eid_resolver
 
     payload = {
         "identity_key": b"\xaa" * 32,
@@ -131,9 +125,14 @@ def test_persistence_writes_moto_tag_material(monkeypatch: pytest.MonkeyPatch) -
         "dev-anchor", payload, clear_metadata_only=False
     )
 
-    assert registry.updated_payload is not None
-    assert registry.updated_payload["identity_key"] == (b"\xaa" * 32).hex()
-    assert registry.updated_payload["secrets_creation_date"] == 1_700_000_123
+    # Verify data is stored in _device_location_data (the correct location)
+    assert "dev-anchor" in coordinator._device_location_data
+    cached_data = coordinator._device_location_data["dev-anchor"]
+    assert cached_data["identity_key"] == b"\xaa" * 32
+    assert cached_data["secrets_creation_date"] == 1_700_000_123
+
+    # Verify EID resolver refresh was triggered (task was created)
+    assert len(created_tasks) == 1, "EID resolver refresh should be triggered"
 
 
 def test_little_endian_generation_registers_variants() -> None:

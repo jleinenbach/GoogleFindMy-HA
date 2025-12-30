@@ -4880,10 +4880,44 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         ignored = self._get_ignored_set()
         entry = self.config_entry
         entry_id = entry.entry_id if entry is not None else None
+
+        # =====================================================================
+        # EID DATA SOURCES - Documentation for maintainers
+        # =====================================================================
+        # The EID resolver requires identity_key, pair_date, and secrets_creation_date
+        # to generate Ephemeral Identifiers. These are sourced from (in priority order):
+        #
+        # 1. cache_* (from _device_location_data):
+        #    - Populated by decrypt_locations via FCM push or manual locate
+        #    - Contains decrypted identity_key from encryptedUserSecrets
+        #    - Most authoritative source for recently-updated devices
+        #
+        # 2. data_* (from self.data - current API response):
+        #    - Populated by _async_update_data polling cycle
+        #    - Contains raw API payloads with encrypted_identity_key
+        #
+        # 3. last_* (from _last_device_list - nbe_list_devices):
+        #    - Populated by async_get_basic_device_list()
+        #    - Contains device metadata including encrypted_identity_key
+        #    - Useful for devices that haven't received FCM updates yet
+        #
+        # 4. registry_* (DEPRECATED - was never functional):
+        #    - Previously attempted to use DeviceRegistry custom_fields
+        #    - custom_fields does NOT exist in Home Assistant's DeviceRegistry API
+        #    - These dicts remain for API compatibility but are always empty
+        #
+        # The identity_key is typically obtained via:
+        # - decrypt_locations (from FCM/LocateTracker responses)
+        # - EID resolver's own decryption of encrypted_identity_key using owner_key
+        # =====================================================================
+
         registry_map: dict[str, tuple[str, bytes | None]] = {}
+        # These dicts were intended for DeviceRegistry persistence but custom_fields
+        # does not exist in HA's API. They remain empty for backward compatibility.
         registry_pair_dates: dict[str, int] = {}
         registry_secrets_creation_dates: dict[str, int] = {}
         registry_time_anchors_debug: dict[str, Any] = {}
+
         if entry is not None:
             device_reg = dr.async_get(self.hass)
             extract_identifier = getattr(self, "_extract_our_identifier", None)
@@ -4905,32 +4939,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 if canonical_id in ignored:
                     continue
 
-                custom_fields = getattr(device, "custom_fields", None)
-                anchors_debug: Any | None = None
-                raw_identity = (
-                    custom_fields.get("identity_key") if custom_fields else None
-                )
-                registry_map[canonical_id] = (
-                    device.id,
-                    self._normalize_identity_key(raw_identity),
-                )
-
-                if isinstance(custom_fields, Mapping):
-                    pair_date = _extract_pair_date(custom_fields)
-                    if pair_date is not None:
-                        registry_pair_dates[canonical_id] = pair_date
-
-                    secrets_creation_date = _extract_secrets_creation_date(
-                        custom_fields
-                    )
-                    if secrets_creation_date is not None:
-                        registry_secrets_creation_dates[canonical_id] = (
-                            secrets_creation_date
-                        )
-
-                    anchors_debug = _extract_time_anchors_debug(custom_fields)
-                if anchors_debug is not None:
-                    registry_time_anchors_debug[canonical_id] = anchors_debug
+                # Map canonical_id -> (device.id, identity_key)
+                # Note: identity_key from DeviceRegistry is always None because
+                # custom_fields does not exist in HA's DeviceRegistry API.
+                # The actual identity_key comes from cache_identities, data_identities,
+                # or last_identities (populated from API responses and FCM).
+                registry_map[canonical_id] = (device.id, None)
 
         device_ids_set = {dev_id for dev_id in enabled_ids if dev_id not in ignored}
         device_ids_set.update(registry_map)
@@ -6916,108 +6930,47 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         *,
         clear_metadata_only: bool,
     ) -> None:
-        """Persist anchor metadata even when no coordinates are present."""
+        """Persist anchor metadata to _device_location_data for EID resolution.
+
+        This function extracts EID-relevant metadata (identity_key, pair_date,
+        secrets_creation_date, etc.) from location payloads and stores them in
+        the in-memory _device_location_data cache.
+
+        Data sources that call this function:
+        - decrypt_locations: FCM push messages and manual LocateTracker responses
+        - update_device_cache: Unified cache update path for all location data
+
+        The stored metadata is later read by get_active_device_identities() to
+        provide DeviceIdentity objects to the EID resolver.
+
+        Note: Previously attempted to persist to HA DeviceRegistry custom_fields,
+        but that parameter does not exist in the HA API. Now stores in-memory only;
+        data is refreshed from API on each polling cycle or FCM update.
+        """
 
         if not isinstance(location, Mapping):
             return
 
         def _persist_registry_anchor_metadata(anchor_payload: Mapping[str, Any]) -> None:
-            hass_obj = getattr(self, "hass", None)
-            if hass_obj is None:
-                return
-
-            try:
-                dev_reg = dr.async_get(hass_obj)
-            except Exception as err:  # pragma: no cover - defensive fallback
-                _LOGGER.debug(
-                    "Unable to load device registry for %s: %s", device_id, err
-                )
-                return
-
-            async_get_device = getattr(dev_reg, "async_get_device", None)
-            if async_get_device is None:
-                _LOGGER.debug(
-                    "Device registry missing async_get_device; skipping persistence for %s",
-                    device_id,
-                )
-                return
-
-            # [FIX] Use entry-scoped identifier format (2025+) first, fall back to legacy
-            # Devices are registered with (DOMAIN, f"{entry_id}:{device_id}") when entry_id
-            # exists, but we were only looking up with (DOMAIN, device_id). This caused
-            # phone devices to never get their identity_key and secrets_creation_date
-            # persisted to the device registry, breaking EID generation.
-            entry_id_local = self._entry_id()
-            device_entry = None
-            if entry_id_local:
-                device_entry = async_get_device(
-                    identifiers={(DOMAIN, f"{entry_id_local}:{device_id}")}
-                )
-            if device_entry is None:
-                # Fall back to legacy identifier format
-                device_entry = async_get_device(identifiers={(DOMAIN, device_id)})
-            if device_entry is None:
-                _LOGGER.debug(
-                    "Device %s not found in registry (tried entry-scoped and legacy formats)",
-                    device_id,
-                )
-                return
-
-            custom_fields: Mapping[str, Any] | None = getattr(
-                device_entry, "custom_fields", None
-            )
-            new_custom_fields: dict[str, Any] = (
-                dict(custom_fields) if isinstance(custom_fields, Mapping) else {}
-            )
-            changed = False
-
-            for key in ("pair_date", "secrets_creation_date"):
-                if key not in anchor_payload:
-                    continue
-                candidate_value = anchor_payload[key]
-                if candidate_value != new_custom_fields.get(key):
-                    new_custom_fields[key] = candidate_value
-                    changed = True
-
+            # This function previously attempted to write to DeviceRegistry custom_fields,
+            # which does not exist in HA's API. The anchor_payload is now stored only in
+            # _device_location_data (see below). This nested function is retained to
+            # trigger EID resolver refresh when identity_key changes.
+            #
+            # The EID resolver refresh ensures that newly-received identity keys from
+            # decrypt_locations are immediately used for EID generation.
             if "identity_key" in anchor_payload:
-                raw_key = anchor_payload["identity_key"]
-                key_hex = raw_key.hex() if isinstance(raw_key, (bytes, bytearray)) else raw_key
-                if key_hex != new_custom_fields.get("identity_key"):
-                    new_custom_fields["identity_key"] = key_hex
-                    changed = True
-                    _LOGGER.info(
-                        "Persisting updated identity key for %s to device registry",
-                        device_id,
-                    )
-
-            if not changed:
-                return
-
-            try:
-                dev_reg.async_update_device(
-                    device_entry.id,
-                    custom_fields=new_custom_fields,
-                )
-            except Exception as err:  # pragma: no cover - defensive fallback
-                _LOGGER.warning(
-                    "Failed to persist anchors to device registry for %s: %s",
-                    device_id,
-                    err,
-                    exc_info=err,
-                )
-            else:
-                _LOGGER.debug(
-                    "Persisted anchor metadata to device registry for %s", device_id
-                )
-
                 eid_resolver = getattr(self, "eid_resolver", None)
                 if eid_resolver is not None:
                     _LOGGER.debug(
-                        "Triggering immediate EID Resolver refresh for %s", device_id
+                        "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
+                        device_id,
                     )
-                    self.hass.async_create_task(
-                        eid_resolver.async_trigger_immediate_refresh()
-                    )
+                    refresh_task = getattr(eid_resolver, "async_trigger_immediate_refresh", None)
+                    if callable(refresh_task):
+                        hass_obj = getattr(self, "hass", None)
+                        if hass_obj is not None:
+                            hass_obj.async_create_task(refresh_task())
 
         def _normalize_anchor_value(value: Any) -> int | Any:
             normalized = normalize_epoch_seconds(value)
