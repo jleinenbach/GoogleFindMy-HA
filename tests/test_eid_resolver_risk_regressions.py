@@ -504,4 +504,5 @@ def test_normalize_counter_candidate_rejects_bool() -> None:
 
     # Valid integers should still work
     assert _normalize_counter_candidate(1000, basis="pair_date") == 1000
-    assert _normalize_counter_candidate(0, basis="pair_date") == 0
+    # Zero is rejected to handle phones with pair_date=0 (no deviceRegistration)
+    assert _normalize_counter_candidate(0, basis="pair_date") is None
