@@ -107,9 +107,9 @@ def test_persistence_writes_moto_tag_material(monkeypatch: pytest.MonkeyPatch) -
             coro.close()  # type: ignore[union-attr]
         return MagicMock()
 
-    # Create a mock EID resolver with async_trigger_immediate_refresh
+    # Create a mock EID resolver with async_refresh
     mock_eid_resolver = MagicMock()
-    mock_eid_resolver.async_trigger_immediate_refresh = mock_refresh
+    mock_eid_resolver.async_refresh = mock_refresh
 
     coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
         coordinator_module.GoogleFindMyCoordinator
