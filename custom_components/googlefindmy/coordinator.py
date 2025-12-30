@@ -6976,9 +6976,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
                         device_id,
                     )
-                    refresh_task = getattr(eid_resolver, "async_trigger_immediate_refresh", None)
-                    if callable(refresh_task):
-                        hass_obj.async_create_task(refresh_task())
+                    # FIX: The method is called async_refresh, not async_trigger_immediate_refresh
+                    refresh_coro = getattr(eid_resolver, "async_refresh", None)
+                    if callable(refresh_coro):
+                        hass_obj.async_create_task(refresh_coro())
 
         def _normalize_anchor_value(value: Any) -> int | Any:
             normalized = normalize_epoch_seconds(value)
