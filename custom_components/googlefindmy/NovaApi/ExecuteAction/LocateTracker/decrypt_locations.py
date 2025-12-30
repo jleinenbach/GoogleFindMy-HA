@@ -723,6 +723,20 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             metadata_update.setdefault("pair_date", pair_date_raw)
             metadata_update.setdefault("pairDate", pair_date_raw)
 
+        # FIX: Extract manufacturer, model, and fast_pair_model_id for EID resolver
+        manufacturer_raw = getattr(device_registration, "manufacturer", None)
+        if manufacturer_raw and isinstance(manufacturer_raw, str):
+            metadata_update.setdefault("manufacturer", manufacturer_raw)
+
+        model_raw = getattr(device_registration, "model", None)
+        if model_raw and isinstance(model_raw, str):
+            metadata_update.setdefault("model", model_raw)
+
+        fast_pair_model_id_raw = getattr(device_registration, "fastPairModelId", None)
+        if fast_pair_model_id_raw and isinstance(fast_pair_model_id_raw, str):
+            metadata_update.setdefault("fast_pair_model_id", fast_pair_model_id_raw)
+            metadata_update.setdefault("fastPairModelId", fast_pair_model_id_raw)
+
     if encrypted_user_secrets:
         creation = getattr(encrypted_user_secrets, "creationDate", None)
         if creation is not None:
@@ -907,8 +921,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     if not wrapped:
         _LOGGER.debug("[DecryptLocations] No locations found.")
-        if metadata:
-            metadata_only = dict(metadata)
+        # FIX: Merge metadata_update into the returned payload even when no locations.
+        # This ensures encrypted_identity_key, secrets_creation_date, owner_key_version,
+        # identity_key, etc. are returned for devices (like phones) that have these
+        # fields but no location reports yet.
+        if metadata or metadata_update:
+            metadata_only: dict[str, Any] = {}
+            if metadata:
+                metadata_only.update(metadata)
+            if metadata_update:
+                metadata_only.update(metadata_update)
             metadata_only["metadata_only"] = True
             return [metadata_only]
         return []

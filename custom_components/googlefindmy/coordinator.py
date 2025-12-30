@@ -236,6 +236,10 @@ _PERSISTED_METADATA_KEYS: tuple[str, ...] = (
     "encrypted_identity_key_candidates",
     "owner_key_version",
     "time_anchors_debug",
+    # FIX: Add device metadata fields for phones
+    "manufacturer",
+    "model",
+    "fast_pair_model_id",
 )
 
 
