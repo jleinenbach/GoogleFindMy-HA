@@ -17,13 +17,19 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+from custom_components.googlefindmy.const import DOMAIN, DATA_EID_RESOLVER
+
 # ============================================================================
 # Test fixtures and helpers
 # ============================================================================
 
 
-def _fake_hass() -> SimpleNamespace:
-    """Return a minimal hass stand-in with async task helpers."""
+def _fake_hass(eid_resolver: Any = None) -> SimpleNamespace:
+    """Return a minimal hass stand-in with async task helpers.
+
+    Args:
+        eid_resolver: Optional EID resolver to put in hass.data[DOMAIN][DATA_EID_RESOLVER]
+    """
     created_coros: list[Any] = []
 
     def create_task(coro: Any, name: str | None = None) -> MagicMock:
@@ -34,10 +40,15 @@ def _fake_hass() -> SimpleNamespace:
             coro.close()
         return MagicMock()
 
+    # Build data dict with optional EID resolver (stored at domain level)
+    data: dict[str, Any] = {}
+    if eid_resolver is not None:
+        data[DOMAIN] = {DATA_EID_RESOLVER: eid_resolver}
+
     return SimpleNamespace(
         async_create_task=create_task,
         async_create_background_task=create_task,
-        data={},
+        data=data,
         _created_coros=created_coros,
     )
 
@@ -51,19 +62,22 @@ def _fake_config_entry(entry_id: str = "test_entry_123") -> SimpleNamespace:
     )
 
 
-def _create_test_coordinator() -> Any:
-    """Create a minimal coordinator instance for testing EID data flow."""
+def _create_test_coordinator(eid_resolver: Any = None) -> Any:
+    """Create a minimal coordinator instance for testing EID data flow.
+
+    Args:
+        eid_resolver: Optional EID resolver to set up in hass.data[DOMAIN][DATA_EID_RESOLVER]
+    """
     from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 
     # Create a minimal coordinator without full initialization
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
-    coordinator.hass = _fake_hass()
+    coordinator.hass = _fake_hass(eid_resolver=eid_resolver)
     coordinator.config_entry = _fake_config_entry()
     coordinator._device_location_data = {}
     coordinator._last_device_list = []
     coordinator._enabled_poll_device_ids = set()
     coordinator.data = []
-    coordinator.eid_resolver = None
     coordinator.logger = MagicMock()
 
     # Add minimal required methods
@@ -155,8 +169,6 @@ class TestEidDataPersistence:
 
     def test_persist_anchor_metadata_triggers_eid_resolver_refresh(self) -> None:
         """When identity_key is in payload, EID resolver refresh should be triggered."""
-        coordinator = _create_test_coordinator()
-
         # Set up a mock EID resolver with a simple callable
         mock_resolver = MagicMock()
 
@@ -164,7 +176,9 @@ class TestEidDataPersistence:
             pass
 
         mock_resolver.async_trigger_immediate_refresh = lambda: mock_refresh_coro()
-        coordinator.eid_resolver = mock_resolver
+
+        # Create coordinator with eid_resolver in hass.data[DOMAIN][DATA_EID_RESOLVER]
+        coordinator = _create_test_coordinator(eid_resolver=mock_resolver)
 
         location_data: dict[str, Any] = {
             "identity_key": b"\x01\x02\x03\x04" * 8,
