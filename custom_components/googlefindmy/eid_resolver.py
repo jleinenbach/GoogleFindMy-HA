@@ -379,12 +379,17 @@ class EIDGenerationLock:
 
 
 def _normalize_counter_candidate(candidate_value: object, *, basis: str) -> int | None:
-    """Return a sane u32 counter candidate or ``None`` when unusable."""
+    """Return a sane u32 counter candidate or ``None`` when unusable.
 
+    Rejects values that are:
+    - Not integers
+    - Booleans (which are technically int subclass in Python)
+    - Negative or zero (handles phones with pair_date=0 that lack deviceRegistration)
+    """
     if (
         not isinstance(candidate_value, int)
         or isinstance(candidate_value, bool)
-        or candidate_value < 0
+        or candidate_value <= 0
     ):
         return None
 
