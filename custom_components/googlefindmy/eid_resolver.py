@@ -769,16 +769,10 @@ class GoogleFindMyEIDResolver:
             clean_canonical_id = clean_canonical_id.split(":")[-1]
 
         # FIX: Handle both bytes and hex string formats for identity_key
-        raw_key = identity.identity_key
-        if isinstance(raw_key, (bytes, bytearray)):
-            key_bytes = bytes(raw_key)
-        elif isinstance(raw_key, str):
-            try:
-                key_bytes = bytes.fromhex(raw_key)
-            except ValueError:
-                return None
-        else:
+        key_bytes = _normalize_encrypted_blob(identity.identity_key)
+        if key_bytes is None:
             return None
+
         lock = self._locks.get(identity.registry_id)
         locked_variant: EidVariant | None = None
         rotation_ts: int | None = None
@@ -1406,19 +1400,14 @@ class GoogleFindMyEIDResolver:
         """Decrypt encrypted identity key when owner/shared key material is available."""
 
         self._ensure_cache_defaults()
-        if cache is None or identity.encrypted_identity_key is None:
+        if cache is None:
             return None
 
         # FIX: Handle both bytes and hex string formats for encrypted_identity_key
-        raw_eik = identity.encrypted_identity_key
-        if isinstance(raw_eik, (bytes, bytearray)):
-            encrypted_identity_key = bytes(raw_eik)
-        elif isinstance(raw_eik, str):
-            try:
-                encrypted_identity_key = bytes.fromhex(raw_eik)
-            except ValueError:
-                return None
-        else:
+        encrypted_identity_key = _normalize_encrypted_blob(
+            identity.encrypted_identity_key
+        )
+        if encrypted_identity_key is None:
             return None
 
         owner_key_info = await self._resolve_owner_key(identity, cache=cache)
