@@ -1049,8 +1049,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 payload.update(metadata_update)
 
             # Safety net: ensure identity key propagates even if metadata lacks it
-            if "identity_key" not in payload and identity_key_bytes:
-                payload["identity_key"] = identity_key_bytes
+            if "identity_key" not in payload and identity_key_hex:
+                payload["identity_key"] = identity_key_hex
 
             if metadata:
                 payload.update(metadata)

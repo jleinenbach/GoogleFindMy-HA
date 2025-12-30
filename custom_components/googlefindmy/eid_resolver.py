@@ -768,7 +768,17 @@ class GoogleFindMyEIDResolver:
         if ":" in clean_canonical_id:
             clean_canonical_id = clean_canonical_id.split(":")[-1]
 
-        key_bytes = bytes(identity.identity_key)
+        # FIX: Handle both bytes and hex string formats for identity_key
+        raw_key = identity.identity_key
+        if isinstance(raw_key, (bytes, bytearray)):
+            key_bytes = bytes(raw_key)
+        elif isinstance(raw_key, str):
+            try:
+                key_bytes = bytes.fromhex(raw_key)
+            except ValueError:
+                return None
+        else:
+            return None
         lock = self._locks.get(identity.registry_id)
         locked_variant: EidVariant | None = None
         rotation_ts: int | None = None
@@ -1396,11 +1406,19 @@ class GoogleFindMyEIDResolver:
         """Decrypt encrypted identity key when owner/shared key material is available."""
 
         self._ensure_cache_defaults()
-        if (
-            cache is None
-            or identity.encrypted_identity_key is None
-            or not isinstance(identity.encrypted_identity_key, (bytes, bytearray))
-        ):
+        if cache is None or identity.encrypted_identity_key is None:
+            return None
+
+        # FIX: Handle both bytes and hex string formats for encrypted_identity_key
+        raw_eik = identity.encrypted_identity_key
+        if isinstance(raw_eik, (bytes, bytearray)):
+            encrypted_identity_key = bytes(raw_eik)
+        elif isinstance(raw_eik, str):
+            try:
+                encrypted_identity_key = bytes.fromhex(raw_eik)
+            except ValueError:
+                return None
+        else:
             return None
 
         owner_key_info = await self._resolve_owner_key(identity, cache=cache)
@@ -1414,8 +1432,6 @@ class GoogleFindMyEIDResolver:
             shared_key = None
         if shared_key is not None:
             key_sources.append(("shared", shared_key))
-
-        encrypted_identity_key = bytes(identity.encrypted_identity_key)
         suggested_mcu = is_mcu_tracker(
             device_type=identity.device_type,
             fast_pair_model_id=identity.fast_pair_model_id,
