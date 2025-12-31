@@ -80,8 +80,7 @@ async def test_moto_tag_decryption_unwraps_and_injects_metadata(
     assert decrypt_mock.called
     assert results
     payload = results[0]
-    # FIX: identity_key is now returned as hex string
-    assert payload["identity_key"] == decrypted_identity_key.hex()
+    assert payload["identity_key"] == decrypted_identity_key
     assert payload.get("secrets_creation_date") is not None
     assert payload["secrets_creation_date"] == creation_seconds
 

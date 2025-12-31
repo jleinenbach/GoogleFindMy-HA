@@ -274,15 +274,13 @@ async def test_async_decrypt_location_response_unwraps_60_byte_eik(
     assert len(result) == 1
     entry = result[0]
     assert entry.get("metadata_only") is not True
-    # FIX: identity_key and encrypted_identity_key are now returned as hex strings
-    assert entry["identity_key"] == unwrapped_eik.hex()
-    assert entry["identity_key_candidates"] == [unwrapped_eik.hex()]
-    assert entry["encrypted_identity_key"] == encrypted_eik.hex()
+    assert entry["identity_key"] == unwrapped_eik
+    assert entry["identity_key_candidates"] == [unwrapped_eik]
+    assert entry["encrypted_identity_key"] == encrypted_eik
     assert entry["pair_date"] == int(base_now - 30)
     assert entry["secrets_creation_date"] == int(base_now - 15)
     assert entry["accuracy"] == ACCURACY_METERS
     assert entry["altitude"] == ALTITUDE_METERS
-    # offload_calls still receives bytes internally
     assert offload_calls["identity_key"] == unwrapped_eik
     assert len(offload_calls["identity_key"]) == 32
     assert offload_calls["encrypted_location"] == b"ciphertext"
@@ -324,10 +322,9 @@ async def test_async_decrypt_location_response_locations_normalizes_anchor_units
     assert entry.get("metadata_only") is True
     assert entry["pair_date"] == int(base_now - 300)
     assert entry["secrets_creation_date"] == int(base_now - 150)
-    # FIX: identity_key and encrypted_identity_key are now returned as hex strings
-    assert entry["identity_key"] == (b"\x51" * 32).hex()
-    assert entry["identity_key_candidates"] == [(b"\x51" * 32).hex()]
-    assert entry["encrypted_identity_key"] == (b"\x10" * 32).hex()
+    assert entry["identity_key"] == b"\x51" * 32
+    assert entry["identity_key_candidates"] == [b"\x51" * 32]
+    assert entry["encrypted_identity_key"] == b"\x10" * 32
     assert decrypt_locations._parse_epoch_seconds(  # type: ignore[attr-defined]
         int((base_now - 75) * 1000), base_now
     ) == pytest.approx(base_now - 75)
@@ -369,8 +366,7 @@ async def test_async_decrypt_location_response_reads_registration_anchors(
     entry = result[0]
     assert entry["pair_date"] == int(base_now - 500)
     assert entry["secrets_creation_date"] == int(base_now - 250)
-    # FIX: identity_key is now returned as hex string
-    assert entry["identity_key"] == (b"\x61" * 32).hex()
+    assert entry["identity_key"] == b"\x61" * 32
     type_meta = entry.get("device_type_information")
     assert not type_meta
     registration_meta = entry.get("device_registration")
