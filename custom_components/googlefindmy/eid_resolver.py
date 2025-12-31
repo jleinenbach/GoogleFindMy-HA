@@ -32,8 +32,12 @@ from .FMDNCrypto.eid_generator import (
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
     ROTATION_PERIOD,
+    ROTATION_PERIOD_900,
+    ROTATION_PERIOD_3600,
     EidVariant,
+    HeuristicBasis,
     generate_eid_variant,
+    generate_heuristic_eid,
 )
 from .FMDNCrypto.mcu_utils import flip_bits, is_mcu_tracker
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
@@ -90,6 +94,40 @@ KNOWN_OFFSET_KEY_LENGTH = 2
 # expected counter when tracking a locked device. ±2 periods covers ~34 minutes
 # of clock drift at 1024s rotation.
 LOCK_TRACKING_WINDOW_STEPS = 2
+
+# =============================================================================
+# Heuristic Phone Discovery Configuration
+# =============================================================================
+# Android phones with "Offline Finding" may use different parameters than
+# standard FMDN trackers. The heuristic resolver tests multiple hypotheses
+# when the standard lookup fails.
+
+# ENABLE_HEURISTIC_PHONE_DISCOVERY: Enable the reactive heuristic check for
+# packets that would otherwise be logged as MISS. This only runs when the
+# standard cache lookup fails.
+ENABLE_HEURISTIC_PHONE_DISCOVERY: bool = True
+
+# HEURISTIC_HYPOTHESES: Ordered list of (rotation_period, basis) tuples to test.
+# Ordered by likelihood based on Android phone behavior analysis.
+HEURISTIC_HYPOTHESES: tuple[tuple[int, HeuristicBasis], ...] = (
+    (ROTATION_PERIOD_900, HeuristicBasis.ABSOLUTE),   # Most likely for phones
+    (ROTATION_PERIOD_3600, HeuristicBasis.ABSOLUTE),  # 1-hour rotation
+    (ROTATION_PERIOD_900, HeuristicBasis.RELATIVE),   # 15-min with anchor
+    (ROTATION_PERIOD, HeuristicBasis.ABSOLUTE),       # 1024s with absolute time
+)
+
+# HEURISTIC_VARIANTS_TO_TEST: EID variants to test during heuristic resolution.
+# P-256 variants are most common for modern Android phones.
+HEURISTIC_VARIANTS_TO_TEST: tuple[EidVariant, ...] = (
+    EidVariant.MODERN_P256_X20_TRUNC_BE,
+    EidVariant.MODERN_P256_X32_BE,
+    EidVariant.MODERN_P256_X20_TRUNC_LE,
+    EidVariant.LEGACY_SECP160R1_X20_BE,
+)
+
+# HEURISTIC_LOG_INTERVAL_SECONDS: Minimum interval between heuristic miss logs
+# for the same device to prevent log spam.
+HEURISTIC_LOG_INTERVAL_SECONDS: int = 300  # 5 minutes
 
 
 class EIDMatch(NamedTuple):
@@ -179,6 +217,51 @@ class RotationParams:
     min_unix_window: int
     min_relative_window: int
     max_window: int
+
+
+@dataclass(slots=True)
+class LearnedHeuristicParams:
+    """Learned heuristic parameters for a device discovered via heuristic resolution.
+
+    When a device is successfully matched using heuristic parameters, those
+    parameters are cached here to speed up future lookups.
+    """
+
+    device_id: str
+    canonical_id: str
+    rotation_period: int
+    basis: HeuristicBasis
+    variant: EidVariant
+    discovered_at: int  # Unix timestamp when discovered
+    last_confirmed_at: int  # Unix timestamp of last successful match
+    confirmation_count: int = 1  # Number of successful matches
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for storage."""
+        return {
+            "device_id": self.device_id,
+            "canonical_id": self.canonical_id,
+            "rotation_period": self.rotation_period,
+            "basis": self.basis.value,
+            "variant": self.variant.value,
+            "discovered_at": self.discovered_at,
+            "last_confirmed_at": self.last_confirmed_at,
+            "confirmation_count": self.confirmation_count,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> LearnedHeuristicParams:
+        """Deserialize from storage."""
+        return cls(
+            device_id=str(data["device_id"]),
+            canonical_id=str(data.get("canonical_id", "")),
+            rotation_period=int(data["rotation_period"]),
+            basis=HeuristicBasis(data["basis"]),
+            variant=EidVariant(data["variant"]),
+            discovered_at=int(data.get("discovered_at", 0)),
+            last_confirmed_at=int(data.get("last_confirmed_at", 0)),
+            confirmation_count=int(data.get("confirmation_count", 1)),
+        )
 
 
 @dataclass(slots=True)
@@ -438,6 +521,12 @@ class GoogleFindMyEIDResolver:
     _refresh_lock: asyncio.Lock = field(init=False, default_factory=asyncio.Lock)
     _pending_refresh: bool = field(init=False, default=False)
     _load_task: asyncio.Task[None] | None = field(init=False, default=None)
+    # Heuristic phone discovery state
+    _learned_heuristic_params: dict[str, LearnedHeuristicParams] = field(
+        init=False, default_factory=dict
+    )
+    _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
+    _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         """Set up caches and schedule the first rotation-aligned refresh."""
@@ -447,7 +536,7 @@ class GoogleFindMyEIDResolver:
         self._load_task = self.hass.async_create_task(self._async_load_locks())
         self._start_alignment_timer()
 
-    def _ensure_cache_defaults(self) -> None:
+    def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912
         """Initialize optional caches when stubs bypass __init__."""
 
         if not hasattr(self, "_known_offsets"):
@@ -470,6 +559,13 @@ class GoogleFindMyEIDResolver:
             self._lock_miss_counts = {}
         if not hasattr(self, "_truncated_frame_log_at"):
             self._truncated_frame_log_at = {}
+        # Heuristic phone discovery state
+        if not hasattr(self, "_learned_heuristic_params"):
+            self._learned_heuristic_params = {}
+        if not hasattr(self, "_heuristic_miss_log_at"):
+            self._heuristic_miss_log_at = {}
+        if not hasattr(self, "_cached_identities"):
+            self._cached_identities = []
 
     def _clear_lock_state(self, device_id: str) -> bool:
         """Remove all cached state associated with a device lock."""
@@ -1210,6 +1306,8 @@ class GoogleFindMyEIDResolver:
         rotation_params = self._build_rotation_params()
 
         identities = await self._collect_device_secrets()
+        # Cache identities for heuristic phone discovery
+        self._cached_identities = list(identities)
         _LOGGER.debug("Refresh start: %d identities discovered", len(identities))
         work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
@@ -1568,7 +1666,253 @@ class GoogleFindMyEIDResolver:
 
         return owner_key_info
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0912, PLR0915
+    # =========================================================================
+    # Heuristic Phone Discovery
+    # =========================================================================
+    # These methods implement a reactive heuristic check for Android phones
+    # that don't follow the standard FMDN tracker protocol. When a packet
+    # fails the normal cache lookup, these methods test alternative hypotheses
+    # (different rotation periods and time bases) to find a match.
+    # =========================================================================
+
+    def _heuristic_resolve(
+        self,
+        candidates: list[bytes],
+        *,
+        now_unix: int,
+    ) -> EIDMatch | None:
+        """Attempt heuristic resolution for packets that missed the standard cache.
+
+        This method tests multiple hypotheses about the EID generation parameters:
+        - Rotation periods: 900s, 1024s, 3600s
+        - Time bases: ABSOLUTE (now // period) vs RELATIVE ((now - anchor) // period)
+
+        Args:
+            candidates: EID byte candidates extracted from the BLE payload.
+            now_unix: Current Unix timestamp in seconds.
+
+        Returns:
+            EIDMatch if a heuristic match is found, None otherwise.
+        """
+        if not ENABLE_HEURISTIC_PHONE_DISCOVERY:
+            return None
+
+        if not self._cached_identities:
+            _LOGGER.debug("Heuristic resolve skipped: no cached identities")
+            return None
+
+        # Build a lookup set for fast candidate matching
+        candidate_set = set(candidates)
+
+        # First, check devices with learned parameters (fast path)
+        for device_id, learned in self._learned_heuristic_params.items():
+            match = self._heuristic_check_learned(
+                device_id,
+                learned,
+                candidate_set,
+                now_unix=now_unix,
+            )
+            if match is not None:
+                return match
+
+        # Fall back to full hypothesis testing (slow path)
+        for identity in self._cached_identities:
+            if identity.identity_key is None:
+                continue
+
+            match = self._heuristic_test_hypotheses(
+                identity,
+                candidate_set,
+                now_unix=now_unix,
+            )
+            if match is not None:
+                return match
+
+        return None
+
+    def _heuristic_check_learned(
+        self,
+        device_id: str,
+        learned: LearnedHeuristicParams,
+        candidate_set: set[bytes],
+        *,
+        now_unix: int,
+    ) -> EIDMatch | None:
+        """Check if a payload matches a device with previously learned parameters.
+
+        This is the fast path for devices that have been successfully matched
+        using heuristic parameters before.
+        """
+        # Find the identity for this device
+        identity: DeviceIdentity | None = None
+        for ident in self._cached_identities:
+            if ident.registry_id == device_id:
+                identity = ident
+                break
+
+        if identity is None or identity.identity_key is None:
+            return None
+
+        key_bytes = self._normalize_key_bytes(identity.identity_key)
+        if key_bytes is None:
+            return None
+
+        anchor = self._get_best_anchor(identity)
+
+        try:
+            results = generate_heuristic_eid(
+                key_bytes,
+                now_unix,
+                rotation_period=learned.rotation_period,
+                basis=learned.basis,
+                variant=learned.variant,
+                anchor=anchor if learned.basis == HeuristicBasis.RELATIVE else None,
+            )
+        except Exception as exc:
+            _LOGGER.debug(
+                "Heuristic learned check failed for %s: %s",
+                device_id,
+                exc,
+            )
+            return None
+
+        for result in results:
+            if result.eid_bytes in candidate_set:
+                # Update confirmation tracking
+                learned.last_confirmed_at = now_unix
+                learned.confirmation_count += 1
+
+                _LOGGER.info(
+                    "HEURISTIC HIT (learned): device=%s period=%ds basis=%s "
+                    "variant=%s drift=%d reversed=%s",
+                    device_id,
+                    learned.rotation_period,
+                    learned.basis.value,
+                    learned.variant.value,
+                    result.drift_offset,
+                    result.is_reversed,
+                )
+
+                return EIDMatch(
+                    device_id=device_id,
+                    config_entry_id=str(identity.config_entry_id or ""),
+                    canonical_id=identity.canonical_id,
+                    time_offset=result.drift_offset * learned.rotation_period,
+                    is_reversed=result.is_reversed,
+                )
+
+        return None
+
+    def _heuristic_test_hypotheses(
+        self,
+        identity: DeviceIdentity,
+        candidate_set: set[bytes],
+        *,
+        now_unix: int,
+    ) -> EIDMatch | None:
+        """Test all hypotheses against a device identity.
+
+        This is the slow path that tests all combinations of rotation periods,
+        time bases, and EID variants.
+        """
+        key_bytes = self._normalize_key_bytes(identity.identity_key)
+        if key_bytes is None:
+            return None
+
+        anchor = self._get_best_anchor(identity)
+        device_id = identity.registry_id
+
+        for rotation_period, basis in HEURISTIC_HYPOTHESES:
+            # Skip RELATIVE basis if no valid anchor
+            if basis == HeuristicBasis.RELATIVE and (anchor is None or anchor <= 0):
+                continue
+
+            for variant in HEURISTIC_VARIANTS_TO_TEST:
+                try:
+                    results = generate_heuristic_eid(
+                        key_bytes,
+                        now_unix,
+                        rotation_period=rotation_period,
+                        basis=basis,
+                        variant=variant,
+                        anchor=anchor if basis == HeuristicBasis.RELATIVE else None,
+                    )
+                except Exception as exc:
+                    _LOGGER.debug(
+                        "Heuristic generation failed: device=%s period=%d basis=%s variant=%s: %s",
+                        device_id,
+                        rotation_period,
+                        basis.value,
+                        variant.value,
+                        exc,
+                    )
+                    continue
+
+                for result in results:
+                    if result.eid_bytes in candidate_set:
+                        # Found a match! Store the learned parameters
+                        self._learned_heuristic_params[device_id] = LearnedHeuristicParams(
+                            device_id=device_id,
+                            canonical_id=identity.canonical_id,
+                            rotation_period=rotation_period,
+                            basis=basis,
+                            variant=variant,
+                            discovered_at=now_unix,
+                            last_confirmed_at=now_unix,
+                            confirmation_count=1,
+                        )
+
+                        _LOGGER.info(
+                            "HEURISTIC HIT (discovery): device=%s period=%ds basis=%s "
+                            "variant=%s drift=%d reversed=%s. Caching parameters.",
+                            device_id,
+                            rotation_period,
+                            basis.value,
+                            variant.value,
+                            result.drift_offset,
+                            result.is_reversed,
+                        )
+
+                        return EIDMatch(
+                            device_id=device_id,
+                            config_entry_id=str(identity.config_entry_id or ""),
+                            canonical_id=identity.canonical_id,
+                            time_offset=result.drift_offset * rotation_period,
+                            is_reversed=result.is_reversed,
+                        )
+
+        return None
+
+    def _normalize_key_bytes(self, key: Any) -> bytes | None:
+        """Normalize an identity key to bytes."""
+        if isinstance(key, (bytes, bytearray)):
+            return bytes(key)
+        if isinstance(key, str):
+            try:
+                return bytes.fromhex(key)
+            except ValueError:
+                return None
+        return None
+
+    def _get_best_anchor(self, identity: DeviceIdentity) -> int | None:
+        """Get the best available time anchor for an identity."""
+        anchors: list[int] = []
+        if isinstance(identity.pair_date, int) and identity.pair_date > 0:
+            anchors.append(identity.pair_date)
+        if isinstance(identity.secrets_creation_date, int) and identity.secrets_creation_date > 0:
+            anchors.append(identity.secrets_creation_date)
+        return max(anchors) if anchors else None
+
+    def _should_log_heuristic_miss(self, raw_prefix: str) -> bool:
+        """Check if a heuristic miss should be logged (rate limited)."""
+        now = time.time()
+        last_log = self._heuristic_miss_log_at.get(raw_prefix)
+        if last_log is not None and now - last_log < HEURISTIC_LOG_INTERVAL_SECONDS:
+            return False
+        self._heuristic_miss_log_at[raw_prefix] = now
+        return True
+
+    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
         """Resolve a scanned payload to a Home Assistant device registry ID."""
 
         self._ensure_cache_defaults()
@@ -1682,17 +2026,37 @@ class GoogleFindMyEIDResolver:
             )
             return match
 
+        # =================================================================
+        # Heuristic Phone Discovery: Reactive check before logging MISS
+        # =================================================================
+        # If the standard cache lookup failed, attempt heuristic resolution
+        # for Android phones that may use different rotation periods or
+        # time bases than standard FMDN trackers.
+        now_unix = int(time.time())
+        heuristic_match = self._heuristic_resolve(candidates, now_unix=now_unix)
+        if heuristic_match is not None:
+            # Update standard tracking state for the heuristic match
+            self._last_lock_confirmation[heuristic_match.device_id] = now_unix
+            self._known_advertisement_reversed[heuristic_match.device_id] = (
+                heuristic_match.is_reversed
+            )
+            return heuristic_match
+
+        # Log MISS with rate limiting for heuristic failures
         max_prefixes = 8
         prefix_log = ", ".join(candidate_prefixes[:max_prefixes])
         if len(candidate_prefixes) > max_prefixes:
             prefix_log = f"{prefix_log}, ..."
 
-        _LOGGER.debug(
-            "MISS: candidate_prefixes=%s raw_prefix=%s cache_size=%d",
-            prefix_log or "<none>",
-            raw_prefix,
-            len(self._lookup),
-        )
+        if self._should_log_heuristic_miss(raw_prefix):
+            _LOGGER.debug(
+                "MISS (after heuristic): candidate_prefixes=%s raw_prefix=%s "
+                "cache_size=%d identities=%d",
+                prefix_log or "<none>",
+                raw_prefix,
+                len(self._lookup),
+                len(self._cached_identities),
+            )
         return None
 
     def _extract_candidates(  # noqa: PLR0912
