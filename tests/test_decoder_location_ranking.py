@@ -81,9 +81,10 @@ def test_device_list_preserves_anchor_metadata(monkeypatch: pytest.MonkeyPatch) 
         # Anchor + diagnostics payload:
         "pair_date": 1_700_000_100,
         "secrets_creation_date": 1_700_000_200,
-        "identity_key": b"\xaa" * 32,
-        "identity_key_candidates": [b"\xaa" * 32, b"\xbb" * 32],
-        "encrypted_identity_key_candidates": [b"\x01\x02"],
+        # FIX: identity_key is now returned as hex string by decrypt_locations
+        "identity_key": (b"\xaa" * 32).hex(),
+        "identity_key_candidates": [(b"\xaa" * 32).hex(), (b"\xbb" * 32).hex()],
+        "encrypted_identity_key_candidates": [(b"\x01\x02").hex()],
         "device_registration": {"pairDate": 1_700_000_300},
         "encrypted_user_secrets": {"creationDate": 1_700_000_400},
         "time_anchors_debug": {"source": "device_list"},
