@@ -6,3 +6,4 @@ pytest_output.log
 .bootstrap/
 node_modules/
 .npm-cache/
+*.egg-info/
