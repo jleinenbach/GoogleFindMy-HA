@@ -4633,15 +4633,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 target[key] = value
 
         def _normalize_timestamp(value: Any) -> int | None:
-            """Return epoch seconds from ints/strings or Timestamp-like mappings."""
+            """Return epoch seconds from ints/strings or Timestamp-like mappings.
+
+            Values <= 0 are treated as invalid to prevent zero timestamps from
+            shadowing valid values in priority lookups.
+            """
 
             ts = _normalize_epoch_seconds(value)
-            if ts is not None:
+            if ts is not None and ts > 0:
                 return ts
 
             if isinstance(value, Mapping):
                 seconds = _normalize_epoch_seconds(value.get("seconds"))
-                if seconds is not None:
+                if seconds is not None and seconds > 0:
                     return seconds
                 if "nanos" in value or "nsec" in value:
                     return None
@@ -5287,6 +5291,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             secrets_creation_date = normalize_epoch_seconds(secrets_creation_raw)
             if secrets_creation_date is None:
                 secrets_creation_source = None
+
+            # Anchor fallback: use secrets_creation_date as pair_date when pair_date
+            # is missing or invalid (0). This is common for Android phones that lack
+            # deviceRegistration data but have valid encrypted_user_secrets bundles.
+            if (pair_date is None or pair_date <= 0) and (
+                secrets_creation_date is not None and secrets_creation_date > 0
+            ):
+                _LOGGER.debug(
+                    "Anchor fallback for %s: pair_date=%s invalid, "
+                    "using secrets_creation_date=%s as pair_date",
+                    canonical_id,
+                    pair_date,
+                    secrets_creation_date,
+                )
+                pair_date = secrets_creation_date
+                pair_date_source = f"fallback:{secrets_creation_source or 'secrets'}"
 
             anchors_debug = _lookup_prio(
                 lookup_keys,

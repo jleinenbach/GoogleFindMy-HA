@@ -1316,10 +1316,22 @@ class GoogleFindMyEIDResolver:
         """Retrieve active tracker identities from all loaded coordinators."""
         bucket = self.hass.data.get(DOMAIN)
         if not isinstance(bucket, dict):
+            _LOGGER.warning(
+                "EID pipeline disabled: hass.data[%s] is not a dict (type=%s). "
+                "This may indicate the integration was not properly initialized.",
+                DOMAIN,
+                type(bucket).__name__,
+            )
             return []
 
         entries = bucket.get("entries")
         if not isinstance(entries, dict):
+            _LOGGER.warning(
+                "EID pipeline disabled: hass.data[%s]['entries'] is not a dict (type=%s). "
+                "Falling back to empty identity list.",
+                DOMAIN,
+                type(entries).__name__ if entries is not None else "None",
+            )
             return []
 
         identities: list[DeviceIdentity] = []
@@ -1569,6 +1581,11 @@ class GoogleFindMyEIDResolver:
         candidate_prefixes = [candidate[:4].hex() for candidate in candidates]
 
         if not candidates:
+            _LOGGER.debug(
+                "No candidates extracted from payload (raw_prefix=%s, len=%d)",
+                raw_prefix,
+                len(raw),
+            )
             return None
 
         if not self._lookup:
@@ -1671,7 +1688,7 @@ class GoogleFindMyEIDResolver:
             prefix_log = f"{prefix_log}, ..."
 
         _LOGGER.debug(
-            "RESOLVER MISS: candidate_prefixes=%s raw_prefix=%s cache_size=%d",
+            "MISS: candidate_prefixes=%s raw_prefix=%s cache_size=%d",
             prefix_log or "<none>",
             raw_prefix,
             len(self._lookup),
