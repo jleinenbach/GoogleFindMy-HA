@@ -116,4 +116,5 @@ async def test_decrypted_key_reaches_coordinator_cache(
 
     stored_data = coordinator.get_device_location_data("device-1")
     assert stored_data is not None
-    assert stored_data["identity_key"] == identity_key.hex()
+    # Coordinator normalizes identity_key to bytes when storing
+    assert stored_data["identity_key"] == identity_key
