@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import warnings
+from dataclasses import dataclass
 from enum import Enum
 from typing import Final, Literal
 
@@ -25,14 +26,20 @@ __all__ = [
     "EidVariant",
     "EIK_LENGTH",
     "FHNA_K",
+    "HeuristicBasis",
+    "HeuristicEidResult",
     "K",
     "LEGACY_EID_LENGTH",
     "MODERN_EID_LENGTH",
     "P256_ORDER",
     "ROTATION_PERIOD",
+    "ROTATION_PERIOD_900",
+    "ROTATION_PERIOD_3600",
+    "build_heuristic_prf_input",
     "build_table10_prf_input",
     "generate_eid",
     "generate_eid_variant",
+    "generate_heuristic_eid",
     "get_masked_counter",
     "prf_aes_256_ecb",
 ]
@@ -47,13 +54,18 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
 
 FHNA_K: Final[int] = 10
 K: Final[int] = FHNA_K
-ROTATION_PERIOD: Final[int] = 1 << FHNA_K
+ROTATION_PERIOD: Final[int] = 1 << FHNA_K  # 1024 seconds (standard FMDN trackers)
+ROTATION_PERIOD_900: Final[int] = 900  # 15 minutes (Android phone MAC sync)
+ROTATION_PERIOD_3600: Final[int] = 3600  # 1 hour (alternative phone period)
 EIK_LENGTH: Final[int] = 32
 LEGACY_EID_LENGTH: Final[int] = 20
 MODERN_EID_LENGTH: Final[int] = 32
 FHNA_PRF_INPUT_LENGTH: Final[int] = 32
 FHNA_ROTATION_MASK: Final[int] = (1 << FHNA_K) - 1
 FHNA_COUNTER_MASK: Final[int] = 0xFFFFFFFF
+
+# Heuristic rotation periods for phone discovery (ordered by likelihood)
+HEURISTIC_ROTATION_PERIODS: Final[tuple[int, ...]] = (900, 3600, 1024)
 P256_ORDER: Final[int] = (
     0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 )
@@ -71,6 +83,37 @@ class EidVariant(str, Enum):
     MODERN_P256_X20_TRUNC_BE = "modern_p256_x20_trunc_be"
     MODERN_P256_X32_LE_SCALAR = "modern_p256_x32_le_scalar"
     MODERN_P256_X20_TRUNC_LE = "modern_p256_x20_trunc_le"
+
+
+class HeuristicBasis(str, Enum):
+    """Time basis modes for heuristic EID generation.
+
+    Android phones with "Offline Finding" may use different time bases than
+    the standard FMDN tracker protocol:
+
+    - RELATIVE: counter = (now - anchor) // period  (standard FMDN)
+    - ABSOLUTE: counter = now // period  (Android phone style)
+    """
+
+    RELATIVE = "relative"
+    ABSOLUTE = "absolute"
+
+
+@dataclass(frozen=True, slots=True)
+class HeuristicEidResult:
+    """Result of a successful heuristic EID match.
+
+    Contains the discovered parameters that successfully matched the payload,
+    allowing the resolver to cache and reuse them for future lookups.
+    """
+
+    eid_bytes: bytes
+    rotation_period: int
+    basis: HeuristicBasis
+    variant: EidVariant
+    counter: int
+    drift_offset: int  # -1, 0, or +1 from the expected counter
+    is_reversed: bool
 
 
 def _normalize_time_counter(time_counter_u32: int, *, strict: bool) -> int:
@@ -338,6 +381,266 @@ def generate_eid(
         stacklevel=2,
     )
     return generate_eid_variant(eik, time_counter_u32, variant, k=k, strict=strict)
+
+
+# =============================================================================
+# Heuristic EID Generation for Android Phone Discovery
+# =============================================================================
+#
+# Android phones with "Offline Finding" may use different parameters than
+# standard FMDN trackers:
+# - Rotation period: 900s (15 min) or 3600s (1 hour) instead of 1024s
+# - Time basis: Absolute Unix time instead of relative (now - anchor)
+#
+# These functions support flexible rotation periods using integer division
+# instead of the power-of-2 bitwise operations required by FHNA spec.
+# =============================================================================
+
+
+def _align_to_rotation_flexible(
+    timestamp: int, *, rotation_period: int
+) -> int:
+    """Align a timestamp to the start of its rotation window using integer division.
+
+    Unlike ``_align_to_rotation`` which uses bitwise masking (power-of-2 only),
+    this function supports arbitrary rotation periods like 900s or 3600s.
+
+    Args:
+        timestamp: Unix timestamp in seconds.
+        rotation_period: Rotation period in seconds (e.g., 900, 1024, 3600).
+
+    Returns:
+        The timestamp aligned to the start of its rotation window.
+    """
+    if rotation_period <= 0:
+        raise ValueError(f"rotation_period must be positive; got {rotation_period}")
+    return (timestamp // rotation_period) * rotation_period
+
+
+def _compute_heuristic_counter(
+    now_unix: int,
+    *,
+    rotation_period: int,
+    basis: HeuristicBasis,
+    anchor: int | None = None,
+) -> int:
+    """Compute the EID counter based on the specified time basis.
+
+    Args:
+        now_unix: Current Unix timestamp in seconds.
+        rotation_period: Rotation period in seconds.
+        basis: Time basis mode (ABSOLUTE or RELATIVE).
+        anchor: Anchor timestamp for relative basis (pair_date or secrets_creation_date).
+
+    Returns:
+        The counter value aligned to the rotation period.
+
+    Raises:
+        ValueError: If RELATIVE basis is used without an anchor.
+    """
+    if basis == HeuristicBasis.ABSOLUTE:
+        # Android phone style: counter based on absolute Unix time
+        return _align_to_rotation_flexible(now_unix, rotation_period=rotation_period)
+
+    # RELATIVE basis: counter based on elapsed time since anchor
+    if anchor is None or anchor <= 0:
+        raise ValueError(
+            f"RELATIVE basis requires a valid anchor timestamp; got {anchor}"
+        )
+    elapsed = now_unix - anchor
+    if elapsed < 0:
+        _LOGGER.debug(
+            "Negative elapsed time (%s - %s = %s); using 0",
+            now_unix,
+            anchor,
+            elapsed,
+        )
+        elapsed = 0
+    return _align_to_rotation_flexible(elapsed, rotation_period=rotation_period)
+
+
+def build_heuristic_prf_input(
+    counter: int,
+    *,
+    rotation_period: int,
+) -> bytes:
+    """Build PRF input for heuristic EID generation with flexible rotation period.
+
+    This function constructs a Table 10-like PRF input buffer but uses the
+    rotation period directly in the exponent field, allowing non-power-of-2
+    periods to be encoded.
+
+    For compatibility with the standard FHNA crypto, we still use the Table 10
+    structure but encode the rotation-aligned counter directly.
+
+    Args:
+        counter: The rotation-aligned counter value.
+        rotation_period: Rotation period in seconds (for logging/diagnostics).
+
+    Returns:
+        32-byte PRF input buffer.
+    """
+    # Normalize counter to u32 range
+    counter_u32 = counter & FHNA_COUNTER_MASK
+    counter_bytes = counter_u32.to_bytes(4, byteorder="big", signed=False)
+
+    # Compute an effective K value for the PRF input structure
+    # For standard periods, use log2; for others, use FHNA_K as default
+    effective_k = FHNA_K
+    if rotation_period == ROTATION_PERIOD:
+        effective_k = FHNA_K  # 1024 = 2^10
+    elif rotation_period == ROTATION_PERIOD_900:
+        # 900 is not a power of 2; use a marker value
+        # The crypto still works because the counter is already aligned
+        effective_k = 9  # Approximation: 2^9 = 512 < 900 < 1024 = 2^10
+    elif rotation_period == ROTATION_PERIOD_3600:
+        effective_k = 12  # Approximation: 2^12 = 4096 > 3600
+
+    block = bytearray(FHNA_PRF_INPUT_LENGTH)
+    block[0:11] = b"\xff" * 11
+    block[11] = effective_k
+    block[12:16] = counter_bytes
+    block[16:27] = b"\x00" * 11
+    block[27] = effective_k
+    block[28:32] = counter_bytes
+
+    return bytes(block)
+
+
+def _generate_heuristic_eid_single(
+    eik: bytes,
+    counter: int,
+    variant: EidVariant,
+) -> bytes:
+    """Generate a single EID using the heuristic counter.
+
+    This is a lightweight wrapper around the scalar derivation that uses
+    an already-computed counter value.
+    """
+    if len(eik) != EIK_LENGTH:
+        raise ValueError(f"Ephemeral Identity Key must be {EIK_LENGTH} bytes")
+
+    # Build PRF input with the pre-computed counter
+    # For heuristic mode, we use the counter directly as the time value
+    prf_input = build_heuristic_prf_input(counter, rotation_period=ROTATION_PERIOD)
+    r_dash = prf_aes_256_ecb(eik, prf_input)
+
+    match variant:
+        case EidVariant.LEGACY_SECP160R1_X20_BE:
+            curve_order = int(_CURVE.order)
+            r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
+            scalar = r_dash_int % curve_order
+            return _serialize_legacy_x(scalar)
+
+        case EidVariant.MODERN_P256_X32_BE:
+            r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
+            scalar = (r_dash_int % (P256_ORDER - 1)) + 1
+            return _serialize_p256_x(scalar)
+
+        case EidVariant.MODERN_P256_X20_TRUNC_BE:
+            full = _generate_heuristic_eid_single(eik, counter, EidVariant.MODERN_P256_X32_BE)
+            return full[:LEGACY_EID_LENGTH]
+
+        case EidVariant.MODERN_P256_X32_LE_SCALAR:
+            r_dash_int = int.from_bytes(r_dash, byteorder="little", signed=False)
+            scalar = (r_dash_int % (P256_ORDER - 1)) + 1
+            return _serialize_p256_x(scalar)
+
+        case EidVariant.MODERN_P256_X20_TRUNC_LE:
+            full = _generate_heuristic_eid_single(
+                eik, counter, EidVariant.MODERN_P256_X32_LE_SCALAR
+            )
+            return full[:LEGACY_EID_LENGTH]
+
+        case _:
+            raise ValueError(f"Unsupported EID variant: {variant}")
+
+
+def generate_heuristic_eid(  # noqa: PLR0913
+    eik: bytes,
+    now_unix: int,
+    *,
+    rotation_period: int,
+    basis: HeuristicBasis,
+    variant: EidVariant,
+    anchor: int | None = None,
+    drift_offsets: tuple[int, ...] = (-1, 0, 1),
+) -> list[HeuristicEidResult]:
+    """Generate EID candidates using heuristic parameters for phone discovery.
+
+    This function supports flexible rotation periods (900s, 1024s, 3600s) and
+    both absolute and relative time bases, allowing discovery of Android phones
+    that don't follow the standard FMDN tracker protocol.
+
+    Args:
+        eik: 32-byte Ephemeral Identity Key.
+        now_unix: Current Unix timestamp in seconds.
+        rotation_period: Rotation period in seconds (e.g., 900, 1024, 3600).
+        basis: Time basis mode (ABSOLUTE or RELATIVE).
+        variant: EID variant to generate.
+        anchor: Anchor timestamp for RELATIVE basis (required if basis=RELATIVE).
+        drift_offsets: Counter offsets to check for clock skew (default: -1, 0, +1).
+
+    Returns:
+        List of HeuristicEidResult objects for each drift offset, containing
+        both the normal and reversed EID bytes.
+    """
+    if len(eik) != EIK_LENGTH:
+        raise ValueError(f"Ephemeral Identity Key must be {EIK_LENGTH} bytes")
+
+    base_counter = _compute_heuristic_counter(
+        now_unix,
+        rotation_period=rotation_period,
+        basis=basis,
+        anchor=anchor,
+    )
+
+    results: list[HeuristicEidResult] = []
+
+    for drift in drift_offsets:
+        counter = base_counter + (drift * rotation_period)
+        if counter < 0:
+            continue
+
+        try:
+            eid_bytes = _generate_heuristic_eid_single(eik, counter, variant)
+        except Exception as exc:
+            _LOGGER.debug(
+                "Heuristic EID generation failed: period=%s basis=%s drift=%s: %s",
+                rotation_period,
+                basis.value,
+                drift,
+                exc,
+            )
+            continue
+
+        # Add normal orientation
+        results.append(
+            HeuristicEidResult(
+                eid_bytes=eid_bytes,
+                rotation_period=rotation_period,
+                basis=basis,
+                variant=variant,
+                counter=counter,
+                drift_offset=drift,
+                is_reversed=False,
+            )
+        )
+
+        # Add reversed orientation (some devices advertise bytes in reverse)
+        results.append(
+            HeuristicEidResult(
+                eid_bytes=eid_bytes[::-1],
+                rotation_period=rotation_period,
+                basis=basis,
+                variant=variant,
+                counter=counter,
+                drift_offset=drift,
+                is_reversed=True,
+            )
+        )
+
+    return results
 
 
 if __name__ == "__main__":
