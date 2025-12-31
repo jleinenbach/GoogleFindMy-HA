@@ -121,11 +121,13 @@ from .const import (
     EVENT_AUTH_OK,
     INTEGRATION_VERSION,
     ISSUE_AUTH_EXPIRED_KEY,
+    LEGACY_SERVICE_IDENTIFIER,
     LOCATION_REQUEST_TIMEOUT_S,
     # Helpers
     MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     OPT_IGNORED_DEVICES,
     OPT_SEMANTIC_LOCATIONS,
+    SERVICE_DEVICE_IDENTIFIER_PREFIX,
     SERVICE_DEVICE_MANUFACTURER,
     # Integration "service device" metadata
     SERVICE_DEVICE_MODEL,
@@ -2075,6 +2077,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     return ident.split(":", 1)[1]  # return canonical device_id
                 # Identifier belongs to a different entry; ignore.
                 continue
+
+            # Skip service device identifiers (integration_<entry_id> or legacy "integration")
+            if ident.startswith(SERVICE_DEVICE_IDENTIFIER_PREFIX) or ident == LEGACY_SERVICE_IDENTIFIER:
+                continue
+
             # Legacy format -> accept as-is
             return ident
         return None
