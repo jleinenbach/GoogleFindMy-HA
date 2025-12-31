@@ -47,6 +47,14 @@ documentation = "https://github.com/BSkando/GoogleFindMy-HA"
 repository = "https://github.com/BSkando/GoogleFindMy-HA"
 issue-tracker = "https://github.com/BSkando/GoogleFindMy-HA/issues"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["custom_components*"]
+exclude = ["tests*", "script*", "google*"]
+
+[tool.setuptools.package-data]
+"custom_components.googlefindmy" = ["*.json", "*.yaml", "translations/*.json"]
+
 [tool.ruff]
 target-version = "py313"
 extend-exclude = [

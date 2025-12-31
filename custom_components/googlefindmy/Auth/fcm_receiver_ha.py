@@ -64,20 +64,22 @@ import logging
 import math
 import random
 import time
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from aiohttp import ClientError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
-from custom_components.googlefindmy.NovaApi import nova_request
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
     async_decrypt_location_response_locations,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    _CACHE_PROVIDER,
 )
 from custom_components.googlefindmy.ProtoDecoders import decoder as decoder_module
 
@@ -354,8 +356,10 @@ class FcmReceiverHA:
         try:
             loop = asyncio.get_running_loop()
             # Already in an event loop - schedule directly
-            task = loop.create_task(coro, name=f"{DOMAIN}.{label}")  # type: ignore[arg-type]
-            self._track_task(task, label=label)
+            new_task: asyncio.Task[Any] = loop.create_task(
+                coro, name=f"{DOMAIN}.{label}"  # type: ignore[arg-type]
+            )
+            self._track_task(new_task, label=label)
             return
         except RuntimeError:
             # No running loop in this thread; schedule onto HA loop
@@ -367,8 +371,10 @@ class FcmReceiverHA:
             return
 
         def _schedule() -> None:
-            task = hass_loop.create_task(coro, name=f"{DOMAIN}.{label}")  # type: ignore[arg-type]
-            self._track_task(task, label=label)
+            scheduled_task: asyncio.Task[Any] = hass_loop.create_task(
+                coro, name=f"{DOMAIN}.{label}"
+            )
+            self._track_task(scheduled_task, label=label)
 
         hass_loop.call_soon_threadsafe(_schedule)
 
@@ -407,20 +413,11 @@ class FcmReceiverHA:
         """
         token: contextvars.Token[Callable[[], Any] | None] | None = None
         try:
-            # Import the context var directly to use reset() for proper cleanup
-            from custom_components.googlefindmy.NovaApi.nova_request import (
-                _CACHE_PROVIDER,
-            )
-
             token = _CACHE_PROVIDER.set(provider)
             yield token
         finally:
             if token is not None:
                 try:
-                    from custom_components.googlefindmy.NovaApi.nova_request import (
-                        _CACHE_PROVIDER,
-                    )
-
                     _CACHE_PROVIDER.reset(token)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("Cache provider reset failed: %s", err)

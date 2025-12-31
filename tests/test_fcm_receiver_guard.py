@@ -220,6 +220,9 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
 
     try:
         receiver = FcmReceiverHA()
+        # P0 fix: attach hass with loop for thread-safe dispatch
+        hass = SimpleNamespace(loop=loop, data={})
+        receiver.attach_hass(hass)
 
         async def fake_start(
             _self: FcmReceiverHA, _entry_id: str, _cache: object | None
@@ -302,7 +305,8 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
         envelope = {"data": {"com.google.android.apps.adm.FCM_PAYLOAD": payload}}
 
         receiver._on_notification("entry-one", envelope, None, None)
-        loop.run_until_complete(asyncio.sleep(0))
+        # P0 fix: give async handler time to execute
+        loop.run_until_complete(asyncio.sleep(0.01))
 
         assert seen_routes
 
@@ -311,7 +315,8 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
         receiver.unregister_coordinator(coord_one)
 
         receiver._on_notification("entry-one", envelope, None, None)
-        loop.run_until_complete(asyncio.sleep(0))
+        # P0 fix: give async handler time to execute
+        loop.run_until_complete(asyncio.sleep(0.01))
 
         assert seen_routes == []
         assert "token-one" not in receiver._token_to_entries

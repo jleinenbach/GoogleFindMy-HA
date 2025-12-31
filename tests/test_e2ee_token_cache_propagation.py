@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -268,15 +267,20 @@ def test_sync_decrypt_location_response_forwards_cache(
 def test_fcm_background_decode_uses_entry_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Background FCM decoding must supply the entry TokenCache."""
+    """Background FCM decoding must supply the entry TokenCache.
 
+    P1-2 fix: Now uses scoped context manager with contextvars instead of
+    global register/unregister to prevent cross-contamination between entries.
+    """
     from custom_components.googlefindmy.Auth import fcm_receiver_ha
+    from custom_components.googlefindmy.NovaApi.nova_request import _CACHE_PROVIDER
 
     receiver = fcm_receiver_ha.FcmReceiverHA()
     cache = object()
     receiver._entry_caches["entry"] = cache
 
     captured: dict[str, object] = {}
+    initial_provider = _CACHE_PROVIDER.get()
 
     def fake_parse(hex_string: str) -> str:
         captured["hex"] = hex_string
@@ -294,15 +298,13 @@ def test_fcm_background_decode_uses_entry_cache(
         },
     ]
 
-    def fake_register_cache_provider(provider: Callable[[], object]) -> None:
-        captured["cache_provider"] = provider
-
-    def fake_unregister_cache_provider() -> None:
-        captured["unregistered"] = True
-
     async def fake_async_decrypt(  # type: ignore[no-untyped-def]
         device_update, *, cache: object
     ):
+        # P1-2: Capture the provider during decryption to verify scoped context
+        provider = _CACHE_PROVIDER.get()
+        if provider is not None:
+            captured["provider_cache"] = provider()
         captured["device_update"] = device_update
         captured["cache"] = cache
         return records
@@ -310,16 +312,6 @@ def test_fcm_background_decode_uses_entry_cache(
     monkeypatch.setattr(
         "custom_components.googlefindmy.ProtoDecoders.decoder.parse_device_update_protobuf",
         fake_parse,
-    )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.NovaApi.nova_request.register_cache_provider",
-        fake_register_cache_provider,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.NovaApi.nova_request.unregister_cache_provider",
-        fake_unregister_cache_provider,
-        raising=False,
     )
     monkeypatch.setattr(
         "custom_components.googlefindmy.Auth.fcm_receiver_ha.async_decrypt_location_response_locations",
@@ -339,4 +331,7 @@ def test_fcm_background_decode_uses_entry_cache(
     assert captured["hex"] == "payload"
     assert captured["device_update"] == "parsed"
     assert captured["cache"] is cache
-    assert captured["unregistered"] is True
+    # P1-2: Verify scoped cache provider was set during decryption
+    assert captured["provider_cache"] is cache
+    # P1-2: Verify provider is reset after decryption (scoped cleanup)
+    assert _CACHE_PROVIDER.get() == initial_provider

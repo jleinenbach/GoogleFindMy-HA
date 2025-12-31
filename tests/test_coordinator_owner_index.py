@@ -105,7 +105,8 @@ def test_fcm_owner_index_fallback_routes_entry(
     try:
         receiver = FcmReceiverHA()
         hass = SimpleNamespace(
-            data={DOMAIN: {"device_owner_index": {"device-z": "entry-target"}}}
+            data={DOMAIN: {"device_owner_index": {"device-z": "entry-target"}}},
+            loop=loop,  # P0 fix: provide loop for thread-safe dispatch
         )
         receiver.attach_hass(hass)
 
@@ -129,6 +130,9 @@ def test_fcm_owner_index_fallback_routes_entry(
             None,
             None,
         )
+
+        # P0 fix: allow async handler to execute
+        loop.run_until_complete(asyncio.sleep(0.01))
 
         assert seen == [{"entry-target"}]
     finally:
