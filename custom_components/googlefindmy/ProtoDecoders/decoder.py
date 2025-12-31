@@ -738,11 +738,21 @@ def get_devices_with_location(
 
     for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
+        # FIX: For phones (IDENTIFIER_ANDROID), use only the FIRST canonical ID.
+        # Phones can have multiple canonical IDs in the array (e.g., after re-pairing),
+        # but only the first/primary ID should be used to avoid creating duplicate
+        # device entries. This matches fcm_receiver_ha._extract_canonic_id_from_response().
+        is_android_device = False
         try:
-            if device.identifierInformation.type == DeviceUpdate_pb2.IDENTIFIER_ANDROID:
-                canonic_ids = (
+            is_android_device = (
+                device.identifierInformation.type == DeviceUpdate_pb2.IDENTIFIER_ANDROID
+            )
+            if is_android_device:
+                all_ids = (
                     device.identifierInformation.phoneInformation.canonicIds.canonicId
                 )
+                # Use only the first canonical ID for phones to prevent duplicates
+                canonic_ids = all_ids[:1] if all_ids else []
             else:
                 canonic_ids = device.identifierInformation.canonicIds.canonicId
         except Exception:
@@ -928,17 +938,8 @@ def get_devices_with_location(
                 [str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids]
             )
 
-            # Check if this is a phone/Android device (keys come from Locate flow)
-            is_android_device = False
-            try:
-                is_android_device = (
-                    device.identifierInformation.type
-                    == DeviceUpdate_pb2.IDENTIFIER_ANDROID
-                )
-            except Exception:
-                pass
-
             # Check if device has reduced fields (no 'information' block)
+            # Note: is_android_device is already set at the top of the device loop
             has_information_block = device.HasField("information")
 
             # Phone devices legitimately don't have keys in list_devices - this is expected.
