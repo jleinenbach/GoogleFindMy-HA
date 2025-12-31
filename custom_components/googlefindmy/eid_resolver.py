@@ -762,6 +762,13 @@ class GoogleFindMyEIDResolver:
             or identity.identity_key is None
             or identity.registry_id is None
         ):
+            _LOGGER.debug(
+                "Skipping work item for %s: config_entry_id=%s, identity_key=%s, registry_id=%s",
+                identity.canonical_id,
+                bool(identity.config_entry_id),
+                identity.identity_key is not None,
+                bool(identity.registry_id),
+            )
             return None
 
         clean_canonical_id = identity.canonical_id
@@ -1008,6 +1015,12 @@ class GoogleFindMyEIDResolver:
                 raw_anchor = getattr(work_item.identity, basis, None)
                 anchor_value = _normalize_counter_candidate(raw_anchor, basis=basis)
                 if anchor_value is None:
+                    _LOGGER.debug(
+                        "Skipping basis %s for %s: raw_anchor=%s (normalized=None)",
+                        basis,
+                        work_item.registry_id,
+                        raw_anchor,
+                    )
                     continue
                 candidate_value = now_unix - anchor_value
                 reference_ts = candidate_value
@@ -1036,6 +1049,12 @@ class GoogleFindMyEIDResolver:
 
             normalized = _normalize_counter_candidate(candidate_value, basis=basis)
             if normalized is None:
+                _LOGGER.debug(
+                    "Skipping basis %s for %s: candidate_value=%s (counter normalized=None)",
+                    basis,
+                    work_item.registry_id,
+                    candidate_value,
+                )
                 continue
             reference_ts = normalized
 
