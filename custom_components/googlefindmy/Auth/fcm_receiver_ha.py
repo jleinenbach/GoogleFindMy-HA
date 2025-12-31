@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextvars
 import functools
 import json
 import logging
@@ -65,7 +66,8 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Iterator, ParamSpec, TypeVar, cast
 
 from aiohttp import ClientError
 from homeassistant.helpers import issue_registry as ir
@@ -267,6 +269,9 @@ class FcmReceiverHA:
         self._entry_health: dict[str, bool] = {}
         self._entry_last_connected_wall: dict[str, float] = {}
 
+        # Active background tasks for exception tracking (P0 fix)
+        self._active_tasks: set[asyncio.Task[Any]] = set()
+
     def _clear_fatal_error_for_entry(
         self, entry_id: str, *, reason: str | None = None
     ) -> None:
@@ -334,6 +339,91 @@ class FcmReceiverHA:
     def attach_hass(self, hass: HomeAssistant) -> None:
         """Optionally attach Home Assistant for owner-index fallback routing."""
         self._hass = hass
+
+    # -------------------- Loop-safe dispatch (P0 fix) --------------------
+
+    def _dispatch_to_hass_loop(
+        self, coro: Awaitable[Any], *, label: str
+    ) -> None:
+        """Dispatch a coroutine into the HA event loop from any thread safely.
+
+        This fixes P0 thread-safety issue: _on_notification may be called from
+        a non-event-loop thread by the FCM client. Using asyncio.create_task
+        directly would fail with 'no running event loop'.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            # Already in an event loop - schedule directly
+            task = loop.create_task(coro, name=f"{DOMAIN}.{label}")  # type: ignore[arg-type]
+            self._track_task(task, label=label)
+            return
+        except RuntimeError:
+            # No running loop in this thread; schedule onto HA loop
+            pass
+
+        hass_loop = getattr(self._hass, "loop", None) if self._hass else None
+        if hass_loop is None:
+            _LOGGER.error("FCM notification dropped: Home Assistant loop not available")
+            return
+
+        def _schedule() -> None:
+            task = hass_loop.create_task(coro, name=f"{DOMAIN}.{label}")  # type: ignore[arg-type]
+            self._track_task(task, label=label)
+
+        hass_loop.call_soon_threadsafe(_schedule)
+
+    def _track_task(self, task: asyncio.Task[Any], *, label: str) -> None:
+        """Ensure task exceptions are retrieved and logged.
+
+        Prevents 'Task exception was never retrieved' warnings by attaching
+        a done callback that logs any exceptions.
+        """
+        self._active_tasks.add(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            self._active_tasks.discard(t)
+            try:
+                exc = t.exception()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                _LOGGER.exception(
+                    "Unhandled exception retrieving task result (%s)", label
+                )
+                return
+            if exc:
+                _LOGGER.exception("Background task failed (%s)", label, exc_info=exc)
+
+        task.add_done_callback(_done)
+
+    @contextmanager
+    def _scoped_cache_provider(
+        self, provider: Callable[[], Any]
+    ) -> Iterator[contextvars.Token[Callable[[], Any] | None] | None]:
+        """Context manager for cache provider with guaranteed cleanup (P1-2 fix).
+
+        Uses only contextvars (not global state) to prevent cross-contamination
+        between concurrent async operations from different config entries.
+        """
+        token: contextvars.Token[Callable[[], Any] | None] | None = None
+        try:
+            # Import the context var directly to use reset() for proper cleanup
+            from custom_components.googlefindmy.NovaApi.nova_request import (
+                _CACHE_PROVIDER,
+            )
+
+            token = _CACHE_PROVIDER.set(provider)
+            yield token
+        finally:
+            if token is not None:
+                try:
+                    from custom_components.googlefindmy.NovaApi.nova_request import (
+                        _CACHE_PROVIDER,
+                    )
+
+                    _CACHE_PROVIDER.reset(token)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Cache provider reset failed: %s", err)
 
     def _monotonic_from_wall_time(
         self, wall_time: float, monotonic_now: float
@@ -987,15 +1077,32 @@ class FcmReceiverHA:
         persistent_id: str | None,
         context: Any | None,
     ) -> None:
-        """Handle incoming FCM notification (sync callback from per-entry client)."""
+        """Handle incoming FCM notification (sync callback from per-entry client).
+
+        This callback may be invoked from any thread by the FCM client.
+        We use _dispatch_to_hass_loop for thread-safe async dispatch (P0 fix).
+        """
         _ = persistent_id  # maintained for signature compatibility
         _ = context
+
+        # Thread-safe dispatch to HA event loop
+        label = f"fcm-notification[{entry_id[:8] if entry_id else 'unknown'}]"
+        self._dispatch_to_hass_loop(
+            self._handle_notification_async(entry_id, payload),
+            label=label,
+        )
+
+    async def _handle_notification_async(
+        self, entry_id: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Async handler executed in HA loop: parse, route, and schedule downstream work."""
         try:
             hex_string = self._extract_hex_payload(payload)
             if hex_string is None:
                 return
 
-            canonic_id = self._extract_canonic_id_from_response(hex_string)
+            # P1 fix: offload protobuf parsing to executor
+            canonic_id = await self._extract_canonic_id_async(hex_string)
             if not canonic_id:
                 _LOGGER.debug("FCM response has no canonical id")
                 return
@@ -1009,9 +1116,7 @@ class FcmReceiverHA:
             cb = self.location_update_callbacks.get(canonic_id)
             if cb:
                 self._log_push_received(canonic_id, target_entries, route_src, 1)
-                asyncio.create_task(
-                    self._run_callback_async(cb, canonic_id, hex_string)
-                )
+                await self._run_callback_async(cb, canonic_id, hex_string)
                 return
 
             tracked = [
@@ -1033,14 +1138,12 @@ class FcmReceiverHA:
                 )
                 return
 
-            asyncio.create_task(
-                self._process_background_update(
-                    entry_id, canonic_id, hex_string, target_entries
-                )
+            await self._process_background_update(
+                entry_id, canonic_id, hex_string, target_entries
             )
 
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Error processing FCM notification: %s", err)
+        except Exception:
+            _LOGGER.exception("Failed to handle FCM notification safely")
 
     # -------------------- Routing helpers --------------------
 
@@ -1328,11 +1431,31 @@ class FcmReceiverHA:
             _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
         return None
 
+    async def _extract_canonic_id_async(self, hex_response: str) -> str | None:
+        """Extract canonical ID via the decoder in an executor (P1-1 fix).
+
+        Offloads CPU-bound protobuf parsing to avoid blocking the event loop.
+        """
+        return await _call_in_executor(
+            self._extract_canonic_id_from_response, hex_response
+        )
+
     async def _run_callback_async(
         self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
     ) -> None:
-        """Run a potentially blocking callback in a thread."""
-        await _call_in_executor(callback, canonic_id, hex_string)
+        """Run a user callback safely without unhandled task exceptions (P0-2 fix).
+
+        Catches and logs exceptions to prevent 'Task exception was never retrieved'.
+        """
+        try:
+            await _call_in_executor(callback, canonic_id, hex_string)
+        except Exception:
+            # Do NOT log the full payload - use length only for safety
+            _LOGGER.exception(
+                "FCM locate callback failed (canonic_id=%s, payload_len=%d)",
+                canonic_id[:8] if canonic_id else "unknown",
+                len(hex_string) if hex_string else 0,
+            )
 
     # -------------------- Push-path decode → debounce → flush --------------------
 
@@ -1446,9 +1569,17 @@ class FcmReceiverHA:
     async def _decode_background_location_async(
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
-        """Decode background location using protobuf decoders (CPU-bound)."""
+        """Decode background location using protobuf decoders.
+
+        P1 fixes applied:
+        - Protobuf parsing offloaded to executor (non-blocking)
+        - Scoped cache provider prevents cross-contamination between entries
+        """
         try:
-            device_update = decoder_module.parse_device_update_protobuf(hex_string)
+            # P1-1: Offload CPU-bound protobuf parsing to executor
+            device_update = await _call_in_executor(
+                decoder_module.parse_device_update_protobuf, hex_string
+            )
             cache = self._entry_caches.get(entry_id)
             if cache is None:
                 _LOGGER.error(
@@ -1457,19 +1588,18 @@ class FcmReceiverHA:
                 )
                 return {}
 
-            nova_request.register_cache_provider(lambda: cache)
-            try:
-                raw_locations = await async_decrypt_location_response_locations(
-                    device_update, cache=cache
-                )
-            except StaleOwnerKeyError:
-                _LOGGER.info(
-                    "Background location update skipped (stale key) for entry %s",
-                    entry_id,
-                )
-                return {}
-            finally:
-                nova_request.unregister_cache_provider()
+            # P1-2: Use scoped context manager for proper cleanup
+            with self._scoped_cache_provider(lambda: cache):
+                try:
+                    raw_locations = await async_decrypt_location_response_locations(
+                        device_update, cache=cache
+                    )
+                except StaleOwnerKeyError:
+                    _LOGGER.info(
+                        "Background location update skipped (stale key) for entry %s",
+                        entry_id,
+                    )
+                    return {}
 
             locations: list[JSONDict] = (
                 raw_locations if raw_locations is not None else []
