@@ -61,7 +61,8 @@ def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.Go
 async def test_decrypted_key_reaches_coordinator_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    identity_key = b"new_decrypted_bytes_source_of_truth"
+    # FIX: identity_key must be exactly 32 bytes for hex conversion
+    identity_key = b"new_decrypted_key_source_truth!!"  # 32 bytes
     timestamp = int(time.time())
 
     semantic_location = SimpleNamespace(
@@ -107,11 +108,13 @@ async def test_decrypted_key_reaches_coordinator_cache(
 
     assert decrypted_payloads
     payload = decrypted_payloads[0]
-    assert payload["identity_key"] == identity_key
+    # FIX: identity_key is now returned as hex string
+    assert payload["identity_key"] == identity_key.hex()
 
     coordinator = _build_coordinator(monkeypatch)
     coordinator.update_device_cache("device-1", payload)
 
     stored_data = coordinator.get_device_location_data("device-1")
     assert stored_data is not None
+    # Coordinator normalizes identity_key to bytes when storing
     assert stored_data["identity_key"] == identity_key

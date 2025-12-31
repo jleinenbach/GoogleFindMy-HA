@@ -175,7 +175,7 @@ class TestEidDataPersistence:
         async def mock_refresh_coro() -> None:
             pass
 
-        mock_resolver.async_trigger_immediate_refresh = lambda: mock_refresh_coro()
+        mock_resolver.async_refresh = lambda: mock_refresh_coro()
 
         # Create coordinator with eid_resolver in hass.data[DOMAIN][DATA_EID_RESOLVER]
         coordinator = _create_test_coordinator(eid_resolver=mock_resolver)

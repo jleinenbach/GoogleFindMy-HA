@@ -7059,8 +7059,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not anchor_payload:
             return
 
-        _persist_registry_anchor_metadata(anchor_payload)
-
         existing = self._device_location_data.get(device_id)
         merged: dict[str, Any] = {}
         if isinstance(existing, Mapping):
@@ -7074,6 +7072,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             merged["metadata_only"] = True
 
         self._device_location_data[device_id] = merged
+
+        # FIX: Trigger EID refresh AFTER cache is updated, not before.
+        # This ensures the phone's identity_key is available when the resolver
+        # collects device identities.
+        _persist_registry_anchor_metadata(anchor_payload)
 
     def _get_predicted_poll_time(self) -> float | None:
         """Predict the earliest next update time based on device histories."""

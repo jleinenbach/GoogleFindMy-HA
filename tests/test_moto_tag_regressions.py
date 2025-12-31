@@ -26,7 +26,8 @@ async def test_moto_tag_decryption_unwraps_and_injects_metadata(
     base_now = 1_700_000_000
     creation_seconds = base_now - 123
     encrypted_identity_key = b"\x99" * decrypt_locations.EIK_GCM_TOTAL_LEN
-    decrypted_identity_key = b"DecryptedMotoTagIdentityKey!!"[:32]
+    # FIX: decrypted_identity_key must be exactly 32 bytes for hex conversion
+    decrypted_identity_key = b"DecryptedMotoTagIdentityKey!!!!!"  # 32 bytes
 
     location_proto = DeviceUpdate_pb2.Location()
     location_proto.latitude = int(40.0 * 1e7)
@@ -79,7 +80,8 @@ async def test_moto_tag_decryption_unwraps_and_injects_metadata(
     assert decrypt_mock.called
     assert results
     payload = results[0]
-    assert payload["identity_key"] == decrypted_identity_key
+    # FIX: identity_key is now returned as hex string
+    assert payload["identity_key"] == decrypted_identity_key.hex()
     assert payload.get("secrets_creation_date") is not None
     assert payload["secrets_creation_date"] == creation_seconds
 
@@ -107,9 +109,9 @@ def test_persistence_writes_moto_tag_material(monkeypatch: pytest.MonkeyPatch) -
             coro.close()  # type: ignore[union-attr]
         return MagicMock()
 
-    # Create a mock EID resolver with async_trigger_immediate_refresh
+    # Create a mock EID resolver with async_refresh
     mock_eid_resolver = MagicMock()
-    mock_eid_resolver.async_trigger_immediate_refresh = mock_refresh
+    mock_eid_resolver.async_refresh = mock_refresh
 
     coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
         coordinator_module.GoogleFindMyCoordinator

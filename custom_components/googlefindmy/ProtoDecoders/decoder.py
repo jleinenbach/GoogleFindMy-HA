@@ -407,11 +407,13 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
                 if ts_val is not None and union.get(ts_key) is None:
                     union[ts_key] = ts_val
 
-        # identity key material (bytes)
+        # identity key material (convert bytes to hex string for consistency)
         if union.get("identity_key") is None:
             ik_val = cand.get("identity_key")
             if isinstance(ik_val, (bytes, bytearray)) and ik_val:
-                union["identity_key"] = bytes(ik_val)
+                union["identity_key"] = bytes(ik_val).hex()
+            elif isinstance(ik_val, str) and ik_val:
+                union["identity_key"] = ik_val
 
         # encrypted_identity_key (convert bytes to hex string for consistency)
         if union.get("encrypted_identity_key") is None:
