@@ -80,8 +80,7 @@ async def test_moto_tag_decryption_unwraps_and_injects_metadata(
     assert decrypt_mock.called
     assert results
     payload = results[0]
-    # FIX: identity_key is now returned as hex string
-    assert payload["identity_key"] == decrypted_identity_key.hex()
+    assert payload["identity_key"] == decrypted_identity_key
     assert payload.get("secrets_creation_date") is not None
     assert payload["secrets_creation_date"] == creation_seconds
 
@@ -159,3 +158,82 @@ def test_little_endian_generation_registers_variants() -> None:
 
     assert be_eid != le_eid
     assert len(be_eid) == len(le_eid)
+
+
+def test_hex_string_identity_key_normalization() -> None:
+    """Hex string identity_key should be properly normalized to bytes.
+
+    Regression test: Phones may return identity_key as hex strings while
+    trackers return bytes. The coordinator must normalize both formats
+    before length validation (fixes bug at line 5326).
+    """
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+
+    # Test bytes normalization
+    raw_bytes = b"\xaa" * 32
+    normalized = coordinator._normalize_identity_key(raw_bytes)
+    assert normalized == raw_bytes
+    assert isinstance(normalized, bytes)
+    assert len(normalized) == 32
+
+    # Test hex string normalization (64 chars = 32 bytes)
+    hex_string = "aa" * 32  # 64 characters representing 32 bytes
+    normalized = coordinator._normalize_identity_key(hex_string)
+    assert normalized == b"\xaa" * 32
+    assert isinstance(normalized, bytes)
+    assert len(normalized) == 32
+
+    # Test that both formats produce identical results
+    assert coordinator._normalize_identity_key(raw_bytes) == coordinator._normalize_identity_key(hex_string)
+
+
+def test_persistence_with_hex_string_identity_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hex string identity_key from phones should trigger EID resolver refresh.
+
+    Regression test: Ensures that identity_key provided as hex strings (common
+    from phone data sources) properly triggers the EID resolver refresh.
+    """
+    created_tasks: list[object] = []
+
+    async def mock_refresh() -> None:
+        pass
+
+    def mock_create_task(coro: object) -> MagicMock:
+        created_tasks.append(coro)
+        if hasattr(coro, "close"):
+            coro.close()  # type: ignore[union-attr]
+        return MagicMock()
+
+    mock_eid_resolver = MagicMock()
+    mock_eid_resolver.async_refresh = mock_refresh
+
+    coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
+        coordinator_module.GoogleFindMyCoordinator
+    )
+    coordinator._device_location_data = {}
+
+    hass_data: dict[str, Any] = {DOMAIN: {DATA_EID_RESOLVER: mock_eid_resolver}}
+    coordinator.hass = SimpleNamespace(async_create_task=mock_create_task, data=hass_data)
+
+    # Use hex string identity_key (as phones might provide)
+    hex_identity_key = "bb" * 32  # 64 chars = 32 bytes
+    payload = {
+        "identity_key": hex_identity_key,
+        "secrets_creation_date": 1_700_000_456,
+    }
+
+    coordinator._persist_anchor_metadata(
+        "phone-anchor", payload, clear_metadata_only=False
+    )
+
+    # Verify data is stored correctly
+    assert "phone-anchor" in coordinator._device_location_data
+    cached_data = coordinator._device_location_data["phone-anchor"]
+    # The hex string should be stored as-is (normalization happens in EID resolution)
+    assert cached_data["identity_key"] == hex_identity_key
+    assert cached_data["secrets_creation_date"] == 1_700_000_456
+
+    # Verify EID resolver refresh was triggered
+    assert len(created_tasks) == 1, "EID resolver refresh should be triggered for hex string identity_key"

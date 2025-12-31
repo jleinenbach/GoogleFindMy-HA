@@ -808,25 +808,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         metadata["device_type_information"] = device_type_information_metadata
         metadata.setdefault("deviceTypeInformation", device_type_information_metadata)
 
-    # FIX: Convert bytes to hex strings for consistency with other data sources
-    # This ensures identity_key and encrypted_identity_key are stored in the same
-    # format as data from device listings (hex strings, not raw bytes).
-    identity_key_hex: str | None = None
-    candidates_hex: list[str] | None = None
-    encrypted_key_hex: str | None = None
-
+    # Store identity keys as bytes (coordinator normalizes via _normalize_identity_key)
     if identity_key_bytes is not None and len(identity_key_bytes) == _EIK_LEN:
-        identity_key_hex = identity_key_bytes.hex()
-        metadata_update["identity_key"] = identity_key_hex
-        metadata_update["identityKey"] = identity_key_hex
+        metadata_update["identity_key"] = identity_key_bytes
+        metadata_update["identityKey"] = identity_key_bytes
     if identity_key_candidate_bytes:
-        candidates_hex = [c.hex() for c in identity_key_candidate_bytes if c]
-        metadata.setdefault("identity_key_candidates", candidates_hex)
-        metadata.setdefault("identityKeyCandidates", candidates_hex)
+        metadata.setdefault("identity_key_candidates", identity_key_candidate_bytes)
+        metadata.setdefault("identityKeyCandidates", identity_key_candidate_bytes)
     if raw_encrypted_identity_key:
-        encrypted_key_hex = raw_encrypted_identity_key.hex()
-        metadata_update.setdefault("encrypted_identity_key", encrypted_key_hex)
-        metadata_update.setdefault("encryptedIdentityKey", encrypted_key_hex)
+        metadata_update.setdefault("encrypted_identity_key", raw_encrypted_identity_key)
+        metadata_update.setdefault("encryptedIdentityKey", raw_encrypted_identity_key)
     if raw_owner_key_version is not None:
         metadata.setdefault("owner_key_version", raw_owner_key_version)
         metadata.setdefault("ownerKeyVersion", raw_owner_key_version)
@@ -974,10 +965,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "status_code": int(loc.status),
                     "is_own_report": False,
                     "semantic_name": loc.name,
-                    "encrypted_identity_key": encrypted_key_hex if raw_encrypted_identity_key else None,
+                    "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
-                    "identity_key": identity_key_hex if identity_key_bytes else None,
-                    "identity_key_candidates": candidates_hex if identity_key_candidate_bytes else None,
+                    "identity_key": identity_key_bytes,
+                    "identity_key_candidates": identity_key_candidate_bytes if identity_key_candidate_bytes else None,
                 }
                 # Internal hint helps the coordinator schedule throttling-aware cooldowns.
                 if report_hint:
@@ -1027,10 +1018,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "status_code": int(loc.status),
                     "is_own_report": loc.is_own_report,
                     "semantic_name": None,
-                    "encrypted_identity_key": encrypted_key_hex,
+                    "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
-                    "identity_key": identity_key_hex,
-                    "identity_key_candidates": candidates_hex,
+                    "identity_key": identity_key_bytes,
+                    "identity_key_candidates": identity_key_candidate_bytes,
                 }
                 if report_hint:
                     payload["_report_hint"] = report_hint
@@ -1049,8 +1040,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 payload.update(metadata_update)
 
             # Safety net: ensure identity key propagates even if metadata lacks it
-            if "identity_key" not in payload and identity_key_hex:
-                payload["identity_key"] = identity_key_hex
+            if "identity_key" not in payload and identity_key_bytes:
+                payload["identity_key"] = identity_key_bytes
 
             if metadata:
                 payload.update(metadata)

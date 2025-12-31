@@ -108,13 +108,11 @@ async def test_decrypted_key_reaches_coordinator_cache(
 
     assert decrypted_payloads
     payload = decrypted_payloads[0]
-    # FIX: identity_key is now returned as hex string
-    assert payload["identity_key"] == identity_key.hex()
+    assert payload["identity_key"] == identity_key
 
     coordinator = _build_coordinator(monkeypatch)
     coordinator.update_device_cache("device-1", payload)
 
     stored_data = coordinator.get_device_location_data("device-1")
     assert stored_data is not None
-    # Coordinator normalizes identity_key to bytes when storing
     assert stored_data["identity_key"] == identity_key
