@@ -90,6 +90,21 @@ def test_device_list_preserves_anchor_metadata(monkeypatch: pytest.MonkeyPatch) 
         "metadata_only": True,
     }
 
+    # Expected values after decoder normalizes bytes to hex strings
+    expected_values = {
+        "pair_date": 1_700_000_100,
+        "secrets_creation_date": 1_700_000_200,
+        # decoder.py converts bytes to hex strings for consistency
+        "identity_key": "aa" * 32,
+        # identity_key_candidates keeps bytes (list union preserves bytes)
+        "identity_key_candidates": [b"\xaa" * 32, b"\xbb" * 32],
+        "encrypted_identity_key_candidates": [b"\x01\x02"],
+        "device_registration": {"pairDate": 1_700_000_300},
+        "encrypted_user_secrets": {"creationDate": 1_700_000_400},
+        "time_anchors_debug": {"source": "device_list"},
+        "metadata_only": True,
+    }
+
     with patch(_DECRYPT_LOCATIONS_TARGET, return_value=[anchor_payload]) as mocked:
         rows = get_devices_with_location(
             devices_list,
@@ -117,7 +132,7 @@ def test_device_list_preserves_anchor_metadata(monkeypatch: pytest.MonkeyPatch) 
         "time_anchors_debug",
         "metadata_only",
     ):
-        assert row[key] == anchor_payload[key]
+        assert row[key] == expected_values[key]
 
 
 @pytest.mark.parametrize(
