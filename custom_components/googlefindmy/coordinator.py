@@ -5323,13 +5323,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 ):
                     normalized_candidates.append(normalized_key)
 
-            if identity_key is not None and len(identity_key) != _expected_identity_key_length:
-                _LOGGER.debug(
-                    "Discarding identity key with invalid length %s for %s",
-                    len(identity_key),
-                    canonical_id,
-                )
-                identity_key = None
+            # Normalize identity_key before length validation to handle hex strings
+            if identity_key is not None:
+                normalized_identity_key = self._normalize_identity_key(identity_key)
+                if normalized_identity_key is None:
+                    _LOGGER.debug(
+                        "Could not normalize identity key for %s",
+                        canonical_id,
+                    )
+                    identity_key = None
+                elif len(normalized_identity_key) != _expected_identity_key_length:
+                    _LOGGER.debug(
+                        "Discarding identity key with invalid length %s for %s",
+                        len(normalized_identity_key),
+                        canonical_id,
+                    )
+                    identity_key = None
+                else:
+                    # Use the normalized bytes version
+                    identity_key = normalized_identity_key
 
             decrypted_owner_version: int | None = None
             if (
