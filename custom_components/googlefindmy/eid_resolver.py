@@ -609,6 +609,13 @@ class GoogleFindMyEIDResolver:
 
         return bool(to_delete)
 
+    def _get_device_rotation_period(self, device_id: str) -> int:
+        """Get rotation period for a device, using learned heuristics."""
+        learned = self._learned_heuristic_params.get(device_id)
+        if learned is not None:
+            return learned.rotation_period
+        return ROTATION_PERIOD
+
     def _update_lock_health(self, device_id: str, *, now: int) -> bool:
         """Track consecutive unconfirmed refresh cycles for locked devices."""
 
@@ -616,11 +623,14 @@ class GoogleFindMyEIDResolver:
         if lock is None:
             return False
 
+        # Use device-specific rotation period (phones: 900s, trackers: 1024s, etc.)
+        device_rotation_period = self._get_device_rotation_period(device_id)
+
         last_confirmation = self._last_lock_confirmation.get(device_id)
         confirmed_recently = (
             isinstance(last_confirmation, int)
             and not isinstance(last_confirmation, bool)
-            and (now - last_confirmation) < ROTATION_PERIOD
+            and (now - last_confirmation) < device_rotation_period
         )
 
         if confirmed_recently:
@@ -636,11 +646,12 @@ class GoogleFindMyEIDResolver:
 
         if self._clear_lock_state(device_id):
             _LOGGER.debug(
-                "Lock self-heal: clearing lock for %s after %d unconfirmed refresh cycles "
-                "(last_confirmation=%s)",
+                "Lock self-heal: clearing lock for %s after %d unconfirmed "
+                "cycles (last_confirmation=%s, rotation_period=%ds)",
                 device_id,
                 miss_count,
                 last_confirmation,
+                device_rotation_period,
             )
             self._schedule_lock_save()
             return True
