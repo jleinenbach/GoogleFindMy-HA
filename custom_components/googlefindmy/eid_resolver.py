@@ -655,6 +655,12 @@ class GoogleFindMyEIDResolver:
             except Exception:  # pragma: no cover - defensive
                 continue
             self._locks[lock.device_id] = lock
+            # Restore drift offset to _known_offsets for EID calculation
+            if lock.drift_offset != 0 and lock.time_basis:
+                self._known_offsets[(lock.device_id, lock.time_basis)] = (
+                    lock.drift_offset
+                )
+                self._known_timebases[lock.device_id] = lock.time_basis
 
     async def _async_save_locks(self) -> None:
         """Persist locks to storage."""
