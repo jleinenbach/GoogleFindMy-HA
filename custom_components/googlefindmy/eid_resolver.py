@@ -85,7 +85,7 @@ LOCK_FALLBACK_RELATIVE_WINDOW_SIZE: int = 3
 EID_LENGTH = LEGACY_EID_LENGTH
 LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
 LOCK_CONFIRMATION_TTL_SECONDS = 90 * 60
-LOCK_MISS_THRESHOLD = 3
+LOCK_MISS_THRESHOLD = 2
 TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 KNOWN_OFFSET_KEY_LENGTH = 2
@@ -635,7 +635,7 @@ class GoogleFindMyEIDResolver:
             return False
 
         if self._clear_lock_state(device_id):
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Lock self-heal: clearing lock for %s after %d unconfirmed refresh cycles "
                 "(last_confirmation=%s)",
                 device_id,
