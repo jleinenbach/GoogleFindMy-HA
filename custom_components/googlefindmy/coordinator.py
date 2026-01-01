@@ -5391,7 +5391,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             has_key = bool(normalized_candidates) or identity_key is not None
             has_key = has_key or encrypted_identity_key is not None
             if not has_key:
-                _LOGGER.warning(
+                _LOGGER.debug(
                     "Missing crypto material for %s: key=%s (pair=%s). Skipping resolution.",
                     canonical_id,
                     effective_identity_for_log,

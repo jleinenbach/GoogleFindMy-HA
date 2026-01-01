@@ -171,7 +171,6 @@ async def test_stale_lock_removed_by_confirmation_ttl() -> None:
     resolver._known_offsets[(device_id, "pair_date")] = 4
     resolver._known_advertisement_reversed[device_id] = True
     resolver._known_timebases[device_id] = "pair_date"
-    resolver._lock_miss_counts[device_id] = 2
 
     last_confirmation = 100
     resolver._last_lock_confirmation[device_id] = last_confirmation
@@ -190,6 +189,5 @@ async def test_stale_lock_removed_by_confirmation_ttl() -> None:
     assert not any(key[0] == device_id for key in resolver._known_offsets)
     assert device_id not in resolver._known_advertisement_reversed
     assert device_id not in resolver._known_timebases
-    assert device_id not in resolver._lock_miss_counts
     assert device_id not in resolver._last_lock_confirmation
     assert scheduled

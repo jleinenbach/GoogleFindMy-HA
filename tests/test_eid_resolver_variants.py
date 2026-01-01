@@ -47,7 +47,6 @@ def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
     resolver._last_lock_confirmation = {}
     resolver._provisioning_warn_at = {}
     resolver._locks = {}
-    resolver._lock_miss_counts = {}
     resolver._store = SimpleNamespace(async_load=_async_noop, async_save=_async_noop)
     resolver._unsub_interval = None
     resolver._unsub_alignment = None

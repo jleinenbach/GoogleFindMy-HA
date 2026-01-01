@@ -44,7 +44,6 @@ async def test_pair_date_offset_beats_drifted_unix(
     resolver._last_lock_confirmation = {}
     resolver._provisioning_warn_at = {}
     resolver._locks = {}
-    resolver._lock_miss_counts = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()

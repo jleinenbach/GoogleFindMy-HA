@@ -1024,7 +1024,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     )
 
                     if status == HTTP_OK:
-                        return content.hex()
+                        return cast(bytes, content).hex()
 
                     text_snippet = _redact(
                         _beautify_text(content.decode(errors="ignore"))

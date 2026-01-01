@@ -251,7 +251,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
         """Processes the location update received via FCM."""
         try:
             # [DIAGNOSTIC] Capture full protobuf payload for offline schema inspection
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "[DIAG-RAW-DUMP] Device: %s | Raw Protobuf: %s",
                 response_canonic_id,
                 hex_response,
