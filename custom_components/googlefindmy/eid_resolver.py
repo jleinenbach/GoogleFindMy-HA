@@ -85,7 +85,6 @@ LOCK_FALLBACK_RELATIVE_WINDOW_SIZE: int = 3
 EID_LENGTH = LEGACY_EID_LENGTH
 LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
 LOCK_CONFIRMATION_TTL_SECONDS = 90 * 60
-LOCK_MISS_THRESHOLD = 1
 TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 KNOWN_OFFSET_KEY_LENGTH = 2
@@ -408,6 +407,8 @@ class EIDGenerationLock:
     frame_type: int | None = None
     time_basis: str | None = None
     created_at: int = field(default_factory=lambda: int(time.time()))
+    drift_offset: int = 0  # Tracked drift in seconds (positive = ahead, negative = behind)
+    last_seen_at: int | None = None  # Last successful EID match timestamp
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize lock for storage."""
@@ -422,6 +423,8 @@ class EIDGenerationLock:
             "frame_type": self.frame_type,
             "time_basis": self.time_basis,
             "created_at": self.created_at,
+            "drift_offset": self.drift_offset,
+            "last_seen_at": self.last_seen_at,
         }
 
     @classmethod
@@ -458,6 +461,10 @@ class EIDGenerationLock:
             frame_type=payload.get("frame_type"),
             time_basis=str(payload.get("time_basis") or "") or None,
             created_at=int(payload.get("created_at") or int(time.time())),
+            drift_offset=int(payload.get("drift_offset") or 0),
+            last_seen_at=int(payload["last_seen_at"])
+            if payload.get("last_seen_at") is not None
+            else None,
         )
 
 
@@ -511,7 +518,6 @@ class GoogleFindMyEIDResolver:
     _last_lock_confirmation: dict[str, int] = field(init=False, default_factory=dict)
     _provisioning_warn_at: dict[str, float] = field(init=False, default_factory=dict)
     _locks: dict[str, EIDGenerationLock] = field(init=False, default_factory=dict)
-    _lock_miss_counts: dict[str, int] = field(init=False, default_factory=dict)
     _truncated_frame_log_at: dict[tuple[int, int], float] = field(
         init=False, default_factory=dict
     )
@@ -555,8 +561,6 @@ class GoogleFindMyEIDResolver:
             self._provisioning_warn_at = {}
         if not hasattr(self, "_locks"):
             self._locks = {}
-        if not hasattr(self, "_lock_miss_counts"):
-            self._lock_miss_counts = {}
         if not hasattr(self, "_truncated_frame_log_at"):
             self._truncated_frame_log_at = {}
         # Heuristic phone discovery state
@@ -577,7 +581,6 @@ class GoogleFindMyEIDResolver:
         for attr in (
             "_locks",
             "_persisted_locks",
-            "_lock_miss_counts",
             "_known_advertisement_reversed",
             "_known_timebases",
             "_last_lock_confirmation",
@@ -608,47 +611,6 @@ class GoogleFindMyEIDResolver:
             mapping.pop(key, None)
 
         return bool(to_delete)
-
-    def _update_lock_health(self, device_id: str, *, now: int) -> bool:
-        """Clear lock immediately when EID resolution stops working.
-
-        Called every refresh cycle (ROTATION_PERIOD). If a device hasn't been
-        confirmed since the last refresh, the lock is cleared immediately to
-        trigger recomputation. This ensures devices become findable again
-        quickly rather than waiting multiple rotation periods.
-        """
-        lock = self._locks.get(device_id)
-        if lock is None:
-            return False
-
-        # Check if device was confirmed since the last refresh cycle.
-        # Use the refresh interval (ROTATION_PERIOD), not device-specific
-        # rotation, so all devices are checked equally each cycle.
-        last_confirmation = self._last_lock_confirmation.get(device_id)
-        confirmed_since_last_refresh = (
-            isinstance(last_confirmation, int)
-            and not isinstance(last_confirmation, bool)
-            and (now - last_confirmation) < ROTATION_PERIOD
-        )
-
-        if confirmed_since_last_refresh:
-            self._lock_miss_counts.pop(device_id, None)
-            return False
-
-        # No confirmation since last refresh - clear the lock immediately
-        # to allow EID recomputation on the next scan.
-        if self._clear_lock_state(device_id):
-            _LOGGER.debug(
-                "Lock cleared for %s: no confirmation in last refresh cycle "
-                "(last_confirmation=%s, age=%ds)",
-                device_id,
-                last_confirmation,
-                (now - last_confirmation) if last_confirmation else -1,
-            )
-            self._schedule_lock_save()
-            return True
-
-        return False
 
     def _start_alignment_timer(self) -> None:
         """Schedule the first refresh on the next rotation boundary."""
@@ -882,11 +844,6 @@ class GoogleFindMyEIDResolver:
         lock = self._locks.get(identity.registry_id)
         locked_variant: EidVariant | None = None
         rotation_ts: int | None = None
-
-        if lock is not None:
-            if self._update_lock_health(identity.registry_id, now=now_unix):
-                lock = self._locks.get(identity.registry_id)
-                basis_hint = self._known_timebases.get(identity.registry_id)
 
         if lock is not None:
             raw_rotation_ts = lock.rotation_timestamp
@@ -1984,7 +1941,8 @@ class GoogleFindMyEIDResolver:
                 self._known_timebases.pop(match.device_id, None)
             if anchor_basis is None and not basis_explicitly_invalid:
                 self._known_timebases.pop(match.device_id, None)
-            if match.device_id not in self._locks:
+            existing_lock = self._locks.get(match.device_id)
+            if existing_lock is None:
                 variant_value = self._normalize_variant_value(
                     metadata.get("variant"),
                     eid_len=len(candidate),
@@ -2003,13 +1961,27 @@ class GoogleFindMyEIDResolver:
                     frame_type=observed_frame,
                     time_basis=anchor_basis,
                     created_at=now,
+                    drift_offset=match.time_offset,
+                    last_seen_at=now,
                 )
                 self._locks[match.device_id] = lock
                 self._persisted_locks[match.device_id] = lock
                 self._schedule_lock_save()
+            else:
+                # Update drift tracking on existing lock
+                drift_changed = existing_lock.drift_offset != match.time_offset
+                existing_lock.drift_offset = match.time_offset
+                existing_lock.last_seen_at = now
+                if drift_changed and match.time_offset != 0:
+                    _LOGGER.debug(
+                        "Drift update for %s: offset=%d (using %s window)",
+                        match.device_id,
+                        match.time_offset,
+                        "+1/+2" if match.time_offset > 0 else "-1/-2",
+                    )
+                self._schedule_lock_save()
 
             self._known_advertisement_reversed[match.device_id] = match.is_reversed
-            self._lock_miss_counts[match.device_id] = 0
 
             if anchor_basis is not None and not basis_explicitly_invalid:
                 self._known_offsets[(match.device_id, anchor_basis)] = match.time_offset
