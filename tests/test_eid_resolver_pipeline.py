@@ -43,7 +43,6 @@ def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
     resolver._known_timebases = {}
     resolver._known_advertisement_reversed = {}
     resolver._last_lock_confirmation = {}
-    resolver._lock_miss_counts = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -75,7 +74,6 @@ async def test_reset_device_offset_clears_state_and_schedules_refresh(
     resolver._known_offsets = {("reg-1", "pair_date"): -1}
     resolver._known_timebases = {"reg-1": "pair_date"}
     resolver._known_advertisement_reversed = {"reg-1": True}
-    resolver._lock_miss_counts = {"reg-1": 2}
     resolver._last_lock_confirmation = {"reg-1": 1_234}
 
     scheduled_tasks: list[asyncio.Task[None]] = []
@@ -108,7 +106,6 @@ async def test_reset_device_offset_clears_state_and_schedules_refresh(
     assert resolver._known_offsets == {}
     assert resolver._known_timebases == {}
     assert resolver._known_advertisement_reversed == {}
-    assert resolver._lock_miss_counts == {}
     assert resolver._last_lock_confirmation == {}
     assert schedule_calls, "Lock persistence should be scheduled"
     assert refresh_calls, "Refresh should be scheduled after reset"
@@ -124,7 +121,6 @@ def test_reset_device_offset_noop_when_unknown(monkeypatch: pytest.MonkeyPatch) 
     resolver._known_offsets = {("other", "pair_date"): 0}
     resolver._known_timebases = {"other": "pair_date"}
     resolver._known_advertisement_reversed = {"other": False}
-    resolver._lock_miss_counts = {"other": 1}
     resolver._last_lock_confirmation = {"other": 1}
 
     refresh_calls: list[None] = []
@@ -147,7 +143,6 @@ def test_reset_device_offset_noop_when_unknown(monkeypatch: pytest.MonkeyPatch) 
     assert resolver._known_offsets == {("other", "pair_date"): 0}
     assert resolver._known_timebases == {"other": "pair_date"}
     assert resolver._known_advertisement_reversed == {"other": False}
-    assert resolver._lock_miss_counts == {"other": 1}
     assert resolver._last_lock_confirmation == {"other": 1}
     assert not schedule_calls
     assert not refresh_calls

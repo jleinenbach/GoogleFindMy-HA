@@ -691,7 +691,9 @@ async def _async_import_api(hass: HomeAssistant) -> type[GoogleFindMyAPI]:
 # Optional network exception typing (robust mapping without hard dependency)
 aiohttp: ModuleType | None
 try:  # pragma: no cover - environment dependent
-    import aiohttp
+    import aiohttp as _aiohttp_mod
+
+    aiohttp = _aiohttp_mod
 except Exception:  # noqa: BLE001
     aiohttp = None
 

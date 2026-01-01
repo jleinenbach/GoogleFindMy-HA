@@ -46,7 +46,6 @@ def _build_resolver() -> GoogleFindMyEIDResolver:
     resolver._decryption_status = {}
     resolver._last_lock_confirmation = {}
     resolver._provisioning_warn_at = {}
-    resolver._lock_miss_counts = {}
     resolver._truncated_frame_log_at = {}
     resolver._refresh_lock = asyncio.Lock()
     resolver._pending_refresh = False

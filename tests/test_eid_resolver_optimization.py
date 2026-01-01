@@ -45,7 +45,6 @@ async def test_known_time_basis_skips_alternate_strategies(monkeypatch: pytest.M
     resolver._last_lock_confirmation = {}
     resolver._provisioning_warn_at = {}
     resolver._locks = {}
-    resolver._lock_miss_counts = {}
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
