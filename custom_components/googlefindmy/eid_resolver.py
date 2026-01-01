@@ -85,7 +85,7 @@ LOCK_FALLBACK_RELATIVE_WINDOW_SIZE: int = 3
 EID_LENGTH = LEGACY_EID_LENGTH
 LOCK_TTL_SECONDS = 7 * 24 * 60 * 60
 LOCK_CONFIRMATION_TTL_SECONDS = 90 * 60
-LOCK_MISS_THRESHOLD = 2
+LOCK_MISS_THRESHOLD = 1
 TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 KNOWN_OFFSET_KEY_LENGTH = 2
@@ -609,49 +609,41 @@ class GoogleFindMyEIDResolver:
 
         return bool(to_delete)
 
-    def _get_device_rotation_period(self, device_id: str) -> int:
-        """Get rotation period for a device, using learned heuristics."""
-        learned = self._learned_heuristic_params.get(device_id)
-        if learned is not None:
-            return learned.rotation_period
-        return ROTATION_PERIOD
-
     def _update_lock_health(self, device_id: str, *, now: int) -> bool:
-        """Track consecutive unconfirmed refresh cycles for locked devices."""
+        """Clear lock immediately when EID resolution stops working.
 
+        Called every refresh cycle (ROTATION_PERIOD). If a device hasn't been
+        confirmed since the last refresh, the lock is cleared immediately to
+        trigger recomputation. This ensures devices become findable again
+        quickly rather than waiting multiple rotation periods.
+        """
         lock = self._locks.get(device_id)
         if lock is None:
             return False
 
-        # Use device-specific rotation period (phones: 900s, trackers: 1024s, etc.)
-        device_rotation_period = self._get_device_rotation_period(device_id)
-
+        # Check if device was confirmed since the last refresh cycle.
+        # Use the refresh interval (ROTATION_PERIOD), not device-specific
+        # rotation, so all devices are checked equally each cycle.
         last_confirmation = self._last_lock_confirmation.get(device_id)
-        confirmed_recently = (
+        confirmed_since_last_refresh = (
             isinstance(last_confirmation, int)
             and not isinstance(last_confirmation, bool)
-            and (now - last_confirmation) < device_rotation_period
+            and (now - last_confirmation) < ROTATION_PERIOD
         )
 
-        if confirmed_recently:
-            if self._lock_miss_counts.get(device_id):
-                self._lock_miss_counts[device_id] = 0
+        if confirmed_since_last_refresh:
+            self._lock_miss_counts.pop(device_id, None)
             return False
 
-        self._lock_miss_counts[device_id] = self._lock_miss_counts.get(device_id, 0) + 1
-
-        miss_count = self._lock_miss_counts[device_id]
-        if miss_count < LOCK_MISS_THRESHOLD:
-            return False
-
+        # No confirmation since last refresh - clear the lock immediately
+        # to allow EID recomputation on the next scan.
         if self._clear_lock_state(device_id):
             _LOGGER.debug(
-                "Lock self-heal: clearing lock for %s after %d unconfirmed "
-                "cycles (last_confirmation=%s, rotation_period=%ds)",
+                "Lock cleared for %s: no confirmation in last refresh cycle "
+                "(last_confirmation=%s, age=%ds)",
                 device_id,
-                miss_count,
                 last_confirmation,
-                device_rotation_period,
+                (now - last_confirmation) if last_confirmation else -1,
             )
             self._schedule_lock_save()
             return True
