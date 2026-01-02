@@ -155,7 +155,7 @@ ignore = ["E501"]
     "PLR2004",
 ]
 "custom_components/googlefindmy/device_tracker.py" = ["PLR0912", "PLR0915"]
-"custom_components/googlefindmy/diagnostics.py" = ["PLR0912", "PLR0915", "UP047"]
+"custom_components/googlefindmy/diagnostics.py" = ["PLR0912", "PLR0915", "UP047", "PLC0415"]
 "custom_components/googlefindmy/system_health.py" = ["UP047", "PLR2004"]
 "custom_components/googlefindmy/typing_utils.py" = ["UP047"]
 "google/protobuf/internal/containers.pyi" = ["UP046"]
