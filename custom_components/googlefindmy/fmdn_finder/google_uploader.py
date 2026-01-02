@@ -113,7 +113,9 @@ async def _get_cache_from_hass(hass: HomeAssistant) -> TokenCache:
         raise RuntimeError("TokenCache not available in GoogleFindMy entry data")
 
     # Import TokenCache for runtime type checking
-    from custom_components.googlefindmy.Auth.token_cache import TokenCache  # noqa: PLC0415
+    from custom_components.googlefindmy.Auth.token_cache import (  # noqa: PLC0415
+        TokenCache,
+    )
 
     return cast(TokenCache, cache)
 

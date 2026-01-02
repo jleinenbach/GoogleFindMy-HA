@@ -405,7 +405,9 @@ async def _encrypt_and_upload_location(
     # Lazy imports to avoid loading heavy crypto libraries at startup
     from ..FMDNCrypto.foreign_tracker_cryptor import encrypt  # noqa: PLC0415
     from ..ProtoDecoders.Common_pb2 import LocationReport  # noqa: PLC0415
-    from ..ProtoDecoders.LocationReportsUpload_pb2 import LocationReportsUpload  # noqa: PLC0415
+    from ..ProtoDecoders.LocationReportsUpload_pb2 import (  # noqa: PLC0415
+        LocationReportsUpload,
+    )
 
     # 1. Create LocationReport protobuf
     location_proto = LocationReport()
