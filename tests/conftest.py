@@ -619,6 +619,8 @@ def _stub_homeassistant() -> None:
     const_module.ATTR_GPS_ACCURACY = "gps_accuracy"
     const_module.STATE_UNAVAILABLE = "unavailable"
     const_module.STATE_UNKNOWN = "unknown"
+    const_module.STATE_HOME = "home"  # For FMDN Finder location filtering
+    const_module.EVENT_STATE_CHANGED = "state_changed"  # For FMDN Finder event listening
     const_module.Platform = Platform
     sys.modules["homeassistant.const"] = const_module
 
@@ -668,6 +670,19 @@ def _stub_homeassistant() -> None:
         ) -> None:
             super().__init__(event_type=event_type, data=data or {})
 
+    class State(SimpleNamespace):
+        """Minimal State stub for entity states."""
+
+        def __init__(
+            self,
+            entity_id: str,
+            state: str,
+            attributes: Mapping[str, Any] | None = None,
+        ) -> None:
+            super().__init__(
+                entity_id=entity_id, state=state, attributes=attributes or {}
+            )
+
     class HomeAssistant:  # minimal HomeAssistant placeholder
         state = CoreState.running
 
@@ -675,6 +690,7 @@ def _stub_homeassistant() -> None:
     core_module.HomeAssistant = HomeAssistant
     core_module.ServiceCall = ServiceCall
     core_module.Event = Event
+    core_module.State = State
     core_module.CALLBACK_TYPE = Callable[[], None]
     install_homeassistant_core_callback_stub(module=core_module, overwrite=True)
 
@@ -1446,6 +1462,14 @@ def _stub_homeassistant() -> None:
         return lambda: None
 
     event_module.async_track_time_interval = _async_track_time_interval
+
+    def _async_track_state_change_event(
+        hass, entity_ids, action, **_kwargs
+    ) -> Callable[[], None]:  # pragma: no cover - stubbed for FMDN Finder
+        del hass, entity_ids, action, _kwargs
+        return lambda: None
+
+    event_module.async_track_state_change_event = _async_track_state_change_event
     sys.modules["homeassistant.helpers.event"] = event_module
     setattr(helpers_pkg, "event", event_module)
 
