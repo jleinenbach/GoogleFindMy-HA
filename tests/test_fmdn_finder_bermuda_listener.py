@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -83,7 +83,6 @@ async def test_bermuda_state_change_with_valid_fmdn_eid(hass_mock):
 @pytest.mark.asyncio
 async def test_bermuda_state_change_ignores_non_fmdn_entities(hass_mock):
     """Test that non-FMDN entities are ignored."""
-    from homeassistant.const import EVENT_STATE_CHANGED
 
     await async_setup_bermuda_listener(hass_mock)
 
@@ -108,7 +107,6 @@ async def test_bermuda_state_change_ignores_non_fmdn_entities(hass_mock):
 @pytest.mark.asyncio
 async def test_bermuda_state_change_validates_eid_length(hass_mock):
     """Test that invalid EID lengths are rejected."""
-    from homeassistant.const import EVENT_STATE_CHANGED
 
     mock_uploader = AsyncMock()
 
@@ -141,7 +139,6 @@ async def test_bermuda_state_change_validates_eid_length(hass_mock):
 @pytest.mark.asyncio
 async def test_bermuda_state_change_accepts_32_byte_eid(hass_mock):
     """Test that 32-byte EID is accepted (FMDN spec allows 20 or 32)."""
-    from homeassistant.const import EVENT_STATE_CHANGED
 
     mock_uploader = AsyncMock()
 

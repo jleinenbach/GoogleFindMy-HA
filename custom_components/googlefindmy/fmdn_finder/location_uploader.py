@@ -25,9 +25,6 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from homeassistant.components.zone import async_active_zone
-from homeassistant.const import STATE_HOME
-
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant, State
 
@@ -42,6 +39,19 @@ MIN_UPLOAD_INTERVAL_BATTERY_SAVER = 900  # 15 minutes in battery saver mode
 # Accuracy thresholds
 MAX_ZONE_ACCURACY_METERS = 100  # Zone-based location accuracy
 DEFAULT_HOME_ZONE_ACCURACY = 50  # Default home zone accuracy
+
+# RSSI-based distance estimation thresholds (dBm)
+RSSI_THRESHOLD_VERY_CLOSE = -60  # < -60 dBm = very close (2m estimated)
+RSSI_THRESHOLD_CLOSE = -70  # < -70 dBm = close (5m estimated)
+RSSI_THRESHOLD_MEDIUM = -80  # < -80 dBm = medium (10m estimated)
+RSSI_THRESHOLD_FAR = -90  # < -90 dBm = far (20m estimated)
+
+# Cache management
+UPLOAD_CACHE_MAX_ENTRIES = 100  # Maximum cached upload entries
+UPLOAD_CACHE_CLEANUP_COUNT = 50  # Number of old entries to remove
+
+# Log formatting
+EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
 
 # Data storage keys
 DATA_FMDN_UPLOAD_CACHE = "fmdn_finder_upload_cache"
@@ -67,7 +77,7 @@ class UploadCacheEntry:
     timestamp: float
 
 
-async def async_process_fmdn_beacon_detection(
+async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     hass: HomeAssistant,
     *,
     eid: bytes,
@@ -96,7 +106,7 @@ async def async_process_fmdn_beacon_detection(
     eid_hex = eid.hex()
     _LOGGER.debug(
         "Processing FMDN beacon: EID=%s..., area=%s, RSSI=%s",
-        eid_hex[:8],
+        eid_hex[:EID_LOG_PREFIX_LENGTH],
         area,
         rssi,
     )
@@ -124,12 +134,12 @@ async def async_process_fmdn_beacon_detection(
     should_upload, reason = await _should_upload_location(hass, eid_hex, location)
 
     if not should_upload:
-        _LOGGER.debug("Upload throttled for EID %s...: %s", eid_hex[:8], reason)
+        _LOGGER.debug("Upload throttled for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason)
         return
 
     _LOGGER.info(
         "Uploading FMDN location report: EID=%s..., zone=%s, accuracy=%dm",
-        eid_hex[:8],
+        eid_hex[:EID_LOG_PREFIX_LENGTH],
         location.zone_name,
         location.accuracy,
     )
@@ -146,12 +156,12 @@ async def async_process_fmdn_beacon_detection(
         # Update cache on successful upload
         _update_upload_cache(hass, eid_hex, location)
 
-        _LOGGER.info("FMDN location report uploaded successfully for EID %s...", eid_hex[:8])
+        _LOGGER.info("FMDN location report uploaded successfully for EID %s...", eid_hex[:EID_LOG_PREFIX_LENGTH])
 
     except Exception as err:  # noqa: BLE001
         _LOGGER.error(
             "Failed to upload FMDN location report for EID %s...: %s",
-            eid_hex[:8],
+            eid_hex[:EID_LOG_PREFIX_LENGTH],
             err,
             exc_info=True,
         )
@@ -358,13 +368,13 @@ def _calculate_accuracy_from_rssi(rssi: int, zone_accuracy: int) -> int:
     # Formula: distance = 10 ^ ((TxPower - RSSI) / (10 * N))
     # Assuming TxPower = -59 dBm (typical), N = 2.5 (indoor)
 
-    if rssi > -60:
+    if rssi > RSSI_THRESHOLD_VERY_CLOSE:
         estimated_distance = 2  # Very close
-    elif rssi > -70:
+    elif rssi > RSSI_THRESHOLD_CLOSE:
         estimated_distance = 5  # Close
-    elif rssi > -80:
+    elif rssi > RSSI_THRESHOLD_MEDIUM:
         estimated_distance = 10  # Medium
-    elif rssi > -90:
+    elif rssi > RSSI_THRESHOLD_FAR:
         estimated_distance = 20  # Far
     else:
         estimated_distance = 30  # Very far
@@ -393,12 +403,9 @@ async def _encrypt_and_upload_location(
         ValueError: If encryption fails
     """
     # Lazy imports to avoid loading heavy crypto libraries at startup
-    from ..FMDNCrypto.foreign_tracker_cryptor import encrypt
-    from ..ProtoDecoders.LocationReportsUpload_pb2 import (
-        LocationReportsUpload,
-        LocationReport,
-        Report,
-    )
+    from ..FMDNCrypto.foreign_tracker_cryptor import encrypt  # noqa: PLC0415
+    from ..ProtoDecoders.Common_pb2 import LocationReport  # noqa: PLC0415
+    from ..ProtoDecoders.LocationReportsUpload_pb2 import LocationReportsUpload  # noqa: PLC0415
 
     # 1. Create LocationReport protobuf
     location_proto = LocationReport()
@@ -456,7 +463,7 @@ async def _encrypt_and_upload_location(
     _LOGGER.debug("Upload protobuf: %d bytes", len(upload_bytes))
 
     # 4. Upload to Google FMDN backend
-    from .google_uploader import async_upload_to_google_fmdn
+    from .google_uploader import async_upload_to_google_fmdn  # noqa: PLC0415
 
     await async_upload_to_google_fmdn(hass, upload_bytes, eid[:10].hex())
 
@@ -479,8 +486,8 @@ def _update_upload_cache(hass: HomeAssistant, eid_hex: str, location: LocationDa
         timestamp=time.time(),
     )
 
-    # Cleanup old entries (keep last 100)
-    if len(upload_cache) > 100:
-        oldest_keys = sorted(upload_cache.keys(), key=lambda k: upload_cache[k].timestamp)[:50]
+    # Cleanup old entries (keep last UPLOAD_CACHE_MAX_ENTRIES)
+    if len(upload_cache) > UPLOAD_CACHE_MAX_ENTRIES:
+        oldest_keys = sorted(upload_cache.keys(), key=lambda k: upload_cache[k].timestamp)[:UPLOAD_CACHE_CLEANUP_COUNT]
         for key in oldest_keys:
             upload_cache.pop(key, None)

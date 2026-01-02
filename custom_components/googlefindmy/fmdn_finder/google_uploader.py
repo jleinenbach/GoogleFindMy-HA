@@ -22,8 +22,13 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from typing import cast
+
     from homeassistant.core import HomeAssistant
+
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
+else:
+    from typing import cast
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,7 +112,10 @@ async def _get_cache_from_hass(hass: HomeAssistant) -> TokenCache:
     if cache is None:
         raise RuntimeError("TokenCache not available in GoogleFindMy entry data")
 
-    return cache
+    # Import TokenCache for runtime type checking
+    from custom_components.googlefindmy.Auth.token_cache import TokenCache  # noqa: PLC0415
+
+    return cast(TokenCache, cache)
 
 
 async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> None:
@@ -173,7 +181,7 @@ async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
 
     # Check SpotApi patterns
     try:
-        from ..SpotApi import spot_request
+        from ..SpotApi import spot_request  # noqa: PLC0415
 
         for attr in dir(spot_request):
             if "ENDPOINT" in attr.upper() or "URL" in attr.upper() or "METHOD" in attr.upper():

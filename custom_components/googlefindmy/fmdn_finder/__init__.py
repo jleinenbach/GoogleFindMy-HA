@@ -37,7 +37,7 @@ async def async_setup_fmdn_finder(hass: HomeAssistant) -> bool:
     Returns:
         True if setup successful, False otherwise
     """
-    from .bermuda_listener import async_setup_bermuda_listener
+    from .bermuda_listener import async_setup_bermuda_listener  # noqa: PLC0415
 
     _LOGGER.info("Setting up FMDN Finder integration")
 
@@ -60,7 +60,7 @@ async def async_unload_fmdn_finder(hass: HomeAssistant) -> bool:
     Returns:
         True if unload successful
     """
-    from .bermuda_listener import async_unload_bermuda_listener
+    from .bermuda_listener import async_unload_bermuda_listener  # noqa: PLC0415
 
     _LOGGER.info("Unloading FMDN Finder integration")
 

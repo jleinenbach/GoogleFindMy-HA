@@ -16,7 +16,8 @@ def test_no_micro_sign_in_repository() -> None:
     offenders: list[Path] = []
 
     for path in repo_root.rglob("*"):
-        if ".venv" in path.parts:
+        # Skip all virtual environment directories
+        if any(part.startswith(".venv") for part in path.parts):
             continue
 
         if not path.is_file():

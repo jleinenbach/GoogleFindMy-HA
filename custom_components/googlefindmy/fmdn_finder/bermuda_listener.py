@@ -10,11 +10,11 @@ FMDN Specification: FMDN.md Section 3 (BLE Advertising & EID)
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, HomeAssistant, State, callback
-from homeassistant.helpers.event import async_track_state_change_event
 
 if TYPE_CHECKING:
     from homeassistant.helpers.event import EventStateChangedData
@@ -34,6 +34,9 @@ ATTR_FMDN_DEVICE_ID = "fmdn_device_id"
 DATA_BERMUDA_LISTENER = "fmdn_finder_bermuda_listener"
 DATA_BERMUDA_UNSUBSCRIBE = "fmdn_finder_bermuda_unsub"
 
+# Log formatting constants
+EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
+
 
 async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     """Setup Bermuda integration event listener for FMDN beacons.
@@ -49,15 +52,17 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     """
     # Lazy import to avoid circular dependencies
     try:
-        from .location_uploader import async_process_fmdn_beacon_detection
+        from .location_uploader import (  # noqa: PLC0415
+            async_process_fmdn_beacon_detection,
+        )
     except ImportError as err:
         _LOGGER.error("Failed to import location_uploader: %s", err)
         raise RuntimeError("FMDN Finder location_uploader not available") from err
 
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    @callback
-    def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:
+    @callback  # type: ignore[untyped-decorator]
+    def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:  # noqa: PLR0911
         """Handle Bermuda entity state changes.
 
         Filters for FMDN-related entities and extracts beacon data.
@@ -68,15 +73,13 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
         entity_id: str | None = event.data.get("entity_id")
         new_state: State | None = event.data.get("new_state")
 
+        # Combined early validation checks
         if not entity_id or not new_state:
             return
 
         # Filter for Bermuda FMDN entities
         # Bermuda creates sensors like: sensor.bermuda_fmdn_device_xxxxx
-        if not entity_id.startswith(f"sensor.{BERMUDA_DOMAIN}_"):
-            return
-
-        if "fmdn" not in entity_id.lower():
+        if not entity_id.startswith(f"sensor.{BERMUDA_DOMAIN}_") or "fmdn" not in entity_id.lower():
             return
 
         # Extract FMDN attributes from Bermuda state
@@ -110,7 +113,7 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
         _LOGGER.debug(
             "FMDN beacon detected: entity=%s, EID=%s..., area=%s, rssi=%s, scanner=%s",
             entity_id,
-            fmdn_eid_hex[:8] if len(fmdn_eid_hex) >= 8 else fmdn_eid_hex,
+            fmdn_eid_hex[:EID_LOG_PREFIX_LENGTH] if len(fmdn_eid_hex) >= EID_LOG_PREFIX_LENGTH else fmdn_eid_hex,
             area,
             rssi,
             scanner_source,

@@ -22,7 +22,9 @@ import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List, Set
+
+# Display constants
+LOG_LINE_MAX_LENGTH = 100  # Maximum log line length before truncation
 
 
 @dataclass
@@ -108,9 +110,9 @@ def parse_logcat_line(line: str) -> tuple[str, str, str] | None:
     return None
 
 
-def analyze_line(line: str, line_num: int) -> List[EndpointCandidate]:
+def analyze_line(line: str, line_num: int) -> list[EndpointCandidate]:
     """Analyze a single logcat line for FMDN endpoints."""
-    candidates = []
+    candidates: list[EndpointCandidate] = []
 
     parsed = parse_logcat_line(line)
     if not parsed:
@@ -149,7 +151,7 @@ def analyze_line(line: str, line_num: int) -> List[EndpointCandidate]:
     return candidates
 
 
-def analyze_logcat(file_path: str | None = None) -> List[EndpointCandidate]:
+def analyze_logcat(file_path: str | None = None) -> list[EndpointCandidate]:
     """Analyze logcat output for FMDN endpoints.
 
     Args:
@@ -195,20 +197,21 @@ def analyze_logcat(file_path: str | None = None) -> List[EndpointCandidate]:
             )
 
             line_num = 0
-            for line in process.stdout:
-                line_num += 1
-                line_candidates = analyze_line(line, line_num)
+            if process.stdout is not None:
+                for line in process.stdout:
+                    line_num += 1
+                    line_candidates = analyze_line(line, line_num)
 
-                # Print high-confidence findings immediately
-                for candidate in line_candidates:
-                    if candidate.confidence == "high":
-                        print(f"\n🎯 HIGH CONFIDENCE MATCH:")
-                        print(f"   URL: {candidate.url}")
-                        print(f"   Source: {candidate.source}")
-                        print(f"   Log: {candidate.log_line[:120]}...")
-                        print()
+                    # Print high-confidence findings immediately
+                    for candidate in line_candidates:
+                        if candidate.confidence == "high":
+                            print("\n🎯 HIGH CONFIDENCE MATCH:")
+                            print(f"   URL: {candidate.url}")
+                            print(f"   Source: {candidate.source}")
+                            print(f"   Log: {candidate.log_line[:120]}...")
+                            print()
 
-                candidates.extend(line_candidates)
+                    candidates.extend(line_candidates)
 
         except KeyboardInterrupt:
             print("\n[*] Stopped live analysis.")
@@ -219,7 +222,7 @@ def analyze_logcat(file_path: str | None = None) -> List[EndpointCandidate]:
     return candidates
 
 
-def print_summary(candidates: List[EndpointCandidate]) -> None:
+def print_summary(candidates: list[EndpointCandidate]) -> None:  # noqa: PLR0915
     """Print analysis summary with ranked candidates."""
     if not candidates:
         print("❌ No FMDN endpoints found in logs.")
@@ -232,7 +235,7 @@ def print_summary(candidates: List[EndpointCandidate]) -> None:
         return
 
     print(f"\n{'=' * 80}")
-    print(f"FMDN ENDPOINT ANALYSIS SUMMARY")
+    print("FMDN ENDPOINT ANALYSIS SUMMARY")
     print(f"{'=' * 80}\n")
 
     # Group by confidence
@@ -241,7 +244,7 @@ def print_summary(candidates: List[EndpointCandidate]) -> None:
         by_confidence[candidate.confidence].append(candidate)
 
     # Deduplicate URLs
-    seen_urls: Set[str] = set()
+    seen_urls: set[str] = set()
 
     for confidence in ["high", "medium", "low"]:
         if confidence not in by_confidence:
@@ -259,8 +262,8 @@ def print_summary(candidates: List[EndpointCandidate]) -> None:
             print(f"\n  🔗 {candidate.url}")
             print(f"     Method: {candidate.method}")
             print(f"     Source: {candidate.source}")
-            if len(candidate.log_line) > 100:
-                print(f"     Log: {candidate.log_line[:97]}...")
+            if len(candidate.log_line) > LOG_LINE_MAX_LENGTH:
+                print(f"     Log: {candidate.log_line[:LOG_LINE_MAX_LENGTH-3]}...")
             else:
                 print(f"     Log: {candidate.log_line}")
 
@@ -275,9 +278,9 @@ def print_summary(candidates: List[EndpointCandidate]) -> None:
         print(f"✅ Top candidate: {top_candidate.url}")
         print()
         print("Next steps:")
-        print(f"1. Update google_uploader.py:")
+        print("1. Update google_uploader.py:")
         print(f'   FMDN_UPLOAD_ENDPOINT = "{top_candidate.url}"')
-        print(f"   FMDN_UPLOAD_ENABLED = True")
+        print("   FMDN_UPLOAD_ENABLED = True")
         print()
         print("2. Test with Home Assistant")
         print("3. Monitor logs for successful uploads")
@@ -307,7 +310,7 @@ def print_summary(candidates: List[EndpointCandidate]) -> None:
     print()
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(
         description="Analyze Android logcat for FMDN endpoint discovery",
