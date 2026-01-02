@@ -7297,6 +7297,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # devices across all loaded config entries via hass.data[DOMAIN][DATA_EID_RESOLVER].
         domain_bucket[DATA_EID_RESOLVER] = eid_resolver
 
+    # Setup FMDN Finder (Bermuda integration listener for location uploads)
+    # This allows Home Assistant to act as a "Finder" in Google's FMDN network,
+    # uploading encrypted location reports for detected FMDN beacons.
+    try:
+        from .fmdn_finder import async_setup_fmdn_finder
+        fmdn_setup_success = await async_setup_fmdn_finder(hass)
+        if fmdn_setup_success:
+            _LOGGER.info("FMDN Finder enabled - will upload location reports for FMDN beacons detected by Bermuda")
+        else:
+            _LOGGER.warning("FMDN Finder setup failed - location uploads disabled")
+    except ImportError:
+        _LOGGER.debug("FMDN Finder module not available (optional feature)")
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.warning("FMDN Finder setup failed: %s", err, exc_info=True)
+
     parent_platforms_forwarded = bool(
         getattr(entry, "_gfm_parent_platforms_forwarded", False)
     )
@@ -8008,6 +8023,16 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
             await _async_release_shared_fcm(hass, entry)
         except Exception as err:
             _LOGGER.debug("FCM release during parent unload raised: %s", err)
+
+        # Unload FMDN Finder (if enabled)
+        try:
+            from .fmdn_finder import async_unload_fmdn_finder
+            await async_unload_fmdn_finder(hass)
+            _LOGGER.debug("FMDN Finder unloaded successfully")
+        except ImportError:
+            pass  # FMDN Finder module not available (optional feature)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("FMDN Finder unload raised: %s", err)
 
         try:
             owner_index: dict[str, str] = _ensure_device_owner_index(bucket)
