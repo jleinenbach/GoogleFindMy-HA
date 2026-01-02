@@ -657,6 +657,14 @@ async def async_get_config_entry_diagnostics(
     concurrency = _concurrency_block(hass)
     fcm_state = _fcm_receiver_state(hass)
 
+    # EIK cache statistics (performance optimization metrics)
+    # Import lazily to avoid circular import (diagnostics <- decrypt_locations <- __init__ <- diagnostics)
+    from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+        get_eik_cache_stats,
+    )
+
+    eik_cache_stats = get_eik_cache_stats()
+
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
         "integration": integration_meta,
@@ -673,6 +681,7 @@ async def async_get_config_entry_diagnostics(
             "entity": entity_registry_counts,
         },
         "concurrency": concurrency,
+        "eik_cache": eik_cache_stats,
     }
     if coordinator_block:
         payload["coordinator"] = coordinator_block
