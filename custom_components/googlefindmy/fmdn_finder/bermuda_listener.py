@@ -61,7 +61,7 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
 
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    @callback  # type: ignore[untyped-decorator]
+    @callback  # type: ignore[misc]
     def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:  # noqa: PLR0911
         """Handle Bermuda entity state changes.
 
