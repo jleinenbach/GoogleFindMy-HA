@@ -24,6 +24,9 @@ def test_async_retrieve_identity_key_threads_cache(
         decrypt_locations,
     )
 
+    # Clear the global EIK cache to avoid interference from previous tests
+    decrypt_locations.clear_eik_cache()
+
     owner_calls: dict[str, object] = {}
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
@@ -73,6 +76,9 @@ def test_async_retrieve_identity_key_error_uses_cache(
     from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
         decrypt_locations,
     )
+
+    # Clear the global EIK cache to avoid interference from previous tests
+    decrypt_locations.clear_eik_cache()
 
     caches: dict[str, object] = {}
 
@@ -129,6 +135,9 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
     from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
         decrypt_locations,
     )
+
+    # Clear the global EIK cache to avoid interference from previous tests
+    decrypt_locations.clear_eik_cache()
 
     owner_calls: list[object] = []
     eid_calls: list[object] = []
