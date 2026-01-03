@@ -118,6 +118,16 @@ def test_translation_placeholders() -> None:  # noqa: PLR0915
             f"{language} translation is missing strings for: {', '.join(missing_paths)}"
         )
 
+        # Check for extra keys not present in base language
+        if language != BASE_LANGUAGE:
+            lang_string_paths: set[tuple[str, ...]] = set()
+            _collect_string_paths(data, tuple(), lang_string_paths)
+            extra_paths = lang_string_paths - base_string_paths
+            assert not extra_paths, (
+                f"{language} translation has extra keys not in {BASE_LANGUAGE}: "
+                f"{', '.join('/'.join(p) for p in sorted(extra_paths))}"
+            )
+
     for path in sorted(all_paths):
         union_placeholders: set[str] = set()
         for placeholders in language_placeholders.values():
