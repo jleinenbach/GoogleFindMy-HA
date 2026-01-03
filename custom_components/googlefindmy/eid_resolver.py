@@ -153,6 +153,56 @@ class _IdentityProvider(Protocol):
     def get_active_device_identities(self) -> list[DeviceIdentity]: ...
 
 
+@runtime_checkable
+class GoogleFindMyEIDResolverProtocol(Protocol):
+    """Protocol defining the public interface for EID resolution.
+
+    This abstraction layer enables:
+    - Bermuda and other integrations to resolve EIDs without tight coupling
+    - Easy mocking in tests without depending on concrete implementation
+    - Clear documentation of the public EID resolver API surface
+
+    The resolver maintains a lookup table mapping ephemeral identifiers (EIDs)
+    to device identities, refreshing periodically as EIDs rotate.
+    """
+
+    async def async_refresh(self) -> None:
+        """Refresh the EID lookup table from all active coordinators.
+
+        This rebuilds the mapping of EID bytes to device identities by:
+        1. Collecting identities from all registered coordinators
+        2. Decrypting identity keys where owner keys are available
+        3. Generating EIDs for the current rotation window
+        """
+        ...
+
+    def reset_device_offset(self, registry_id: str) -> None:
+        """Clear cached time offset for a specific device.
+
+        Use when a device's EID timing needs to be re-learned, e.g.,
+        after firmware updates or clock drift corrections.
+        """
+        ...
+
+    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
+        """Resolve EID bytes to a matching device identity.
+
+        Args:
+            eid_bytes: Raw EID bytes from a BLE advertisement.
+
+        Returns:
+            EIDMatch with device identity info, or None if no match found.
+        """
+        ...
+
+    def stop(self) -> None:
+        """Stop the resolver and release resources.
+
+        Cancels periodic refresh timers and cleanup tasks.
+        """
+        ...
+
+
 @dataclass(slots=True, frozen=True)
 class WorkItem:
     """Normalized device identity with optional lock context."""
