@@ -44,12 +44,16 @@ __all__ = [
     "prf_aes_256_ecb",
 ]
 
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     CurveParametersProtocol,
     load_curve,
+)
+from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
+    get_algorithms_module,
+    get_cipher_class,
+    get_ec_module,
+    get_modes_module,
+    get_p256_curve,
 )
 
 FHNA_K: Final[int] = 10
@@ -69,10 +73,28 @@ HEURISTIC_ROTATION_PERIODS: Final[tuple[int, ...]] = (900, 3600, 1024)
 P256_ORDER: Final[int] = (
     0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 )
-_CURVE: CurveParametersProtocol = load_curve()
-_P256_CURVE: Final[ec.SECP256R1] = ec.SECP256R1()
+
+# Lazy-loaded curve instances (deferred to first use for faster startup)
+_CURVE: CurveParametersProtocol | None = None
+_P256_CURVE: object | None = None
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _get_curve() -> CurveParametersProtocol:
+    """Get the SECP160r1 curve, loading lazily on first access."""
+    global _CURVE  # noqa: PLW0603
+    if _CURVE is None:
+        _CURVE = load_curve()
+    return _CURVE
+
+
+def _get_p256_curve() -> object:
+    """Get the P-256 curve, loading lazily on first access."""
+    global _P256_CURVE  # noqa: PLW0603
+    if _P256_CURVE is None:
+        _P256_CURVE = get_p256_curve()
+    return _P256_CURVE
 
 
 class EidVariant(str, Enum):
@@ -200,6 +222,10 @@ def prf_aes_256_ecb(eik: bytes, prf_input: bytes) -> bytes:
     if len(prf_input) != FHNA_PRF_INPUT_LENGTH:
         raise ValueError(f"PRF input must be {FHNA_PRF_INPUT_LENGTH} bytes")
 
+    # Lazy-load cryptography modules for faster startup
+    Cipher = get_cipher_class()
+    algorithms = get_algorithms_module()
+    modes = get_modes_module()
     cipher = Cipher(algorithms.AES(eik), modes.ECB())
     encryptor = cipher.encryptor()
     ciphertext: bytes = encryptor.update(prf_input) + encryptor.finalize()
@@ -256,7 +282,7 @@ def _derive_scalar(  # noqa: PLR0913
 def _serialize_legacy_x(scalar_r: int) -> bytes:
     """Return the big-endian x-coordinate for ``R = r * G`` on secp160r1."""
 
-    curve = _CURVE
+    curve = _get_curve()
     generator = curve.generator
     R = scalar_r * generator
 
@@ -266,8 +292,9 @@ def _serialize_legacy_x(scalar_r: int) -> bytes:
 
 def _serialize_p256_x(scalar_r: int) -> bytes:
     """Return the big-endian x-coordinate for ``R = r * G`` on secp256r1."""
+    ec = get_ec_module()
     public_numbers = (
-        ec.derive_private_key(scalar_r, _P256_CURVE).public_key().public_numbers()
+        ec.derive_private_key(scalar_r, _get_p256_curve()).public_key().public_numbers()
     )
 
     x_int: int = int(public_numbers.x)
@@ -289,7 +316,7 @@ def generate_eid_variant(
 
     match variant:
         case EidVariant.LEGACY_SECP160R1_X20_BE:
-            curve_order: int = int(_CURVE.order)
+            curve_order: int = int(_get_curve().order)
             scalar = _derive_scalar(
                 eik,
                 counter_u32,
@@ -527,7 +554,7 @@ def _generate_heuristic_eid_single(
 
     match variant:
         case EidVariant.LEGACY_SECP160R1_X20_BE:
-            curve_order = int(_CURVE.order)
+            curve_order = int(_get_curve().order)
             r_dash_int = int.from_bytes(r_dash, byteorder="big", signed=False)
             scalar = r_dash_int % curve_order
             return _serialize_legacy_x(scalar)

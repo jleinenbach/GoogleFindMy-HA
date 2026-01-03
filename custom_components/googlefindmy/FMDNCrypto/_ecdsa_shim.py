@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, cast
 
-import ecdsa
+from ._lazy_crypto import get_curve_fp_class, get_point_class, get_secp160r1_curve
 
 
 class CurveFpProtocol(Protocol):
@@ -29,22 +29,21 @@ class CurveParametersProtocol(Protocol):
 
 
 def load_curve() -> CurveParametersProtocol:
-    """Load the SECP160r1 curve parameters with runtime imports.
+    """Load the SECP160r1 curve parameters with lazy imports.
 
-    The eager module-level import keeps the returned object fully typed while
-    matching the access pattern used by the other helpers below.
+    The import is deferred until first call to improve startup time.
     """
 
-    return cast(CurveParametersProtocol, ecdsa.SECP160r1)
+    return cast(CurveParametersProtocol, get_secp160r1_curve())
 
 
 def load_curve_fp_class() -> type[CurveFpProtocol]:
     """Return the ``CurveFp`` class from ``ecdsa.ellipticcurve``."""
 
-    return cast(type[CurveFpProtocol], ecdsa.ellipticcurve.CurveFp)
+    return cast(type[CurveFpProtocol], get_curve_fp_class())
 
 
-def load_point_class() -> type[Any]:
+def load_point_class() -> type:
     """Return the ``Point`` class from ``ecdsa.ellipticcurve``."""
 
-    return cast(type[Any], ecdsa.ellipticcurve.Point)
+    return get_point_class()
