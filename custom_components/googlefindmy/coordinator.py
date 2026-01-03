@@ -906,6 +906,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._locate_inflight: set[str] = set()  # device_id -> in-flight flag
         self._locate_cooldown_until: dict[str, float] = {}  # device_id -> mono deadline
 
+        # Per-device action locks to prevent race conditions on concurrent requests
+        self._device_action_locks: dict[str, asyncio.Lock] = {}
+
         # Play Sound UUID tracking (needed to properly cancel sound requests)
         self._sound_request_uuids: dict[str, str] = {}  # device_id -> request_uuid
         self._sound_request_timestamps: dict[str, float] = {}  # device_id -> creation timestamp
@@ -7996,6 +7999,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return True
 
     # ---------------------------- Public control / Locate gating ------------
+    def _get_device_lock(self, device_id: str) -> asyncio.Lock:
+        """Get or create a lock for a specific device.
+
+        This prevents race conditions when multiple concurrent locate requests
+        target the same device (e.g., rapid UI clicks or parallel service calls).
+        """
+        if device_id not in self._device_action_locks:
+            self._device_action_locks[device_id] = asyncio.Lock()
+        return self._device_action_locks[device_id]
+
     def can_request_location(self, device_id: str) -> bool:
         """Return True if a manual 'Locate now' request is currently allowed.
 
@@ -8142,245 +8155,248 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         name = self.get_device_display_name(device_id) or device_id
 
-        if not self.can_request_location(device_id):
-            _LOGGER.warning(
-                "Manual locate for %s is currently disabled (in-flight, cooldown, or polling).",
-                name,
-            )
-            return {}
-
-        if not self._api_push_ready():
-            _LOGGER.warning(
-                "Manual locate for %s is currently disabled (push transport not ready).",
-                name,
-            )
-            return {}
-
-        # Enter in-flight and set a lower-bound cooldown window
-        self._locate_inflight.add(device_id)
-        self._locate_cooldown_until[device_id] = time.monotonic() + float(
-            DEFAULT_MIN_POLL_INTERVAL
-        )
-        self.async_set_updated_data(self.data)
-
-        google_home_filter = self._get_google_home_filter()
-
-        try:
-            location_data = await self.api.async_get_device_location(device_id, name)
-
-            # Success path: clear any auth error state
-            self._set_auth_state(failed=False)
-
-            if not location_data:
+        # Acquire per-device lock to prevent race conditions on concurrent requests
+        lock = self._get_device_lock(device_id)
+        async with lock:
+            if not self.can_request_location(device_id):
+                _LOGGER.warning(
+                    "Manual locate for %s is currently disabled (in-flight, cooldown, or polling).",
+                    name,
+                )
                 return {}
 
-            self._record_semantic_label(location_data, device_id=device_id)
+            if not self._api_push_ready():
+                _LOGGER.warning(
+                    "Manual locate for %s is currently disabled (push transport not ready).",
+                    name,
+                )
+                return {}
 
-            cached_loc = self._device_location_data.get(device_id)
-            is_replay = False
-            if isinstance(cached_loc, Mapping):
-                new_ts = _normalize_epoch_seconds(location_data.get("last_seen"))
-                old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
-                if new_ts is not None and old_ts is not None and new_ts == old_ts:
-                    is_replay = True
+            # Enter in-flight and set a lower-bound cooldown window
+            self._locate_inflight.add(device_id)
+            self._locate_cooldown_until[device_id] = time.monotonic() + float(
+                DEFAULT_MIN_POLL_INTERVAL
+            )
+            self.async_set_updated_data(self.data)
 
-            location_data["is_replayed"] = is_replay
-            mapping_applied = self._apply_semantic_mapping(location_data)
+            google_home_filter = self._get_google_home_filter()
 
-            # --- Parity with polling path: Google Home semantic spam filter --------
-            # Consume coordinate substitution from the filter when needed.
-            semantic_name = location_data.get("semantic_name")
-            if (
-                not mapping_applied
-                and not is_replay
-                and semantic_name
-                and google_home_filter is not None
-            ):
-                try:
-                    (should_filter, replacement_attrs) = (
-                        google_home_filter.should_filter_detection(
-                            device_id, semantic_name
+            try:
+                location_data = await self.api.async_get_device_location(device_id, name)
+
+                # Success path: clear any auth error state
+                self._set_auth_state(failed=False)
+
+                if not location_data:
+                    return {}
+
+                self._record_semantic_label(location_data, device_id=device_id)
+
+                cached_loc = self._device_location_data.get(device_id)
+                is_replay = False
+                if isinstance(cached_loc, Mapping):
+                    new_ts = _normalize_epoch_seconds(location_data.get("last_seen"))
+                    old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+                    if new_ts is not None and old_ts is not None and new_ts == old_ts:
+                        is_replay = True
+
+                location_data["is_replayed"] = is_replay
+                mapping_applied = self._apply_semantic_mapping(location_data)
+
+                # --- Parity with polling path: Google Home semantic spam filter --------
+                # Consume coordinate substitution from the filter when needed.
+                semantic_name = location_data.get("semantic_name")
+                if (
+                    not mapping_applied
+                    and not is_replay
+                    and semantic_name
+                    and google_home_filter is not None
+                ):
+                    try:
+                        (should_filter, replacement_attrs) = (
+                            google_home_filter.should_filter_detection(
+                                device_id, semantic_name
+                            )
                         )
-                    )
-                except Exception as gf_err:
-                    _LOGGER.debug("Google Home filter error for %s: %s", name, gf_err)
-                else:
-                    if should_filter:
+                    except Exception as gf_err:
+                        _LOGGER.debug("Google Home filter error for %s: %s", name, gf_err)
+                    else:
+                        if should_filter:
+                            _LOGGER.debug(
+                                "Filtering out Google Home spam detection for %s (manual locate)",
+                                name,
+                            )
+                            # Successful but filtered: reset baseline, clear cooldown, and refresh UI.
+                            self._last_poll_mono = time.monotonic()
+                            self._locate_cooldown_until.pop(device_id, None)
+                            self.push_updated([device_id])
+                            return {}
+                        if replacement_attrs:
+                            prev_location = self._device_location_data.get(device_id)
+                            keep_previous_precise = (
+                                self._should_preserve_precise_home_coordinates(
+                                    prev_location, replacement_attrs
+                                )
+                            )
+
+                            location_data = dict(location_data)
+                            if keep_previous_precise and prev_location is not None:
+                                _LOGGER.debug(
+                                    "Google Home filter: %s detected at '%s' (manual locate), preserving previous precise coordinates",
+                                    name,
+                                    semantic_name,
+                                )
+                                location_data["latitude"] = prev_location["latitude"]
+                                location_data["longitude"] = prev_location["longitude"]
+                                location_data["accuracy"] = prev_location["accuracy"]
+                            else:
+                                if (
+                                    "latitude" in replacement_attrs
+                                    and "longitude" in replacement_attrs
+                                ):
+                                    location_data["latitude"] = replacement_attrs.get(
+                                        "latitude"
+                                    )
+                                    location_data["longitude"] = replacement_attrs.get(
+                                        "longitude"
+                                    )
+                                if (
+                                    "radius" in replacement_attrs
+                                    and replacement_attrs.get("radius") is not None
+                                ):
+                                    location_data["accuracy"] = replacement_attrs.get(
+                                        "radius"
+                                    )
+                            # Clear semantic name so HA Core's zone engine determines the final state.
+                            location_data["semantic_name"] = None
+                location_data.pop("is_replayed", None)
+                # ----------------------------------------------------------------------
+
+                # Preserve previous coordinates if only semantic location is provided.
+                if (
+                    location_data.get("latitude") is None
+                    or location_data.get("longitude") is None
+                ) and location_data.get("semantic_name"):
+                    prev = self._device_location_data.get(device_id, {})
+                    if prev:
+                        location_data.setdefault("latitude", prev.get("latitude"))
+                        location_data.setdefault("longitude", prev.get("longitude"))
+                        location_data.setdefault("accuracy", prev.get("accuracy"))
+                        location_data["status"] = (
+                            "Semantic location; preserving previous coordinates"
+                        )
+
+                # Validate/normalize coordinates (and accuracy if present).
+                if not self._normalize_coords(location_data, device_label=name):
+                    if not location_data.get("semantic_name"):
                         _LOGGER.debug(
-                            "Filtering out Google Home spam detection for %s (manual locate)",
+                            "No location data (coordinates or semantic name) available for %s in manual locate.",
                             name,
                         )
-                        # Successful but filtered: reset baseline, clear cooldown, and refresh UI.
-                        self._last_poll_mono = time.monotonic()
-                        self._locate_cooldown_until.pop(device_id, None)
-                        self.push_updated([device_id])
-                        return {}
-                    if replacement_attrs:
-                        prev_location = self._device_location_data.get(device_id)
-                        keep_previous_precise = (
-                            self._should_preserve_precise_home_coordinates(
-                                prev_location, replacement_attrs
-                            )
+                    return {}
+
+                # Prepare a copy for gating/cooldown application
+                slot = dict(location_data)
+                slot.setdefault("last_updated", time.time())
+
+                # Apply type-aware cooldowns based on internal hint (if any), then strip it.
+                report_hint = slot.get("_report_hint")
+                self._apply_report_type_cooldown(device_id, report_hint)
+
+                # Track crowd-sourced updates when hint is present
+                if report_hint:
+                    self.increment_stat("crowd_sourced_updates")
+
+                slot.pop("_report_hint", None)
+
+                # Sanitize invariants + derive labels before significance gating
+                slot = _sanitize_decoder_row(slot)
+
+                if not self._apply_weighted_location_fusion(device_id, slot):
+                    return {}
+
+                slot["_fusion_preapplied"] = True
+
+                # Increment crowdsourced stats for manual locate as well (if applicable)
+                if slot.get("source_label") == "crowdsourced":
+                    self.increment_stat("crowd_sourced_updates")
+
+                # Commit to cache (update_device_cache ensures last_updated and stats)
+                self.update_device_cache(device_id, slot)
+
+                # Successful manual locate:
+                # - reset poll baseline,
+                # - set a per-device poll cooldown (owner purge window) using a dynamic guess
+                #   clamped into guardrails,
+                # - set the same cooldown for manual locate button to avoid spamming.
+                self._last_poll_mono = time.monotonic()
+                dynamic_guess = max(
+                    float(DEFAULT_MIN_POLL_INTERVAL), float(self.location_poll_interval)
+                )
+                owner_cooldown = _clamp(
+                    dynamic_guess, _COOLDOWN_OWNER_MIN_S, _COOLDOWN_OWNER_MAX_S
+                )
+                now_mono = time.monotonic()
+                # Extend (not overwrite) any type-aware cooldown applied above
+                existing_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+                owner_deadline = now_mono + owner_cooldown
+                self._device_poll_cooldown_until[device_id] = max(
+                    existing_deadline, owner_deadline
+                )
+                self._locate_cooldown_until[device_id] = max(
+                    self._locate_cooldown_until.get(device_id, 0.0), owner_deadline
+                )
+
+                # Touch presence for the device (a fresh interaction implies it exists)
+                self._present_last_seen[device_id] = now_mono
+
+                self.push_updated([device_id])
+                return location_data or {}
+            except SpotAuthPermanentError as auth_err:
+                self._set_auth_state(
+                    failed=True,
+                    reason=f"Auth failed during manual locate: {auth_err}",
+                )
+                entry = getattr(self, "config_entry", None)
+                reauth_started = False
+                if entry is not None:
+                    try:
+                        await entry.async_start_reauth(self.hass)
+                        reauth_started = True
+                    except Exception as reauth_err:  # pragma: no cover - defensive
+                        _LOGGER.debug(
+                            "Failed to start reauth flow after manual locate auth error: %s",
+                            reauth_err,
                         )
-
-                        location_data = dict(location_data)
-                        if keep_previous_precise and prev_location is not None:
-                            _LOGGER.debug(
-                                "Google Home filter: %s detected at '%s' (manual locate), preserving previous precise coordinates",
-                                name,
-                                semantic_name,
-                            )
-                            location_data["latitude"] = prev_location["latitude"]
-                            location_data["longitude"] = prev_location["longitude"]
-                            location_data["accuracy"] = prev_location["accuracy"]
-                        else:
-                            if (
-                                "latitude" in replacement_attrs
-                                and "longitude" in replacement_attrs
-                            ):
-                                location_data["latitude"] = replacement_attrs.get(
-                                    "latitude"
-                                )
-                                location_data["longitude"] = replacement_attrs.get(
-                                    "longitude"
-                                )
-                            if (
-                                "radius" in replacement_attrs
-                                and replacement_attrs.get("radius") is not None
-                            ):
-                                location_data["accuracy"] = replacement_attrs.get(
-                                    "radius"
-                                )
-                        # Clear semantic name so HA Core's zone engine determines the final state.
-                        location_data["semantic_name"] = None
-            location_data.pop("is_replayed", None)
-            # ----------------------------------------------------------------------
-
-            # Preserve previous coordinates if only semantic location is provided.
-            if (
-                location_data.get("latitude") is None
-                or location_data.get("longitude") is None
-            ) and location_data.get("semantic_name"):
-                prev = self._device_location_data.get(device_id, {})
-                if prev:
-                    location_data.setdefault("latitude", prev.get("latitude"))
-                    location_data.setdefault("longitude", prev.get("longitude"))
-                    location_data.setdefault("accuracy", prev.get("accuracy"))
-                    location_data["status"] = (
-                        "Semantic location; preserving previous coordinates"
-                    )
-
-            # Validate/normalize coordinates (and accuracy if present).
-            if not self._normalize_coords(location_data, device_label=name):
-                if not location_data.get("semantic_name"):
-                    _LOGGER.debug(
-                        "No location data (coordinates or semantic name) available for %s in manual locate.",
-                        name,
-                    )
-                return {}
-
-            # Prepare a copy for gating/cooldown application
-            slot = dict(location_data)
-            slot.setdefault("last_updated", time.time())
-
-            # Apply type-aware cooldowns based on internal hint (if any), then strip it.
-            report_hint = slot.get("_report_hint")
-            self._apply_report_type_cooldown(device_id, report_hint)
-
-            # Track crowd-sourced updates when hint is present
-            if report_hint:
-                self.increment_stat("crowd_sourced_updates")
-
-            slot.pop("_report_hint", None)
-
-            # Sanitize invariants + derive labels before significance gating
-            slot = _sanitize_decoder_row(slot)
-
-            if not self._apply_weighted_location_fusion(device_id, slot):
-                return {}
-
-            slot["_fusion_preapplied"] = True
-
-            # Increment crowdsourced stats for manual locate as well (if applicable)
-            if slot.get("source_label") == "crowdsourced":
-                self.increment_stat("crowd_sourced_updates")
-
-            # Commit to cache (update_device_cache ensures last_updated and stats)
-            self.update_device_cache(device_id, slot)
-
-            # Successful manual locate:
-            # - reset poll baseline,
-            # - set a per-device poll cooldown (owner purge window) using a dynamic guess
-            #   clamped into guardrails,
-            # - set the same cooldown for manual locate button to avoid spamming.
-            self._last_poll_mono = time.monotonic()
-            dynamic_guess = max(
-                float(DEFAULT_MIN_POLL_INTERVAL), float(self.location_poll_interval)
-            )
-            owner_cooldown = _clamp(
-                dynamic_guess, _COOLDOWN_OWNER_MIN_S, _COOLDOWN_OWNER_MAX_S
-            )
-            now_mono = time.monotonic()
-            # Extend (not overwrite) any type-aware cooldown applied above
-            existing_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
-            owner_deadline = now_mono + owner_cooldown
-            self._device_poll_cooldown_until[device_id] = max(
-                existing_deadline, owner_deadline
-            )
-            self._locate_cooldown_until[device_id] = max(
-                self._locate_cooldown_until.get(device_id, 0.0), owner_deadline
-            )
-
-            # Touch presence for the device (a fresh interaction implies it exists)
-            self._present_last_seen[device_id] = now_mono
-
-            self.push_updated([device_id])
-            return location_data or {}
-        except SpotAuthPermanentError as auth_err:
-            self._set_auth_state(
-                failed=True,
-                reason=f"Auth failed during manual locate: {auth_err}",
-            )
-            entry = getattr(self, "config_entry", None)
-            reauth_started = False
-            if entry is not None:
+                message = (
+                    "Authentication for Google Find My Device expired; "
+                    "re-authentication has been started."
+                    if reauth_started
+                    else "Authentication for Google Find My Device expired; please re-authenticate."
+                )
+                raise HomeAssistantError(message) from auth_err
+            except ConfigEntryAuthFailed as auth_exc:
+                # Mark error and request a refresh; no need to re-raise here for manual action.
+                self._set_auth_state(
+                    failed=True, reason=f"Auth failed during manual locate: {auth_exc}"
+                )
                 try:
-                    await entry.async_start_reauth(self.hass)
-                    reauth_started = True
-                except Exception as reauth_err:  # pragma: no cover - defensive
-                    _LOGGER.debug(
-                        "Failed to start reauth flow after manual locate auth error: %s",
-                        reauth_err,
-                    )
-            message = (
-                "Authentication for Google Find My Device expired; "
-                "re-authentication has been started."
-                if reauth_started
-                else "Authentication for Google Find My Device expired; please re-authenticate."
-            )
-            raise HomeAssistantError(message) from auth_err
-        except ConfigEntryAuthFailed as auth_exc:
-            # Mark error and request a refresh; no need to re-raise here for manual action.
-            self._set_auth_state(
-                failed=True, reason=f"Auth failed during manual locate: {auth_exc}"
-            )
-            try:
-                await self.async_request_refresh()
-            except Exception:
-                pass
-            return {}
-        except Exception as err:
-            short_err = self._short_error_message(err)
-            _LOGGER.error("Manual locate for %s failed: %s", name, short_err)
-            self.note_error(err, where="async_locate_device", device=name)
-            raise HomeAssistantError(
-                f"Manual locate for '{name}' failed due to an unexpected error. "
-                "Check logs for details."
-            ) from err
-        finally:
-            self._locate_inflight.discard(device_id)
-            # Push an update so buttons/entities can refresh availability
-            self.async_set_updated_data(self.data)
+                    await self.async_request_refresh()
+                except Exception:
+                    pass
+                return {}
+            except Exception as err:
+                short_err = self._short_error_message(err)
+                _LOGGER.error("Manual locate for %s failed: %s", name, short_err)
+                self.note_error(err, where="async_locate_device", device=name)
+                raise HomeAssistantError(
+                    f"Manual locate for '{name}' failed due to an unexpected error. "
+                    "Check logs for details."
+                ) from err
+            finally:
+                self._locate_inflight.discard(device_id)
+                # Push an update so buttons/entities can refresh availability
+                self.async_set_updated_data(self.data)
 
     async def async_play_sound(self, device_id: str) -> bool:
         """Play sound on a device using the native async API (no executor).
