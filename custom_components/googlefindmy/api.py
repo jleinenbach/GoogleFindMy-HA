@@ -145,6 +145,105 @@ class CacheProtocol(Protocol):
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
 
 
+@runtime_checkable
+class GoogleFindMyAPIProtocol(Protocol):
+    """Protocol defining the public interface for Google Find My Device API.
+
+    This abstraction layer enables:
+    - Consistent API contract for the coordinator and other consumers
+    - Easy mocking in tests without depending on concrete implementation
+    - Future extensibility for alternative backend implementations
+
+    All methods that interact with Google's servers are available in both
+    sync and async variants where applicable.
+    """
+
+    async def close(self) -> None:
+        """Release resources held by the API instance."""
+        ...
+
+    def set_contributor_mode(
+        self, mode: str | None, *, switch_epoch: int | None = None
+    ) -> None:
+        """Update the contributor mode used for Nova requests."""
+        ...
+
+    async def async_get_basic_device_list(
+        self,
+        *,
+        contributor_mode: str | None = None,
+        switch_epoch: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch the device list from Google Find My Device (async).
+
+        Returns a list of device dictionaries with basic info and capabilities.
+        """
+        ...
+
+    def get_basic_device_list(self) -> list[dict[str, Any]]:
+        """Fetch the device list from Google Find My Device (sync wrapper)."""
+        ...
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        """Legacy alias for get_basic_device_list()."""
+        ...
+
+    async def async_get_device_location(
+        self,
+        device_id: str,
+        device_name: str,
+        *,
+        contributor_mode: str | None = None,
+        switch_epoch: int | None = None,
+    ) -> dict[str, Any]:
+        """Request location for a specific device (async).
+
+        Returns location data dict or empty dict on failure.
+        """
+        ...
+
+    def get_device_location(self, device_id: str, device_name: str) -> dict[str, Any]:
+        """Request location for a specific device (sync wrapper)."""
+        ...
+
+    def locate_device(self, device_id: str) -> dict[str, Any]:
+        """Legacy alias for get_device_location()."""
+        ...
+
+    def is_push_ready(self) -> bool:
+        """Check if push infrastructure is available for actions."""
+        ...
+
+    def push_ready(self) -> bool:
+        """Alias for is_push_ready()."""
+        ...
+
+    def can_play_sound(self, device_id: str) -> bool | None:
+        """Check if a device supports the play sound action."""
+        ...
+
+    def play_sound(self, device_id: str) -> bool:
+        """Play a sound on the device (sync wrapper)."""
+        ...
+
+    def stop_sound(self, device_id: str, request_uuid: str | None = None) -> bool:
+        """Stop playing sound on the device (sync wrapper)."""
+        ...
+
+    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
+        """Play a sound on the device (async).
+
+        Returns (success, request_uuid) tuple.
+        """
+        ...
+
+    async def async_stop_sound(
+        self, device_id: str, request_uuid: str | None = None
+    ) -> bool:
+        """Stop playing sound on the device (async)."""
+        ...
+
+
 # Module-local FCM provider getter; installed by the integration at setup time.
 _FCM_ReceiverGetter: (
     Callable[[str | None], FcmReceiverProtocol]
