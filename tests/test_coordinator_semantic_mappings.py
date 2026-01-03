@@ -59,6 +59,7 @@ def _base_coordinator(
     coordinator._present_last_seen = {}
     coordinator._locate_inflight = set()
     coordinator._locate_cooldown_until = {}
+    coordinator._device_action_locks = {}
     coordinator._device_update_history = {}
     coordinator._last_poll_mono = 0.0
     coordinator._consecutive_timeouts = 0
