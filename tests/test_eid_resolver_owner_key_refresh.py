@@ -6,6 +6,10 @@ import pytest
 
 from custom_components.googlefindmy import eid_resolver
 from custom_components.googlefindmy.coordinator import DeviceIdentity
+from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
+    get_aesgcm_class,
+    get_invalid_tag_exception,
+)
 from tests.helpers import DummyCache
 
 
@@ -63,7 +67,9 @@ async def test_try_decrypt_identity_key_unwraps_aes_gcm_envelope(
     nonce = b"\x00" * 12
     plaintext = b"\x99" * 32
     aad = b"reg-wrap"
-    ciphertext = eid_resolver.AESGCM(key).encrypt(nonce, plaintext, aad)
+    AESGCM = get_aesgcm_class()
+    InvalidTag = get_invalid_tag_exception()
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad)
     envelope = nonce + ciphertext
 
     async def fake_async_get_owner_key(*, cache: object, **kwargs):  # type: ignore[no-untyped-def]
@@ -73,7 +79,7 @@ async def test_try_decrypt_identity_key_unwraps_aes_gcm_envelope(
         raise RuntimeError("shared key unavailable")
 
     def fake_decrypt_eik(owner_key: bytes, encrypted_identity_key: bytes) -> bytes:  # noqa: ARG001
-        raise eid_resolver.InvalidTag("wrapped")
+        raise InvalidTag("wrapped")
 
     async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
         return func(*args, **kwargs)

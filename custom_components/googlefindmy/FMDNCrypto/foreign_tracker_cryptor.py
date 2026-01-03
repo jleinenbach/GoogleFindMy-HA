@@ -25,10 +25,6 @@ from __future__ import annotations
 import asyncio
 import secrets
 
-from Cryptodome.Cipher import AES
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-
 from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     CurveFpProtocol,
@@ -36,6 +32,11 @@ from custom_components.googlefindmy.FMDNCrypto._ecdsa_shim import (
     load_curve,
     load_curve_fp_class,
     load_point_class,
+)
+from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import (
+    get_aes_class,
+    get_hashes_module,
+    get_hkdf_class,
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_K,
@@ -57,9 +58,23 @@ _COORD_LEN: int = 20
 # Nonce is constructed as LRx(8) || LSx(8) = 16 bytes (see spec used here)
 _NONCE_LEN: int = 16
 
-_CURVE: CurveParametersProtocol = load_curve()
-CurveFp = load_curve_fp_class()
-Point = load_point_class()
+# Use module-level caching for lazy-loaded curve instances
+# The getters always return valid objects after first load
+
+
+def _get_curve() -> CurveParametersProtocol:
+    """Get the SECP160r1 curve, loading lazily on first access."""
+    return load_curve()
+
+
+def _get_curve_fp() -> type:
+    """Get the CurveFp class, loading lazily on first access."""
+    return load_curve_fp_class()
+
+
+def _get_point() -> type:
+    """Get the Point class, loading lazily on first access."""
+    return load_point_class()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -201,6 +216,7 @@ def encrypt_aes_eax(data: bytes, nonce: bytes, key: bytes) -> tuple[bytes, bytes
     _require_len("nonce", nonce, _NONCE_LEN)
     _require_len("key", key, _AES_KEY_LEN)
 
+    AES = get_aes_class()
     cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
     m_dash, tag = cipher.encrypt_and_digest(data)
     return m_dash, tag
@@ -212,6 +228,7 @@ def decrypt_aes_eax(m_dash: bytes, tag: bytes, nonce: bytes, key: bytes) -> byte
     _require_len("key", key, _AES_KEY_LEN)
     _require_len("tag", tag, _AES_TAG_LEN)
 
+    AES = get_aes_class()
     cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
     plaintext: bytes = cipher.decrypt(m_dash)
     cipher.verify(tag)
@@ -229,7 +246,7 @@ def calculate_r(identity_key: bytes, time_counter_u32: int) -> int:
     prf_input = build_table10_prf_input(time_counter_u32, k=FHNA_K)
     prf_output = prf_aes_256_ecb(identity_key, prf_input)
     r_dash_int = int.from_bytes(prf_output, byteorder="big", signed=False)
-    order: int = int(_CURVE.order)
+    order: int = int(_get_curve().order)
     return (r_dash_int % (order - 1)) + 1
 
 
@@ -249,7 +266,7 @@ def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
         ValueError: On invalid inputs (lengths) or curve mismatch.
     """
     # Curve parameters
-    curve = _CURVE
+    curve = _get_curve()
     order: int = int(curve.order)
 
     # Validate EID length (x coordinate on SECP160r1)
@@ -268,9 +285,12 @@ def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:
     # Rebuild R from EID (x only) and choose even Y
     Rx = int.from_bytes(eid, byteorder="big")
     Ry = rx_to_ry(Rx, curve.curve)
+    Point = _get_point()
     R = Point(curve.curve, Rx, Ry)
 
     # Derive AES-256 key via HKDF-SHA256 over (s·R).x (20 bytes)
+    HKDF = get_hkdf_class()
+    hashes = get_hashes_module()
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
     k: bytes = hkdf.derive((s * R).x().to_bytes(_COORD_LEN, "big"))
 
@@ -320,7 +340,7 @@ def decrypt(
     tag: bytes = encryptedAndTag[-_AES_TAG_LEN:]
 
     # Curve and scalar r
-    curve = _CURVE
+    curve = _get_curve()
     order: int = int(curve.order)
     r = calculate_r(identity_key, beacon_time_counter) % order
 
@@ -336,9 +356,12 @@ def decrypt(
     Sy = rx_to_ry(Sx_int, curve.curve)
 
     curve_fp: CurveFpProtocol = curve.curve
+    Point = _get_point()
     S = Point(curve_fp, Sx_int, Sy)
 
     # Derive AES-256 key via HKDF-SHA256 over (r·S).x (20 bytes)
+    HKDF = get_hkdf_class()
+    hashes = get_hashes_module()
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"")
     k: bytes = hkdf.derive((r * S).x().to_bytes(_COORD_LEN, "big"))
 

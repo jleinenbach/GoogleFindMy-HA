@@ -18,8 +18,6 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.storage import Store
@@ -27,6 +25,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
+from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
 from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
@@ -1493,6 +1492,8 @@ class GoogleFindMyEIDResolver:
         cache: TokenCache | None,
     ) -> DecryptionResult | None:
         """Decrypt encrypted identity key when owner/shared key material is available."""
+        # Lazy-load crypto exception for startup performance
+        InvalidTag = get_invalid_tag_exception()
 
         self._ensure_cache_defaults()
         if cache is None:
@@ -1574,6 +1575,9 @@ class GoogleFindMyEIDResolver:
         aad_value: str,
     ) -> DecryptionResult | None:
         """Attempt to unwrap an AES-GCM envelope using the provided key."""
+        # Lazy-load crypto classes for startup performance
+        AESGCM = get_aesgcm_class()
+        InvalidTag = get_invalid_tag_exception()
 
         if len(envelope) <= AESGCM_NONCE_LENGTH:
             return None
