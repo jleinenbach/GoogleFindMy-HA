@@ -192,7 +192,8 @@ class GoogleFindMyEIDResolverProtocol(Protocol):
 
         Returns:
             EIDMatch with device identity info, or None if no match found.
-            When multiple accounts share the same device, returns the first match.
+            When multiple accounts share the same device, returns the match
+            with the smallest time_offset (best match).
             Use resolve_eid_all() to get all matches for shared devices.
         """
         ...
@@ -2188,10 +2189,14 @@ class GoogleFindMyEIDResolver:
         """Resolve a scanned payload to a Home Assistant device registry ID.
 
         For shared devices (same tracker across multiple accounts), this returns
-        the first match. Use resolve_eid_all() to get all matches.
+        the match with the smallest time_offset (best match).
+        Use resolve_eid_all() to get all matches.
         """
         matches, _, _ = self._resolve_eid_internal(eid_bytes)
-        return matches[0] if matches else None
+        if not matches:
+            return None
+        # Return the match with the smallest absolute time_offset (best match)
+        return min(matches, key=lambda m: abs(m.time_offset))
 
     def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
         """Resolve a scanned payload to all matching Home Assistant device registry IDs.
