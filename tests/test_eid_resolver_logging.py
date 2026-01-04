@@ -51,11 +51,11 @@ def test_match_triggers_info_log(
         time_offset=0,
         is_reversed=False,
     )
-    resolver._lookup = {lookup_key: match}
+    resolver._lookup = {lookup_key: [match]}
 
     caplog.set_level(logging.DEBUG)
 
-    assert resolver.resolve_eid(lookup_key) is match
+    assert resolver.resolve_eid(lookup_key) == match
     assert any(
         "HIT: device=" in record.message and record.levelno == logging.INFO
         for record in caplog.records
@@ -97,11 +97,11 @@ def test_resolve_eid_logs_candidate_prefix_not_raw_prefix(
         time_offset=0,
         is_reversed=False,
     )
-    resolver._lookup = {candidate: match}
+    resolver._lookup = {candidate: [match]}
 
     caplog.set_level(logging.DEBUG)
 
-    assert resolver.resolve_eid(raw_payload) is match
+    assert resolver.resolve_eid(raw_payload) == match
 
     messages = [record.message for record in caplog.records]
     assert any("candidate_prefix=11223344" in message for message in messages)

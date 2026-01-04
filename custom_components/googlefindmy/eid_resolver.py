@@ -1989,7 +1989,7 @@ class GoogleFindMyEIDResolver:
         self._heuristic_miss_log_at[raw_prefix] = now
         return True
 
-    def _update_match_state(
+    def _update_match_state(  # noqa: PLR0913
         self,
         match: EIDMatch,
         *,
@@ -2073,7 +2073,7 @@ class GoogleFindMyEIDResolver:
             raw_prefix,
         )
 
-    def _resolve_eid_internal(
+    def _resolve_eid_internal(  # noqa: PLR0911, PLR0912
         self, eid_bytes: bytes
     ) -> tuple[list[EIDMatch], bytes | None, int | None]:
         """Internal EID resolution returning all matches.

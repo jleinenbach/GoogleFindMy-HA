@@ -11,7 +11,7 @@ from custom_components.googlefindmy.eid_resolver import (
 def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolver:
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace()
-    resolver._lookup = {lookup_key: match}
+    resolver._lookup = {lookup_key: [match]}
     resolver._lookup_metadata = {}
     resolver._known_offsets = {}
     resolver._known_advertisement_reversed = {}
