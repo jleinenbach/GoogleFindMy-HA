@@ -664,10 +664,13 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             )
             return []
         except NovaAuthError as e:
+            # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
+            # and trigger re-authentication flow. Previously this was swallowed,
+            # causing users to see only "No location data" without re-auth prompt.
             _LOGGER.warning(
                 "Authentication error while requesting location for %s: %s", name, e
             )
-            return []
+            raise
         except aiohttp.ClientError as e:
             _LOGGER.warning(
                 "Network/client error while requesting location for %s: %s", name, e
