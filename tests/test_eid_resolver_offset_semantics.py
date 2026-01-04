@@ -117,7 +117,8 @@ async def test_pair_date_offset_beats_drifted_unix(
     await resolver._refresh_cache()
 
     assert collision_eid in resolver._lookup
-    match = resolver._lookup[collision_eid]
+    matches = resolver._lookup[collision_eid]
+    match = matches[0]  # Get first match from list
     metadata = resolver._lookup_metadata[collision_eid]
 
     assert match.time_offset == 0

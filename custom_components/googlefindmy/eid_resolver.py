@@ -192,6 +192,24 @@ class GoogleFindMyEIDResolverProtocol(Protocol):
 
         Returns:
             EIDMatch with device identity info, or None if no match found.
+            When multiple accounts share the same device, returns the match
+            with the smallest time_offset (best match).
+            Use resolve_eid_all() to get all matches for shared devices.
+        """
+        ...
+
+    def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
+        """Resolve EID bytes to all matching device identities.
+
+        This method supports shared devices: when the same physical tracker
+        is shared between accounts, all accounts' matches are returned.
+
+        Args:
+            eid_bytes: Raw EID bytes from a BLE advertisement.
+
+        Returns:
+            List of EIDMatch entries for all accounts that share this device.
+            Empty list if no match found.
         """
         ...
 
@@ -314,9 +332,14 @@ class LearnedHeuristicParams:
 
 @dataclass(slots=True)
 class CacheBuilder:
-    """Immutable-safe cache builder enforcing lookup/metadata invariants."""
+    """Immutable-safe cache builder enforcing lookup/metadata invariants.
 
-    lookup: dict[bytes, EIDMatch] = field(default_factory=dict)
+    Supports multiple matches per EID to handle shared devices across accounts.
+    When the same physical tracker is shared between accounts, each account
+    registers its own EIDMatch for the same EID bytes.
+    """
+
+    lookup: dict[bytes, list[EIDMatch]] = field(default_factory=dict)
     metadata: dict[bytes, dict[str, Any]] = field(default_factory=dict)
 
     def register_eid(
@@ -328,9 +351,13 @@ class CacheBuilder:
         window: WindowCandidate,
         advertisement_reversed: bool,
     ) -> None:
-        """Register an EID and metadata, resolving collisions deterministically."""
+        """Register an EID and metadata, supporting multiple matches per EID.
 
-        existing = self.lookup.get(eid_bytes)
+        When the same EID is registered by multiple accounts (shared devices),
+        all matches are stored. For metadata, the entry with the smallest
+        time_offset is used as the primary.
+        """
+        existing_matches = self.lookup.get(eid_bytes, [])
         existing_metadata = self.metadata.get(eid_bytes)
         existing_bases: set[str] | None = None
         if existing_metadata is not None:
@@ -341,29 +368,56 @@ class CacheBuilder:
                 existing_bases.add(basis)
             existing_bases.add(window.time_basis)
 
-        if existing is not None and abs(existing.time_offset) <= abs(
+        # Check if this device_id already has a match for this EID
+        existing_device_match: EIDMatch | None = None
+        existing_device_idx: int | None = None
+        for idx, existing in enumerate(existing_matches):
+            if existing.device_id == match.device_id:
+                existing_device_match = existing
+                existing_device_idx = idx
+                break
+
+        # If this device already has a match with better or equal offset, skip
+        if existing_device_match is not None and abs(existing_device_match.time_offset) <= abs(
             match.time_offset
         ):
             if existing_metadata is not None and existing_bases is not None:
                 existing_metadata["timestamp_bases"] = existing_bases
             return
 
+        # Add or update the match for this device
+        if existing_device_idx is not None:
+            # Replace existing match for this device
+            existing_matches[existing_device_idx] = match
+        else:
+            # Add new match
+            existing_matches.append(match)
+
+        self.lookup[eid_bytes] = existing_matches
+
+        # Update metadata - use the match with smallest time_offset as primary
+        best_match = min(existing_matches, key=lambda m: abs(m.time_offset))
         timestamp_bases = existing_bases or {window.time_basis}
-        self.lookup[eid_bytes] = match
-        self.metadata[eid_bytes] = {
-            "variant": variant.value,
-            "rotation_timestamp": window.timestamp,
-            "time_offset": match.time_offset,
-            "timestamp_basis": window.time_basis,
-            "timestamp_bases": timestamp_bases,
-            "advertisement_reversed": advertisement_reversed,
-        }
+
+        # Only update metadata if this match is the best (smallest offset)
+        if best_match.device_id == match.device_id:
+            self.metadata[eid_bytes] = {
+                "variant": variant.value,
+                "rotation_timestamp": window.timestamp,
+                "time_offset": match.time_offset,
+                "timestamp_basis": window.time_basis,
+                "timestamp_bases": timestamp_bases,
+                "advertisement_reversed": advertisement_reversed,
+            }
+        elif existing_metadata is not None and existing_bases is not None:
+            existing_metadata["timestamp_bases"] = existing_bases
+
         if __debug__:
             assert set(self.lookup.keys()).issuperset(
                 self.metadata.keys()
             ), "metadata keys diverged after registration"
 
-    def finalize(self) -> tuple[dict[bytes, EIDMatch], dict[bytes, dict[str, Any]]]:
+    def finalize(self) -> tuple[dict[bytes, list[EIDMatch]], dict[bytes, dict[str, Any]]]:
         """Return the finalized lookup tables after invariant validation."""
 
         lookup_keys = set(self.lookup.keys())
@@ -548,10 +602,14 @@ def _normalize_counter_candidate(candidate_value: object, *, basis: str) -> int 
 
 @dataclass(slots=True)
 class GoogleFindMyEIDResolver:
-    """Resolver that precalculates rotating EIDs for known trackers."""
+    """Resolver that precalculates rotating EIDs for known trackers.
+
+    Supports shared devices: when the same physical tracker is shared between
+    accounts, all accounts receive EID match updates via resolve_eid_all().
+    """
 
     hass: HomeAssistant
-    _lookup: dict[bytes, EIDMatch] = field(init=False, default_factory=dict)
+    _lookup: dict[bytes, list[EIDMatch]] = field(init=False, default_factory=dict)
     _lookup_metadata: dict[bytes, dict[str, Any]] = field(
         init=False, default_factory=dict
     )
@@ -1932,12 +1990,102 @@ class GoogleFindMyEIDResolver:
         self._heuristic_miss_log_at[raw_prefix] = now
         return True
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
-        """Resolve a scanned payload to a Home Assistant device registry ID."""
+    def _update_match_state(  # noqa: PLR0913
+        self,
+        match: EIDMatch,
+        *,
+        metadata: dict[str, Any],
+        candidate: bytes,
+        observed_frame: int | None,
+        candidate_prefix: str,
+        raw_prefix: str,
+        now: int,
+    ) -> None:
+        """Update internal state (locks, offsets, etc.) for a single match."""
+        self._last_lock_confirmation[match.device_id] = now
+        previous_basis = _normalize_anchor_basis(self._known_timebases.get(match.device_id))
+        raw_time_basis = metadata.get("timestamp_basis")
+        anchor_basis = _normalize_anchor_basis(raw_time_basis)
+        basis_explicitly_invalid = raw_time_basis is not None and anchor_basis is None
+        if anchor_basis is None:
+            if raw_time_basis is None:
+                anchor_basis = previous_basis
+        elif raw_time_basis != anchor_basis:
+            self._known_timebases.pop(match.device_id, None)
+        if anchor_basis is None and not basis_explicitly_invalid:
+            self._known_timebases.pop(match.device_id, None)
 
+        existing_lock = self._locks.get(match.device_id)
+        if existing_lock is None:
+            variant_value = self._normalize_variant_value(
+                metadata.get("variant"),
+                eid_len=len(candidate),
+            )
+            rotation_timestamp = metadata.get("rotation_timestamp")
+            lock = EIDGenerationLock(
+                device_id=match.device_id,
+                canonical_id=match.canonical_id,
+                variant=variant_value,
+                advertisement_reversed=match.is_reversed,
+                eid_length=len(candidate),
+                rotation_timestamp=int(rotation_timestamp)
+                if isinstance(rotation_timestamp, int)
+                and not isinstance(rotation_timestamp, bool)
+                else None,
+                frame_type=observed_frame,
+                time_basis=anchor_basis,
+                created_at=now,
+                drift_offset=match.time_offset,
+                last_seen_at=now,
+            )
+            self._locks[match.device_id] = lock
+            self._persisted_locks[match.device_id] = lock
+            self._schedule_lock_save()
+        else:
+            # Update drift tracking on existing lock
+            drift_changed = existing_lock.drift_offset != match.time_offset
+            existing_lock.drift_offset = match.time_offset
+            existing_lock.last_seen_at = now
+            if drift_changed and match.time_offset != 0:
+                _LOGGER.debug(
+                    "Drift update for %s: offset=%d (using %s window)",
+                    match.device_id,
+                    match.time_offset,
+                    "+1/+2" if match.time_offset > 0 else "-1/-2",
+                )
+            self._schedule_lock_save()
+
+        self._known_advertisement_reversed[match.device_id] = match.is_reversed
+
+        if anchor_basis is not None and not basis_explicitly_invalid:
+            self._known_offsets[(match.device_id, anchor_basis)] = match.time_offset
+            self._known_timebases[match.device_id] = anchor_basis
+
+        _LOGGER.info(
+            (
+                "HIT: device=%s canonical=%s reversed=%s offset=%s "
+                "candidate_prefix=%s raw_prefix=%s"
+            ),
+            match.device_id,
+            match.canonical_id,
+            match.is_reversed,
+            match.time_offset,
+            candidate_prefix,
+            raw_prefix,
+        )
+
+    def _resolve_eid_internal(  # noqa: PLR0911, PLR0912
+        self, eid_bytes: bytes
+    ) -> tuple[list[EIDMatch], bytes | None, int | None]:
+        """Internal EID resolution returning all matches.
+
+        Returns:
+            Tuple of (matches, matched_candidate, observed_frame).
+            matches is empty if no match found.
+        """
         self._ensure_cache_defaults()
         if not isinstance(eid_bytes, (bytes, bytearray)):
-            return None
+            return [], None, None
 
         raw = bytes(eid_bytes)
         candidates, observed_frame = self._extract_candidates(raw)
@@ -1950,7 +2098,7 @@ class GoogleFindMyEIDResolver:
                 raw_prefix,
                 len(raw),
             )
-            return None
+            return [], None, None
 
         if not self._lookup:
             is_locked = self._refresh_lock.locked()
@@ -1961,7 +2109,7 @@ class GoogleFindMyEIDResolver:
                     is_locked,
                     raw_prefix,
                 )
-                return None
+                return [], None, None
 
             _LOGGER.debug(
                 "RESOLVER NOT READY: empty cache; scheduling refresh for raw_prefix=%s",
@@ -1980,86 +2128,29 @@ class GoogleFindMyEIDResolver:
                         asyncio.create_task(scheduled)
                 except Exception:  # pragma: no cover
                     self._pending_refresh = False
-            return None
+            return [], None, None
 
         for candidate_prefix, candidate in zip(candidate_prefixes, candidates):
-            match = self._lookup.get(candidate)
-            if match is None:
+            matches = self._lookup.get(candidate)
+            if not matches:
                 continue
 
             metadata: dict[str, Any] = self._lookup_metadata.get(candidate) or {}
             now = int(time.time())
-            self._last_lock_confirmation[match.device_id] = now
-            previous_basis = _normalize_anchor_basis(self._known_timebases.get(match.device_id))
-            raw_time_basis = metadata.get("timestamp_basis")
-            anchor_basis = _normalize_anchor_basis(raw_time_basis)
-            basis_explicitly_invalid = raw_time_basis is not None and anchor_basis is None
-            if anchor_basis is None:
-                if raw_time_basis is None:
-                    anchor_basis = previous_basis
-            elif raw_time_basis != anchor_basis:
-                self._known_timebases.pop(match.device_id, None)
-            if anchor_basis is None and not basis_explicitly_invalid:
-                self._known_timebases.pop(match.device_id, None)
-            existing_lock = self._locks.get(match.device_id)
-            if existing_lock is None:
-                variant_value = self._normalize_variant_value(
-                    metadata.get("variant"),
-                    eid_len=len(candidate),
+
+            # Update state for ALL matches (shared devices)
+            for match in matches:
+                self._update_match_state(
+                    match,
+                    metadata=metadata,
+                    candidate=candidate,
+                    observed_frame=observed_frame,
+                    candidate_prefix=candidate_prefix,
+                    raw_prefix=raw_prefix,
+                    now=now,
                 )
-                rotation_timestamp = metadata.get("rotation_timestamp")
-                lock = EIDGenerationLock(
-                    device_id=match.device_id,
-                    canonical_id=match.canonical_id,
-                    variant=variant_value,
-                    advertisement_reversed=match.is_reversed,
-                    eid_length=len(candidate),
-                    rotation_timestamp=int(rotation_timestamp)
-                    if isinstance(rotation_timestamp, int)
-                    and not isinstance(rotation_timestamp, bool)
-                    else None,
-                    frame_type=observed_frame,
-                    time_basis=anchor_basis,
-                    created_at=now,
-                    drift_offset=match.time_offset,
-                    last_seen_at=now,
-                )
-                self._locks[match.device_id] = lock
-                self._persisted_locks[match.device_id] = lock
-                self._schedule_lock_save()
-            else:
-                # Update drift tracking on existing lock
-                drift_changed = existing_lock.drift_offset != match.time_offset
-                existing_lock.drift_offset = match.time_offset
-                existing_lock.last_seen_at = now
-                if drift_changed and match.time_offset != 0:
-                    _LOGGER.debug(
-                        "Drift update for %s: offset=%d (using %s window)",
-                        match.device_id,
-                        match.time_offset,
-                        "+1/+2" if match.time_offset > 0 else "-1/-2",
-                    )
-                self._schedule_lock_save()
 
-            self._known_advertisement_reversed[match.device_id] = match.is_reversed
-
-            if anchor_basis is not None and not basis_explicitly_invalid:
-                self._known_offsets[(match.device_id, anchor_basis)] = match.time_offset
-                self._known_timebases[match.device_id] = anchor_basis
-
-            _LOGGER.info(
-                (
-                    "HIT: device=%s canonical=%s reversed=%s offset=%s "
-                    "candidate_prefix=%s raw_prefix=%s"
-                ),
-                match.device_id,
-                match.canonical_id,
-                match.is_reversed,
-                match.time_offset,
-                candidate_prefix,
-                raw_prefix,
-            )
-            return match
+            return matches, candidate, observed_frame
 
         # =================================================================
         # Heuristic Phone Discovery: Reactive check before logging MISS
@@ -2075,7 +2166,7 @@ class GoogleFindMyEIDResolver:
             self._known_advertisement_reversed[heuristic_match.device_id] = (
                 heuristic_match.is_reversed
             )
-            return heuristic_match
+            return [heuristic_match], None, None
 
         # Log MISS with rate limiting for heuristic failures
         max_prefixes = 8
@@ -2092,7 +2183,38 @@ class GoogleFindMyEIDResolver:
                 len(self._lookup),
                 len(self._cached_identities),
             )
-        return None
+        return [], None, None
+
+    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
+        """Resolve a scanned payload to a Home Assistant device registry ID.
+
+        For shared devices (same tracker across multiple accounts), this returns
+        the match with the smallest time_offset (best match).
+        Use resolve_eid_all() to get all matches.
+        """
+        matches, _, _ = self._resolve_eid_internal(eid_bytes)
+        if not matches:
+            return None
+        # Return the match with the smallest absolute time_offset (best match)
+        return min(matches, key=lambda m: abs(m.time_offset))
+
+    def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
+        """Resolve a scanned payload to all matching Home Assistant device registry IDs.
+
+        This method supports shared devices: when the same physical tracker
+        is shared between accounts, all accounts' matches are returned.
+        Each match represents a different Home Assistant device registry entry
+        for the same physical tracker.
+
+        Args:
+            eid_bytes: Raw EID bytes from a BLE advertisement.
+
+        Returns:
+            List of EIDMatch entries for all accounts that share this device.
+            Empty list if no match found.
+        """
+        matches, _, _ = self._resolve_eid_internal(eid_bytes)
+        return matches
 
     def _extract_candidates(  # noqa: PLR0912
         self, payload: bytes

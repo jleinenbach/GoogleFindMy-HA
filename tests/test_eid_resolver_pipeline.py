@@ -242,7 +242,7 @@ def test_collision_policy_prefers_smallest_offset() -> None:
     )
 
     lookup, metadata = builder.finalize()
-    assert lookup[b"eid"].time_offset == 1
+    assert lookup[b"eid"][0].time_offset == 1  # Get first match from list
     assert metadata[b"eid"]["timestamp_bases"] == {"pair_date", "secrets_creation_date"}
 
 
@@ -273,13 +273,13 @@ async def test_lock_save_scheduled_after_match(monkeypatch: pytest.MonkeyPatch) 
     resolver = _build_resolver(monkeypatch)
     payload = b"B" * LEGACY_EID_LENGTH
     resolver._lookup = {
-        payload: resolver_module.EIDMatch(
+        payload: [resolver_module.EIDMatch(
             device_id="dev-lock",
             config_entry_id="entry-lock",
             canonical_id="can-lock",
             time_offset=0,
             is_reversed=False,
-        )
+        )]
     }
     resolver._lookup_metadata = {
         payload: {

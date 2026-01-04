@@ -152,13 +152,13 @@ def test_confirmation_refresh_and_purge_stability(monkeypatch: pytest.MonkeyPatc
 
     resolver = _resolver()
     eid_bytes = b"\x99" * 20
-    resolver._lookup[eid_bytes] = EIDMatch(
+    resolver._lookup[eid_bytes] = [EIDMatch(
         device_id="device-id",
         config_entry_id="entry-id",
         canonical_id="canonical-id",
         time_offset=0,
         is_reversed=False,
-    )
+    )]
     resolver._lookup_metadata[eid_bytes] = {
         "timestamp_basis": "pair_date",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
@@ -271,13 +271,13 @@ def test_resolve_eid_does_not_store_lock_tracking_as_known_timebasis(
 
     resolver = _resolver()
     eid = b"\x11" * 20
-    resolver._lookup[eid] = EIDMatch(
+    resolver._lookup[eid] = [EIDMatch(
         device_id="dev",
         config_entry_id="entry",
         canonical_id="can",
         time_offset=7,
         is_reversed=False,
-    )
+    )]
     resolver._lookup_metadata[eid] = {
         "timestamp_basis": "lock_tracking",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
@@ -306,13 +306,13 @@ def test_resolve_eid_missing_timestamp_basis_uses_previous_valid_basis(
     resolver._known_timebases["dev"] = "pair_date"
 
     eid = b"\x22" * 20
-    resolver._lookup[eid] = EIDMatch(
+    resolver._lookup[eid] = [EIDMatch(
         device_id="dev",
         config_entry_id="entry",
         canonical_id="can",
         time_offset=3,
         is_reversed=False,
-    )
+    )]
     resolver._lookup_metadata[eid] = {
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
     }
@@ -334,13 +334,13 @@ def test_resolve_eid_normalizes_variant_and_never_persists_invalid_lock_variant(
 
     resolver = _resolver()
     eid = b"\x33" * 20
-    resolver._lookup[eid] = EIDMatch(
+    resolver._lookup[eid] = [EIDMatch(
         device_id="dev",
         config_entry_id="entry",
         canonical_id="can",
         time_offset=0,
         is_reversed=False,
-    )
+    )]
     resolver._lookup_metadata[eid] = {
         "timestamp_basis": "pair_date",
         "variant": "0",  # intentionally invalid for EidVariant in many implementations
@@ -466,13 +466,13 @@ def test_resolve_eid_does_not_poison_anchor_offsets_with_lock_tracking_basis(
     resolver._known_offsets[("dev", "pair_date")] = 123
 
     eid = b"\x11" * 20
-    resolver._lookup[eid] = EIDMatch(
+    resolver._lookup[eid] = [EIDMatch(
         device_id="dev",
         config_entry_id="entry",
         canonical_id="can",
         time_offset=7,
         is_reversed=False,
-    )
+    )]
     resolver._lookup_metadata[eid] = {
         "timestamp_basis": "lock_tracking",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
