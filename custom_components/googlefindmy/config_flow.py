@@ -3680,32 +3680,47 @@ class ConfigFlow(
         )
 
     def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
-        """Return the TokenCache (or equivalent) for this entry if available."""
+        """Return the TokenCache (or equivalent) for this entry if available.
+
+        Returns None if the cache is closed (unusable state) to allow
+        self-healing during reauth flows.
+        """
+        cache = None
 
         rd = getattr(entry, "runtime_data", None)
         if rd is not None:
             for attr in ("token_cache", "cache", "_cache"):
                 if hasattr(rd, attr):
                     try:
-                        return getattr(rd, attr)
+                        cache = getattr(rd, attr)
+                        break
                     except Exception:  # pragma: no cover
                         pass
 
-        runtime_container = getattr(self.hass, "data", {}) if self.hass else {}
-        runtime_bucket = runtime_container.get(DOMAIN, {}).get("entries", {})
-        runtime_entry = runtime_bucket.get(entry.entry_id)
-        if runtime_entry is not None:
-            for attr in ("_cache", "cache"):
-                if hasattr(runtime_entry, attr):
-                    try:
-                        return getattr(runtime_entry, attr)
-                    except Exception:  # pragma: no cover
-                        pass
-            if isinstance(runtime_entry, dict):
-                cache = runtime_entry.get("cache") or runtime_entry.get("_cache")
-                if cache is not None:
-                    return cache
-        return None
+        if cache is None:
+            runtime_container = getattr(self.hass, "data", {}) if self.hass else {}
+            runtime_bucket = runtime_container.get(DOMAIN, {}).get("entries", {})
+            runtime_entry = runtime_bucket.get(entry.entry_id)
+            if runtime_entry is not None:
+                for attr in ("_cache", "cache"):
+                    if hasattr(runtime_entry, attr):
+                        try:
+                            cache = getattr(runtime_entry, attr)
+                            break
+                        except Exception:  # pragma: no cover
+                            pass
+                if cache is None and isinstance(runtime_entry, dict):
+                    cache = runtime_entry.get("cache") or runtime_entry.get("_cache")
+
+        # Check if cache is closed (unusable) - return None to allow self-healing
+        if cache is not None and getattr(cache, "_closed", False):
+            _LOGGER.debug(
+                "TokenCache for entry '%s' is closed; returning None to allow self-healing",
+                getattr(entry, "entry_id", "unknown"),
+            )
+            return None
+
+        return cache
 
     @staticmethod
     async def _async_trigger_core_subentry_repair(
