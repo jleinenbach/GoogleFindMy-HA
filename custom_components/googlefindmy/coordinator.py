@@ -7418,7 +7418,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if not device_set or len(device_set) <= 1:
             return
 
-        # Extract only location-relevant fields to propagate
+        # Extract location-relevant and Bermuda-specific fields to propagate
         propagate_fields = (
             "latitude",
             "longitude",
@@ -7429,14 +7429,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             "address",
             "source_label",
             "status",
+            # Bermuda-specific fields
+            "bermuda_area",
+            "bermuda_rssi",
+            "bermuda_distance",
+            "bermuda_floor",
+            "bermuda_scanner",
+            "bermuda_last_seen",
         )
         propagated_data: dict[str, Any] = {}
         for key in propagate_fields:
             if key in location_data:
                 propagated_data[key] = location_data[key]
 
-        if not propagated_data.get("latitude") and not propagated_data.get("longitude"):
-            # No coordinates to propagate
+        # Check if we have any data worth propagating (coordinates OR Bermuda data)
+        has_coordinates = propagated_data.get("latitude") or propagated_data.get("longitude")
+        has_bermuda_data = any(k.startswith("bermuda_") for k in propagated_data)
+
+        if not has_coordinates and not has_bermuda_data:
+            # No data to propagate
             return
 
         # Mark as propagated to prevent re-propagation
@@ -7454,13 +7465,31 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     continue
 
                 # Compare timestamps: only propagate if newer
-                source_ts = _normalize_epoch_seconds(propagated_data.get("last_seen"))
-                target_ts = _normalize_epoch_seconds(target_cached.get("last_seen"))
+                # For location data, use last_seen; for Bermuda data, use bermuda_last_seen
+                should_propagate = True
 
-                if source_ts is not None and target_ts is not None:
-                    if source_ts <= target_ts:
-                        # Target has same or newer data, skip propagation
-                        continue
+                if has_coordinates:
+                    source_ts = _normalize_epoch_seconds(propagated_data.get("last_seen"))
+                    target_ts = _normalize_epoch_seconds(target_cached.get("last_seen"))
+
+                    if source_ts is not None and target_ts is not None:
+                        if source_ts <= target_ts:
+                            # Target has same or newer location data
+                            should_propagate = False
+
+                if has_bermuda_data and should_propagate:
+                    # For Bermuda data, compare bermuda_last_seen
+                    source_bermuda_ts = propagated_data.get("bermuda_last_seen")
+                    target_bermuda_ts = target_cached.get("bermuda_last_seen")
+
+                    if source_bermuda_ts and target_bermuda_ts:
+                        if source_bermuda_ts <= target_bermuda_ts:
+                            # Target has same or newer Bermuda data, but still might need coordinates
+                            if not has_coordinates:
+                                should_propagate = False
+
+                if not should_propagate:
+                    continue
 
                 # Merge propagated data into target's cached data
                 merged = dict(target_cached)
@@ -7468,10 +7497,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 merged["_propagated_from"] = source_device_id
 
                 _LOGGER.debug(
-                    "Propagating location from %s to shared device %s (identity_key=%s...)",
+                    "Propagating data from %s to shared device %s (identity_key=%s..., "
+                    "has_coords=%s, has_bermuda=%s)",
                     source_device_id,
                     target_device_id,
                     identity_key[:8].hex(),
+                    has_coordinates,
+                    has_bermuda_data,
                 )
 
                 self._device_location_data[target_device_id] = merged
