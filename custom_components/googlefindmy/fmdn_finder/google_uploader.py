@@ -36,8 +36,8 @@ _LOGGER = logging.getLogger(__name__)
 # See: docs/QUICK_START_SHIZUKU.md for 15-minute discovery guide
 # See: docs/FMDN_ENDPOINT_DISCOVERY.md for comprehensive analysis
 
-FMDN_UPLOAD_ENDPOINT = "UploadLocationReports"  # gRPC method name (highest probability)
-FMDN_UPLOAD_ENABLED = False  # Enable after endpoint confirmation
+FMDN_UPLOAD_ENDPOINT = "UploadLocationReports"  # Confirmed via PCAPdroid (spot-pa.googleapis.com)
+FMDN_UPLOAD_ENABLED = True  # Enabled - endpoint confirmed
 
 
 async def async_upload_to_google_fmdn(
@@ -134,35 +134,23 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> None:
         payload: Serialized LocationReportsUpload protobuf
 
     Raises:
-        NotImplementedError: Until endpoint is confirmed via Shizuku discovery
+        ValueError: If upload fails
     """
-    # IMPLEMENTATION NOTE FOR ENDPOINT CONFIRMATION:
-    #
-    # After Shizuku endpoint discovery confirms "UploadLocationReports", uncomment:
-    #
-    # from ..SpotApi.spot_request import async_spot_request
-    #
-    # response = await async_spot_request(
-    #     api_scope=FMDN_UPLOAD_ENDPOINT,  # "UploadLocationReports"
-    #     payload=payload,  # Already serialized LocationReportsUpload protobuf
-    #     cache=cache,  # REQUIRED on 1.7.0-3 for entry-scoped auth
-    # )
-    #
-    # Then set FMDN_UPLOAD_ENABLED = True above.
-    #
-    # The async_spot_request function will:
-    # 1. Construct full gRPC path: /google.internal.spot.v1.SpotService/UploadLocationReports
-    # 2. Use grpclib with HTTP/2 transport
-    # 3. Auto-refresh SPOT/ADM tokens using the provided cache
-    # 4. Retry transient failures (network, rate limit, etc.)
+    from ..SpotApi.spot_request import async_spot_request  # noqa: PLC0415
 
-    raise NotImplementedError(
-        "FMDN upload endpoint not yet confirmed. "
-        "Run endpoint discovery via Shizuku (see docs/QUICK_START_SHIZUKU.md) "
-        "or automated script (tools/analyze_fmdn_logs.py --live). "
-        "Expected endpoint: google.internal.spot.v1.SpotService/UploadLocationReports "
-        "Then uncomment implementation above and set FMDN_UPLOAD_ENABLED = True."
+    _LOGGER.debug(
+        "Sending FMDN upload via SpotService/%s (%d bytes)",
+        FMDN_UPLOAD_ENDPOINT,
+        len(payload),
     )
+
+    response = await async_spot_request(
+        api_scope=FMDN_UPLOAD_ENDPOINT,
+        payload=payload,
+        cache=cache,
+    )
+
+    _LOGGER.debug("FMDN upload response: %d bytes", len(response) if response else 0)
 
 
 # ============================================================================
