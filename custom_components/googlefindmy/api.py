@@ -1037,6 +1037,18 @@ class GoogleFindMyAPI:
                 _LOGGER.error("Authentication failed (gpsoauth): %s", _short_err(msg))
                 raise ConfigEntryAuthFailed(_short_err(msg)) from err
 
+            # TokenCache closed indicates the integration is in an invalid state
+            # (e.g., after a failed reload or during shutdown). Trigger re-auth
+            # to force a clean re-initialization of the entry.
+            if "TokenCache is closed" in msg:
+                _LOGGER.error(
+                    "TokenCache is closed; integration state is invalid. "
+                    "Triggering re-authentication to reinitialize."
+                )
+                raise ConfigEntryAuthFailed(
+                    "Integration state invalid (cache closed); please re-authenticate"
+                ) from err
+
             # Detect and tame the multi-entry guard (INFO once, DEBUG thereafter)
             if _is_multi_entry_guard_message(msg):
                 # Try to enrich with context if available from cache (best-effort)
