@@ -196,11 +196,16 @@ def parse_device_list_protobuf(
 def get_canonic_ids(
     device_list: DeviceUpdate_pb2.DevicesList,
 ) -> list[tuple[str, str]]:
-    """Return (device_name, canonic_id) for all devices in the list.
+    """Return (device_name, canonic_id) for devices in the list.
+
+    Only returns the PRIMARY (first) canonical ID for each device.
+    Android devices can have multiple canonical IDs (historical IDs from
+    updates/resets), but we only want the current primary identifier.
 
     Defensive policy:
         * Handle Android and non-Android identifier shapes.
         * Skip non-string/empty IDs to avoid downstream surprises.
+        * Use only first valid ID per device to prevent duplicates.
     """
     result: list[tuple[str, str]] = []
     for device in getattr(device_list, "deviceMetadata", []):
@@ -221,11 +226,12 @@ def get_canonic_ids(
             cid = getattr(canonic_id, "id", None)
             if isinstance(cid, str) and cid:
                 _LOGGER.debug(
-                    "ID extraction: Found ID '%s' for device '%s'",
+                    "ID extraction: Using primary ID '%s' for device '%s'",
                     cid,
                     device_name,
                 )
                 result.append((device_name, cid))
+                break  # Only use first (primary) canonical ID per device
     return result
 
 

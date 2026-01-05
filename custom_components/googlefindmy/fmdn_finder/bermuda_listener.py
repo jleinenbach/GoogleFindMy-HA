@@ -1,299 +1,353 @@
-"""Bermuda BLE Integration - FMDN Beacon Event Listener.
+"""Bermuda BLE Integration - FMDN Location Upload Listener.
 
-Listens to Bermuda integration state changes to detect FMDN beacons and
-extract relevant data (EID, RSSI, scanner location) for location reporting.
+Listens to Bermuda device_tracker state changes to detect area changes
+and trigger FMDN location uploads to Google's Find My Device network.
+
+Architecture:
+- Bermuda creates device_tracker entities for GoogleFindMy devices (same HA device)
+- Entity pattern: device_tracker.*_bermuda_tracker*
+- When area changes, we find the GoogleFindMy device via Device Registry
+- Get the current EID from GoogleFindMy coordinator
+- Upload semantic location to Google FMDN backend
 
 Bermuda Integration: https://github.com/jleinenbach/bermuda
-FMDN Specification: FMDN.md Section 3 (BLE Advertising & EID)
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 if TYPE_CHECKING:
     from homeassistant.helpers.event import EventStateChangedData
 
+from ..const import DOMAIN
+
 _LOGGER = logging.getLogger(__name__)
 
-# Bermuda constants
-BERMUDA_DOMAIN = "bermuda"
-ATTR_FMDN_EID = "fmdn_eid"
+# Bermuda entity pattern
+BERMUDA_TRACKER_SUFFIX = "_bermuda_tracker"
+
+# Bermuda state attributes
 ATTR_AREA = "area"
-ATTR_RSSI = "rssi"
+ATTR_SCANNER = "scanner"
 ATTR_SOURCE = "source"
-ATTR_SCANNER_DEVICE_ID = "scanner_device_id"
-ATTR_FMDN_DEVICE_ID = "fmdn_device_id"
-ATTR_DISTANCE = "distance"
-ATTR_FLOOR = "floor"
 
-# Data storage key
-DATA_BERMUDA_LISTENER = "fmdn_finder_bermuda_listener"
+# Data storage keys
 DATA_BERMUDA_UNSUBSCRIBE = "fmdn_finder_bermuda_unsub"
+DATA_LAST_AREA_CACHE = "fmdn_finder_last_area"
 
-# Log formatting constants
+# Throttling
+MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
+
+# Log formatting
 EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
 
 
 async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
-    """Setup Bermuda integration event listener for FMDN beacons.
+    """Setup Bermuda integration event listener for FMDN location uploads.
 
-    Registers a state change listener that monitors Bermuda sensor updates
-    for FMDN device detections.
+    Registers a state change listener that monitors Bermuda device_tracker updates
+    and triggers FMDN location uploads when area changes.
 
     Args:
         hass: Home Assistant instance
-
-    Raises:
-        RuntimeError: If location_uploader module cannot be imported
     """
-    # Lazy import to avoid circular dependencies
-    try:
-        from .location_uploader import (  # noqa: PLC0415
-            async_process_fmdn_beacon_detection,
-        )
-    except ImportError as err:
-        _LOGGER.error("Failed to import location_uploader: %s", err)
-        raise RuntimeError("FMDN Finder location_uploader not available") from err
-
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    @callback  # type: ignore[misc,untyped-decorator,unused-ignore]
-    def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:  # noqa: PLR0911
-        """Handle Bermuda entity state changes.
+    # Initialize area cache for change detection
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
 
-        Filters for FMDN-related entities and extracts beacon data.
+    @callback  # type: ignore[misc]
+    def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:
+        """Handle Bermuda device_tracker state changes.
 
-        Args:
-            event: State change event from Home Assistant
+        Filters for Bermuda tracker entities and triggers FMDN uploads on area change.
         """
         entity_id: str | None = event.data.get("entity_id")
         new_state: State | None = event.data.get("new_state")
+        old_state: State | None = event.data.get("old_state")
 
-        # Combined early validation checks
         if not entity_id or not new_state:
             return
 
-        # Filter for Bermuda FMDN entities
-        # Bermuda creates sensors like: sensor.bermuda_fmdn_device_xxxxx
-        if not entity_id.startswith(f"sensor.{BERMUDA_DOMAIN}_") or "fmdn" not in entity_id.lower():
+        # Filter for Bermuda tracker entities
+        # Pattern: device_tracker.*_bermuda_tracker* (e.g., device_tracker.moto_tag_koffer_grun_bermuda_tracker_2)
+        if not entity_id.startswith("device_tracker.") or BERMUDA_TRACKER_SUFFIX not in entity_id:
             return
 
-        # Extract FMDN attributes from Bermuda state
-        attrs = new_state.attributes
-        fmdn_eid_hex = attrs.get(ATTR_FMDN_EID)
+        # Extract area from attributes
+        new_area = new_state.attributes.get(ATTR_AREA)
+        old_area = old_state.attributes.get(ATTR_AREA) if old_state else None
 
-        if not fmdn_eid_hex:
-            # Not an FMDN beacon or EID not yet resolved
-            _LOGGER.debug(
-                "Entity %s has no FMDN EID attribute (may be unresolved beacon)",
-                entity_id,
-            )
+        # Skip if no area or area unchanged
+        if not new_area:
+            _LOGGER.debug("Bermuda tracker %s has no area attribute", entity_id)
             return
 
-        # Validate EID format (hex string)
-        if not isinstance(fmdn_eid_hex, str):
-            _LOGGER.warning(
-                "Invalid FMDN EID type for %s: %s (expected str)",
-                entity_id,
-                type(fmdn_eid_hex),
-            )
+        if new_area == old_area:
             return
 
-        # Extract additional metadata
-        area = attrs.get(ATTR_AREA)
-        rssi = attrs.get(ATTR_RSSI)
-        scanner_source = attrs.get(ATTR_SOURCE)
-        scanner_device_id = attrs.get(ATTR_SCANNER_DEVICE_ID)
-        fmdn_device_id = attrs.get(ATTR_FMDN_DEVICE_ID)
-
-        _LOGGER.debug(
-            "FMDN beacon detected: entity=%s, EID=%s..., area=%s, rssi=%s, scanner=%s",
+        _LOGGER.info(
+            "Bermuda area change detected: %s -> %s (entity: %s)",
+            old_area,
+            new_area,
             entity_id,
-            fmdn_eid_hex[:EID_LOG_PREFIX_LENGTH] if len(fmdn_eid_hex) >= EID_LOG_PREFIX_LENGTH else fmdn_eid_hex,
-            area,
-            rssi,
-            scanner_source,
         )
 
-        # Convert hex EID to bytes
-        try:
-            eid_bytes = bytes.fromhex(fmdn_eid_hex)
-        except (ValueError, AttributeError) as err:
-            _LOGGER.warning("Failed to parse FMDN EID hex '%s': %s", fmdn_eid_hex, err)
-            return
-
-        # Validate EID length (20 or 32 bytes per FMDN spec)
-        if len(eid_bytes) not in (20, 32):
-            _LOGGER.warning(
-                "Invalid FMDN EID length for %s: %d bytes (expected 20 or 32)",
-                entity_id,
-                len(eid_bytes),
-            )
-            return
-
-        # Extract additional Bermuda attributes for propagation
-        distance = attrs.get(ATTR_DISTANCE)
-        floor = attrs.get(ATTR_FLOOR)
-
-        # Pass to location uploader (async task)
+        # Trigger async upload task
         hass.async_create_task(
-            async_process_fmdn_beacon_detection(
-                hass=hass,
-                eid=eid_bytes,
-                area=area,
-                rssi=rssi,
-                scanner_address=scanner_source,
-                scanner_device_id=scanner_device_id,
-                fmdn_device_id=fmdn_device_id,
-                entity_id=entity_id,
-            ),
-            name=f"fmdn_finder_upload_{entity_id}",
-        )
-
-        # Propagate Bermuda data to all devices sharing this EID
-        hass.async_create_task(
-            _async_propagate_bermuda_data_to_shared_devices(
-                hass=hass,
-                eid=eid_bytes,
-                area=area,
-                rssi=rssi,
-                distance=distance,
-                floor=floor,
-                scanner_source=scanner_source,
-            ),
-            name=f"fmdn_finder_propagate_{entity_id}",
+            _async_handle_area_change(hass, entity_id, new_area, new_state.attributes),
+            name=f"fmdn_upload_{entity_id}",
         )
 
     # Register state change listener
-    # Using async_track_state_change_event for efficient filtering
     unsubscribe = hass.bus.async_listen(EVENT_STATE_CHANGED, _bermuda_state_changed)
 
     # Store unsubscribe callback for cleanup
-    hass.data.setdefault(BERMUDA_DOMAIN, {})
-    hass.data[BERMUDA_DOMAIN][DATA_BERMUDA_UNSUBSCRIBE] = unsubscribe
+    hass.data[DOMAIN][DATA_BERMUDA_UNSUBSCRIBE] = unsubscribe
 
     _LOGGER.info("Bermuda FMDN beacon listener registered successfully")
 
 
-async def _async_propagate_bermuda_data_to_shared_devices(  # noqa: PLR0913
+async def _async_handle_area_change(
     hass: HomeAssistant,
-    *,
-    eid: bytes,
-    area: str | None,
-    rssi: int | None,
-    distance: float | None,
-    floor: str | None,
-    scanner_source: str | None,
+    entity_id: str,
+    area: str,
+    attributes: dict[str, Any],
 ) -> None:
-    """Propagate Bermuda detection data to all devices sharing the same EID.
-
-    When a tracker is detected by Bermuda, this function resolves the EID to find
-    ALL devices that share the same physical tracker (across multiple accounts).
-    The Bermuda data (area, rssi, distance, floor) is then sent to the coordinator
-    for each device, which will propagate the data to all shared devices.
+    """Handle area change and trigger FMDN upload.
 
     Args:
         hass: Home Assistant instance
-        eid: Ephemeral Identity Key bytes
-        area: Bermuda area/room name
-        rssi: Signal strength (dBm)
-        distance: Estimated distance (meters)
-        floor: Floor/level name
-        scanner_source: Scanner identifier
+        entity_id: Bermuda tracker entity ID
+        area: New area name (semantic location)
+        attributes: Entity attributes (scanner, source, etc.)
     """
-    # Import here to avoid circular dependencies
-    from ..const import DATA_EID_RESOLVER, DOMAIN  # noqa: PLC0415
+    # Get entity registry to find the HA device
+    ent_reg = er.async_get(hass)
+    entity_entry = ent_reg.async_get(entity_id)
 
-    eid_hex = eid.hex()
-    eid_prefix = eid_hex[:EID_LOG_PREFIX_LENGTH] if len(eid_hex) >= EID_LOG_PREFIX_LENGTH else eid_hex
-
-    # Get EID resolver from hass.data
-    domain_bucket = hass.data.get(DOMAIN)
-    if not isinstance(domain_bucket, dict):
-        _LOGGER.debug("No GoogleFindMy domain bucket found, skipping propagation")
+    if not entity_entry or not entity_entry.device_id:
+        _LOGGER.warning("Cannot find device for Bermuda entity %s", entity_id)
         return
 
-    eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
-    if eid_resolver is None:
-        _LOGGER.debug("No EID resolver found, skipping propagation")
+    ha_device_id = entity_entry.device_id
+
+    # Find the GoogleFindMy device data for this HA device
+    device_info = await _async_find_googlefindmy_device(hass, ha_device_id)
+
+    if not device_info:
+        _LOGGER.debug(
+            "No GoogleFindMy device found for HA device %s (entity: %s)",
+            ha_device_id,
+            entity_id,
+        )
         return
 
-    # Resolve EID to ALL matching devices (not just the best match)
-    resolve_all = getattr(eid_resolver, "resolve_eid_all", None)
-    if not callable(resolve_all):
-        _LOGGER.debug("EID resolver does not support resolve_eid_all, skipping propagation")
+    google_device_id = device_info.get("device_id")
+    config_entry_id = device_info.get("config_entry_id")
+    coordinator = device_info.get("coordinator")
+
+    if not google_device_id or not coordinator or not config_entry_id:
+        _LOGGER.warning("Incomplete GoogleFindMy device info for %s", ha_device_id)
         return
 
-    matches = resolve_all(eid)
-    if not matches:
-        _LOGGER.debug("No EID matches found for %s..., skipping propagation", eid_prefix)
+    # Type narrowing for mypy
+    assert isinstance(config_entry_id, str)
+
+    # Get current EID for the device
+    eid = await _async_get_device_eid(hass, coordinator, google_device_id)
+
+    if not eid:
+        _LOGGER.warning(
+            "Cannot get EID for GoogleFindMy device %s, skipping upload",
+            google_device_id,
+        )
         return
 
-    _LOGGER.debug(
-        "Found %d EID matches for %s..., propagating Bermuda data",
-        len(matches),
-        eid_prefix,
+    _LOGGER.info(
+        "Triggering FMDN upload: device=%s, area=%s, EID=%s...",
+        google_device_id,
+        area,
+        eid[:EID_LOG_PREFIX_LENGTH].hex() if len(eid) >= EID_LOG_PREFIX_LENGTH else eid.hex(),
     )
 
-    # Build Bermuda data payload
-    bermuda_data: dict[str, Any] = {
-        "bermuda_area": area,
-        "bermuda_rssi": rssi,
-        "bermuda_distance": distance,
-        "bermuda_floor": floor,
-        "bermuda_scanner": scanner_source,
-        "bermuda_last_seen": time.time(),
-    }
+    # Trigger the location upload
+    await _async_upload_semantic_location(
+        hass=hass,
+        eid=eid,
+        area=area,
+        config_entry_id=config_entry_id,
+        scanner=attributes.get(ATTR_SCANNER),
+    )
 
-    # Filter out None values
-    bermuda_data = {k: v for k, v in bermuda_data.items() if v is not None}
 
-    if not bermuda_data:
-        _LOGGER.debug("No Bermuda data to propagate for %s...", eid_prefix)
-        return
+async def _async_find_googlefindmy_device(
+    hass: HomeAssistant,
+    ha_device_id: str,
+) -> dict[str, Any] | None:
+    """Find GoogleFindMy device data for a Home Assistant device.
 
-    # Get all coordinators and update each matched device
-    for match in matches:
-        device_id = match.device_id
-        config_entry_id = match.config_entry_id
+    Searches through all GoogleFindMy config entries to find a device
+    that matches the given HA device registry ID.
 
-        if not device_id or not config_entry_id:
+    Args:
+        hass: Home Assistant instance
+        ha_device_id: Home Assistant device registry ID
+
+    Returns:
+        Dict with device_id, config_entry_id, coordinator, or None if not found
+    """
+    domain_data = hass.data.get(DOMAIN)
+    if not domain_data:
+        return None
+
+    # Get device registry to check identifiers
+    dev_reg = dr.async_get(hass)
+    device_entry = dev_reg.async_get(ha_device_id)
+
+    if not device_entry:
+        return None
+
+    # Check each config entry's coordinator for matching devices
+    for entry_id, entry_data in domain_data.items():
+        if not isinstance(entry_data, dict):
             continue
 
-        # Find the coordinator for this config entry
-        entry_bucket = domain_bucket.get(config_entry_id)
-        if not isinstance(entry_bucket, dict):
+        coordinator = entry_data.get("coordinator")
+        if not coordinator:
             continue
 
-        coordinator = entry_bucket.get("coordinator")
-        if coordinator is None:
-            continue
+        # Check if this coordinator has a device matching our HA device
+        device_identities = getattr(coordinator, "_device_identities", {})
 
-        # Update device cache with Bermuda data
-        update_cache = getattr(coordinator, "update_device_cache", None)
-        if callable(update_cache):
-            _LOGGER.debug(
-                "Propagating Bermuda data to device %s (entry=%s): area=%s, rssi=%s",
-                device_id,
-                config_entry_id,
-                area,
-                rssi,
-            )
-            try:
-                update_cache(device_id, bermuda_data)
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.warning(
-                    "Failed to propagate Bermuda data to %s: %s",
-                    device_id,
-                    err,
-                )
+        for google_device_id, identity in device_identities.items():
+            # Check if identifiers match
+            # GoogleFindMy uses (DOMAIN, device_id) as identifier
+            for identifier in device_entry.identifiers:
+                if identifier[0] == DOMAIN and identifier[1] == google_device_id:
+                    return {
+                        "device_id": google_device_id,
+                        "config_entry_id": entry_id,
+                        "coordinator": coordinator,
+                        "identity": identity,
+                    }
+
+    return None
+
+
+async def _async_get_device_eid(
+    hass: HomeAssistant,
+    coordinator: Any,
+    device_id: str,
+) -> bytes | None:
+    """Get the current EID for a GoogleFindMy device.
+
+    The EID is computed from the device's identity key and current time.
+
+    Args:
+        hass: Home Assistant instance
+        coordinator: GoogleFindMyCoordinator instance
+        device_id: Google device ID
+
+    Returns:
+        Current EID bytes (20 or 32 bytes), or None if unavailable
+    """
+    # Try to get EID from the EID resolver
+    eid_resolver = hass.data.get(DOMAIN, {}).get("eid_resolver")
+
+    if eid_resolver:
+        # Get device identity from coordinator
+        device_identities = getattr(coordinator, "_device_identities", {})
+        identity = device_identities.get(device_id)
+
+        if identity:
+            # Generate current EID using the identity key
+            identity_key = getattr(identity, "identity_key", None)
+            if identity_key:
+                try:
+                    import time  # noqa: PLC0415
+
+                    from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
+                        EidVariant,
+                        generate_eid_variant,
+                    )
+
+                    # Calculate beacon time counter
+                    rotation_period = 1024  # Default FMDN rotation period
+                    pair_date = getattr(identity, "pair_date", 0) or 0
+                    current_time = int(time.time())
+                    beacon_time_counter = (current_time - pair_date) // rotation_period
+
+                    # Generate EID
+                    eid = generate_eid_variant(
+                        eik=identity_key,
+                        time_counter_u32=beacon_time_counter,
+                        variant=EidVariant.MODERN_P256_X20_TRUNC_BE,
+                    )
+                    return eid
+                except Exception as err:
+                    _LOGGER.debug("Failed to generate EID: %s", err)
+
+    # Fallback: try to get from coordinator's cached data
+    device_cache = getattr(coordinator, "_device_location_data", {})
+    cached = device_cache.get(device_id, {})
+
+    # Check for pre-computed EID in cache (if available)
+    eid_hex = cached.get("current_eid")
+    if eid_hex:
+        try:
+            return bytes.fromhex(eid_hex)
+        except (ValueError, TypeError):
+            pass
+
+    return None
+
+
+async def _async_upload_semantic_location(
+    hass: HomeAssistant,
+    eid: bytes,
+    area: str,
+    config_entry_id: str,
+    scanner: str | None = None,
+) -> None:
+    """Upload semantic location to Google FMDN backend.
+
+    Args:
+        hass: Home Assistant instance
+        eid: Device EID (20 or 32 bytes)
+        area: Semantic location name (e.g., "Windfang", "Wohnzimmer")
+        config_entry_id: Config entry ID for authentication
+        scanner: Optional scanner name for logging
+    """
+    from .location_uploader import async_process_fmdn_beacon_detection  # noqa: PLC0415
+
+    _LOGGER.debug(
+        "Uploading semantic location: EID=%s..., area=%s, scanner=%s",
+        eid[:EID_LOG_PREFIX_LENGTH].hex() if len(eid) >= EID_LOG_PREFIX_LENGTH else eid.hex(),
+        area,
+        scanner,
+    )
+
+    # Use the location uploader with the semantic area
+    await async_process_fmdn_beacon_detection(
+        hass=hass,
+        eid=eid,
+        area=area,
+        rssi=None,  # Not available from Bermuda tracker
+        scanner_address=scanner,
+        scanner_device_id=None,
+        fmdn_device_id=None,
+        entity_id=f"bermuda_semantic_{area}",
+    )
 
 
 async def async_unload_bermuda_listener(hass: HomeAssistant) -> None:
@@ -302,12 +356,12 @@ async def async_unload_bermuda_listener(hass: HomeAssistant) -> None:
     Args:
         hass: Home Assistant instance
     """
-    bermuda_data = hass.data.get(BERMUDA_DOMAIN, {})
-    unsubscribe: Callable[[], None] | None = bermuda_data.get(DATA_BERMUDA_UNSUBSCRIBE)
+    domain_data = hass.data.get(DOMAIN, {})
+    unsubscribe: Callable[[], None] | None = domain_data.get(DATA_BERMUDA_UNSUBSCRIBE)
 
     if unsubscribe:
         unsubscribe()
-        bermuda_data.pop(DATA_BERMUDA_UNSUBSCRIBE, None)
+        domain_data.pop(DATA_BERMUDA_UNSUBSCRIBE, None)
         _LOGGER.info("Bermuda FMDN beacon listener unloaded")
     else:
         _LOGGER.debug("No Bermuda listener to unload")
