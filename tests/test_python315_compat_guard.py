@@ -51,7 +51,12 @@ SKIP_PARTS = {
     "build",
     "venv",
     ".venv",
+    ".venv313",
     "__pycache__",
+    # Skip external packages - we only check our own code
+    "site-packages",
+    "lib",
+    "lib64",
 }
 
 
