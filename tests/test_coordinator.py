@@ -286,6 +286,8 @@ def test_coordinator_propagates_timestamps_to_identity(
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
     )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
 
     metadata_only_payload = {
         "identity_key": b"\x01\x02\x03\x04",
@@ -344,6 +346,8 @@ def test_coordinator_persists_camelCase_identity_keys(
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
     )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
 
     camel_payload = {
         "identityKey": b"\x05\x06\x07\x08",
@@ -411,6 +415,8 @@ def test_coordinator_yields_encrypted_only_identities(
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
     )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
 
     encrypted_payload = {
         "pair_date": 1_700_000_000,
@@ -471,6 +477,8 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
     )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
 
     encrypted_eik = b"\x66" * 60  # Wrapped 60-byte identity key payload (Moto Tag/Chipolo style)
     decrypted_eik = b"\xAA" * 32
@@ -547,6 +555,8 @@ def test_coordinator_yields_identities_without_pair_date(
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
     )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
 
     identity_only_payload = {
         "identity_key": b"\x09\x0a\x0b\x0c",

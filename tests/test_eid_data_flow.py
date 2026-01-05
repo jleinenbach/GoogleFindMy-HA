@@ -85,6 +85,10 @@ def _create_test_coordinator(eid_resolver: Any = None) -> Any:
     coordinator._get_ignored_set = lambda: set()
     coordinator._extract_our_identifier = None
 
+    # Shared tracker support attributes
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
     return coordinator
 
 

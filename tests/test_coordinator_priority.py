@@ -49,6 +49,8 @@ def _build_coordinator(
     )
     coordinator.data = []
     coordinator._device_location_data = {}
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
     return coordinator
 
 
