@@ -23,7 +23,7 @@ import math
 import secrets
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant, State
@@ -87,7 +87,9 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     scanner_device_id: str | None,
     fmdn_device_id: str | None,
     entity_id: str,
-) -> None:
+    google_device_id: str | None = None,
+    coordinator: Any | None = None,
+) -> bool:
     """Process FMDN beacon detection and upload location report.
 
     Main entry point from bermuda_listener. Coordinates location resolution,
@@ -102,6 +104,11 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         scanner_device_id: HA device registry ID of scanner
         fmdn_device_id: HA device registry ID of FMDN device
         entity_id: Bermuda entity ID for logging
+        google_device_id: Google device ID for semantic_name update
+        coordinator: GoogleFindMy coordinator for semantic_name update
+
+    Returns:
+        True if upload succeeded, False otherwise
     """
     eid_hex = eid.hex()
     _LOGGER.debug(
@@ -120,7 +127,7 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
             area,
             scanner_address,
         )
-        return
+        return False
 
     _LOGGER.debug(
         "Resolved location: lat=%.6f, lon=%.6f, accuracy=%dm, zone=%s",
@@ -135,7 +142,7 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
 
     if not should_upload:
         _LOGGER.debug("Upload throttled for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason)
-        return
+        return False
 
     _LOGGER.info(
         "Uploading FMDN location report: EID=%s..., zone=%s, accuracy=%dm",
@@ -151,12 +158,28 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
 
     # 4. Encrypt and upload
     try:
-        await _encrypt_and_upload_location(hass, eid, location)
+        success = await _encrypt_and_upload_location(hass, eid, location, area)
 
-        # Update cache on successful upload
-        _update_upload_cache(hass, eid_hex, location)
+        if success:
+            # Update cache on successful upload
+            _update_upload_cache(hass, eid_hex, location)
 
-        _LOGGER.info("FMDN location report uploaded successfully for EID %s...", eid_hex[:EID_LOG_PREFIX_LENGTH])
+            # Update semantic_name in coordinator for device_tracker display
+            if google_device_id and coordinator and area:
+                _update_semantic_name(coordinator, google_device_id, area)
+                _LOGGER.debug(
+                    "Updated semantic_name='%s' for device %s",
+                    area,
+                    google_device_id,
+                )
+
+            _LOGGER.info(
+                "FMDN location report uploaded successfully for EID %s... (semantic: %s)",
+                eid_hex[:EID_LOG_PREFIX_LENGTH],
+                area,
+            )
+
+        return success
 
     except Exception as err:  # noqa: BLE001
         _LOGGER.error(
@@ -165,6 +188,7 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
             err,
             exc_info=True,
         )
+        return False
 
 
 async def _resolve_scanner_location(
@@ -383,11 +407,43 @@ def _calculate_accuracy_from_rssi(rssi: int, zone_accuracy: int) -> int:
     return max(estimated_distance, zone_accuracy)
 
 
+def _update_semantic_name(coordinator: Any, google_device_id: str, area: str) -> None:
+    """Update semantic_name in coordinator's device data.
+
+    This updates the device_tracker's location_name attribute after
+    a successful FMDN location upload.
+
+    Args:
+        coordinator: GoogleFindMy coordinator
+        google_device_id: Google device ID
+        area: Semantic location name (e.g., "Büro", "Wohnzimmer")
+    """
+    device_location_data = getattr(coordinator, "_device_location_data", None)
+    if device_location_data is None:
+        return
+
+    device_data = device_location_data.get(google_device_id)
+    if device_data is None:
+        # Create minimal entry if not exists
+        device_location_data[google_device_id] = {"semantic_name": area}
+    else:
+        device_data["semantic_name"] = area
+
+    # Trigger entity update by requesting refresh
+    # The coordinator will propagate this to the device_tracker entity
+    if hasattr(coordinator, "async_request_refresh"):
+        # Don't await - just schedule the refresh
+        import asyncio  # noqa: PLC0415
+
+        asyncio.create_task(coordinator.async_request_refresh())
+
+
 async def _encrypt_and_upload_location(
     hass: HomeAssistant,
     eid: bytes,
     location: LocationData,
-) -> None:
+    semantic_area: str | None = None,
+) -> bool:
     """Encrypt location and upload to Google FMDN backend.
 
     Uses existing crypto primitives from foreign_tracker_cryptor.py
@@ -397,6 +453,10 @@ async def _encrypt_and_upload_location(
         hass: Home Assistant instance
         eid: Ephemeral Identity Key (20 or 32 bytes)
         location: Location to upload
+        semantic_area: Optional semantic location name for logging
+
+    Returns:
+        True if upload succeeded, False otherwise
 
     Raises:
         ImportError: If crypto or protobuf modules not available
@@ -462,12 +522,16 @@ async def _encrypt_and_upload_location(
 
     upload_bytes = upload.SerializeToString()
 
-    _LOGGER.debug("Upload protobuf: %d bytes", len(upload_bytes))
+    _LOGGER.debug(
+        "Upload protobuf: %d bytes%s",
+        len(upload_bytes),
+        f", semantic_area='{semantic_area}'" if semantic_area else "",
+    )
 
     # 4. Upload to Google FMDN backend
     from .google_uploader import async_upload_to_google_fmdn  # noqa: PLC0415
 
-    await async_upload_to_google_fmdn(hass, upload_bytes, eid[:10].hex())
+    return await async_upload_to_google_fmdn(hass, upload_bytes, eid[:10].hex())
 
 
 def _update_upload_cache(hass: HomeAssistant, eid_hex: str, location: LocationData) -> None:

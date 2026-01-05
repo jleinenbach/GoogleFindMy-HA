@@ -44,13 +44,16 @@ async def async_upload_to_google_fmdn(
     hass: HomeAssistant,
     payload: bytes,
     truncated_eid_hex: str,
-) -> None:
+) -> bool:
     """Upload encrypted location report to Google FMDN backend.
 
     Args:
         hass: Home Assistant instance
         payload: Serialized LocationReportsUpload protobuf
         truncated_eid_hex: Truncated EID (first 10 bytes) for logging
+
+    Returns:
+        True if upload succeeded, False otherwise
 
     Raises:
         RuntimeError: If GoogleFindMy integration not available or no cache
@@ -64,7 +67,7 @@ async def async_upload_to_google_fmdn(
             len(payload),
             truncated_eid_hex[:8],
         )
-        return
+        return False
 
     # Get cache from integration data (entry-scoped on 1.7.0-3)
     cache = await _get_cache_from_hass(hass)
@@ -76,8 +79,19 @@ async def async_upload_to_google_fmdn(
     )
 
     try:
-        await _upload_via_spot_request(cache, payload)
-        _LOGGER.info("FMDN location report uploaded successfully")
+        response = await _upload_via_spot_request(cache, payload)
+        _LOGGER.info(
+            "FMDN location report uploaded successfully for EID %s... (response: %d bytes)",
+            truncated_eid_hex[:8],
+            len(response),
+        )
+        _LOGGER.debug(
+            "Upload success - EID=%s, payload=%d bytes, response=%d bytes",
+            truncated_eid_hex,
+            len(payload),
+            len(response),
+        )
+        return True
     except Exception as err:  # noqa: BLE001
         _LOGGER.error("Failed to upload FMDN report: %s", err, exc_info=True)
         raise ValueError(f"Upload failed: {err}") from err
@@ -120,7 +134,7 @@ async def _get_cache_from_hass(hass: HomeAssistant) -> TokenCache:
     return cast(TokenCache, cache)
 
 
-async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> None:
+async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> bytes:
     """Upload payload using Spot API (gRPC over HTTP/2).
 
     Implementation follows the pattern of existing Spot API calls on 1.7.0-3:
@@ -132,6 +146,9 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> None:
     Args:
         cache: Entry-scoped TokenCache for authentication
         payload: Serialized LocationReportsUpload protobuf
+
+    Returns:
+        Response bytes from server
 
     Raises:
         ValueError: If upload fails
@@ -150,7 +167,14 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> None:
         cache=cache,
     )
 
-    _LOGGER.debug("FMDN upload response: %d bytes", len(response) if response else 0)
+    response_len = len(response) if response else 0
+    _LOGGER.debug(
+        "FMDN upload response: %d bytes%s",
+        response_len,
+        f", data={response.hex()[:64]}..." if response and response_len > 0 else " (empty)",
+    )
+
+    return response if response else b""
 
 
 # ============================================================================
