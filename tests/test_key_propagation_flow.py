@@ -54,6 +54,8 @@ def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.Go
     coordinator._ensure_device_name_cache = lambda: {}
     coordinator._reset_resolver_offset = lambda *_args, **_kwargs: None
     coordinator._schedule_eid_resolver_refresh = lambda *_args, **_kwargs: None
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
     return coordinator
 
 

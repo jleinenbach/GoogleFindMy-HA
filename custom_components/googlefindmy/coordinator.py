@@ -992,6 +992,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._skip_repair_during_reload_refresh: bool = False
         self._reload_repair_skip_pending_release: bool = False
 
+        # Shared tracker support: identity_key → set of device_ids mapping
+        # Enables Location propagation across devices sharing the same tracker
+        self._identity_key_to_devices: dict[bytes, set[str]] = {}
+        # Guard against infinite propagation loops
+        self._propagating_location: bool = False
+
         super().__init__(
             hass,
             _LOGGER,
@@ -7349,9 +7355,128 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # Increment background updates to account for push/manual commits.
         self.increment_stat("background_updates")
 
+        # Update identity_key mapping and propagate location to shared devices
+        effective_identity_key = incoming_identity_key or cached_identity_key
+        if effective_identity_key is not None:
+            self._register_identity_key(device_id, effective_identity_key)
+            # Propagate location to all devices sharing the same tracker
+            self._propagate_location_to_shared_devices(
+                device_id, effective_identity_key, slot
+            )
+
         if resolver_refresh_needed:
             self._reset_resolver_offset(device_id)
             self._schedule_eid_resolver_refresh()
+
+    def _register_identity_key(self, device_id: str, identity_key: bytes) -> None:
+        """Register a device's identity_key for shared tracker detection.
+
+        Maintains a mapping from identity_key to all device_ids that share the
+        same physical tracker. This enables location propagation across accounts.
+
+        Args:
+            device_id: Canonical device identifier.
+            identity_key: Normalized 32-byte identity key.
+        """
+        if not isinstance(identity_key, bytes) or len(identity_key) != 32:
+            return
+
+        device_set = self._identity_key_to_devices.setdefault(identity_key, set())
+        if device_id not in device_set:
+            device_set.add(device_id)
+            if len(device_set) > 1:
+                _LOGGER.info(
+                    "Shared tracker detected: identity_key=%s... shared by %d devices: %s",
+                    identity_key[:8].hex(),
+                    len(device_set),
+                    sorted(device_set),
+                )
+
+    def _propagate_location_to_shared_devices(
+        self,
+        source_device_id: str,
+        identity_key: bytes,
+        location_data: dict[str, Any],
+    ) -> None:
+        """Propagate location data to all devices sharing the same identity_key.
+
+        When a tracker is shared between multiple Google accounts, each account
+        has its own canonical_id but they share the same identity_key. This method
+        ensures that location updates received for one device are propagated to
+        all other devices representing the same physical tracker.
+
+        Args:
+            source_device_id: Device that received the original location update.
+            identity_key: The shared identity key.
+            location_data: Location data to propagate.
+        """
+        # Guard against infinite recursion (propagation calling propagation)
+        if self._propagating_location:
+            return
+
+        device_set = self._identity_key_to_devices.get(identity_key)
+        if not device_set or len(device_set) <= 1:
+            return
+
+        # Extract only location-relevant fields to propagate
+        propagate_fields = (
+            "latitude",
+            "longitude",
+            "accuracy",
+            "last_seen",
+            "last_updated",
+            "altitude",
+            "address",
+            "source_label",
+            "status",
+        )
+        propagated_data: dict[str, Any] = {}
+        for key in propagate_fields:
+            if key in location_data:
+                propagated_data[key] = location_data[key]
+
+        if not propagated_data.get("latitude") and not propagated_data.get("longitude"):
+            # No coordinates to propagate
+            return
+
+        # Mark as propagated to prevent re-propagation
+        propagated_data["_propagated_from"] = source_device_id
+
+        self._propagating_location = True
+        try:
+            for target_device_id in device_set:
+                if target_device_id == source_device_id:
+                    continue
+
+                target_cached = self._device_location_data.get(target_device_id)
+                if target_cached is None:
+                    # Target device not yet in cache (will be populated on next poll)
+                    continue
+
+                # Compare timestamps: only propagate if newer
+                source_ts = _normalize_epoch_seconds(propagated_data.get("last_seen"))
+                target_ts = _normalize_epoch_seconds(target_cached.get("last_seen"))
+
+                if source_ts is not None and target_ts is not None:
+                    if source_ts <= target_ts:
+                        # Target has same or newer data, skip propagation
+                        continue
+
+                # Merge propagated data into target's cached data
+                merged = dict(target_cached)
+                merged.update(propagated_data)
+                merged["_propagated_from"] = source_device_id
+
+                _LOGGER.debug(
+                    "Propagating location from %s to shared device %s (identity_key=%s...)",
+                    source_device_id,
+                    target_device_id,
+                    identity_key[:8].hex(),
+                )
+
+                self._device_location_data[target_device_id] = merged
+        finally:
+            self._propagating_location = False
 
     def _reset_resolver_offset(self, device_id: str) -> None:
         """Clear resolver offsets using registry IDs when identity keys rotate."""
