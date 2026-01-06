@@ -126,6 +126,11 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
             _LOGGER.debug("Bermuda tracker %s has no area attribute", entity_id)
             return
 
+        # Skip if area unchanged (unless first detection)
+        if new_area == old_area:
+            _LOGGER.debug("Bermuda tracker %s area unchanged: %s", entity_id, new_area)
+            return
+
         # Get debounce cache
         debounce_cache: dict[str, AreaDebounceState] = hass.data[DOMAIN].get(
             DATA_AREA_DEBOUNCE, {}
@@ -133,9 +138,9 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
         current_time = time.time()
         debounce_state = debounce_cache.get(entity_id)
 
-        # Check if this is a new area or same area as debounce state
+        # Check if this is the same area as current debounce state
         if debounce_state and debounce_state.area == new_area:
-            # Same area, update last_seen time
+            # Same area as debounce, update last_seen time
             debounce_state.last_seen = current_time
             _LOGGER.debug(
                 "Bermuda %s still in area '%s' (stable for %.1fs)",
@@ -145,15 +150,14 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
             )
             return
 
-        # Area changed (or first detection) - reset debounce
-        if new_area != old_area:
-            _LOGGER.info(
-                "Bermuda area change detected: %s -> %s (entity: %s), starting %ds stabilization",
-                old_area,
-                new_area,
-                entity_id,
-                AREA_STABILIZATION_SECONDS,
-            )
+        # Area changed - log and start debounce
+        _LOGGER.info(
+            "Bermuda area change detected: %s -> %s (entity: %s), starting %ds stabilization",
+            old_area,
+            new_area,
+            entity_id,
+            AREA_STABILIZATION_SECONDS,
+        )
 
         # Create/update debounce state
         debounce_cache[entity_id] = AreaDebounceState(
