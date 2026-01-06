@@ -11,5 +11,7 @@ pytest-homeassistant-custom-component>=0.13
 ruff>=0.14.1
 types-requests>=2.32.0.20240712
 certifi>=2024.7.4
-    # pip-audit: subdependency explicitly fixed
+# pip-audit: subdependency explicitly fixed
 uv==0.9.6
+    # pip-audit: subdependency explicitly fixed
+aiohttp==3.13.3
