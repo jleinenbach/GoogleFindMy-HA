@@ -88,7 +88,7 @@ DATA_LAST_AREA_CACHE = "fmdn_finder_last_area"
 DATA_AREA_DEBOUNCE = "fmdn_finder_area_debounce"
 
 # Debouncing - area must be stable for this duration before triggering upload
-AREA_STABILIZATION_SECONDS = 30  # Wait 30 seconds after area change to confirm it's stable
+AREA_STABILIZATION_SECONDS = 5  # Wait 5 seconds after area change to confirm it's stable (DEBUG: reduced from 30)
 MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
 
 # Log formatting
