@@ -530,60 +530,106 @@ async def _async_get_device_eid(
     Args:
         hass: Home Assistant instance
         coordinator: GoogleFindMyCoordinator instance
-        device_id: Google device ID
+        device_id: Google device UUID (e.g., "68419b51-0000-2131-873b-fc411691d329")
 
     Returns:
         Current EID bytes (20 or 32 bytes), or None if unavailable
     """
-    # Try to get EID from the EID resolver
-    eid_resolver = hass.data.get(DOMAIN, {}).get("eid_resolver")
+    # Get device identities from coordinator
+    get_identities = getattr(coordinator, "get_active_device_identities", None)
+    if not callable(get_identities):
+        _LOGGER.debug("Coordinator does not have get_active_device_identities method")
+        return None
 
-    if eid_resolver:
-        # Get device identity from coordinator
-        device_identities = getattr(coordinator, "_device_identities", {})
-        identity = device_identities.get(device_id)
+    try:
+        identities = get_identities()
+    except Exception as err:
+        _LOGGER.debug("Failed to get device identities: %s", err)
+        return None
 
-        if identity:
-            # Generate current EID using the identity key
-            identity_key = getattr(identity, "identity_key", None)
-            if identity_key:
-                try:
-                    import time  # noqa: PLC0415
+    if not identities:
+        _LOGGER.debug("No device identities available from coordinator")
+        return None
 
-                    from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
-                        EidVariant,
-                        generate_eid_variant,
-                    )
+    # Find identity matching our device_id
+    # canonical_id format: "{entry_id}:{device_uuid}" or just "{device_uuid}"
+    # We match if device_id equals canonical_id or is the suffix after ":"
+    identity = None
+    for ident in identities:
+        canonical_id = getattr(ident, "canonical_id", None)
+        if not canonical_id:
+            continue
 
-                    # Calculate beacon time counter
-                    rotation_period = 1024  # Default FMDN rotation period
-                    pair_date = getattr(identity, "pair_date", 0) or 0
-                    current_time = int(time.time())
-                    beacon_time_counter = (current_time - pair_date) // rotation_period
+        # Check for exact match or suffix match
+        if canonical_id == device_id or canonical_id.endswith(f":{device_id}"):
+            identity = ident
+            _LOGGER.debug(
+                "Found matching identity for device %s (canonical_id: %s)",
+                device_id,
+                canonical_id,
+            )
+            break
 
-                    # Generate EID
-                    eid = generate_eid_variant(
-                        eik=identity_key,
-                        time_counter_u32=beacon_time_counter,
-                        variant=EidVariant.MODERN_P256_X20_TRUNC_BE,
-                    )
-                    return eid
-                except Exception as err:
-                    _LOGGER.debug("Failed to generate EID: %s", err)
+    if not identity:
+        _LOGGER.debug(
+            "No identity found for device %s in %d identities. Available canonical_ids: %s",
+            device_id,
+            len(identities),
+            [getattr(i, "canonical_id", "?") for i in identities[:10]],  # Limit for logging
+        )
+        return None
 
-    # Fallback: try to get from coordinator's cached data
-    device_cache = getattr(coordinator, "_device_location_data", {})
-    cached = device_cache.get(device_id, {})
+    # Get identity key
+    identity_key = getattr(identity, "identity_key", None)
+    if not identity_key:
+        _LOGGER.debug(
+            "Identity for device %s has no identity_key (encrypted_identity_key present: %s)",
+            device_id,
+            getattr(identity, "encrypted_identity_key", None) is not None,
+        )
+        return None
 
-    # Check for pre-computed EID in cache (if available)
-    eid_hex = cached.get("current_eid")
-    if eid_hex:
-        try:
-            return bytes.fromhex(eid_hex)
-        except (ValueError, TypeError):
-            pass
+    # Generate EID
+    try:
+        import time as time_module  # noqa: PLC0415
 
-    return None
+        from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
+            EidVariant,
+            generate_eid_variant,
+        )
+
+        # Calculate beacon time counter
+        rotation_period = 1024  # Default FMDN rotation period in seconds
+        pair_date = getattr(identity, "pair_date", None) or 0
+        current_time = int(time_module.time())
+        beacon_time_counter = (current_time - pair_date) // rotation_period
+
+        _LOGGER.debug(
+            "Generating EID for device %s: pair_date=%s, current=%s, counter=%s",
+            device_id,
+            pair_date,
+            current_time,
+            beacon_time_counter,
+        )
+
+        # Generate EID
+        eid = generate_eid_variant(
+            eik=identity_key,
+            time_counter_u32=beacon_time_counter,
+            variant=EidVariant.MODERN_P256_X20_TRUNC_BE,
+        )
+
+        _LOGGER.debug(
+            "Generated EID for device %s: %s...",
+            device_id,
+            eid[:EID_LOG_PREFIX_LENGTH].hex() if len(eid) >= EID_LOG_PREFIX_LENGTH else eid.hex(),
+        )
+
+        return eid
+
+    except Exception as err:
+        _LOGGER.warning("Failed to generate EID for device %s: %s", device_id, err)
+        return None
 
 
 async def _async_upload_semantic_location(  # noqa: PLR0913
