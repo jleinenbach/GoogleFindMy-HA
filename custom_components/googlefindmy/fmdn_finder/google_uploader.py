@@ -120,8 +120,14 @@ async def _get_cache_from_hass(hass: HomeAssistant) -> TokenCache:
         raise RuntimeError("No GoogleFindMy entries available for authentication")
 
     # Extract cache from first entry
+    # RuntimeData is a dataclass with .token_cache attribute, not a dict
     first_entry = next(iter(entries.values()))
-    cache = first_entry.get("cache")
+    cache = getattr(first_entry, "token_cache", None)
+
+    if cache is None:
+        # Fallback: try dict-style access for backwards compatibility
+        if isinstance(first_entry, dict):
+            cache = first_entry.get("cache")
 
     if cache is None:
         raise RuntimeError("TokenCache not available in GoogleFindMy entry data")
