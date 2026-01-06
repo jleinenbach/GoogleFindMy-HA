@@ -206,6 +206,8 @@ async def _async_handle_area_change(
         area=area,
         config_entry_id=config_entry_id,
         scanner=attributes.get(ATTR_SCANNER),
+        google_device_id=google_device_id,
+        coordinator=coordinator,
     )
 
 
@@ -349,12 +351,14 @@ async def _async_get_device_eid(
     return None
 
 
-async def _async_upload_semantic_location(
+async def _async_upload_semantic_location(  # noqa: PLR0913
     hass: HomeAssistant,
     eid: bytes,
     area: str,
     config_entry_id: str,
     scanner: str | None = None,
+    google_device_id: str | None = None,
+    coordinator: Any | None = None,
 ) -> None:
     """Upload semantic location to Google FMDN backend.
 
@@ -364,6 +368,8 @@ async def _async_upload_semantic_location(
         area: Semantic location name (e.g., "Windfang", "Wohnzimmer")
         config_entry_id: Config entry ID for authentication
         scanner: Optional scanner name for logging
+        google_device_id: Google device ID for semantic_name update
+        coordinator: GoogleFindMy coordinator for semantic_name update
     """
     from .location_uploader import async_process_fmdn_beacon_detection  # noqa: PLC0415
 
@@ -384,6 +390,8 @@ async def _async_upload_semantic_location(
         scanner_device_id=None,
         fmdn_device_id=None,
         entity_id=f"bermuda_semantic_{area}",
+        google_device_id=google_device_id,
+        coordinator=coordinator,
     )
 
 
