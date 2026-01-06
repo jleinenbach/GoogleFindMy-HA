@@ -3,6 +3,33 @@
 Listens to Bermuda device_tracker state changes to detect area changes
 and trigger FMDN location uploads to Google's Find My Device network.
 
+CRITICAL: Device Matching via Congealment
+=========================================
+Bermuda uses "congealment" to attach its entities to EXISTING HA devices.
+This means:
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  SAME HA Device (e.g., "moto tag Jens' Schlüsselbund")          │
+    │  HA Device ID: 11b2838b4bb2ba2eb5f4f4b2c742cbf9                 │
+    │                                                                 │
+    │  ┌─────────────────────────┐  ┌─────────────────────────────┐  │
+    │  │ GoogleFindMy Entity     │  │ Bermuda Entity              │  │
+    │  │ device_tracker.moto_... │  │ device_tracker.moto_..._2   │  │
+    │  │ platform: googlefindmy  │  │ platform: bermuda           │  │
+    │  └─────────────────────────┘  └─────────────────────────────┘  │
+    └─────────────────────────────────────────────────────────────────┘
+
+To find the GoogleFindMy device for a Bermuda tracker:
+1. Get the HA device_id from the Bermuda entity (via entity registry)
+2. Find ALL entities belonging to that HA device
+3. Look for the entity with platform="googlefindmy" and domain="device_tracker"
+4. Extract the Google device ID from that entity's unique_id
+
+WARNING: DO NOT match by:
+- Entity names (users can rename entities at any time!)
+- Device identifiers (Bermuda doesn't add googlefindmy identifiers)
+- MAC addresses (BLE MACs rotate for privacy)
+
 Architecture
 ------------
 Bermuda (jleinenbach/bermuda fork) integrates with GoogleFindMy via the
@@ -10,16 +37,14 @@ EID Resolver API (see docs/google_find_my_support.md):
 
 1. Bermuda detects FMDN BLE advertisements containing EIDs
 2. EID Resolver maps EIDs to GoogleFindMy devices via precomputed lookup
-3. Bermuda creates "metadevices" with fmdn_device_id pointing to HA Device Registry
-4. For FMDN devices, Bermuda uses the SAME identifiers as GoogleFindMy (congealment)
-   - This means Bermuda entities appear under the same HA device as GoogleFindMy
-   - Identifier matching works because both share (DOMAIN, device_id) tuples
+3. Bermuda attaches its entities to the SAME HA device as GoogleFindMy
+4. Both integrations share one HA device, but have separate entities
 
 Entity Pattern: device_tracker.*_bermuda_tracker*
 Attributes: area (semantic location), scanner (BLE scanner name)
 
 Flow:
-- Bermuda area change detected → find GoogleFindMy device via shared identifiers
+- Bermuda area change detected → find GoogleFindMy entity on SAME HA device
 - Get current EID from GoogleFindMy coordinator's identity keys
 - Upload semantic location to Google FMDN backend
 
@@ -31,13 +56,15 @@ References:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import Event, HomeAssistant, State, callback
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
 if TYPE_CHECKING:
@@ -58,12 +85,25 @@ ATTR_SOURCE = "source"
 # Data storage keys
 DATA_BERMUDA_UNSUBSCRIBE = "fmdn_finder_bermuda_unsub"
 DATA_LAST_AREA_CACHE = "fmdn_finder_last_area"
+DATA_AREA_DEBOUNCE = "fmdn_finder_area_debounce"
 
-# Throttling
+# Debouncing - area must be stable for this duration before triggering upload
+AREA_STABILIZATION_SECONDS = 30  # Wait 30 seconds after area change to confirm it's stable
 MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
 
 # Log formatting
 EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
+
+
+@dataclass
+class AreaDebounceState:
+    """Track area debouncing state for an entity."""
+
+    entity_id: str
+    area: str
+    first_seen: float
+    last_seen: float
+    upload_scheduled: bool = False
 
 
 async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
@@ -77,15 +117,17 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     """
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    # Initialize area cache for change detection
+    # Initialize caches
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
+    hass.data[DOMAIN].setdefault(DATA_AREA_DEBOUNCE, {})
 
-    @callback  # type: ignore[misc]
+    @callback  # type: ignore[misc, untyped-decorator, unused-ignore]
     def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:
-        """Handle Bermuda device_tracker state changes.
+        """Handle Bermuda device_tracker state changes with debouncing.
 
-        Filters for Bermuda tracker entities and triggers FMDN uploads on area change.
+        Filters for Bermuda tracker entities and triggers FMDN uploads
+        only after area has been stable for AREA_STABILIZATION_SECONDS.
         """
         entity_id: str | None = event.data.get("entity_id")
         new_state: State | None = event.data.get("new_state")
@@ -103,25 +145,59 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
         new_area = new_state.attributes.get(ATTR_AREA)
         old_area = old_state.attributes.get(ATTR_AREA) if old_state else None
 
-        # Skip if no area or area unchanged
+        # Skip if no area
         if not new_area:
             _LOGGER.debug("Bermuda tracker %s has no area attribute", entity_id)
             return
 
+        # Skip if area unchanged (unless first detection)
         if new_area == old_area:
+            _LOGGER.debug("Bermuda tracker %s area unchanged: %s", entity_id, new_area)
             return
 
+        # Get debounce cache
+        debounce_cache: dict[str, AreaDebounceState] = hass.data[DOMAIN].get(
+            DATA_AREA_DEBOUNCE, {}
+        )
+        current_time = time.time()
+        debounce_state = debounce_cache.get(entity_id)
+
+        # Check if this is the same area as current debounce state
+        if debounce_state and debounce_state.area == new_area:
+            # Same area as debounce, update last_seen time
+            debounce_state.last_seen = current_time
+            _LOGGER.debug(
+                "Bermuda %s still in area '%s' (stable for %.1fs)",
+                entity_id,
+                new_area,
+                current_time - debounce_state.first_seen,
+            )
+            return
+
+        # Area changed - log and start debounce
         _LOGGER.info(
-            "Bermuda area change detected: %s -> %s (entity: %s)",
+            "Bermuda area change detected: %s -> %s (entity: %s), starting %ds stabilization",
             old_area,
             new_area,
             entity_id,
+            AREA_STABILIZATION_SECONDS,
         )
 
-        # Trigger async upload task
+        # Create/update debounce state
+        debounce_cache[entity_id] = AreaDebounceState(
+            entity_id=entity_id,
+            area=new_area,
+            first_seen=current_time,
+            last_seen=current_time,
+            upload_scheduled=False,
+        )
+
+        # Schedule delayed upload check
         hass.async_create_task(
-            _async_handle_area_change(hass, entity_id, new_area, new_state.attributes),
-            name=f"fmdn_upload_{entity_id}",
+            _async_debounced_area_upload(
+                hass, entity_id, new_area, new_state.attributes, current_time
+            ),
+            name=f"fmdn_debounce_{entity_id}",
         )
 
     # Register state change listener
@@ -131,6 +207,77 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][DATA_BERMUDA_UNSUBSCRIBE] = unsubscribe
 
     _LOGGER.info("Bermuda FMDN beacon listener registered successfully")
+
+
+async def _async_debounced_area_upload(
+    hass: HomeAssistant,
+    entity_id: str,
+    expected_area: str,
+    attributes: dict[str, Any],
+    debounce_start_time: float,
+) -> None:
+    """Wait for stabilization period then trigger upload if area is still the same.
+
+    Args:
+        hass: Home Assistant instance
+        entity_id: Bermuda tracker entity ID
+        expected_area: Area that triggered this debounce
+        attributes: Entity attributes at the time of area change
+        debounce_start_time: When this debounce was started
+    """
+    # Wait for stabilization period
+    await asyncio.sleep(AREA_STABILIZATION_SECONDS)
+
+    # Get current debounce state
+    debounce_cache: dict[str, AreaDebounceState] = hass.data.get(DOMAIN, {}).get(
+        DATA_AREA_DEBOUNCE, {}
+    )
+    debounce_state = debounce_cache.get(entity_id)
+
+    if not debounce_state:
+        _LOGGER.debug(
+            "Debounce state cleared for %s during stabilization, skipping upload",
+            entity_id,
+        )
+        return
+
+    # Check if area changed during stabilization
+    if debounce_state.area != expected_area:
+        _LOGGER.info(
+            "Area changed during stabilization for %s: %s -> %s, skipping upload",
+            entity_id,
+            expected_area,
+            debounce_state.area,
+        )
+        return
+
+    # Check if this debounce was superseded by a newer one
+    if debounce_state.first_seen != debounce_start_time:
+        _LOGGER.debug(
+            "Superseded debounce for %s (started %.1f, current %.1f), skipping",
+            entity_id,
+            debounce_start_time,
+            debounce_state.first_seen,
+        )
+        return
+
+    # Check if already uploaded (prevent duplicate uploads)
+    if debounce_state.upload_scheduled:
+        _LOGGER.debug("Upload already scheduled for %s in area '%s'", entity_id, expected_area)
+        return
+
+    # Mark as scheduled to prevent duplicates
+    debounce_state.upload_scheduled = True
+
+    _LOGGER.info(
+        "Area '%s' stable for %ds for %s, triggering FMDN upload",
+        expected_area,
+        AREA_STABILIZATION_SECONDS,
+        entity_id,
+    )
+
+    # Trigger the actual upload
+    await _async_handle_area_change(hass, entity_id, expected_area, attributes)
 
 
 async def _async_handle_area_change(
@@ -157,9 +304,9 @@ async def _async_handle_area_change(
 
     ha_device_id = entity_entry.device_id
 
-    # Find the GoogleFindMy device data for this HA device
-    # For FMDN devices, Bermuda uses the same identifiers as GoogleFindMy
-    device_info = await _async_find_googlefindmy_device(hass, ha_device_id)
+    # Find the GoogleFindMy device data for this Bermuda tracker
+    # Uses entity name matching (primary) and device identifier matching (fallback)
+    device_info = await _async_find_googlefindmy_device(hass, ha_device_id, entity_id)
 
     if not device_info:
         # This is normal for non-FMDN BLE devices tracked by Bermuda
@@ -214,20 +361,36 @@ async def _async_handle_area_change(
 async def _async_find_googlefindmy_device(
     hass: HomeAssistant,
     ha_device_id: str,
+    entity_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Find GoogleFindMy device data for a Home Assistant device.
+    """Find GoogleFindMy device data for a Bermuda tracker.
 
-    For FMDN devices (GoogleFindMy trackers), Bermuda uses the same device
-    identifiers as GoogleFindMy via the "congealment" mechanism. This means
-    the Bermuda entity's HA device will have GoogleFindMy identifiers, making
-    matching straightforward.
+    CRITICAL: This uses Bermuda's "congealment" mechanism where Bermuda
+    entities are attached to the SAME HA device as GoogleFindMy entities.
 
-    See: jleinenbach/bermuda - custom_components/bermuda/entity.py
-         docs/google_find_my_support.md
+    Algorithm:
+        1. Use entity registry to find ALL entities for the given HA device
+        2. Filter for entities where platform="googlefindmy" AND domain="device_tracker"
+        3. Extract Google device ID from the entity's unique_id
+
+    Example:
+        HA Device: "moto tag Jens' Schlüsselbund" (ID: 11b2838b...)
+        Contains:
+          - device_tracker.moto_tag_jens_schlusselbund (platform=googlefindmy)
+          - device_tracker.moto_tag_jens_schlusselbund_bermuda_tracker_2 (platform=bermuda)
+
+        When Bermuda triggers with ha_device_id="11b2838b...", we find the
+        googlefindmy entity and extract its Google device ID.
+
+    WARNING - DO NOT USE THESE MATCHING STRATEGIES:
+        - Entity name matching: Users can rename entities!
+        - Device identifier matching: Bermuda doesn't add googlefindmy identifiers
+        - MAC address matching: BLE MACs rotate for privacy
 
     Args:
         hass: Home Assistant instance
-        ha_device_id: Home Assistant device registry ID
+        ha_device_id: Home Assistant device registry ID (shared by both integrations)
+        entity_id: Bermuda entity ID (unused, kept for API compatibility)
 
     Returns:
         Dict with device_id, config_entry_id, coordinator, or None if not found
@@ -236,51 +399,58 @@ async def _async_find_googlefindmy_device(
     if not domain_data:
         return None
 
-    # Get device registry to check identifiers
-    dev_reg = dr.async_get(hass)
-    device_entry = dev_reg.async_get(ha_device_id)
+    # Get entity registry to find all entities for this device
+    ent_reg = er.async_get(hass)
 
-    if not device_entry:
+    # Find all entities belonging to this HA device
+    device_entities = er.async_entries_for_device(ent_reg, ha_device_id)
+
+    # Look for a GoogleFindMy device_tracker entity
+    gfm_entity = None
+    for entity in device_entities:
+        if entity.domain == "device_tracker" and entity.platform == DOMAIN:
+            gfm_entity = entity
+            break
+
+    if not gfm_entity:
+        _LOGGER.debug(
+            "No GoogleFindMy device_tracker found for HA device %s",
+            ha_device_id,
+        )
         return None
 
-    # Check each config entry's coordinator for matching devices
-    for entry_id, entry_data in domain_data.items():
-        if not isinstance(entry_data, dict):
-            continue
+    # Get coordinator from config entry
+    config_entry_id = gfm_entity.config_entry_id
+    if not config_entry_id:
+        return None
 
-        coordinator = entry_data.get("coordinator")
-        if not coordinator:
-            continue
+    entry_data = domain_data.get(config_entry_id)
+    if not isinstance(entry_data, dict):
+        return None
 
-        # Check if this coordinator has a device matching our HA device
-        device_identities = getattr(coordinator, "_device_identities", {})
+    coordinator = entry_data.get("coordinator")
+    if not coordinator:
+        return None
 
-        for google_device_id, identity in device_identities.items():
-            # For FMDN devices, Bermuda copies GoogleFindMy's identifiers
-            # so we check if any identifier contains the google_device_id.
-            # Identifier formats:
-            #   - (DOMAIN, "device_id")
-            #   - (DOMAIN, "entry_id:device_id")
-            #   - (DOMAIN, "entry_id:subentry_id:device_id")
-            for identifier in device_entry.identifiers:
-                if identifier[0] == DOMAIN:
-                    id_str = str(identifier[1])
-                    # Check exact match or suffix match (for namespaced IDs)
-                    if id_str == google_device_id or id_str.endswith(f":{google_device_id}"):
-                        _LOGGER.debug(
-                            "FMDN device matched: ha_device=%s, google_device=%s",
-                            ha_device_id,
-                            google_device_id,
-                        )
-                        return {
-                            "device_id": google_device_id,
-                            "config_entry_id": entry_id,
-                            "coordinator": coordinator,
-                            "identity": identity,
-                        }
+    # Extract Google device ID from entity unique_id
+    # Format: "{config_entry_id}:{google_device_id}" or just "{google_device_id}"
+    google_device_id = gfm_entity.unique_id
+    if google_device_id and ":" in google_device_id:
+        google_device_id = google_device_id.split(":")[-1]
 
-    # No match found - this is normal for non-FMDN BLE devices tracked by Bermuda
-    return None
+    _LOGGER.info(
+        "Found GoogleFindMy device %s for HA device %s (entity: %s)",
+        google_device_id,
+        ha_device_id,
+        gfm_entity.entity_id,
+    )
+
+    return {
+        "device_id": google_device_id,
+        "config_entry_id": config_entry_id,
+        "coordinator": coordinator,
+        "ha_device_id": ha_device_id,
+    }
 
 
 async def _async_get_device_eid(

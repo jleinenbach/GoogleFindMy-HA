@@ -237,3 +237,224 @@ def hass_mock() -> MagicMock:
     hass.bus.async_listen = MagicMock(return_value=MagicMock())  # Return unsubscribe callable
     hass.async_create_task = MagicMock()
     return hass
+
+
+# =============================================================================
+# Tests for Congealment-based Device Matching
+# =============================================================================
+# CRITICAL: These tests verify that we correctly find GoogleFindMy devices
+# via Bermuda's congealment mechanism (shared HA device).
+#
+# The matching MUST use:
+#   1. Entity registry lookup by HA device_id
+#   2. Filter entities by platform="googlefindmy" and domain="device_tracker"
+#
+# The matching MUST NOT use:
+#   - Entity name matching (users can rename!)
+#   - Device identifier matching (Bermuda doesn't add googlefindmy identifiers)
+#   - MAC address matching (BLE MACs rotate)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_find_googlefindmy_device_via_congealment() -> None:
+    """Test finding GoogleFindMy device when it shares HA device with Bermuda.
+
+    This is the CRITICAL test for congealment. Bermuda attaches its entity
+    to the SAME HA device as GoogleFindMy. We must find the GoogleFindMy
+    entity by looking up ALL entities for the shared HA device.
+    """
+    from unittest.mock import patch
+
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _async_find_googlefindmy_device,
+    )
+
+    # Setup mock hass with domain data
+    hass = MagicMock()
+    mock_coordinator = MagicMock()
+    hass.data = {
+        "googlefindmy": {
+            "test_config_entry_id": {
+                "coordinator": mock_coordinator,
+            }
+        }
+    }
+
+    # Create mock entity registry entries for SAME HA device
+    ha_device_id = "11b2838b4bb2ba2eb5f4f4b2c742cbf9"
+
+    # GoogleFindMy entity (platform=googlefindmy)
+    gfm_entity = MagicMock()
+    gfm_entity.entity_id = "device_tracker.moto_tag_jens_schlusselbund"
+    gfm_entity.domain = "device_tracker"
+    gfm_entity.platform = "googlefindmy"
+    gfm_entity.device_id = ha_device_id
+    gfm_entity.config_entry_id = "test_config_entry_id"
+    gfm_entity.unique_id = "test_config_entry_id:google_device_12345"
+
+    # Bermuda entity (platform=bermuda) - same HA device!
+    bermuda_entity = MagicMock()
+    bermuda_entity.entity_id = "device_tracker.moto_tag_jens_schlusselbund_bermuda_tracker_2"
+    bermuda_entity.domain = "device_tracker"
+    bermuda_entity.platform = "bermuda"
+    bermuda_entity.device_id = ha_device_id  # SAME device!
+
+    # Mock entity registry
+    mock_ent_reg = MagicMock()
+
+    with patch(
+        "homeassistant.helpers.entity_registry.async_get",
+        return_value=mock_ent_reg,
+    ), patch(
+        "homeassistant.helpers.entity_registry.async_entries_for_device",
+        return_value=[gfm_entity, bermuda_entity],  # Both entities on same device
+    ):
+        result = await _async_find_googlefindmy_device(hass, ha_device_id)
+
+    # Should find the GoogleFindMy entity
+    assert result is not None
+    assert result["device_id"] == "google_device_12345"
+    assert result["config_entry_id"] == "test_config_entry_id"
+    assert result["coordinator"] == mock_coordinator
+
+
+@pytest.mark.asyncio
+async def test_find_googlefindmy_device_no_gfm_entity_on_device() -> None:
+    """Test that we return None when no GoogleFindMy entity exists on the device.
+
+    This can happen for regular BLE devices tracked by Bermuda that are
+    NOT GoogleFindMy/FMDN devices.
+    """
+    from unittest.mock import patch
+
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _async_find_googlefindmy_device,
+    )
+
+    hass = MagicMock()
+    hass.data = {"googlefindmy": {"config_entry": {"coordinator": MagicMock()}}}
+
+    ha_device_id = "some_other_device_id"
+
+    # Only Bermuda entity, no GoogleFindMy entity
+    bermuda_only_entity = MagicMock()
+    bermuda_only_entity.entity_id = "device_tracker.tile_wallet_bermuda_tracker"
+    bermuda_only_entity.domain = "device_tracker"
+    bermuda_only_entity.platform = "bermuda"
+    bermuda_only_entity.device_id = ha_device_id
+
+    mock_ent_reg = MagicMock()
+
+    with patch(
+        "homeassistant.helpers.entity_registry.async_get",
+        return_value=mock_ent_reg,
+    ), patch(
+        "homeassistant.helpers.entity_registry.async_entries_for_device",
+        return_value=[bermuda_only_entity],  # No GoogleFindMy entity
+    ):
+        result = await _async_find_googlefindmy_device(hass, ha_device_id)
+
+    # Should return None - no GoogleFindMy device
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_find_googlefindmy_device_extracts_device_id_from_unique_id() -> None:
+    """Test that Google device ID is correctly extracted from unique_id.
+
+    unique_id format: "{config_entry_id}:{google_device_id}"
+    We need to extract just the google_device_id part.
+    """
+    from unittest.mock import patch
+
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _async_find_googlefindmy_device,
+    )
+
+    hass = MagicMock()
+    hass.data = {
+        "googlefindmy": {
+            "entry_abc123": {"coordinator": MagicMock()},
+        }
+    }
+
+    ha_device_id = "shared_device_id"
+
+    gfm_entity = MagicMock()
+    gfm_entity.entity_id = "device_tracker.pixel_buds"
+    gfm_entity.domain = "device_tracker"
+    gfm_entity.platform = "googlefindmy"
+    gfm_entity.device_id = ha_device_id
+    gfm_entity.config_entry_id = "entry_abc123"
+    # unique_id with colon separator
+    gfm_entity.unique_id = "entry_abc123:actual_google_device_id_xyz"
+
+    mock_ent_reg = MagicMock()
+
+    with patch(
+        "homeassistant.helpers.entity_registry.async_get",
+        return_value=mock_ent_reg,
+    ), patch(
+        "homeassistant.helpers.entity_registry.async_entries_for_device",
+        return_value=[gfm_entity],
+    ):
+        result = await _async_find_googlefindmy_device(hass, ha_device_id)
+
+    assert result is not None
+    # Should extract the part after the colon
+    assert result["device_id"] == "actual_google_device_id_xyz"
+
+
+@pytest.mark.asyncio
+async def test_find_googlefindmy_device_ignores_non_device_tracker_entities() -> None:
+    """Test that we only match device_tracker entities, not sensors etc.
+
+    GoogleFindMy creates multiple entity types. We specifically need
+    the device_tracker for location uploads.
+    """
+    from unittest.mock import patch
+
+    from custom_components.googlefindmy.fmdn_finder.bermuda_listener import (
+        _async_find_googlefindmy_device,
+    )
+
+    hass = MagicMock()
+    hass.data = {
+        "googlefindmy": {
+            "config_entry": {"coordinator": MagicMock()},
+        }
+    }
+
+    ha_device_id = "device_with_sensors"
+
+    # GoogleFindMy sensor (NOT device_tracker)
+    gfm_sensor = MagicMock()
+    gfm_sensor.entity_id = "sensor.moto_tag_battery"
+    gfm_sensor.domain = "sensor"  # NOT device_tracker
+    gfm_sensor.platform = "googlefindmy"
+    gfm_sensor.device_id = ha_device_id
+
+    # GoogleFindMy device_tracker (this is what we want)
+    gfm_tracker = MagicMock()
+    gfm_tracker.entity_id = "device_tracker.moto_tag"
+    gfm_tracker.domain = "device_tracker"
+    gfm_tracker.platform = "googlefindmy"
+    gfm_tracker.device_id = ha_device_id
+    gfm_tracker.config_entry_id = "config_entry"
+    gfm_tracker.unique_id = "target_device_id"
+
+    mock_ent_reg = MagicMock()
+
+    with patch(
+        "homeassistant.helpers.entity_registry.async_get",
+        return_value=mock_ent_reg,
+    ), patch(
+        "homeassistant.helpers.entity_registry.async_entries_for_device",
+        return_value=[gfm_sensor, gfm_tracker],  # Sensor comes first
+    ):
+        result = await _async_find_googlefindmy_device(hass, ha_device_id)
+
+    assert result is not None
+    # Should find the device_tracker, not the sensor
+    assert result["device_id"] == "target_device_id"
