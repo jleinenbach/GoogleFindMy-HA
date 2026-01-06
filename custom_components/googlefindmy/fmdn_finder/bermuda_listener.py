@@ -416,7 +416,8 @@ async def _async_find_googlefindmy_device(
     ent_reg = er.async_get(hass)
 
     # Find all entities belonging to this HA device
-    device_entities = er.async_entries_for_device(ent_reg, ha_device_id)
+    # IMPORTANT: Convert to list to avoid iterator exhaustion by debug logging
+    device_entities = list(er.async_entries_for_device(ent_reg, ha_device_id))
 
     # Debug: Log all entities on this device
     _LOGGER.debug(
