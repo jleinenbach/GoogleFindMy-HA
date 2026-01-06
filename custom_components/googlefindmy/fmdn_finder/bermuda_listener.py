@@ -462,14 +462,39 @@ async def _async_find_googlefindmy_device(
     # Get coordinator from config entry
     config_entry_id = gfm_entity.config_entry_id
     if not config_entry_id:
+        _LOGGER.debug(
+            "GoogleFindMy entity %s has no config_entry_id",
+            gfm_entity.entity_id,
+        )
         return None
 
-    entry_data = domain_data.get(config_entry_id)
-    if not isinstance(entry_data, dict):
+    # Runtime data is stored in hass.data[DOMAIN]["entries"][config_entry_id]
+    entries_bucket = domain_data.get("entries", {})
+    if not isinstance(entries_bucket, dict):
+        _LOGGER.debug(
+            "No entries bucket in domain_data (got: %s, type: %s)",
+            entries_bucket,
+            type(entries_bucket).__name__,
+        )
         return None
 
-    coordinator = entry_data.get("coordinator")
+    runtime_data = entries_bucket.get(config_entry_id)
+    if runtime_data is None:
+        _LOGGER.debug(
+            "No runtime_data for config_entry_id %s (available entries: %s)",
+            config_entry_id,
+            list(entries_bucket.keys()),
+        )
+        return None
+
+    # RuntimeData is a dataclass with .coordinator attribute
+    coordinator = getattr(runtime_data, "coordinator", None)
     if not coordinator:
+        _LOGGER.debug(
+            "No coordinator in runtime_data for config_entry_id %s (runtime_data: %s)",
+            config_entry_id,
+            type(runtime_data).__name__,
+        )
         return None
 
     # Extract Google device ID from entity unique_id
