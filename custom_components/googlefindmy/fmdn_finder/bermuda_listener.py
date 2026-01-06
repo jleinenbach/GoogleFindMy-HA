@@ -122,7 +122,7 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_DEBOUNCE, {})
 
-    @callback  # type: ignore[untyped-decorator]
+    @callback  # type: ignore[misc, untyped-decorator, unused-ignore]
     def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:
         """Handle Bermuda device_tracker state changes with debouncing.
 
