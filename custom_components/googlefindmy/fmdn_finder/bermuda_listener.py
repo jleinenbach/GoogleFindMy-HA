@@ -405,6 +405,13 @@ async def _async_find_googlefindmy_device(
     # Find all entities belonging to this HA device
     device_entities = er.async_entries_for_device(ent_reg, ha_device_id)
 
+    # Debug: Log all entities on this device
+    _LOGGER.debug(
+        "Entities on HA device %s: %s",
+        ha_device_id,
+        [(e.entity_id, e.platform, e.domain) for e in device_entities],
+    )
+
     # Look for a GoogleFindMy device_tracker entity
     gfm_entity = None
     for entity in device_entities:
@@ -413,9 +420,20 @@ async def _async_find_googlefindmy_device(
             break
 
     if not gfm_entity:
+        # Debug: Log all GoogleFindMy entities in the system
+        all_gfm_entities = [
+            (e.entity_id, e.device_id)
+            for e in ent_reg.entities.values()
+            if e.platform == DOMAIN and e.domain == "device_tracker"
+        ]
         _LOGGER.debug(
-            "No GoogleFindMy device_tracker found for HA device %s",
+            "No GoogleFindMy device_tracker found for HA device %s "
+            "(found %d entities on device, none with platform=%s). "
+            "All GoogleFindMy device_trackers in system: %s",
             ha_device_id,
+            len(device_entities),
+            DOMAIN,
+            all_gfm_entities,
         )
         return None
 
