@@ -518,7 +518,7 @@ async def _async_find_googlefindmy_device(  # noqa: PLR0911
     }
 
 
-async def _async_get_device_eid(  # noqa: PLR0911
+async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
     hass: HomeAssistant,
     coordinator: Any,
     device_id: str,
@@ -604,21 +604,54 @@ async def _async_get_device_eid(  # noqa: PLR0911
         current_time = int(time_module.time())
         beacon_time_counter = (current_time - pair_date) // rotation_period
 
+        # Determine EID variant - check EID resolver's persisted lock first
+        variant = EidVariant.LEGACY_SECP160R1_X20_BE  # Default for most FMDN trackers
+        eid_resolver = hass.data.get(DOMAIN, {}).get("eid_resolver")
+        if eid_resolver:
+            # Get the HA device registry ID from the identity
+            registry_id = getattr(identity, "registry_id", None)
+            if registry_id:
+                # Check for persisted lock with known variant
+                locks = getattr(eid_resolver, "_persisted_locks", {})
+                lock = locks.get(registry_id)
+                if lock:
+                    lock_variant_str = getattr(lock, "variant", None)
+                    if lock_variant_str:
+                        try:
+                            locked_variant = EidVariant(lock_variant_str)
+                            # Only use SECP160r1 variants for encryption (encrypt() only supports SECP160r1)
+                            if locked_variant == EidVariant.LEGACY_SECP160R1_X20_BE:
+                                variant = locked_variant
+                                _LOGGER.debug(
+                                    "Using locked EID variant for device %s: %s",
+                                    device_id,
+                                    variant.value,
+                                )
+                            else:
+                                _LOGGER.warning(
+                                    "Device %s uses %s variant which is not supported for upload "
+                                    "(encrypt() only supports SECP160r1). Trying LEGACY_SECP160R1_X20_BE.",
+                                    device_id,
+                                    lock_variant_str,
+                                )
+                        except ValueError:
+                            _LOGGER.debug("Unknown variant in lock: %s", lock_variant_str)
+
         _LOGGER.debug(
-            "Generating EID for device %s: pair_date=%s, current=%s, counter=%s",
+            "Generating EID for device %s: pair_date=%s, current=%s, counter=%s, variant=%s",
             device_id,
             pair_date,
             current_time,
             beacon_time_counter,
+            variant.value,
         )
 
-        # Generate EID using LEGACY SECP160r1 variant
-        # The encrypt() function in foreign_tracker_cryptor.py uses SECP160r1
-        # which requires a 20-byte x-coordinate from the secp160r1 curve
+        # Generate EID using the determined variant
+        # Note: encrypt() in foreign_tracker_cryptor.py only supports SECP160r1 (20-byte EID)
         eid = generate_eid_variant(
             eik=identity_key,
             time_counter_u32=beacon_time_counter,
-            variant=EidVariant.LEGACY_SECP160R1_X20_BE,
+            variant=variant,
         )
 
         _LOGGER.debug(
