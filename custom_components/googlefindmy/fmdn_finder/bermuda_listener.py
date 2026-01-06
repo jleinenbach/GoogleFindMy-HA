@@ -468,29 +468,32 @@ async def _async_find_googlefindmy_device(
         )
         return None
 
-    _LOGGER.debug(
-        "Found GoogleFindMy entity %s with config_entry_id=%s, checking domain_data keys: %s",
-        gfm_entity.entity_id,
-        config_entry_id,
-        list(domain_data.keys()),
-    )
-
-    entry_data = domain_data.get(config_entry_id)
-    if not isinstance(entry_data, dict):
+    # Runtime data is stored in hass.data[DOMAIN]["entries"][config_entry_id]
+    entries_bucket = domain_data.get("entries", {})
+    if not isinstance(entries_bucket, dict):
         _LOGGER.debug(
-            "No entry_data dict for config_entry_id %s (got: %s, type: %s)",
-            config_entry_id,
-            entry_data,
-            type(entry_data).__name__,
+            "No entries bucket in domain_data (got: %s, type: %s)",
+            entries_bucket,
+            type(entries_bucket).__name__,
         )
         return None
 
-    coordinator = entry_data.get("coordinator")
+    runtime_data = entries_bucket.get(config_entry_id)
+    if runtime_data is None:
+        _LOGGER.debug(
+            "No runtime_data for config_entry_id %s (available entries: %s)",
+            config_entry_id,
+            list(entries_bucket.keys()),
+        )
+        return None
+
+    # RuntimeData is a dataclass with .coordinator attribute
+    coordinator = getattr(runtime_data, "coordinator", None)
     if not coordinator:
         _LOGGER.debug(
-            "No coordinator in entry_data for config_entry_id %s (keys: %s)",
+            "No coordinator in runtime_data for config_entry_id %s (runtime_data: %s)",
             config_entry_id,
-            list(entry_data.keys()),
+            type(runtime_data).__name__,
         )
         return None
 
