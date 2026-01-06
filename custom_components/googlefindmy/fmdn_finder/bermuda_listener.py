@@ -371,7 +371,7 @@ async def _async_handle_area_change(
     )
 
 
-async def _async_find_googlefindmy_device(
+async def _async_find_googlefindmy_device(  # noqa: PLR0911
     hass: HomeAssistant,
     ha_device_id: str,
     entity_id: str | None = None,
@@ -518,7 +518,7 @@ async def _async_find_googlefindmy_device(
     }
 
 
-async def _async_get_device_eid(
+async def _async_get_device_eid(  # noqa: PLR0911
     hass: HomeAssistant,
     coordinator: Any,
     device_id: str,
@@ -612,11 +612,13 @@ async def _async_get_device_eid(
             beacon_time_counter,
         )
 
-        # Generate EID
+        # Generate EID using LEGACY SECP160r1 variant
+        # The encrypt() function in foreign_tracker_cryptor.py uses SECP160r1
+        # which requires a 20-byte x-coordinate from the secp160r1 curve
         eid = generate_eid_variant(
             eik=identity_key,
             time_counter_u32=beacon_time_counter,
-            variant=EidVariant.MODERN_P256_X20_TRUNC_BE,
+            variant=EidVariant.LEGACY_SECP160R1_X20_BE,
         )
 
         _LOGGER.debug(
