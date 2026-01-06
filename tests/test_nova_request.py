@@ -104,12 +104,20 @@ class _StubCache:
 def test_async_nova_request_returns_auth_error_on_repeated_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ensure NovaAuthError is raised instead of NameError on 401 responses."""
+    """Ensure NovaAuthError is raised instead of NameError on 401 responses.
+
+    After the initial 401 and token refresh, the code now retries 3 times
+    with exponential backoff (6s, 12s, 24s) before raising NovaAuthError.
+    This test provides 4 consecutive 401 responses to trigger the error.
+    """
 
     cache = _StubCache()
+    # Need 4 responses: 1 initial + 3 retries with backoff
     session = _DummySession(
         [
             _DummyResponse(401, b"<html><body>Unauthorized</body></html>"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
             _DummyResponse(401, b"Unauthorized"),
         ]
     )
@@ -131,10 +139,15 @@ def test_async_nova_request_returns_auth_error_on_repeated_401(
         ) -> str:
             return "initial-adm"
 
+        # Mock asyncio.sleep to skip the 6s+12s+24s backoff delays
+        async def _instant_sleep(_: float) -> None:
+            pass
+
         monkeypatch.setattr(
             "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
             _seed_initial,
         )
+        monkeypatch.setattr("asyncio.sleep", _instant_sleep)
 
         await async_nova_request(
             "testScope",

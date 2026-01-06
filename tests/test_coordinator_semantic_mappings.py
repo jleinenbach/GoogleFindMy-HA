@@ -63,6 +63,8 @@ def _base_coordinator(
     coordinator._device_update_history = {}
     coordinator._last_poll_mono = 0.0
     coordinator._consecutive_timeouts = 0
+    coordinator._consecutive_transient_auth_failures = 0
+    coordinator._last_transient_auth_error = None
     coordinator.location_poll_interval = 0
     coordinator.data = []
     coordinator._last_device_list = []
@@ -152,6 +154,9 @@ def _polling_coordinator(
     coordinator._note_fcm_deferral = lambda *_args, **_kwargs: None
     coordinator._schedule_short_retry = lambda *_args, **_kwargs: None
     coordinator._clear_fcm_deferral = lambda: None
+    coordinator._schedule_eid_resolver_refresh = lambda: None
+    coordinator.note_error = lambda *_args, **_kwargs: None
+    coordinator.async_set_update_error = lambda *_args, **_kwargs: None
     coordinator._last_poll_result = None
     coordinator._startup_complete = True
     coordinator._fcm_defer_started_mono = 0.0

@@ -101,7 +101,6 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
 from .api import GoogleFindMyAPI
-from .NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from .Auth.token_cache import TokenCache
 from .const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
@@ -149,6 +148,7 @@ from .const import (
 )
 from .ha_typing import DataUpdateCoordinator, callback
 from .KeyBackup.cloud_key_decryptor import decrypt_eik
+from .NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from .SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
