@@ -26,6 +26,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound.sound_reques
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
+    NovaAuthPermanentError,
     NovaHTTPError,
     NovaRateLimitError,
     async_nova_request,
@@ -158,9 +159,11 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
         return None
     except NovaHTTPError:
         return None
+    except NovaAuthPermanentError:
+        # Permanent auth failure - must re-raise for immediate reauth.
+        raise
     except NovaAuthError:
-        # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
-        # and trigger re-authentication flow.
+        # Re-raise auth errors (permanent or transient) so api.py can handle appropriately.
         raise
     except aiohttp.ClientError:
         return None

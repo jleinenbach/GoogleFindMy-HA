@@ -53,7 +53,12 @@ from .NovaApi.ExecuteAction.PlaySound.stop_sound_request import (
     async_submit_stop_sound_request,
 )
 from .NovaApi.ListDevices.nbe_list_devices import async_request_device_list
-from .NovaApi.nova_request import NovaAuthError, NovaHTTPError, NovaRateLimitError
+from .NovaApi.nova_request import (
+    NovaAuthError,
+    NovaAuthPermanentError,
+    NovaHTTPError,
+    NovaRateLimitError,
+)
 from .ProtoDecoders.decoder import (
     _select_best_location as _decoder_select_best_location,
 )
@@ -1198,15 +1203,36 @@ class GoogleFindMyAPI:
         except SpotAuthPermanentError:
             raise
 
-        except NovaAuthError as err:
-            # Explicit mapping for upstream auth failure (token expired/invalid)
+        except NovaAuthPermanentError as err:
+            # Permanent auth failure (AAS token invalid) - immediate reauth required
             _LOGGER.error(
-                "Authentication failed while getting location for %s (%s): %s",
+                "Permanent authentication failure for %s (%s): %s. Re-authentication required.",
                 device_name,
                 device_id,
                 _short_err(err),
             )
             raise ConfigEntryAuthFailed(_short_err(err)) from err
+
+        except NovaAuthError as err:
+            # Transient auth failure - may self-heal in subsequent poll cycles.
+            # Re-raise so coordinator can track consecutive failures before triggering reauth.
+            if err.is_permanent:
+                _LOGGER.error(
+                    "Permanent authentication failure for %s (%s): %s",
+                    device_name,
+                    device_id,
+                    _short_err(err),
+                )
+                raise ConfigEntryAuthFailed(_short_err(err)) from err
+
+            _LOGGER.warning(
+                "Transient authentication error for %s (%s): %s. May resolve in next poll cycle.",
+                device_name,
+                device_id,
+                _short_err(err),
+            )
+            # Re-raise to let coordinator track consecutive failures
+            raise
 
         except NovaHTTPError as err:
             # Map 401/403 to ConfigEntryAuthFailed; other HTTP errors are transient here.

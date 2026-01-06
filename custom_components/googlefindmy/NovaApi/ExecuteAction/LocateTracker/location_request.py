@@ -37,6 +37,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action imp
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
+    NovaAuthPermanentError,
     NovaHTTPError,
     NovaRateLimitError,
     async_nova_request,
@@ -721,10 +722,12 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     except SpotApiEmptyResponseError:
         # Bubble up auth failures so the coordinator can trigger reauth.
         raise
+    except NovaAuthPermanentError:
+        # Permanent auth failure (AAS token invalid) - must re-raise for immediate reauth.
+        raise
     except NovaAuthError:
-        # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed.
-        # Previously this was caught by the generic Exception handler below,
-        # which swallowed the exception and returned [] instead of triggering reauth.
+        # Re-raise auth errors (permanent or transient) so api.py can handle appropriately.
+        # Transient errors will be tracked by the coordinator; permanent ones trigger reauth.
         raise
     except Exception as e:
         _LOGGER.error("Error requesting location for %s: %s", name, e)

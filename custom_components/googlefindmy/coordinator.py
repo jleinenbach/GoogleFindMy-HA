@@ -101,6 +101,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
 from .api import GoogleFindMyAPI
+from .NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from .Auth.token_cache import TokenCache
 from .const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
@@ -194,6 +195,12 @@ _EMPTY_LIST_QUORUM = 2
 # POPETS'25-informed throttling windows for crowdsourced reports
 _COOLDOWN_MIN_IN_ALL_AREAS_S = 10 * 60  # 10 minutes
 _COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
+
+# Maximum consecutive transient auth failures before triggering reauth.
+# Transient failures (401 after token refresh) may self-heal as Google's
+# backend propagates the refreshed token. We give it 3 poll cycles before
+# asking the user to re-authenticate.
+_MAX_TRANSIENT_AUTH_FAILURES = 3
 
 # Guardrails for owner-driven locate cooldown
 _COOLDOWN_OWNER_MIN_S = 60  # at least 1 minute
@@ -987,6 +994,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         # FIX: FCM error counter to avoid triggering re-auth on transient errors (#114)
         self._fcm_error_count: int = 0
         self._fcm_last_error: str | None = None
+
+        # Transient auth error tracking: only trigger reauth after consecutive failures
+        # across multiple poll cycles. This prevents premature reauth prompts when
+        # Google's backend is temporarily slow to propagate refreshed tokens.
+        self._consecutive_transient_auth_failures: int = 0
+        self._last_transient_auth_error: str | None = None
 
         # Reload guard: defer core subentry repairs once after reload-driven attach
         self._skip_repair_during_reload_refresh: bool = False
@@ -6239,6 +6252,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                         # Success path: ensure any previous auth error is cleared
                         self._set_auth_state(failed=False)
+                        # Reset transient auth failure counter on success
+                        if self._consecutive_transient_auth_failures > 0:
+                            _LOGGER.info(
+                                "Location request succeeded; clearing %d transient auth failure(s).",
+                                self._consecutive_transient_auth_failures,
+                            )
+                            self._consecutive_transient_auth_failures = 0
+                            self._last_transient_auth_error = None
 
                         if not location:
                             _LOGGER.warning(
@@ -6496,6 +6517,66 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         )
                         last_exception = auth_exc
                         raise auth_exc
+                    except NovaAuthPermanentError as perm_err:
+                        # Permanent auth failure (AAS token invalid) - immediate reauth
+                        _LOGGER.error(
+                            "Permanent authentication failure for %s: %s. Re-authentication required.",
+                            dev_name,
+                            perm_err,
+                        )
+                        self._set_auth_state(
+                            failed=True,
+                            reason=f"Permanent auth failure for {dev_name}: credentials invalid",
+                        )
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        self._consecutive_timeouts = 0
+                        self._consecutive_transient_auth_failures = 0
+                        auth_exc = ConfigEntryAuthFailed(
+                            "Google credentials invalid; re-authentication required"
+                        )
+                        last_exception = auth_exc
+                        raise auth_exc from perm_err
+                    except NovaAuthError as transient_err:
+                        # Transient auth failure - may self-heal in subsequent poll cycles.
+                        # Only trigger reauth after multiple consecutive failures.
+                        self._consecutive_transient_auth_failures += 1
+                        self._last_transient_auth_error = str(transient_err)
+
+                        if self._consecutive_transient_auth_failures >= _MAX_TRANSIENT_AUTH_FAILURES:
+                            _LOGGER.error(
+                                "Transient auth failure for %s persisted across %d poll cycles: %s. "
+                                "Triggering re-authentication.",
+                                dev_name,
+                                self._consecutive_transient_auth_failures,
+                                transient_err,
+                            )
+                            self._set_auth_state(
+                                failed=True,
+                                reason=f"Auth failed for {dev_name} after {self._consecutive_transient_auth_failures} attempts",
+                            )
+                            cycle_failed = True
+                            self._last_poll_result = "failed"
+                            self._consecutive_timeouts = 0
+                            auth_exc = ConfigEntryAuthFailed(
+                                f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
+                            )
+                            last_exception = auth_exc
+                            raise auth_exc from transient_err
+
+                        # Not yet at threshold - log warning and continue to next device
+                        _LOGGER.warning(
+                            "Transient auth failure for %s (%d/%d): %s. "
+                            "Will retry in next poll cycle.",
+                            dev_name,
+                            self._consecutive_transient_auth_failures,
+                            _MAX_TRANSIENT_AUTH_FAILURES,
+                            transient_err,
+                        )
+                        cycle_failed = True
+                        if last_exception is None:
+                            last_exception = transient_err
+                        continue  # Try next device instead of aborting entire cycle
                     except ConfigEntryAuthFailed as auth_exc:
                         # Mark auth failures to HA; abort remaining devices by re-raising.
                         self._set_auth_state(
