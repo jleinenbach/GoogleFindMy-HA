@@ -31,8 +31,11 @@ References:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import EVENT_STATE_CHANGED
@@ -58,12 +61,25 @@ ATTR_SOURCE = "source"
 # Data storage keys
 DATA_BERMUDA_UNSUBSCRIBE = "fmdn_finder_bermuda_unsub"
 DATA_LAST_AREA_CACHE = "fmdn_finder_last_area"
+DATA_AREA_DEBOUNCE = "fmdn_finder_area_debounce"
 
-# Throttling
+# Debouncing - area must be stable for this duration before triggering upload
+AREA_STABILIZATION_SECONDS = 30  # Wait 30 seconds after area change to confirm it's stable
 MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
 
 # Log formatting
 EID_LOG_PREFIX_LENGTH = 8  # Number of hex chars to show in logs
+
+
+@dataclass
+class AreaDebounceState:
+    """Track area debouncing state for an entity."""
+
+    entity_id: str
+    area: str
+    first_seen: float
+    last_seen: float
+    upload_scheduled: bool = False
 
 
 async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
@@ -77,15 +93,17 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     """
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    # Initialize area cache for change detection
+    # Initialize caches
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
+    hass.data[DOMAIN].setdefault(DATA_AREA_DEBOUNCE, {})
 
     @callback  # type: ignore[misc]
     def _bermuda_state_changed(event: Event[EventStateChangedData]) -> None:
-        """Handle Bermuda device_tracker state changes.
+        """Handle Bermuda device_tracker state changes with debouncing.
 
-        Filters for Bermuda tracker entities and triggers FMDN uploads on area change.
+        Filters for Bermuda tracker entities and triggers FMDN uploads
+        only after area has been stable for AREA_STABILIZATION_SECONDS.
         """
         entity_id: str | None = event.data.get("entity_id")
         new_state: State | None = event.data.get("new_state")
@@ -103,25 +121,55 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
         new_area = new_state.attributes.get(ATTR_AREA)
         old_area = old_state.attributes.get(ATTR_AREA) if old_state else None
 
-        # Skip if no area or area unchanged
+        # Skip if no area
         if not new_area:
             _LOGGER.debug("Bermuda tracker %s has no area attribute", entity_id)
             return
 
-        if new_area == old_area:
+        # Get debounce cache
+        debounce_cache: dict[str, AreaDebounceState] = hass.data[DOMAIN].get(
+            DATA_AREA_DEBOUNCE, {}
+        )
+        current_time = time.time()
+        debounce_state = debounce_cache.get(entity_id)
+
+        # Check if this is a new area or same area as debounce state
+        if debounce_state and debounce_state.area == new_area:
+            # Same area, update last_seen time
+            debounce_state.last_seen = current_time
+            _LOGGER.debug(
+                "Bermuda %s still in area '%s' (stable for %.1fs)",
+                entity_id,
+                new_area,
+                current_time - debounce_state.first_seen,
+            )
             return
 
-        _LOGGER.info(
-            "Bermuda area change detected: %s -> %s (entity: %s)",
-            old_area,
-            new_area,
-            entity_id,
+        # Area changed (or first detection) - reset debounce
+        if new_area != old_area:
+            _LOGGER.info(
+                "Bermuda area change detected: %s -> %s (entity: %s), starting %ds stabilization",
+                old_area,
+                new_area,
+                entity_id,
+                AREA_STABILIZATION_SECONDS,
+            )
+
+        # Create/update debounce state
+        debounce_cache[entity_id] = AreaDebounceState(
+            entity_id=entity_id,
+            area=new_area,
+            first_seen=current_time,
+            last_seen=current_time,
+            upload_scheduled=False,
         )
 
-        # Trigger async upload task
+        # Schedule delayed upload check
         hass.async_create_task(
-            _async_handle_area_change(hass, entity_id, new_area, new_state.attributes),
-            name=f"fmdn_upload_{entity_id}",
+            _async_debounced_area_upload(
+                hass, entity_id, new_area, new_state.attributes, current_time
+            ),
+            name=f"fmdn_debounce_{entity_id}",
         )
 
     # Register state change listener
@@ -131,6 +179,77 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     hass.data[DOMAIN][DATA_BERMUDA_UNSUBSCRIBE] = unsubscribe
 
     _LOGGER.info("Bermuda FMDN beacon listener registered successfully")
+
+
+async def _async_debounced_area_upload(
+    hass: HomeAssistant,
+    entity_id: str,
+    expected_area: str,
+    attributes: dict[str, Any],
+    debounce_start_time: float,
+) -> None:
+    """Wait for stabilization period then trigger upload if area is still the same.
+
+    Args:
+        hass: Home Assistant instance
+        entity_id: Bermuda tracker entity ID
+        expected_area: Area that triggered this debounce
+        attributes: Entity attributes at the time of area change
+        debounce_start_time: When this debounce was started
+    """
+    # Wait for stabilization period
+    await asyncio.sleep(AREA_STABILIZATION_SECONDS)
+
+    # Get current debounce state
+    debounce_cache: dict[str, AreaDebounceState] = hass.data.get(DOMAIN, {}).get(
+        DATA_AREA_DEBOUNCE, {}
+    )
+    debounce_state = debounce_cache.get(entity_id)
+
+    if not debounce_state:
+        _LOGGER.debug(
+            "Debounce state cleared for %s during stabilization, skipping upload",
+            entity_id,
+        )
+        return
+
+    # Check if area changed during stabilization
+    if debounce_state.area != expected_area:
+        _LOGGER.info(
+            "Area changed during stabilization for %s: %s -> %s, skipping upload",
+            entity_id,
+            expected_area,
+            debounce_state.area,
+        )
+        return
+
+    # Check if this debounce was superseded by a newer one
+    if debounce_state.first_seen != debounce_start_time:
+        _LOGGER.debug(
+            "Superseded debounce for %s (started %.1f, current %.1f), skipping",
+            entity_id,
+            debounce_start_time,
+            debounce_state.first_seen,
+        )
+        return
+
+    # Check if already uploaded (prevent duplicate uploads)
+    if debounce_state.upload_scheduled:
+        _LOGGER.debug("Upload already scheduled for %s in area '%s'", entity_id, expected_area)
+        return
+
+    # Mark as scheduled to prevent duplicates
+    debounce_state.upload_scheduled = True
+
+    _LOGGER.info(
+        "Area '%s' stable for %ds for %s, triggering FMDN upload",
+        expected_area,
+        AREA_STABILIZATION_SECONDS,
+        entity_id,
+    )
+
+    # Trigger the actual upload
+    await _async_handle_area_change(hass, entity_id, expected_area, attributes)
 
 
 async def _async_handle_area_change(

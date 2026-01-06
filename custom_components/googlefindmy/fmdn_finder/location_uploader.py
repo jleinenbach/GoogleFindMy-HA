@@ -32,7 +32,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # Upload throttling constants (per FMDN spec Section 4)
 MIN_UPLOAD_DISTANCE_METERS = 50  # Minimum distance change to trigger upload
-MIN_UPLOAD_INTERVAL_SECONDS = 300  # 5 minutes minimum between uploads
+MIN_UPLOAD_INTERVAL_SECONDS = 300  # 5 minutes minimum between uploads for GPS-only
+MIN_UPLOAD_INTERVAL_SEMANTIC = 60  # 1 minute minimum for semantic location changes
 MIN_UPLOAD_INTERVAL_SCREEN_OFF = 300  # Additional delay when screen off
 MIN_UPLOAD_INTERVAL_BATTERY_SAVER = 900  # 15 minutes in battery saver mode
 
@@ -75,6 +76,7 @@ class UploadCacheEntry:
     eid_hex: str
     location: LocationData
     timestamp: float
+    semantic_area: str | None = None  # Track semantic area for change detection
 
 
 async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
@@ -137,12 +139,14 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         location.zone_name,
     )
 
-    # 2. Check upload throttling
-    should_upload, reason = await _should_upload_location(hass, eid_hex, location)
+    # 2. Check upload throttling (pass area for semantic upload handling)
+    should_upload, reason = await _should_upload_location(hass, eid_hex, location, area)
 
     if not should_upload:
         _LOGGER.debug("Upload throttled for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason)
         return False
+
+    _LOGGER.info("Upload allowed for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason)
 
     _LOGGER.info(
         "Uploading FMDN location report: EID=%s..., zone=%s, accuracy=%dm",
@@ -161,8 +165,8 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         success = await _encrypt_and_upload_location(hass, eid, location, area)
 
         if success:
-            # Update cache on successful upload
-            _update_upload_cache(hass, eid_hex, location)
+            # Update cache on successful upload (including semantic area for throttling)
+            _update_upload_cache(hass, eid_hex, location, area)
 
             # Update semantic_name in coordinator for device_tracker display
             if google_device_id and coordinator and area:
@@ -284,10 +288,11 @@ async def _get_scanner_device_location(
     return None
 
 
-async def _should_upload_location(
+async def _should_upload_location(  # noqa: PLR0911
     hass: HomeAssistant,
     eid_hex: str,
     new_location: LocationData,
+    semantic_area: str | None = None,
 ) -> tuple[bool, str]:
     """Check if location should be uploaded (throttling per FMDN spec).
 
@@ -295,10 +300,15 @@ async def _should_upload_location(
     - Upload if distance_grew OR accuracy_improved OR sufficient_time_elapsed
     - Additional delays when screen_off or battery_saver mode
 
+    For semantic location uploads (from Bermuda areas):
+    - Allow upload if semantic area changed (even without GPS distance change)
+    - Use shorter throttle interval (MIN_UPLOAD_INTERVAL_SEMANTIC)
+
     Args:
         hass: Home Assistant instance
         eid_hex: EID as hex string (cache key)
         new_location: New location to upload
+        semantic_area: Semantic location name (e.g., "Büro", "Wohnzimmer")
 
     Returns:
         Tuple of (should_upload: bool, reason: str)
@@ -317,7 +327,20 @@ async def _should_upload_location(
     # Check time elapsed
     elapsed = time.time() - last_upload.timestamp
 
-    if elapsed < MIN_UPLOAD_INTERVAL_SECONDS:
+    # For semantic area uploads, check if area changed
+    if semantic_area:
+        # If area changed, use shorter throttle interval
+        if last_upload.semantic_area != semantic_area:
+            if elapsed >= MIN_UPLOAD_INTERVAL_SEMANTIC:
+                return True, f"semantic_area_changed ({last_upload.semantic_area} -> {semantic_area})"
+            return False, f"semantic_area_changed_too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SEMANTIC}s)"
+
+        # Same area - use longer interval and require significant change
+        if elapsed < MIN_UPLOAD_INTERVAL_SECONDS:
+            return False, f"same_area_too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SECONDS}s)"
+
+    # GPS-only upload - standard throttling
+    elif elapsed < MIN_UPLOAD_INTERVAL_SECONDS:
         return False, f"too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SECONDS}s)"
 
     # After minimum interval, upload if ANY of: distance grew, accuracy improved
@@ -339,6 +362,10 @@ async def _should_upload_location(
 
     if accuracy_improved:
         return True, f"accuracy_improved ({new_location.accuracy}m < {last_upload.location.accuracy}m)"
+
+    # For semantic uploads, allow periodic refresh even without GPS change
+    if semantic_area and elapsed >= MIN_UPLOAD_INTERVAL_SECONDS:
+        return True, f"semantic_periodic_refresh (elapsed={elapsed:.0f}s)"
 
     # No significant change
     return False, f"too_close ({distance:.0f}m < {MIN_UPLOAD_DISTANCE_METERS}m, accuracy not improved)"
@@ -449,11 +476,19 @@ async def _encrypt_and_upload_location(
     Uses existing crypto primitives from foreign_tracker_cryptor.py
     and protobuf definitions from LocationReportsUpload_pb2.
 
+    For semantic locations (from Bermuda areas), we send:
+    - status = SEMANTIC (0)
+    - semanticLocation.locationName = area name
+
+    For GPS locations, we additionally send:
+    - geoLocation.encryptedReport with encrypted GPS data
+    - geoLocation.accuracy
+
     Args:
         hass: Home Assistant instance
         eid: Ephemeral Identity Key (20 or 32 bytes)
         location: Location to upload
-        semantic_area: Optional semantic location name for logging
+        semantic_area: Optional semantic location name (e.g., "Büro", "Wohnzimmer")
 
     Returns:
         True if upload succeeded, False otherwise
@@ -464,34 +499,34 @@ async def _encrypt_and_upload_location(
     """
     # Lazy imports to avoid loading heavy crypto libraries at startup
     from ..FMDNCrypto.foreign_tracker_cryptor import encrypt  # noqa: PLC0415
-    from ..ProtoDecoders.Common_pb2 import LocationReport  # noqa: PLC0415
+    from ..ProtoDecoders.Common_pb2 import (  # noqa: PLC0415
+        EncryptedReport,
+        GeoLocation,
+        LocationReport,
+        SemanticLocation,
+        Status,
+    )
     from ..ProtoDecoders.LocationReportsUpload_pb2 import (  # noqa: PLC0415
         LocationReportsUpload,
     )
 
-    # 1. Create LocationReport protobuf
-    location_proto = LocationReport()
-    location_proto.latitudeE7 = int(location.latitude * 1e7)
-    location_proto.longitudeE7 = int(location.longitude * 1e7)
-    location_proto.accuracyMeters = location.accuracy
-    location_proto.timestampMs = int(time.time() * 1000)
-
-    location_bytes = location_proto.SerializeToString()
+    # 1. Create raw GPS data for encryption (simple lat/lon format)
+    # Note: This is the inner encrypted payload, not the outer protobuf
+    gps_data = f"{location.latitude:.7f},{location.longitude:.7f}".encode()
 
     _LOGGER.debug(
-        "Location protobuf: %d bytes, lat=%d, lon=%d, acc=%dm",
-        len(location_bytes),
-        location_proto.latitudeE7,
-        location_proto.longitudeE7,
-        location_proto.accuracyMeters,
+        "GPS data for encryption: %s (accuracy=%dm, zone=%s)",
+        gps_data.decode(),
+        location.accuracy,
+        location.zone_name,
     )
 
-    # 2. Encrypt with EID public key (ECDH + AES-EAX)
+    # 2. Encrypt GPS data with EID public key (ECDH + AES-EAX)
     random_bytes = secrets.token_bytes(32)
 
     try:
         encrypted_and_tag, Sx = encrypt(
-            message=location_bytes,
+            message=gps_data,
             random=random_bytes,
             eid=eid,
         )
@@ -505,7 +540,42 @@ async def _encrypt_and_upload_location(
         Sx.hex()[:16],
     )
 
-    # 3. Create LocationReportsUpload protobuf
+    # 3. Create LocationReport protobuf with proper structure
+    location_report = LocationReport()
+
+    # Set semantic location if available (primary for Bermuda area-based uploads)
+    if semantic_area:
+        location_report.semanticLocation.CopyFrom(
+            SemanticLocation(locationName=semantic_area)
+        )
+        location_report.status = Status.SEMANTIC
+        _LOGGER.debug("Setting semantic location: '%s'", semantic_area)
+    else:
+        location_report.status = Status.CROWDSOURCED
+
+    # Add encrypted GPS data
+    encrypted_report = EncryptedReport(
+        publicKeyRandom=Sx,  # Ephemeral public key (x-coordinate)
+        encryptedLocation=encrypted_and_tag,
+        isOwnReport=True,  # This is from our own scanner
+    )
+
+    location_report.geoLocation.CopyFrom(
+        GeoLocation(
+            encryptedReport=encrypted_report,
+            deviceTimeOffset=0,  # Offset from report.time
+            accuracy=float(location.accuracy),
+        )
+    )
+
+    _LOGGER.debug(
+        "LocationReport: status=%s, semantic='%s', accuracy=%.0fm",
+        Status.Name(location_report.status),
+        semantic_area or "(none)",
+        location.accuracy,
+    )
+
+    # 4. Create LocationReportsUpload protobuf
     upload = LocationReportsUpload()
     upload.random1 = secrets.randbits(64)
     upload.random2 = secrets.randbits(64)
@@ -514,33 +584,36 @@ async def _encrypt_and_upload_location(
     report.advertisement.identifier.truncatedEid = eid[:10]
     report.advertisement.unwantedTrackingModeEnabled = 0
     report.time.seconds = int(time.time())
-
-    # Note: The protobuf structure may need adjustment based on actual FMDN API
-    # Current structure based on LocationReportsUpload.proto
-    # Encrypted data and ephemeral key need to be embedded correctly
-    # This is a placeholder - actual field mapping TBD from Google API analysis
+    report.location.CopyFrom(location_report)
 
     upload_bytes = upload.SerializeToString()
 
-    _LOGGER.debug(
-        "Upload protobuf: %d bytes%s",
+    _LOGGER.info(
+        "Upload protobuf: %d bytes, semantic='%s', EID=%s...",
         len(upload_bytes),
-        f", semantic_area='{semantic_area}'" if semantic_area else "",
+        semantic_area or "(GPS only)",
+        eid[:8].hex(),
     )
 
-    # 4. Upload to Google FMDN backend
+    # 5. Upload to Google FMDN backend
     from .google_uploader import async_upload_to_google_fmdn  # noqa: PLC0415
 
     return await async_upload_to_google_fmdn(hass, upload_bytes, eid[:10].hex())
 
 
-def _update_upload_cache(hass: HomeAssistant, eid_hex: str, location: LocationData) -> None:
+def _update_upload_cache(
+    hass: HomeAssistant,
+    eid_hex: str,
+    location: LocationData,
+    semantic_area: str | None = None,
+) -> None:
     """Update upload cache with latest upload timestamp and location.
 
     Args:
         hass: Home Assistant instance
         eid_hex: EID as hex string
         location: Uploaded location
+        semantic_area: Semantic location name for throttling comparison
     """
     upload_cache: dict[str, UploadCacheEntry] = hass.data.setdefault(
         DATA_FMDN_UPLOAD_CACHE, {}
@@ -550,6 +623,7 @@ def _update_upload_cache(hass: HomeAssistant, eid_hex: str, location: LocationDa
         eid_hex=eid_hex,
         location=location,
         timestamp=time.time(),
+        semantic_area=semantic_area,
     )
 
     # Cleanup old entries (keep last UPLOAD_CACHE_MAX_ENTRIES)
