@@ -26,6 +26,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound.sound_reques
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
+    NovaAuthPermanentError,
     NovaHTTPError,
     NovaRateLimitError,
     async_nova_request,
@@ -152,15 +153,13 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
             cache=cache_ref,
         )
         return (response_hex, request_uuid) if response_hex is not None else None
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, NovaAuthPermanentError, NovaAuthError):
+        # CancelledError: Must propagate for proper task cancellation.
+        # NovaAuthPermanentError: Permanent auth failure - immediate reauth required.
+        # NovaAuthError: Transient auth error - let coordinator track consecutive failures.
         raise
-    except NovaRateLimitError:
-        return None
-    except NovaHTTPError:
-        return None
-    except NovaAuthError:
-        return None
-    except aiohttp.ClientError:
+    except (NovaRateLimitError, NovaHTTPError, aiohttp.ClientError):
+        # Transient errors - return None to signal soft failure to caller.
         return None
 
 
