@@ -462,14 +462,36 @@ async def _async_find_googlefindmy_device(
     # Get coordinator from config entry
     config_entry_id = gfm_entity.config_entry_id
     if not config_entry_id:
+        _LOGGER.debug(
+            "GoogleFindMy entity %s has no config_entry_id",
+            gfm_entity.entity_id,
+        )
         return None
+
+    _LOGGER.debug(
+        "Found GoogleFindMy entity %s with config_entry_id=%s, checking domain_data keys: %s",
+        gfm_entity.entity_id,
+        config_entry_id,
+        list(domain_data.keys()),
+    )
 
     entry_data = domain_data.get(config_entry_id)
     if not isinstance(entry_data, dict):
+        _LOGGER.debug(
+            "No entry_data dict for config_entry_id %s (got: %s, type: %s)",
+            config_entry_id,
+            entry_data,
+            type(entry_data).__name__,
+        )
         return None
 
     coordinator = entry_data.get("coordinator")
     if not coordinator:
+        _LOGGER.debug(
+            "No coordinator in entry_data for config_entry_id %s (keys: %s)",
+            config_entry_id,
+            list(entry_data.keys()),
+        )
         return None
 
     # Extract Google device ID from entity unique_id
