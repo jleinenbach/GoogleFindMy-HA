@@ -280,9 +280,9 @@ async def _async_handle_area_change(
 
     ha_device_id = entity_entry.device_id
 
-    # Find the GoogleFindMy device data for this HA device
-    # For FMDN devices, Bermuda uses the same identifiers as GoogleFindMy
-    device_info = await _async_find_googlefindmy_device(hass, ha_device_id)
+    # Find the GoogleFindMy device data for this Bermuda tracker
+    # Uses entity name matching (primary) and device identifier matching (fallback)
+    device_info = await _async_find_googlefindmy_device(hass, ha_device_id, entity_id)
 
     if not device_info:
         # This is normal for non-FMDN BLE devices tracked by Bermuda
@@ -337,20 +337,21 @@ async def _async_handle_area_change(
 async def _async_find_googlefindmy_device(
     hass: HomeAssistant,
     ha_device_id: str,
+    entity_id: str | None = None,
 ) -> dict[str, Any] | None:
-    """Find GoogleFindMy device data for a Home Assistant device.
+    """Find GoogleFindMy device data for a Bermuda tracker.
 
-    For FMDN devices (GoogleFindMy trackers), Bermuda uses the same device
-    identifiers as GoogleFindMy via the "congealment" mechanism. This means
-    the Bermuda entity's HA device will have GoogleFindMy identifiers, making
-    matching straightforward.
-
-    See: jleinenbach/bermuda - custom_components/bermuda/entity.py
-         docs/google_find_my_support.md
+    Strategy for matching Bermuda trackers to GoogleFindMy devices:
+    1. Entity name matching: Extract base name from Bermuda entity ID
+       - Bermuda: device_tracker.moto_tag_jens_schlusselbund_bermuda_tracker_2
+       - GoogleFindMy: device_tracker.moto_tag_jens_schlusselbund
+       - Base name: moto_tag_jens_schlusselbund
+    2. Device identifier matching (congealment fallback)
 
     Args:
         hass: Home Assistant instance
-        ha_device_id: Home Assistant device registry ID
+        ha_device_id: Home Assistant device registry ID (Bermuda device)
+        entity_id: Bermuda entity ID for name-based matching
 
     Returns:
         Dict with device_id, config_entry_id, coordinator, or None if not found
@@ -359,7 +360,112 @@ async def _async_find_googlefindmy_device(
     if not domain_data:
         return None
 
-    # Get device registry to check identifiers
+    # Strategy 1: Match by entity name pattern
+    if entity_id:
+        match = await _match_by_entity_name(hass, entity_id, domain_data)
+        if match:
+            return match
+
+    # Strategy 2: Fall back to device identifier matching (congealment)
+    match = await _match_by_device_identifiers(hass, ha_device_id, domain_data)
+    if match:
+        return match
+
+    return None
+
+
+async def _match_by_entity_name(  # noqa: PLR0911
+    hass: HomeAssistant,
+    bermuda_entity_id: str,
+    domain_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Match Bermuda entity to GoogleFindMy device by entity name pattern.
+
+    Bermuda creates entities with pattern: {googlefindmy_entity}_bermuda_tracker[_N]
+    We extract the base name and look for a matching GoogleFindMy entity.
+    """
+    import re  # noqa: PLC0415
+
+    # Extract base name: device_tracker.{name}_bermuda_tracker[_N] -> {name}
+    match = re.match(
+        r"device_tracker\.(.+?)_bermuda_tracker(?:_\d+)?$",
+        bermuda_entity_id,
+    )
+    if not match:
+        _LOGGER.debug("Cannot extract base name from Bermuda entity: %s", bermuda_entity_id)
+        return None
+
+    base_name = match.group(1)
+    target_entity_id = f"device_tracker.{base_name}"
+
+    _LOGGER.debug(
+        "Bermuda entity %s -> looking for GoogleFindMy entity %s",
+        bermuda_entity_id,
+        target_entity_id,
+    )
+
+    # Get entity registry to find the GoogleFindMy entity
+    ent_reg = er.async_get(hass)
+    gfm_entity = ent_reg.async_get(target_entity_id)
+
+    if not gfm_entity:
+        _LOGGER.debug("No GoogleFindMy entity found with ID: %s", target_entity_id)
+        return None
+
+    if gfm_entity.domain != "device_tracker" or gfm_entity.platform != DOMAIN:
+        _LOGGER.debug(
+            "Entity %s is not a GoogleFindMy device_tracker (domain=%s, platform=%s)",
+            target_entity_id,
+            gfm_entity.domain,
+            gfm_entity.platform,
+        )
+        return None
+
+    # Found GoogleFindMy entity - get its coordinator
+    gfm_device_id = gfm_entity.device_id
+    config_entry_id = gfm_entity.config_entry_id
+
+    if not config_entry_id:
+        return None
+
+    entry_data = domain_data.get(config_entry_id)
+    if not isinstance(entry_data, dict):
+        return None
+
+    coordinator = entry_data.get("coordinator")
+    if not coordinator:
+        return None
+
+    # Extract Google device ID from entity unique_id
+    # Format: "{config_entry_id}:{google_device_id}" or just "{google_device_id}"
+    google_device_id = gfm_entity.unique_id
+    if google_device_id and ":" in google_device_id:
+        google_device_id = google_device_id.split(":")[-1]
+
+    _LOGGER.info(
+        "Matched Bermuda entity %s to GoogleFindMy device %s",
+        bermuda_entity_id,
+        google_device_id,
+    )
+
+    return {
+        "device_id": google_device_id,
+        "config_entry_id": config_entry_id,
+        "coordinator": coordinator,
+        "ha_device_id": gfm_device_id,
+    }
+
+
+async def _match_by_device_identifiers(
+    hass: HomeAssistant,
+    ha_device_id: str,
+    domain_data: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Match by device identifiers (congealment fallback).
+
+    For FMDN devices using congealment, the Bermuda entity's HA device
+    will have GoogleFindMy identifiers, making matching straightforward.
+    """
     dev_reg = dr.async_get(hass)
     device_entry = dev_reg.async_get(ha_device_id)
 
@@ -375,23 +481,15 @@ async def _async_find_googlefindmy_device(
         if not coordinator:
             continue
 
-        # Check if this coordinator has a device matching our HA device
         device_identities = getattr(coordinator, "_device_identities", {})
 
         for google_device_id, identity in device_identities.items():
-            # For FMDN devices, Bermuda copies GoogleFindMy's identifiers
-            # so we check if any identifier contains the google_device_id.
-            # Identifier formats:
-            #   - (DOMAIN, "device_id")
-            #   - (DOMAIN, "entry_id:device_id")
-            #   - (DOMAIN, "entry_id:subentry_id:device_id")
             for identifier in device_entry.identifiers:
                 if identifier[0] == DOMAIN:
                     id_str = str(identifier[1])
-                    # Check exact match or suffix match (for namespaced IDs)
                     if id_str == google_device_id or id_str.endswith(f":{google_device_id}"):
                         _LOGGER.debug(
-                            "FMDN device matched: ha_device=%s, google_device=%s",
+                            "FMDN device matched via identifiers: ha_device=%s, google_device=%s",
                             ha_device_id,
                             google_device_id,
                         )
@@ -402,7 +500,6 @@ async def _async_find_googlefindmy_device(
                             "identity": identity,
                         }
 
-    # No match found - this is normal for non-FMDN BLE devices tracked by Bermuda
     return None
 
 
