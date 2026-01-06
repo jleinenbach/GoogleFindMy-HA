@@ -52,6 +52,8 @@ FMDN_SERVICE_CANDIDATES = [
     "google.internal.nearby.v1.FinderService",  # Potential finder-specific service
     "google.internal.fmdn.v1.FinderService",  # FMDN-specific
     "google.internal.findmydevice.v1.FinderService",  # FMD-specific
+    "google.internal.findhub.v1.FindHubService",  # Find Hub (new name for FMDN)
+    "google.internal.findhub.v1.ContributorService",  # Contributor-specific
 ]
 
 # Alternative servers to try
@@ -59,6 +61,7 @@ FMDN_SERVER_CANDIDATES = [
     "spot-pa.googleapis.com",  # Default (confirmed for owner ops)
     "nearbyfinder-pa.googleapis.com",  # Nearby Finder
     "findmydevice.googleapis.com",  # Find My Device
+    "find-my.googleapis.com",  # Find Hub (documented for lookup endpoint)
 ]
 
 # Track which combination worked (persistent across calls)
@@ -366,9 +369,9 @@ async def _try_grpc_upload(
         raise _ConnectionError(f"Connection to {server} failed: {err}") from err
 
     finally:
-        # Clean up transport
+        # Clean up transport (properly close the channel)
         try:
-            await transport.close()
+            await transport.async_close()
         except Exception:  # noqa: BLE001, S110
             pass
 
@@ -423,15 +426,15 @@ async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
 CURRENT STATUS:
 - All SpotService methods on spot-pa.googleapis.com returned UNIMPLEMENTED
 - Now trying multiple combinations:
-  - Servers: spot-pa, nearbyfinder-pa, findmydevice
-  - Services: SpotService, FinderService (various namespaces)
+  - Servers: spot-pa, nearbyfinder-pa, findmydevice, find-my (Find Hub)
+  - Services: SpotService, FinderService, FindHubService, ContributorService
   - Methods: ReportDeviceSighting, ContributeLocationReport, etc.
 
-Total combinations: 3 servers × 4 services × 8 methods = 96 attempts
+Total combinations: 4 servers × 6 services × 8 methods = 192 attempts
 
-The FMDN network distinguishes between:
+The FMDN network (now "Find Hub") distinguishes between:
 - OWNER operations: CreateBleDevice, GetEidInfoForE2eeDevices (confirmed on SpotService)
-- FINDER operations: Reporting sightings (endpoint unknown - trying alternatives)
+- FINDER/CONTRIBUTOR operations: Reporting sightings (endpoint unknown - trying alternatives)
 
 See: docs/FMDN_ENDPOINT_DISCOVERY.md for network capture instructions
 """
