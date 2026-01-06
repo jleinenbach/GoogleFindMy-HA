@@ -1,5 +1,18 @@
 # FMDN Endpoint Discovery Guide - With Shizuku
 
+> ⚠️ **IMPORTANT UPDATE (January 2026)**
+>
+> **The FMDN Finder upload endpoint has been identified but is protected by DroidGuard attestation.**
+>
+> We tested 192 endpoint combinations - all returned `UNIMPLEMENTED` because they require
+> an `X-DroidGuard-Result` header that only real Android devices can provide.
+>
+> **See: [FMDN_UPLOAD_LIMITATION.md](FMDN_UPLOAD_LIMITATION.md) for full details.**
+>
+> The information below is kept for reference and future research.
+
+---
+
 This guide shows how to identify the Google FMDN upload endpoint using Shizuku.
 
 ## Prerequisites
