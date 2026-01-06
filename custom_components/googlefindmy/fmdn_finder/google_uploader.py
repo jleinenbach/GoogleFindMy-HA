@@ -4,16 +4,16 @@ Handles uploads of encrypted location reports to Google's FMDN backend via Spot 
 
 ENDPOINT DISCOVERY STATUS:
 The exact Google FMDN upload endpoint is being explored via multiple candidates.
-Initial candidate `UploadLocationReports` returned UNIMPLEMENTED - trying alternatives.
+All SpotService methods on spot-pa.googleapis.com returned UNIMPLEMENTED.
+Now trying alternative servers and gRPC service paths.
 
-Candidate endpoints (SpotService pattern):
-- ReportDeviceSighting - Finder reports seeing a device
-- SubmitLocationReport - Alternative naming
-- UploadSighting - Simplified variant
-- ReportLocation - Generic location report
+Candidate approaches (in order):
+1. SpotService on spot-pa.googleapis.com (all methods tried, all UNIMPLEMENTED)
+2. Alternative gRPC servers: findmydevice.googleapis.com, nearbyfinder-pa.googleapis.com
+3. Alternative gRPC service: google.internal.nearby.v1.FinderService
 
 Note: Owner operations (CreateBleDevice, GetEidInfoForE2eeDevices) work on SpotService.
-Finder operations (reporting sightings) may use a different service or endpoint.
+Finder operations (reporting sightings) may use a different service or server entirely.
 
 See docs/FMDN_ENDPOINT_DISCOVERY.md for comprehensive research and discovery instructions.
 """
@@ -34,20 +34,35 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Candidate endpoints to try (in priority order based on FMDN terminology)
-# The FMDN spec calls these operations "sightings" when a finder reports seeing a device
-FMDN_UPLOAD_CANDIDATES = [
-    "ReportDeviceSighting",  # FMDN terminology - finder "sights" a device
-    "UploadDeviceSightings",  # Plural variant
-    "SubmitLocationReport",  # Alternative naming
-    "ReportSighting",  # Simplified
-    "UploadSighting",  # Simplified upload
-    "ReportLocation",  # Generic
-    "UploadLocationReports",  # Original guess (returned UNIMPLEMENTED)
+# Candidate gRPC method names (on various services/servers)
+FMDN_METHOD_CANDIDATES = [
+    "ReportDeviceSighting",
+    "UploadDeviceSightings",
+    "ContributeLocationReport",  # Based on FMDN spec "contribute" terminology
+    "SubmitLocationReport",
+    "ReportSighting",
+    "UploadSighting",
+    "ReportLocation",
+    "UploadLocationReports",
 ]
 
-# Track which endpoint worked (persistent across calls)
-_working_endpoint: str | None = None
+# Alternative gRPC service paths to try
+FMDN_SERVICE_CANDIDATES = [
+    "google.internal.spot.v1.SpotService",  # Default (confirmed for owner ops)
+    "google.internal.nearby.v1.FinderService",  # Potential finder-specific service
+    "google.internal.fmdn.v1.FinderService",  # FMDN-specific
+    "google.internal.findmydevice.v1.FinderService",  # FMD-specific
+]
+
+# Alternative servers to try
+FMDN_SERVER_CANDIDATES = [
+    "spot-pa.googleapis.com",  # Default (confirmed for owner ops)
+    "nearbyfinder-pa.googleapis.com",  # Nearby Finder
+    "findmydevice.googleapis.com",  # Find My Device
+]
+
+# Track which combination worked (persistent across calls)
+_working_config: dict[str, str] | None = None
 
 FMDN_UPLOAD_ENABLED = True  # Enabled - trying multiple candidates
 
@@ -153,13 +168,12 @@ async def _get_cache_from_hass(hass: HomeAssistant) -> TokenCache:
 
 
 async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> bytes:
-    """Upload payload using Spot API (gRPC over HTTP/2).
+    """Upload payload using gRPC over HTTP/2.
 
-    Implementation follows the pattern of existing Spot API calls on 1.7.0-3:
-    - Uses async_spot_request with cache parameter (required on 1.7.0-3)
-    - Tries multiple candidate endpoints until one works
-    - Authentication via SPOT/ADM token (automatic refresh)
-    - HTTP/2 with grpclib transport
+    Tries multiple combinations of:
+    - Servers: spot-pa.googleapis.com, nearbyfinder-pa.googleapis.com, findmydevice.googleapis.com
+    - Services: SpotService, FinderService, etc.
+    - Methods: ReportDeviceSighting, UploadLocationReports, etc.
 
     Args:
         cache: Entry-scoped TokenCache for authentication
@@ -169,93 +183,194 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> bytes:
         Response bytes from server
 
     Raises:
-        ValueError: If all endpoints fail
+        ValueError: If all combinations fail
     """
-    global _working_endpoint  # noqa: PLW0603
+    global _working_config  # noqa: PLW0603
 
-    from ..SpotApi.spot_request import (  # noqa: PLC0415
-        SpotGrpcStatusError,
-        async_spot_request,
-    )
-
-    # If we've found a working endpoint, use it directly
-    if _working_endpoint is not None:
+    # If we've found a working config, use it directly
+    if _working_config is not None:
         _LOGGER.debug(
-            "Sending FMDN upload via cached endpoint SpotService/%s (%d bytes)",
-            _working_endpoint,
+            "Sending FMDN upload via cached config: %s/%s on %s (%d bytes)",
+            _working_config["service"],
+            _working_config["method"],
+            _working_config["server"],
             len(payload),
         )
-        response = await async_spot_request(
-            api_scope=_working_endpoint,
-            payload=payload,
+        return await _try_grpc_upload(
             cache=cache,
+            payload=payload,
+            server=_working_config["server"],
+            service=_working_config["service"],
+            method=_working_config["method"],
         )
-        return response if response else b""
 
-    # Try each candidate endpoint
+    # Try all combinations
     last_error: Exception | None = None
-    for endpoint in FMDN_UPLOAD_CANDIDATES:
-        _LOGGER.info(
-            "Trying FMDN upload endpoint: SpotService/%s (%d bytes)",
-            endpoint,
-            len(payload),
-        )
+    tried_count = 0
 
-        try:
-            response = await async_spot_request(
-                api_scope=endpoint,
-                payload=payload,
-                cache=cache,
-            )
-
-            # Success! Remember this endpoint
-            _working_endpoint = endpoint
-            response_len = len(response) if response else 0
-            _LOGGER.info(
-                "FMDN upload SUCCESS via SpotService/%s (response: %d bytes)",
-                endpoint,
-                response_len,
-            )
-            return response if response else b""
-
-        except SpotGrpcStatusError as err:
-            # UNIMPLEMENTED means this endpoint doesn't exist - try next
-            err_str = str(err).upper()
-            if "UNIMPLEMENTED" in err_str:
-                _LOGGER.debug(
-                    "Endpoint SpotService/%s returned UNIMPLEMENTED - trying next",
-                    endpoint,
+    for server in FMDN_SERVER_CANDIDATES:
+        for service in FMDN_SERVICE_CANDIDATES:
+            for method in FMDN_METHOD_CANDIDATES:
+                tried_count += 1
+                _LOGGER.info(
+                    "Trying FMDN upload [%d]: %s/%s on %s",
+                    tried_count,
+                    service.split(".")[-1],  # Short service name
+                    method,
+                    server,
                 )
-                last_error = err
-                continue
-            # Other gRPC errors (auth, network) - don't try more endpoints
-            _LOGGER.warning(
-                "Endpoint SpotService/%s failed with gRPC error: %s",
-                endpoint,
-                err,
-            )
-            raise
 
-        except Exception as err:  # noqa: BLE001
-            # Unknown error - log and try next endpoint
-            _LOGGER.debug(
-                "Endpoint SpotService/%s failed: %s - trying next",
-                endpoint,
-                err,
-            )
-            last_error = err
-            continue
+                try:
+                    response = await _try_grpc_upload(
+                        cache=cache,
+                        payload=payload,
+                        server=server,
+                        service=service,
+                        method=method,
+                    )
 
-    # All endpoints failed
+                    # Success! Remember this config
+                    _working_config = {
+                        "server": server,
+                        "service": service,
+                        "method": method,
+                    }
+                    response_len = len(response) if response else 0
+                    _LOGGER.info(
+                        "FMDN upload SUCCESS via %s/%s on %s (response: %d bytes)",
+                        service.split(".")[-1],
+                        method,
+                        server,
+                        response_len,
+                    )
+                    return response
+
+                except _UnimplementedError:
+                    # This endpoint doesn't exist - try next
+                    _LOGGER.debug(
+                        "Endpoint %s/%s on %s returned UNIMPLEMENTED",
+                        service.split(".")[-1],
+                        method,
+                        server,
+                    )
+                    continue
+
+                except _ConnectionError as err:
+                    # Server unreachable - skip remaining methods on this server
+                    _LOGGER.debug(
+                        "Server %s unreachable: %s - skipping",
+                        server,
+                        err,
+                    )
+                    last_error = err
+                    break  # Skip to next server
+
+                except Exception as err:  # noqa: BLE001
+                    # Unknown error - log and continue
+                    _LOGGER.debug(
+                        "Endpoint %s/%s on %s failed: %s",
+                        service.split(".")[-1],
+                        method,
+                        server,
+                        err,
+                    )
+                    last_error = err
+                    continue
+
+    # All combinations failed
     _LOGGER.error(
-        "All FMDN upload endpoints failed. Tried: %s",
-        ", ".join(FMDN_UPLOAD_CANDIDATES),
+        "All FMDN upload combinations failed. Tried %d combinations across %d servers.",
+        tried_count,
+        len(FMDN_SERVER_CANDIDATES),
     )
     raise ValueError(
-        f"All FMDN upload endpoints returned UNIMPLEMENTED. "
-        f"The FMDN Finder upload API may not be available on SpotService. "
-        f"Last error: {last_error}"
+        f"All FMDN upload endpoints returned UNIMPLEMENTED or failed. "
+        f"Tried {tried_count} combinations. Last error: {last_error}"
     )
+
+
+class _UnimplementedError(Exception):
+    """Endpoint returned UNIMPLEMENTED."""
+
+
+class _ConnectionError(Exception):  # noqa: A001
+    """Server connection failed."""
+
+
+async def _try_grpc_upload(
+    *,
+    cache: TokenCache,
+    payload: bytes,
+    server: str,
+    service: str,
+    method: str,
+) -> bytes:
+    """Try a single gRPC upload to a specific server/service/method.
+
+    Args:
+        cache: TokenCache for authentication
+        payload: Protobuf payload
+        server: gRPC server hostname
+        service: Full service path (e.g., google.internal.spot.v1.SpotService)
+        method: Method name (e.g., ReportDeviceSighting)
+
+    Returns:
+        Response bytes
+
+    Raises:
+        _UnimplementedError: If endpoint doesn't exist
+        _ConnectionError: If server is unreachable
+        Other exceptions: For auth or unexpected errors
+    """
+    from ..SpotApi.spot_grpc_transport import SpotGrpcTransport  # noqa: PLC0415
+    from ..SpotApi.spot_request import (  # noqa: PLC0415
+        SpotGrpcStatusError,
+        _pick_auth_token_async,
+    )
+
+    try:
+        import grpclib.exceptions as grpclib_exceptions  # noqa: PLC0415
+        from grpclib.client import UnaryUnaryMethod  # noqa: PLC0415
+    except ImportError as err:
+        raise RuntimeError("grpclib not available") from err
+
+    # Create transport for this server
+    transport = SpotGrpcTransport(host=server)
+    method_path = f"/{service}/{method}"
+
+    try:
+        # Get auth token
+        token, _token_kind, _token_user = await _pick_auth_token_async(
+            prefer_adm=False, cache=cache
+        )
+
+        # Get channel and make request
+        channel = await transport.get_channel()
+        grpc_method = UnaryUnaryMethod(channel, method_path, bytes, bytes)
+
+        metadata = (("authorization", f"Bearer {token}"),)
+
+        async with grpc_method.open(metadata=metadata, timeout=30.0) as stream:
+            await stream.send_message(payload, end=True)
+            reply = await stream.recv_message()
+
+        return reply if reply else b""
+
+    except grpclib_exceptions.GRPCError as err:
+        status_name = getattr(err.status, "name", str(err.status))
+        if status_name == "UNIMPLEMENTED":
+            raise _UnimplementedError(f"{method_path}: UNIMPLEMENTED") from err
+        raise SpotGrpcStatusError(f"gRPC error: {status_name}") from err
+
+    except (OSError, ConnectionError, TimeoutError) as err:
+        raise _ConnectionError(f"Connection to {server} failed: {err}") from err
+
+    finally:
+        # Clean up transport
+        try:
+            await transport.close()
+        except Exception:  # noqa: BLE001, S110
+            pass
 
 
 # ============================================================================
@@ -263,13 +378,13 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> bytes:
 # ============================================================================
 
 
-def get_working_endpoint() -> str | None:
-    """Return the endpoint that worked (for diagnostics).
+def get_working_config() -> dict[str, str] | None:
+    """Return the config that worked (for diagnostics).
 
     Returns:
-        The working endpoint name or None if not yet discovered
+        Dict with server/service/method or None if not yet discovered
     """
-    return _working_endpoint
+    return _working_config
 
 
 async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
@@ -283,25 +398,20 @@ async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
     """
     discovered: dict[str, str] = {}
 
-    # Check SpotApi patterns
-    try:
-        from ..SpotApi import spot_request  # noqa: PLC0415
+    # Add configured candidates
+    discovered["servers"] = ", ".join(FMDN_SERVER_CANDIDATES)
+    discovered["services"] = ", ".join(s.split(".")[-1] for s in FMDN_SERVICE_CANDIDATES)
+    discovered["methods"] = ", ".join(FMDN_METHOD_CANDIDATES)
+    discovered["total_combinations"] = str(
+        len(FMDN_SERVER_CANDIDATES) * len(FMDN_SERVICE_CANDIDATES) * len(FMDN_METHOD_CANDIDATES)
+    )
 
-        for attr in dir(spot_request):
-            if "ENDPOINT" in attr.upper() or "URL" in attr.upper() or "METHOD" in attr.upper():
-                value = getattr(spot_request, attr, None)
-                if isinstance(value, str):
-                    discovered[f"spot_request.{attr}"] = value
-                    _LOGGER.debug("Discovered Spot API pattern: %s = %s", attr, value)
-
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.debug("Failed to introspect spot_request: %s", err)
-
-    # Add known confirmed patterns
-    discovered["confirmed_pattern"] = "google.internal.spot.v1.SpotService/{MethodName}"
-    discovered["confirmed_examples"] = "CreateBleDevice, GetEidInfoForE2eeDevices, UploadPrecomputedPublicKeyIds"
-    discovered["candidate_fmdn_methods"] = ", ".join(FMDN_UPLOAD_CANDIDATES)
-    discovered["working_endpoint"] = _working_endpoint or "(not yet discovered)"
+    if _working_config:
+        discovered["working_server"] = _working_config["server"]
+        discovered["working_service"] = _working_config["service"]
+        discovered["working_method"] = _working_config["method"]
+    else:
+        discovered["working_config"] = "(not yet discovered)"
 
     return discovered
 
@@ -311,25 +421,17 @@ async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
 # ============================================================================
 """
 CURRENT STATUS:
-- Initial candidate `UploadLocationReports` returned UNIMPLEMENTED
-- Now trying multiple candidates based on FMDN terminology:
-  - ReportDeviceSighting (FMDN spec uses "sighting" terminology)
-  - UploadDeviceSightings
-  - SubmitLocationReport
-  - ReportSighting
-  - UploadSighting
-  - ReportLocation
+- All SpotService methods on spot-pa.googleapis.com returned UNIMPLEMENTED
+- Now trying multiple combinations:
+  - Servers: spot-pa, nearbyfinder-pa, findmydevice
+  - Services: SpotService, FinderService (various namespaces)
+  - Methods: ReportDeviceSighting, ContributeLocationReport, etc.
 
-ALTERNATIVE APPROACHES (if all SpotService methods fail):
-1. Different gRPC service (not SpotService)
-2. REST API instead of gRPC
-3. Different server (findmydevice.googleapis.com instead of spot-pa.googleapis.com)
+Total combinations: 3 servers × 4 services × 8 methods = 96 attempts
 
 The FMDN network distinguishes between:
 - OWNER operations: CreateBleDevice, GetEidInfoForE2eeDevices (confirmed on SpotService)
-- FINDER operations: Reporting sightings (endpoint unknown)
-
-Finder operations may use a completely different API surface.
+- FINDER operations: Reporting sightings (endpoint unknown - trying alternatives)
 
 See: docs/FMDN_ENDPOINT_DISCOVERY.md for network capture instructions
 """
