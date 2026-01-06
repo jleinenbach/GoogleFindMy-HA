@@ -287,7 +287,7 @@ async def _try_grpc_upload(
         )
 
         channel = await transport.get_channel()
-        grpc_method = UnaryUnaryMethod(channel, method_path, bytes, bytes)
+        grpc_method = UnaryUnaryMethod(channel, method_path, bytes, bytes)  # type: ignore[arg-type]
 
         # Standard metadata - missing DroidGuard attestation
         # To enable uploads, add: ("x-droidguard-result", droidguard_token)

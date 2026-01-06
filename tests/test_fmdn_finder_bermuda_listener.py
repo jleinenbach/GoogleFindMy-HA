@@ -271,12 +271,15 @@ async def test_find_googlefindmy_device_via_congealment() -> None:
     )
 
     # Setup mock hass with domain data
+    # RuntimeData is a dataclass with .coordinator attribute
     hass = MagicMock()
     mock_coordinator = MagicMock()
+    mock_runtime_data = MagicMock()
+    mock_runtime_data.coordinator = mock_coordinator
     hass.data = {
         "googlefindmy": {
-            "test_config_entry_id": {
-                "coordinator": mock_coordinator,
+            "entries": {
+                "test_config_entry_id": mock_runtime_data,
             }
         }
     }
@@ -333,7 +336,9 @@ async def test_find_googlefindmy_device_no_gfm_entity_on_device() -> None:
     )
 
     hass = MagicMock()
-    hass.data = {"googlefindmy": {"config_entry": {"coordinator": MagicMock()}}}
+    mock_runtime_data = MagicMock()
+    mock_runtime_data.coordinator = MagicMock()
+    hass.data = {"googlefindmy": {"entries": {"config_entry": mock_runtime_data}}}
 
     ha_device_id = "some_other_device_id"
 
@@ -373,9 +378,13 @@ async def test_find_googlefindmy_device_extracts_device_id_from_unique_id() -> N
     )
 
     hass = MagicMock()
+    mock_runtime_data = MagicMock()
+    mock_runtime_data.coordinator = MagicMock()
     hass.data = {
         "googlefindmy": {
-            "entry_abc123": {"coordinator": MagicMock()},
+            "entries": {
+                "entry_abc123": mock_runtime_data,
+            }
         }
     }
 
@@ -420,9 +429,13 @@ async def test_find_googlefindmy_device_ignores_non_device_tracker_entities() ->
     )
 
     hass = MagicMock()
+    mock_runtime_data = MagicMock()
+    mock_runtime_data.coordinator = MagicMock()
     hass.data = {
         "googlefindmy": {
-            "config_entry": {"coordinator": MagicMock()},
+            "entries": {
+                "config_entry": mock_runtime_data,
+            }
         }
     }
 
