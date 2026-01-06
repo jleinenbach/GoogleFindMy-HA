@@ -294,6 +294,8 @@ async def _async_handle_area_change(
         area: New area name (semantic location)
         attributes: Entity attributes (scanner, source, etc.)
     """
+    from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
     # Get entity registry to find the HA device
     ent_reg = er.async_get(hass)
     entity_entry = ent_reg.async_get(entity_id)
@@ -304,8 +306,19 @@ async def _async_handle_area_change(
 
     ha_device_id = entity_entry.device_id
 
+    # Debug: Log entity and device information
+    dev_reg = dr.async_get(hass)
+    bermuda_device = dev_reg.async_get(ha_device_id)
+    _LOGGER.debug(
+        "Bermuda entity %s: device_id=%s, device_name=%s, identifiers=%s, via_device=%s",
+        entity_id,
+        ha_device_id,
+        bermuda_device.name if bermuda_device else None,
+        bermuda_device.identifiers if bermuda_device else None,
+        bermuda_device.via_device_id if bermuda_device else None,
+    )
+
     # Find the GoogleFindMy device data for this Bermuda tracker
-    # Uses entity name matching (primary) and device identifier matching (fallback)
     device_info = await _async_find_googlefindmy_device(hass, ha_device_id, entity_id)
 
     if not device_info:
@@ -405,6 +418,13 @@ async def _async_find_googlefindmy_device(
     # Find all entities belonging to this HA device
     device_entities = er.async_entries_for_device(ent_reg, ha_device_id)
 
+    # Debug: Log all entities on this device
+    _LOGGER.debug(
+        "Entities on HA device %s: %s",
+        ha_device_id,
+        [(e.entity_id, e.platform, e.domain) for e in device_entities],
+    )
+
     # Look for a GoogleFindMy device_tracker entity
     gfm_entity = None
     for entity in device_entities:
@@ -413,9 +433,28 @@ async def _async_find_googlefindmy_device(
             break
 
     if not gfm_entity:
+        # Debug: Log all GoogleFindMy entities with their device info
+        from homeassistant.helpers import device_registry as dr  # noqa: PLC0415
+
+        dev_reg = dr.async_get(hass)
+        gfm_devices_info = []
+        for e in ent_reg.entities.values():
+            if e.platform == DOMAIN and e.domain == "device_tracker":
+                device = dev_reg.async_get(e.device_id) if e.device_id else None
+                gfm_devices_info.append({
+                    "entity_id": e.entity_id,
+                    "device_id": e.device_id,
+                    "device_name": device.name if device else None,
+                    "identifiers": list(device.identifiers) if device else None,
+                })
         _LOGGER.debug(
-            "No GoogleFindMy device_tracker found for HA device %s",
+            "No GoogleFindMy device_tracker found for HA device %s "
+            "(found %d entities on device, none with platform=%s). "
+            "All GoogleFindMy device_trackers: %s",
             ha_device_id,
+            len(device_entities),
+            DOMAIN,
+            gfm_devices_info,
         )
         return None
 
