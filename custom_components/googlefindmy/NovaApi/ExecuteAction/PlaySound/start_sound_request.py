@@ -159,7 +159,9 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
     except NovaHTTPError:
         return None
     except NovaAuthError:
-        return None
+        # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
+        # and trigger re-authentication flow.
+        raise
     except aiohttp.ClientError:
         return None
 

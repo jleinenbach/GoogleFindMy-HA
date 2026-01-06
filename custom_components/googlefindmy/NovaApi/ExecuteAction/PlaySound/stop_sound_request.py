@@ -164,8 +164,9 @@ async def async_submit_stop_sound_request(  # noqa: PLR0913
         # transient server-side; caller should treat as soft-fail
         return None
     except NovaAuthError:
-        # auth required; caller may trigger re-auth UX
-        return None
+        # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
+        # and trigger re-authentication flow.
+        raise
     except aiohttp.ClientError:
         # local/network problem
         return None
