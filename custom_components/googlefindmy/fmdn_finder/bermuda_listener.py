@@ -3,6 +3,33 @@
 Listens to Bermuda device_tracker state changes to detect area changes
 and trigger FMDN location uploads to Google's Find My Device network.
 
+CRITICAL: Device Matching via Congealment
+=========================================
+Bermuda uses "congealment" to attach its entities to EXISTING HA devices.
+This means:
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  SAME HA Device (e.g., "moto tag Jens' Schlüsselbund")          │
+    │  HA Device ID: 11b2838b4bb2ba2eb5f4f4b2c742cbf9                 │
+    │                                                                 │
+    │  ┌─────────────────────────┐  ┌─────────────────────────────┐  │
+    │  │ GoogleFindMy Entity     │  │ Bermuda Entity              │  │
+    │  │ device_tracker.moto_... │  │ device_tracker.moto_..._2   │  │
+    │  │ platform: googlefindmy  │  │ platform: bermuda           │  │
+    │  └─────────────────────────┘  └─────────────────────────────┘  │
+    └─────────────────────────────────────────────────────────────────┘
+
+To find the GoogleFindMy device for a Bermuda tracker:
+1. Get the HA device_id from the Bermuda entity (via entity registry)
+2. Find ALL entities belonging to that HA device
+3. Look for the entity with platform="googlefindmy" and domain="device_tracker"
+4. Extract the Google device ID from that entity's unique_id
+
+WARNING: DO NOT match by:
+- Entity names (users can rename entities at any time!)
+- Device identifiers (Bermuda doesn't add googlefindmy identifiers)
+- MAC addresses (BLE MACs rotate for privacy)
+
 Architecture
 ------------
 Bermuda (jleinenbach/bermuda fork) integrates with GoogleFindMy via the
@@ -10,16 +37,14 @@ EID Resolver API (see docs/google_find_my_support.md):
 
 1. Bermuda detects FMDN BLE advertisements containing EIDs
 2. EID Resolver maps EIDs to GoogleFindMy devices via precomputed lookup
-3. Bermuda creates "metadevices" with fmdn_device_id pointing to HA Device Registry
-4. For FMDN devices, Bermuda uses the SAME identifiers as GoogleFindMy (congealment)
-   - This means Bermuda entities appear under the same HA device as GoogleFindMy
-   - Identifier matching works because both share (DOMAIN, device_id) tuples
+3. Bermuda attaches its entities to the SAME HA device as GoogleFindMy
+4. Both integrations share one HA device, but have separate entities
 
 Entity Pattern: device_tracker.*_bermuda_tracker*
 Attributes: area (semantic location), scanner (BLE scanner name)
 
 Flow:
-- Bermuda area change detected → find GoogleFindMy device via shared identifiers
+- Bermuda area change detected → find GoogleFindMy entity on SAME HA device
 - Get current EID from GoogleFindMy coordinator's identity keys
 - Upload semantic location to Google FMDN backend
 
@@ -340,11 +365,27 @@ async def _async_find_googlefindmy_device(
 ) -> dict[str, Any] | None:
     """Find GoogleFindMy device data for a Bermuda tracker.
 
-    Via Bermuda's "congealment" mechanism, Bermuda entities are attached to
-    the SAME HA device as GoogleFindMy entities. So we:
-    1. Find all entities belonging to the same HA device
-    2. Look for a GoogleFindMy device_tracker entity among them
-    3. Extract the Google device ID from that entity
+    CRITICAL: This uses Bermuda's "congealment" mechanism where Bermuda
+    entities are attached to the SAME HA device as GoogleFindMy entities.
+
+    Algorithm:
+        1. Use entity registry to find ALL entities for the given HA device
+        2. Filter for entities where platform="googlefindmy" AND domain="device_tracker"
+        3. Extract Google device ID from the entity's unique_id
+
+    Example:
+        HA Device: "moto tag Jens' Schlüsselbund" (ID: 11b2838b...)
+        Contains:
+          - device_tracker.moto_tag_jens_schlusselbund (platform=googlefindmy)
+          - device_tracker.moto_tag_jens_schlusselbund_bermuda_tracker_2 (platform=bermuda)
+
+        When Bermuda triggers with ha_device_id="11b2838b...", we find the
+        googlefindmy entity and extract its Google device ID.
+
+    WARNING - DO NOT USE THESE MATCHING STRATEGIES:
+        - Entity name matching: Users can rename entities!
+        - Device identifier matching: Bermuda doesn't add googlefindmy identifiers
+        - MAC address matching: BLE MACs rotate for privacy
 
     Args:
         hass: Home Assistant instance

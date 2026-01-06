@@ -1596,6 +1596,19 @@ def _stub_homeassistant() -> None:
         _async_entries_for_config_entry
     )
 
+    def _async_entries_for_device(
+        registry: _StubEntityRegistry,
+        device_id: str,
+        include_disabled_entities: bool = False,
+    ) -> list[_StubEntityRegistryEntry]:
+        """Get all entity registry entries for a device."""
+        return [
+            entry for entry in registry.entities.values()
+            if getattr(entry, "device_id", None) == device_id
+        ]
+
+    entity_registry_module.async_entries_for_device = _async_entries_for_device
+
     util_pkg = sys.modules.setdefault(
         "homeassistant.util", ModuleType("homeassistant.util")
     )
