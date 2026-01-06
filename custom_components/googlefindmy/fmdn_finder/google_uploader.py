@@ -3,15 +3,17 @@
 Handles uploads of encrypted location reports to Google's FMDN backend via Spot API.
 
 ENDPOINT DISCOVERY STATUS:
-The exact Google FMDN upload endpoint needs confirmation via Shizuku/logcat analysis.
+The exact Google FMDN upload endpoint is being explored via multiple candidates.
+Initial candidate `UploadLocationReports` returned UNIMPLEMENTED - trying alternatives.
 
-Expected endpoint (95% probability based on existing Spot API patterns):
-- https://spot-pa.googleapis.com/google.internal.spot.v1.SpotService/UploadLocationReports
+Candidate endpoints (SpotService pattern):
+- ReportDeviceSighting - Finder reports seeing a device
+- SubmitLocationReport - Alternative naming
+- UploadSighting - Simplified variant
+- ReportLocation - Generic location report
 
-This matches the pattern of 3 confirmed working endpoints:
-- CreateBleDevice
-- GetEidInfoForE2eeDevices
-- UploadPrecomputedPublicKeyIds
+Note: Owner operations (CreateBleDevice, GetEidInfoForE2eeDevices) work on SpotService.
+Finder operations (reporting sightings) may use a different service or endpoint.
 
 See docs/FMDN_ENDPOINT_DISCOVERY.md for comprehensive research and discovery instructions.
 """
@@ -32,12 +34,22 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
-# TODO: Confirm via Shizuku/logcat endpoint discovery
-# See: docs/QUICK_START_SHIZUKU.md for 15-minute discovery guide
-# See: docs/FMDN_ENDPOINT_DISCOVERY.md for comprehensive analysis
+# Candidate endpoints to try (in priority order based on FMDN terminology)
+# The FMDN spec calls these operations "sightings" when a finder reports seeing a device
+FMDN_UPLOAD_CANDIDATES = [
+    "ReportDeviceSighting",  # FMDN terminology - finder "sights" a device
+    "UploadDeviceSightings",  # Plural variant
+    "SubmitLocationReport",  # Alternative naming
+    "ReportSighting",  # Simplified
+    "UploadSighting",  # Simplified upload
+    "ReportLocation",  # Generic
+    "UploadLocationReports",  # Original guess (returned UNIMPLEMENTED)
+]
 
-FMDN_UPLOAD_ENDPOINT = "UploadLocationReports"  # Confirmed via PCAPdroid (spot-pa.googleapis.com)
-FMDN_UPLOAD_ENABLED = True  # Enabled - endpoint confirmed
+# Track which endpoint worked (persistent across calls)
+_working_endpoint: str | None = None
+
+FMDN_UPLOAD_ENABLED = True  # Enabled - trying multiple candidates
 
 
 async def async_upload_to_google_fmdn(
@@ -145,7 +157,7 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> bytes:
 
     Implementation follows the pattern of existing Spot API calls on 1.7.0-3:
     - Uses async_spot_request with cache parameter (required on 1.7.0-3)
-    - gRPC method: /google.internal.spot.v1.SpotService/UploadLocationReports
+    - Tries multiple candidate endpoints until one works
     - Authentication via SPOT/ADM token (automatic refresh)
     - HTTP/2 with grpclib transport
 
@@ -157,35 +169,107 @@ async def _upload_via_spot_request(cache: TokenCache, payload: bytes) -> bytes:
         Response bytes from server
 
     Raises:
-        ValueError: If upload fails
+        ValueError: If all endpoints fail
     """
-    from ..SpotApi.spot_request import async_spot_request  # noqa: PLC0415
+    global _working_endpoint  # noqa: PLW0603
 
-    _LOGGER.debug(
-        "Sending FMDN upload via SpotService/%s (%d bytes)",
-        FMDN_UPLOAD_ENDPOINT,
-        len(payload),
+    from ..SpotApi.spot_request import (  # noqa: PLC0415
+        SpotGrpcStatusError,
+        async_spot_request,
     )
 
-    response = await async_spot_request(
-        api_scope=FMDN_UPLOAD_ENDPOINT,
-        payload=payload,
-        cache=cache,
-    )
+    # If we've found a working endpoint, use it directly
+    if _working_endpoint is not None:
+        _LOGGER.debug(
+            "Sending FMDN upload via cached endpoint SpotService/%s (%d bytes)",
+            _working_endpoint,
+            len(payload),
+        )
+        response = await async_spot_request(
+            api_scope=_working_endpoint,
+            payload=payload,
+            cache=cache,
+        )
+        return response if response else b""
 
-    response_len = len(response) if response else 0
-    _LOGGER.debug(
-        "FMDN upload response: %d bytes%s",
-        response_len,
-        f", data={response.hex()[:64]}..." if response and response_len > 0 else " (empty)",
-    )
+    # Try each candidate endpoint
+    last_error: Exception | None = None
+    for endpoint in FMDN_UPLOAD_CANDIDATES:
+        _LOGGER.info(
+            "Trying FMDN upload endpoint: SpotService/%s (%d bytes)",
+            endpoint,
+            len(payload),
+        )
 
-    return response if response else b""
+        try:
+            response = await async_spot_request(
+                api_scope=endpoint,
+                payload=payload,
+                cache=cache,
+            )
+
+            # Success! Remember this endpoint
+            _working_endpoint = endpoint
+            response_len = len(response) if response else 0
+            _LOGGER.info(
+                "FMDN upload SUCCESS via SpotService/%s (response: %d bytes)",
+                endpoint,
+                response_len,
+            )
+            return response if response else b""
+
+        except SpotGrpcStatusError as err:
+            # UNIMPLEMENTED means this endpoint doesn't exist - try next
+            err_str = str(err).upper()
+            if "UNIMPLEMENTED" in err_str:
+                _LOGGER.debug(
+                    "Endpoint SpotService/%s returned UNIMPLEMENTED - trying next",
+                    endpoint,
+                )
+                last_error = err
+                continue
+            # Other gRPC errors (auth, network) - don't try more endpoints
+            _LOGGER.warning(
+                "Endpoint SpotService/%s failed with gRPC error: %s",
+                endpoint,
+                err,
+            )
+            raise
+
+        except Exception as err:  # noqa: BLE001
+            # Unknown error - log and try next endpoint
+            _LOGGER.debug(
+                "Endpoint SpotService/%s failed: %s - trying next",
+                endpoint,
+                err,
+            )
+            last_error = err
+            continue
+
+    # All endpoints failed
+    _LOGGER.error(
+        "All FMDN upload endpoints failed. Tried: %s",
+        ", ".join(FMDN_UPLOAD_CANDIDATES),
+    )
+    raise ValueError(
+        f"All FMDN upload endpoints returned UNIMPLEMENTED. "
+        f"The FMDN Finder upload API may not be available on SpotService. "
+        f"Last error: {last_error}"
+    )
 
 
 # ============================================================================
 # ENDPOINT DISCOVERY HELPERS (for development/debugging)
 # ============================================================================
+
+
+def get_working_endpoint() -> str | None:
+    """Return the endpoint that worked (for diagnostics).
+
+    Returns:
+        The working endpoint name or None if not yet discovered
+    """
+    return _working_endpoint
 
 
 async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
@@ -197,7 +281,7 @@ async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
     Returns:
         Dictionary of discovered endpoint patterns
     """
-    discovered = {}
+    discovered: dict[str, str] = {}
 
     # Check SpotApi patterns
     try:
@@ -216,42 +300,36 @@ async def async_discover_fmdn_endpoints(hass: HomeAssistant) -> dict[str, str]:
     # Add known confirmed patterns
     discovered["confirmed_pattern"] = "google.internal.spot.v1.SpotService/{MethodName}"
     discovered["confirmed_examples"] = "CreateBleDevice, GetEidInfoForE2eeDevices, UploadPrecomputedPublicKeyIds"
-    discovered["expected_fmdn_method"] = "UploadLocationReports"
+    discovered["candidate_fmdn_methods"] = ", ".join(FMDN_UPLOAD_CANDIDATES)
+    discovered["working_endpoint"] = _working_endpoint or "(not yet discovered)"
 
     return discovered
 
 
 # ============================================================================
-# SHIZUKU ENDPOINT DISCOVERY INSTRUCTIONS
+# ENDPOINT STATUS
 # ============================================================================
 """
-QUICK START (15-30 minutes):
+CURRENT STATUS:
+- Initial candidate `UploadLocationReports` returned UNIMPLEMENTED
+- Now trying multiple candidates based on FMDN terminology:
+  - ReportDeviceSighting (FMDN spec uses "sighting" terminology)
+  - UploadDeviceSightings
+  - SubmitLocationReport
+  - ReportSighting
+  - UploadSighting
+  - ReportLocation
 
-1. Setup Shizuku wireless debugging
-   - Follow: https://shizuku.rikka.app/guide/setup/
-   - Enable Developer Options → Wireless Debugging
+ALTERNATIVE APPROACHES (if all SpotService methods fail):
+1. Different gRPC service (not SpotService)
+2. REST API instead of gRPC
+3. Different server (findmydevice.googleapis.com instead of spot-pa.googleapis.com)
 
-2. Run automated analysis:
-   ```bash
-   cd /path/to/GoogleFindMy-HA
-   python3 tools/analyze_fmdn_logs.py --live
-   ```
+The FMDN network distinguishes between:
+- OWNER operations: CreateBleDevice, GetEidInfoForE2eeDevices (confirmed on SpotService)
+- FINDER operations: Reporting sightings (endpoint unknown)
 
-3. Trigger FMDN upload:
-   - Walk near FMDN beacon (Pixel Buds, Moto Tag, ESP32 tracker)
-   - Wait 2-5 minutes for Play Services background upload
-   - Script will detect and report endpoint
+Finder operations may use a completely different API surface.
 
-4. Expected results:
-   HIGH confidence: google.internal.spot.v1.SpotService/UploadLocationReports
-   Alternative:     /v1/uploadLocationReports (REST-style)
-
-5. After confirmation:
-   - Uncomment implementation in _upload_via_spot_request()
-   - Set FMDN_UPLOAD_ENABLED = True
-   - Restart Home Assistant
-   - Monitor logs: grep -i "fmdn" home-assistant.log
-
-See comprehensive guide: docs/FMDN_ENDPOINT_DISCOVERY.md
-See quick start: docs/QUICK_START_SHIZUKU.md
+See: docs/FMDN_ENDPOINT_DISCOVERY.md for network capture instructions
 """
