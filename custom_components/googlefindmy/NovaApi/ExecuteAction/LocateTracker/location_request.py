@@ -721,6 +721,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     except SpotApiEmptyResponseError:
         # Bubble up auth failures so the coordinator can trigger reauth.
         raise
+    except NovaAuthError:
+        # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed.
+        # Previously this was caught by the generic Exception handler below,
+        # which swallowed the exception and returned [] instead of triggering reauth.
+        raise
     except Exception as e:
         _LOGGER.error("Error requesting location for %s: %s", name, e)
         _LOGGER.debug("Traceback: %s", traceback.format_exc())
