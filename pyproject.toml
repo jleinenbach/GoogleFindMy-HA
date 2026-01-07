@@ -179,6 +179,9 @@ asyncio_mode = "auto"
 filterwarnings = [
     "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
 ]
+markers = [
+    "hypothesis: Property-based tests using Hypothesis (can be run in isolation with -m hypothesis)",
+]
 
 [tool.mypy]
 python_version = "3.13"

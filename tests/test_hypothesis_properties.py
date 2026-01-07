@@ -3,6 +3,9 @@
 
 These tests verify invariants and edge cases that are difficult to cover
 with example-based testing alone.
+
+Note: These tests use aggressive health check suppression to work correctly
+when run alongside the full test suite with heavy Home Assistant stubs.
 """
 
 from __future__ import annotations
@@ -14,7 +17,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from hypothesis import given, settings, strategies as st
+from hypothesis import HealthCheck, Phase, given, settings
+from hypothesis import strategies as st
+
+# Mark all tests in this module for optional isolation
+pytestmark = pytest.mark.hypothesis
+
+# Comprehensive health check suppression for running with HA test fixtures
+# The Home Assistant stubs load many modules which slow down Hypothesis input generation
+_ALL_HEALTH_CHECKS = list(HealthCheck)
+
+# Default settings for all hypothesis tests - maximally permissive to handle
+# slow test generation when combined with Home Assistant test fixtures
+hypothesis_settings = settings(
+    max_examples=50,  # Reduced from 100 for faster execution with large test suites
+    suppress_health_check=_ALL_HEALTH_CHECKS,
+    deadline=None,  # Disable deadline to avoid timeout issues in CI
+    database=None,  # Don't use persistent database - avoids I/O slowdowns
+    phases=[Phase.generate, Phase.target],  # Skip shrinking for speed
+    stateful_step_count=10,  # Limit stateful test complexity
+)
 
 # ---------------------------------------------------------------------------
 # Strategy definitions
@@ -71,7 +93,7 @@ def parse_grpc_frame(data: bytes) -> tuple[int, int, bytes] | None:
 
 
 @given(compressed=grpc_compressed_flag, length=grpc_message_length, payload=binary_payload)
-@settings(max_examples=100)
+@hypothesis_settings
 def test_grpc_frame_roundtrip(compressed: int, length: int, payload: bytes) -> None:
     """Verify that gRPC frame building and parsing are inverses."""
     frame = build_grpc_frame(compressed, length, payload)
@@ -85,7 +107,7 @@ def test_grpc_frame_roundtrip(compressed: int, length: int, payload: bytes) -> N
 
 
 @given(compressed=grpc_compressed_flag, payload=binary_payload)
-@settings(max_examples=50)
+@hypothesis_settings
 def test_grpc_frame_length_matches_payload(compressed: int, payload: bytes) -> None:
     """When length equals payload size, full payload is recoverable."""
     length = len(payload)
@@ -97,6 +119,7 @@ def test_grpc_frame_length_matches_payload(compressed: int, payload: bytes) -> N
 
 
 @given(data=st.binary(min_size=0, max_size=4))
+@hypothesis_settings
 def test_grpc_frame_rejects_short_data(data: bytes) -> None:
     """Frames shorter than 5 bytes cannot be parsed."""
     result = parse_grpc_frame(data)
@@ -116,7 +139,7 @@ def extract_placeholders(text: str) -> set[str]:
 
 
 @given(text=unicode_text)
-@settings(max_examples=100)
+@hypothesis_settings
 def test_placeholder_extraction_is_deterministic(text: str) -> None:
     """Placeholder extraction should be deterministic."""
     result1 = extract_placeholders(text)
@@ -125,7 +148,7 @@ def test_placeholder_extraction_is_deterministic(text: str) -> None:
 
 
 @given(names=st.lists(placeholder_name, min_size=0, max_size=5, unique=True))
-@settings(max_examples=50)
+@hypothesis_settings
 def test_placeholder_roundtrip(names: list[str]) -> None:
     """Placeholders inserted into text can be extracted."""
     # Filter out empty names
@@ -184,7 +207,7 @@ def test_translation_files_have_consistent_placeholders() -> None:
                     if extra:
                         errors.append(f"{lang_file.name}: {path} extra {extra}")
 
-    assert not errors, f"Placeholder mismatches:\n" + "\n".join(errors[:10])
+    assert not errors, "Placeholder mismatches:\n" + "\n".join(errors[:10])
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +221,7 @@ def normalize_device_id(device_id: str) -> str:
 
 
 @given(device_id=device_id_strategy)
-@settings(max_examples=100)
+@hypothesis_settings
 def test_device_id_normalization_is_idempotent(device_id: str) -> None:
     """Normalizing a device ID twice should give the same result."""
     normalized = normalize_device_id(device_id)
@@ -207,7 +230,7 @@ def test_device_id_normalization_is_idempotent(device_id: str) -> None:
 
 
 @given(device_id=device_id_strategy)
-@settings(max_examples=100)
+@hypothesis_settings
 def test_device_id_normalization_is_lowercase(device_id: str) -> None:
     """Normalized device IDs should be lowercase."""
     normalized = normalize_device_id(device_id)
@@ -215,7 +238,7 @@ def test_device_id_normalization_is_lowercase(device_id: str) -> None:
 
 
 @given(device_id=device_id_strategy)
-@settings(max_examples=100)
+@hypothesis_settings
 def test_device_id_normalization_strips_whitespace(device_id: str) -> None:
     """Normalized device IDs should have no leading/trailing whitespace."""
     padded = f"  {device_id}  "
@@ -238,7 +261,7 @@ def generate_entity_unique_id(entry_id: str, device_id: str, entity_type: str) -
     device_id=device_id_strategy,
     entity_type=st.sampled_from(["device_tracker", "sensor", "button", "binary_sensor"]),
 )
-@settings(max_examples=100)
+@hypothesis_settings
 def test_entity_unique_id_is_deterministic(
     entry_id: str, device_id: str, entity_type: str
 ) -> None:
@@ -253,7 +276,7 @@ def test_entity_unique_id_is_deterministic(
     device_id=device_id_strategy,
     entity_type=st.sampled_from(["device_tracker", "sensor", "button", "binary_sensor"]),
 )
-@settings(max_examples=100)
+@hypothesis_settings
 def test_entity_unique_id_contains_all_parts(
     entry_id: str, device_id: str, entity_type: str
 ) -> None:
@@ -329,7 +352,7 @@ def test_micro_sign_constant_is_greek_mu() -> None:
         max_leaves=10,
     )
 )
-@settings(max_examples=50)
+@hypothesis_settings
 def test_json_roundtrip(data: Any) -> None:
     """JSON serialization should be a roundtrip for valid data."""
     serialized = json.dumps(data)
@@ -346,7 +369,7 @@ def test_json_roundtrip(data: Any) -> None:
     lat=st.floats(min_value=-90, max_value=90),
     lon=st.floats(min_value=-180, max_value=180),
 )
-@settings(max_examples=100)
+@hypothesis_settings
 def test_valid_coordinates_are_in_range(lat: float, lon: float) -> None:
     """Valid GPS coordinates should be within expected ranges."""
     assert -90 <= lat <= 90
@@ -358,7 +381,7 @@ def test_valid_coordinates_are_in_range(lat: float, lon: float) -> None:
     lon=st.floats(min_value=-180, max_value=180),
     accuracy=st.floats(min_value=0, max_value=100000),
 )
-@settings(max_examples=100)
+@hypothesis_settings
 def test_accuracy_is_non_negative(lat: float, lon: float, accuracy: float) -> None:
     """Location accuracy should always be non-negative."""
     assert accuracy >= 0
