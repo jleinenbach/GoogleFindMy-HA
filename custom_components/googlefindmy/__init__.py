@@ -1768,9 +1768,7 @@ class ConfigEntrySubEntryManager:
                 name=f"{DOMAIN}.subentry_visibility_refresh",
             )
             self._visibility_update_task = task
-            task.add_done_callback(
-                lambda done_task: self._clear_visibility_task(done_task)
-            )
+            task.add_done_callback(self._clear_visibility_task)
             return
 
         refreshed = self._resolve_updated_subentry(

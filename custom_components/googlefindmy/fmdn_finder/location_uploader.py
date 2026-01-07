@@ -384,7 +384,7 @@ def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> f
         Distance in meters
     """
     # Earth radius in meters
-    R = 6371000
+    earth_radius_m = 6371000
 
     # Convert to radians
     lat1_rad = math.radians(lat1)
@@ -399,7 +399,7 @@ def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     )
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-    return R * c
+    return earth_radius_m * c
 
 
 def _calculate_accuracy_from_rssi(rssi: int, zone_accuracy: int) -> int:
@@ -525,7 +525,7 @@ async def _encrypt_and_upload_location(
     random_bytes = secrets.token_bytes(32)
 
     try:
-        encrypted_and_tag, Sx = encrypt(
+        encrypted_and_tag, ecdh_shared_x = encrypt(
             message=gps_data,
             random=random_bytes,
             eid=eid,
@@ -537,7 +537,7 @@ async def _encrypt_and_upload_location(
     _LOGGER.debug(
         "Encrypted location: %d bytes, ephemeral key Sx=%s...",
         len(encrypted_and_tag),
-        Sx.hex()[:16],
+        ecdh_shared_x.hex()[:16],
     )
 
     # 3. Create LocationReport protobuf with proper structure
@@ -555,7 +555,7 @@ async def _encrypt_and_upload_location(
 
     # Add encrypted GPS data
     encrypted_report = EncryptedReport(
-        publicKeyRandom=Sx,  # Ephemeral public key (x-coordinate)
+        publicKeyRandom=ecdh_shared_x,  # Ephemeral public key (x-coordinate)
         encryptedLocation=encrypted_and_tag,
         isOwnReport=True,  # This is from our own scanner
     )
