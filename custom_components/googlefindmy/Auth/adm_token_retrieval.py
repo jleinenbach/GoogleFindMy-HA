@@ -176,10 +176,10 @@ async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
                 username,
             )
     except Exception as exc:  # Defensive: never fail token flow on seeding.
-            _LOGGER.debug(
-                "Username cache seeding skipped; best-effort fallback active.",
-                exc_info=exc,
-            )
+        _LOGGER.debug(
+            "Username cache seeding skipped; best-effort fallback active.",
+            exc_info=exc,
+        )
 
 
 async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> int:

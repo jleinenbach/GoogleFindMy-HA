@@ -25,7 +25,7 @@ _MISSING_NAMESPACE = (
 
 if TYPE_CHECKING:
 
-    class HomeAssistantError(Exception):
+    class HomeAssistantError(Exception):  # pylint: disable=unnecessary-ellipsis
         """Type checker placeholder matching the Home Assistant error base."""
 
         ...

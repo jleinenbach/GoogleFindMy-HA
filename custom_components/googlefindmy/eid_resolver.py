@@ -154,7 +154,7 @@ class _IdentityProvider(Protocol):
 
 
 @runtime_checkable
-class GoogleFindMyEIDResolverProtocol(Protocol):
+class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     """Protocol defining the public interface for EID resolution.
 
     This abstraction layer enables:

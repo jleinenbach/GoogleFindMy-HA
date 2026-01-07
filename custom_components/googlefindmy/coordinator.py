@@ -173,7 +173,7 @@ _TRACKER_SUBENTRY_FEATURES: tuple[str, ...] = tuple(
 
 
 # --- Lightweight cache protocol for entry-scoped persistence -----------------
-class CacheProtocol(Protocol):
+class CacheProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     """Minimal cache protocol used by the coordinator.
 
     Implementations are provided by the integration's token/cache layer.
