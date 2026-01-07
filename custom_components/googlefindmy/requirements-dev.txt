@@ -3,6 +3,7 @@
 -r requirements.txt
 # Hassfest runs exclusively in CI (.github/workflows/hassfest-auto-fix.yml);
 # please do not add a local wrapper or dependency for it here.
+bandit>=1.7
 homeassistant>=2025.7.0
 beautifulsoup4>=4.12.3
 certifi>=2024.7.4
@@ -11,6 +12,7 @@ gpsoauth>=2.0.0
 grpclib>=0.4.7
 lxml-stubs>=0.5.1
 mypy>=1.11
+pip-audit>=2.6
 pre-commit>=3.7
 protobuf>=6.32.0
 pycares>=4.4.0
