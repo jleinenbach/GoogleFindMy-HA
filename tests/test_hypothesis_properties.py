@@ -23,19 +23,21 @@ from hypothesis import strategies as st
 # Mark all tests in this module for optional isolation
 pytestmark = pytest.mark.hypothesis
 
-# Comprehensive health check suppression for running with HA test fixtures
-# The Home Assistant stubs load many modules which slow down Hypothesis input generation
-_ALL_HEALTH_CHECKS = list(HealthCheck)
-
 # Default settings for all hypothesis tests - maximally permissive to handle
 # slow test generation when combined with Home Assistant test fixtures
 hypothesis_settings = settings(
     max_examples=50,  # Reduced from 100 for faster execution with large test suites
-    suppress_health_check=_ALL_HEALTH_CHECKS,
+    suppress_health_check=[
+        HealthCheck.too_slow,
+        HealthCheck.data_too_large,
+        HealthCheck.filter_too_much,
+        HealthCheck.large_base_example,
+        HealthCheck.not_a_test_method,
+        HealthCheck.differing_executors,
+    ],
     deadline=None,  # Disable deadline to avoid timeout issues in CI
     database=None,  # Don't use persistent database - avoids I/O slowdowns
     phases=[Phase.generate, Phase.target],  # Skip shrinking for speed
-    stateful_step_count=10,  # Limit stateful test complexity
 )
 
 # ---------------------------------------------------------------------------
