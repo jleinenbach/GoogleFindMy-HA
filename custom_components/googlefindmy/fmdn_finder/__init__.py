@@ -13,6 +13,10 @@ Privacy & Security:
 - End-to-end encryption (only device owner can decrypt)
 - Upload throttling per FMDN specification
 - Opt-in only (respects user privacy)
+
+NOTE: This feature is disabled by default. Set FEATURE_FMDN_FINDER_ENABLED=True
+in const.py to enable. When disabled, no listeners are registered and no logs
+are produced.
 """
 
 from __future__ import annotations
@@ -35,8 +39,15 @@ async def async_setup_fmdn_finder(hass: HomeAssistant) -> bool:
         hass: Home Assistant instance
 
     Returns:
-        True if setup successful, False otherwise
+        True if setup successful, False if disabled or failed
     """
+    from ..const import FEATURE_FMDN_FINDER_ENABLED  # noqa: PLC0415
+
+    # Guard: Feature must be explicitly enabled via const.py
+    if not FEATURE_FMDN_FINDER_ENABLED:
+        _LOGGER.debug("FMDN Finder disabled (FEATURE_FMDN_FINDER_ENABLED=False)")
+        return False
+
     from .bermuda_listener import async_setup_bermuda_listener  # noqa: PLC0415
 
     _LOGGER.info("Setting up FMDN Finder integration")

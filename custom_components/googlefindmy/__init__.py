@@ -158,6 +158,7 @@ from .const import (
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
     DOMAIN,
+    FEATURE_FMDN_FINDER_ENABLED,
     LEGACY_SERVICE_IDENTIFIER,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
@@ -7300,17 +7301,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # Setup FMDN Finder (Bermuda integration listener for location uploads)
     # This allows Home Assistant to act as a "Finder" in Google's FMDN network,
     # uploading encrypted location reports for detected FMDN beacons.
-    try:
-        from .fmdn_finder import async_setup_fmdn_finder
-        fmdn_setup_success = await async_setup_fmdn_finder(hass)
-        if fmdn_setup_success:
-            _LOGGER.info("FMDN Finder enabled - will upload location reports for FMDN beacons detected by Bermuda")
-        else:
-            _LOGGER.warning("FMDN Finder setup failed - location uploads disabled")
-    except ImportError:
-        _LOGGER.debug("FMDN Finder module not available (optional feature)")
-    except Exception as err:  # noqa: BLE001
-        _LOGGER.warning("FMDN Finder setup failed: %s", err, exc_info=True)
+    # Feature is disabled by default via FEATURE_FMDN_FINDER_ENABLED in const.py.
+    if FEATURE_FMDN_FINDER_ENABLED:
+        try:
+            from .fmdn_finder import async_setup_fmdn_finder
+            fmdn_setup_success = await async_setup_fmdn_finder(hass)
+            if fmdn_setup_success:
+                _LOGGER.info("FMDN Finder enabled - will upload location reports for FMDN beacons detected by Bermuda")
+            else:
+                _LOGGER.warning("FMDN Finder setup failed - location uploads disabled")
+        except ImportError:
+            _LOGGER.debug("FMDN Finder module not available (optional feature)")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("FMDN Finder setup failed: %s", err, exc_info=True)
 
     parent_platforms_forwarded = bool(
         getattr(entry, "_gfm_parent_platforms_forwarded", False)
