@@ -395,6 +395,14 @@ FCM_MONITOR_INTERVAL_S: int = 1
 FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
 
 # --------------------------------------------------------------------------------------
+# Feature Flags (compile-time toggles for optional functionality)
+# --------------------------------------------------------------------------------------
+# FMDN Finder: Upload location reports to Google for FMDN beacons detected by Bermuda.
+# This feature is prepared but disabled by default. Set to True to enable.
+# When disabled, no Bermuda listeners are registered and no logs are produced.
+FEATURE_FMDN_FINDER_ENABLED: bool = False
+
+# --------------------------------------------------------------------------------------
 # Events & Repairs (auth status)
 # --------------------------------------------------------------------------------------
 # Events fired by the coordinator to allow user automations.
