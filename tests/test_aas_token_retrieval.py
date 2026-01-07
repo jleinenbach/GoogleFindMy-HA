@@ -161,14 +161,17 @@ async def test_get_or_generate_android_id_ignores_boolean_cache(
         await cache.set("android_id_user@example.com", True)
 
     await _prepare()
-    monkeypatch.setattr(aas_token_retrieval.random, "randint", lambda *_: 0xABCDEF12)
+    # secrets.randbelow(0xF000000000000000) + 0x1000000000000000 = final value
+    # Mock randbelow to return 0 so final value = 0x1000000000000000
+    monkeypatch.setattr(aas_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF12)
+    expected_id = 0xABCDEF12 + 0x1000000000000000
 
     android_id = await aas_token_retrieval._get_or_generate_android_id(
         "user@example.com", cache=cache
     )
 
-    assert android_id == 0xABCDEF12
-    assert cache._data["android_id_user@example.com"] == 0xABCDEF12
+    assert android_id == expected_id
+    assert cache._data["android_id_user@example.com"] == expected_id
 
 
 def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,7 +206,9 @@ def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> N
         token_retrieval, "async_get_aas_token", fake_async_get_aas_token
     )
     monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth)
-    monkeypatch.setattr(token_retrieval.random, "randint", lambda *_: 0xDEADBEEFCAFED00D)
+    monkeypatch.setattr(
+        token_retrieval.random, "randint", lambda *_: 0xDEADBEEFCAFED00D
+    )
 
     sentinel_cache = _DummyCache()
     token = token_retrieval.request_token(
