@@ -740,7 +740,7 @@ class FcmReceiverHA:
                         finally:
                             async with self._lock:
                                 self.pcs.pop(entry_id, None)
-                        delay = backoff + random.uniform(0.1, 0.3) * backoff
+                        delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
                         if backoff >= _BACKOFF_WARNING_THRESHOLD_S:
                             _LOGGER.warning(
                                 "[entry=%s] FCM registration still failing after multiple attempts (next retry in %.1fs). "
@@ -862,7 +862,7 @@ class FcmReceiverHA:
                         self._update_entry_health(entry_id, False)
 
                     if not stop_evt.is_set():
-                        delay = backoff + random.uniform(0.1, 0.3) * backoff
+                        delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
                         _LOGGER.info(
                             "[entry=%s] Restarting FCM client in %.1fs", entry_id, delay
                         )
