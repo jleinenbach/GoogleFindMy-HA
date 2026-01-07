@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
+import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
@@ -213,7 +213,7 @@ async def _resolve_android_id_for_entry(username: str, *, cache: TokenCache) -> 
     if cached_android_id is not None:
         return cached_android_id
 
-    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
     _LOGGER.warning(
         "Generated new android_id for %s; cache was missing a stored identifier.",
         _mask_email(username),
@@ -351,7 +351,7 @@ async def _resolve_android_id_for_isolated_flow(
     if cached_android_id is not None:
         return cached_android_id
 
-    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
     _LOGGER.warning(
         "Generated new android_id for %s during isolated exchange; cache was missing a stored identifier.",
         _mask_email(username),

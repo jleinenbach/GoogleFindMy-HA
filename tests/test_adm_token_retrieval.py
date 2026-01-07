@@ -141,7 +141,11 @@ def test_resolve_android_id_for_isolated_flow_generates_and_persists(
     async def _exercise() -> None:
         cache = _DummyTokenCache()
 
-        monkeypatch.setattr(adm_token_retrieval.random, "randint", lambda *_, **__: 0xABCDEF)
+        # secrets.randbelow(0xF000000000000000) + 0x1000000000000000 = final value
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_, **__: 0xABCDEF
+        )
+        expected_id = 0xABCDEF + 0x1000000000000000
 
         android_id = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
             "user@example.com",
@@ -150,8 +154,8 @@ def test_resolve_android_id_for_isolated_flow_generates_and_persists(
             cache_set=cache.set,
         )
 
-        assert android_id == 0xABCDEF
-        assert cache._data["android_id_user@example.com"] == 0xABCDEF
+        assert android_id == expected_id
+        assert cache._data["android_id_user@example.com"] == expected_id
 
     asyncio.run(_exercise())
 
@@ -313,7 +317,9 @@ def test_generate_adm_token_refreshes_android_id_from_fcm(
             recorded_android_ids.append(cache._data.get(f"android_id_{username}"))
             return "adm-token"
 
-        monkeypatch.setattr(adm_token_retrieval, "async_request_token", fake_request_token)
+        monkeypatch.setattr(
+            adm_token_retrieval, "async_request_token", fake_request_token
+        )
 
         token = await adm_token_retrieval._generate_adm_token(user, cache=cache)
 
@@ -937,7 +943,11 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
     async def cache_set(key: str, value: Any) -> None:
         return None
 
-    monkeypatch.setattr(adm_token_retrieval.random, "randint", lambda *_, **__: 0xABCDEF01)
+    # secrets.randbelow(0xF000000000000000) + 0x1000000000000000 = final value
+    monkeypatch.setattr(
+        adm_token_retrieval.secrets, "randbelow", lambda *_, **__: 0xABCDEF01
+    )
+    expected_android_id = 0xABCDEF01 + 0x1000000000000000
 
     token = asyncio.run(
         adm_token_retrieval.async_get_adm_token_isolated(
@@ -950,4 +960,4 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
     )
 
     assert token == "adm-token"
-    assert recorded["android_id"] == 0xABCDEF01
+    assert recorded["android_id"] == expected_android_id

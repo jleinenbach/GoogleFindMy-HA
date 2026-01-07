@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
+import secrets
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
@@ -190,7 +190,7 @@ async def _get_or_generate_android_id(
     if cached_android_id is not None:
         return cached_android_id
 
-    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
     _LOGGER.warning(
         "Generated new android_id for %s; cache was missing a stored identifier.",
         _mask_email_for_logs(username),
