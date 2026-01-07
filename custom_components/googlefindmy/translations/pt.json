@@ -582,9 +582,9 @@
       "stat_invalid_coords": {
         "name": "Coordenadas inválidas"
       },
-        "stat_fused_updates": {
-            "name": "Atualizações de localização combinadas"
-        }
+      "stat_fused_updates": {
+        "name": "Atualizações de localização combinadas"
+      }
     }
   },
   "issues": {
