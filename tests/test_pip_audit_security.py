@@ -103,7 +103,7 @@ def run_pip_audit(requirements_file: str) -> dict[str, Any]:
         "off",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
 
     if "No module named pip_audit" in result.stderr:
         pytest.skip("pip-audit not installed. Run: pip install pip-audit")
@@ -124,7 +124,9 @@ def run_pip_audit(requirements_file: str) -> dict[str, Any]:
         if "{" in stdout:
             json_start = stdout.index("{")
             return json.loads(stdout[json_start:])
-        raise RuntimeError(f"Failed to parse pip-audit output: {e}\nOutput: {stdout[:500]}")
+        raise RuntimeError(
+            f"Failed to parse pip-audit output: {e}\nOutput: {stdout[:500]}"
+        )
 
 
 def parse_issues(audit_output: dict[str, Any]) -> list[DependencyIssue]:
@@ -174,7 +176,9 @@ def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -
 
         if active_vulns:
             active_issues.append(
-                DependencyIssue(name=issue.name, version=issue.version, vulns=active_vulns)
+                DependencyIssue(
+                    name=issue.name, version=issue.version, vulns=active_vulns
+                )
             )
         if ignored_vulns:
             ignored_issues.append((issue.name, issue.version, ignored_vulns))
@@ -189,7 +193,9 @@ def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -
     fixable = sum(1 for i in active_issues for v in i.vulns if v.has_fix)
     unfixable = total_vulns - fixable
 
-    lines.append(f"📊 Summary: {total_vulns} vulnerabilities in {len(active_issues)} packages")
+    lines.append(
+        f"📊 Summary: {total_vulns} vulnerabilities in {len(active_issues)} packages"
+    )
     lines.append(f"   ✅ Fixable: {fixable} | ⚠️ No fix available: {unfixable}")
     lines.append("")
 
@@ -197,7 +203,9 @@ def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -
         lines.append("✅ No active vulnerabilities found!")
         if ignored_issues:
             lines.append("")
-            lines.append(f"ℹ️  {len(ignored_issues)} vulnerabilities ignored (see IGNORED_VULNERABILITIES)")
+            lines.append(
+                f"ℹ️  {len(ignored_issues)} vulnerabilities ignored (see IGNORED_VULNERABILITIES)"
+            )
         return "\n".join(lines)
 
     lines.append("⚠️  CRITICAL: The following vulnerabilities were found!")
@@ -215,14 +223,16 @@ def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -
 
         for issue, vuln in fixable_issues:
             lines.append(f"### [{vuln.vuln_id}] {issue.name} {issue.version}")
-            lines.append(f"🔗 Aliases: {', '.join(vuln.aliases) if vuln.aliases else 'None'}")
+            lines.append(
+                f"🔗 Aliases: {', '.join(vuln.aliases) if vuln.aliases else 'None'}"
+            )
             lines.append(f"✅ Fix available: Upgrade to {vuln.fix_version}")
             lines.append("")
             lines.append(f"📝 {vuln.description[:500]}...")
             lines.append("")
             lines.append("**AI ACTION REQUIRED:**")
             lines.append("```bash")
-            lines.append(f"# Update requirements.txt:")
+            lines.append("# Update requirements.txt:")
             lines.append(f"# Change: {issue.name}>={issue.version}")
             lines.append(f"# To:     {issue.name}>={vuln.fix_version}")
             lines.append("```")
@@ -233,38 +243,52 @@ def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -
         lines.append(f"⚠️  UNFIXABLE VULNERABILITIES ({len(unfixable_issues)} found)")
         lines.append("-" * 80)
         lines.append("")
-        lines.append("These vulnerabilities have no fix available from the package maintainers.")
+        lines.append(
+            "These vulnerabilities have no fix available from the package maintainers."
+        )
         lines.append("Consider the following options:")
         lines.append("")
 
         for issue, vuln in unfixable_issues:
             lines.append(f"### [{vuln.vuln_id}] {issue.name} {issue.version}")
-            lines.append(f"🔗 Aliases: {', '.join(vuln.aliases) if vuln.aliases else 'None'}")
-            lines.append(f"❌ No fix available")
+            lines.append(
+                f"🔗 Aliases: {', '.join(vuln.aliases) if vuln.aliases else 'None'}"
+            )
+            lines.append("❌ No fix available")
             lines.append("")
             lines.append(f"📝 {vuln.description}")
             lines.append("")
             lines.append("**AI ACTION OPTIONS:**")
             lines.append("")
-            lines.append("1. **Ignore if risk is acceptable** - Add to IGNORED_VULNERABILITIES:")
+            lines.append(
+                "1. **Ignore if risk is acceptable** - Add to IGNORED_VULNERABILITIES:"
+            )
             lines.append("   ```python")
-            lines.append(f'   IGNORED_VULNERABILITIES = {{')
-            lines.append(f'       "{vuln.vuln_id}": "Justification: [explain why this is acceptable]",')
-            lines.append(f'   }}')
+            lines.append("   IGNORED_VULNERABILITIES = {")
+            lines.append(
+                f'       "{vuln.vuln_id}": "Justification: [explain why this is acceptable]",'
+            )
+            lines.append("   }")
             lines.append("   ```")
             lines.append("")
             lines.append("2. **Find alternative package** - Search for a replacement:")
             lines.append(f"   - Search PyPI for alternatives to `{issue.name}`")
-            lines.append(f"   - Evaluate if the vulnerable functionality is actually used")
+            lines.append(
+                "   - Evaluate if the vulnerable functionality is actually used"
+            )
             lines.append("")
-            lines.append("3. **Mitigate in code** - If the vulnerable function is used:")
+            lines.append(
+                "3. **Mitigate in code** - If the vulnerable function is used:"
+            )
             lines.append(f"   - Review code that imports `{issue.name}`")
-            lines.append(f"   - Avoid using the affected functionality if possible")
+            lines.append("   - Avoid using the affected functionality if possible")
             lines.append("")
 
     if ignored_issues:
         lines.append("-" * 80)
-        lines.append(f"ℹ️  IGNORED VULNERABILITIES ({sum(len(v) for _, _, v in ignored_issues)} found)")
+        lines.append(
+            f"ℹ️  IGNORED VULNERABILITIES ({sum(len(v) for _, _, v in ignored_issues)} found)"
+        )
         lines.append("-" * 80)
         lines.append("")
         for name, version, vulns in ignored_issues:
@@ -284,10 +308,14 @@ def generate_ai_report(issues: list[DependencyIssue], ignored: dict[str, str]) -
     lines.append("")
     lines.append("2. For UNFIXABLE vulnerabilities:")
     lines.append("   a. Assess if the vulnerable functionality is used in this project")
-    lines.append("   b. If not used or risk is acceptable, add to IGNORED_VULNERABILITIES")
+    lines.append(
+        "   b. If not used or risk is acceptable, add to IGNORED_VULNERABILITIES"
+    )
     lines.append("   c. If used, consider alternative packages or code mitigations")
     lines.append("")
-    lines.append("3. Commit with message: 'security: fix pip-audit findings [package-name]'")
+    lines.append(
+        "3. Commit with message: 'security: fix pip-audit findings [package-name]'"
+    )
     lines.append("")
 
     return "\n".join(lines)
@@ -329,7 +357,9 @@ class TestPipAuditSecurity:
         # Filter active (non-ignored) issues
         active_issues = []
         for issue in all_issues:
-            active_vulns = [v for v in issue.vulns if v.vuln_id not in IGNORED_VULNERABILITIES]
+            active_vulns = [
+                v for v in issue.vulns if v.vuln_id not in IGNORED_VULNERABILITIES
+            ]
             if active_vulns:
                 active_issues.append(issue)
 
@@ -350,6 +380,7 @@ class TestPipAuditSecurity:
         """Verify pip-audit is installed and accessible."""
         result = subprocess.run(
             [sys.executable, "-m", "pip_audit", "--version"],
+            check=False,
             capture_output=True,
             text=True,
         )
@@ -399,7 +430,9 @@ def main() -> int:
     # Filter active (non-ignored) issues
     active_issues = []
     for issue in all_issues:
-        active_vulns = [v for v in issue.vulns if v.vuln_id not in IGNORED_VULNERABILITIES]
+        active_vulns = [
+            v for v in issue.vulns if v.vuln_id not in IGNORED_VULNERABILITIES
+        ]
         if active_vulns:
             active_issues.append(issue)
 

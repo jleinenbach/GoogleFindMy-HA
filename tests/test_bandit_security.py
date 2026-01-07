@@ -347,7 +347,7 @@ def run_bandit(paths: list[str], exclude: list[str]) -> dict[str, Any]:
         ",".join(exclude),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)  # noqa: S603
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
 
     if result.returncode not in (0, 1):
         # Exit code 1 means issues found, which is expected
@@ -368,7 +368,9 @@ def run_bandit(paths: list[str], exclude: list[str]) -> dict[str, Any]:
         if "{" in stdout:
             json_start = stdout.index("{")
             return json.loads(stdout[json_start:])
-        raise RuntimeError(f"Failed to parse Bandit output: {e}\nOutput: {stdout[:500]}")
+        raise RuntimeError(
+            f"Failed to parse Bandit output: {e}\nOutput: {stdout[:500]}"
+        )
 
 
 def parse_issues(bandit_output: dict[str, Any]) -> list[BanditIssue]:
@@ -412,7 +414,9 @@ def generate_ai_report(issues: list[BanditIssue]) -> str:
     lines.append("🔒 BANDIT SECURITY ANALYSIS REPORT")
     lines.append("=" * 80)
     lines.append("")
-    lines.append(f"📊 Summary: {len(high)} HIGH | {len(medium)} MEDIUM | {len(low)} LOW")
+    lines.append(
+        f"📊 Summary: {len(high)} HIGH | {len(medium)} MEDIUM | {len(low)} LOW"
+    )
     lines.append("")
 
     if high or medium:
@@ -425,7 +429,9 @@ def generate_ai_report(issues: list[BanditIssue]) -> str:
             continue
 
         lines.append("-" * 80)
-        lines.append(f"🚨 {severity_name} SEVERITY ISSUES ({len(severity_issues)} found)")
+        lines.append(
+            f"🚨 {severity_name} SEVERITY ISSUES ({len(severity_issues)} found)"
+        )
         lines.append("-" * 80)
 
         for issue in severity_issues:
@@ -455,8 +461,12 @@ def generate_ai_report(issues: list[BanditIssue]) -> str:
         lines.append(f"ℹ️  LOW SEVERITY ISSUES ({len(low)} found) - Informational")
         lines.append("-" * 80)
         lines.append("")
-        lines.append("These issues are informational and may not require immediate action.")
-        lines.append("Consider adding `# nosec BXXX` comments if the code is intentional.")
+        lines.append(
+            "These issues are informational and may not require immediate action."
+        )
+        lines.append(
+            "Consider adding `# nosec BXXX` comments if the code is intentional."
+        )
         lines.append("")
 
         # Group low issues by test_id for cleaner output
@@ -465,14 +475,18 @@ def generate_ai_report(issues: list[BanditIssue]) -> str:
             low_by_type.setdefault(issue.test_id, []).append(issue)
 
         for test_id, type_issues in sorted(low_by_type.items()):
-            lines.append(f"**[{test_id}] {type_issues[0].test_name}** ({len(type_issues)} occurrences)")
+            lines.append(
+                f"**[{test_id}] {type_issues[0].test_name}** ({len(type_issues)} occurrences)"
+            )
             for issue in type_issues[:5]:  # Show first 5
                 lines.append(f"  - {issue.location}")
             if len(type_issues) > 5:
                 lines.append(f"  - ... and {len(type_issues) - 5} more")
 
             if test_id in REMEDIATION_GUIDE:
-                lines.append(f"  💡 Fix: See {test_id} remediation guide above or add `# nosec {test_id}`")
+                lines.append(
+                    f"  💡 Fix: See {test_id} remediation guide above or add `# nosec {test_id}`"
+                )
             lines.append("")
 
     lines.append("=" * 80)
@@ -538,6 +552,7 @@ class TestBanditSecurity:
         """Verify Bandit is installed and accessible."""
         result = subprocess.run(
             [sys.executable, "-m", "bandit", "--version"],
+            check=False,
             capture_output=True,
             text=True,
         )
@@ -580,7 +595,9 @@ def main() -> int:
 
     if critical_issues:
         print()
-        print(f"❌ SECURITY CHECK FAILED: Found {len(critical_issues)} HIGH/MEDIUM severity issues.")
+        print(
+            f"❌ SECURITY CHECK FAILED: Found {len(critical_issues)} HIGH/MEDIUM severity issues."
+        )
         print("   Fix these issues and run again.")
         return 1
 
