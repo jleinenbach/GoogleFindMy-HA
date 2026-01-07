@@ -7,3 +7,4 @@ pytest_output.log
 node_modules/
 .npm-cache/
 *.egg-info/
+.hypothesis/

@@ -36,7 +36,7 @@ class GrpcParser:
                 with gzip.GzipFile(fileobj=io.BytesIO(msg)) as gz:
                     return gz.read()
             except Exception as e:
-                raise ValueError(f"Failed to decompress gRPC frame: {e}")
+                raise ValueError(f"Failed to decompress gRPC frame: {e}") from e
 
         return msg
 

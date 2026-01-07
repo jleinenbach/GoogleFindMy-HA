@@ -151,7 +151,7 @@ class CacheProtocol(Protocol):
 
 
 @runtime_checkable
-class GoogleFindMyAPIProtocol(Protocol):
+class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
     """Protocol defining the public interface for Google Find My Device API.
 
     This abstraction layer enables:

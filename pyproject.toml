@@ -30,6 +30,7 @@ dependencies = [
 dev = [
     "bandit[toml]>=1.7.10",
     "homeassistant>=2025.7.0",
+    "hypothesis>=6.100.0",
     "mypy>=1.11",
     "pre-commit>=3.7",
     "pytest>=8.3",
@@ -179,6 +180,9 @@ asyncio_mode = "auto"
 filterwarnings = [
     "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
 ]
+markers = [
+    "hypothesis: Property-based tests using Hypothesis (can be run in isolation with -m hypothesis)",
+]
 
 [tool.mypy]
 python_version = "3.13"
@@ -241,3 +245,91 @@ source = [
     "custom_components/googlefindmy",
     "*/site-packages/custom_components/googlefindmy",
 ]
+
+[tool.pylint.main]
+# Exclude auto-generated protobuf files
+ignore-patterns = [".*_pb2\\.py$", ".*_pb2_grpc\\.py$"]
+# Set max line length
+max-line-length = 120
+
+[tool.pylint."messages control"]
+# Disable warnings that are intentional design decisions
+disable = [
+    # Intentional patterns for this codebase:
+    "broad-exception-caught",       # W0718 - Defensive error handling
+    "protected-access",             # W0212 - Internal API access
+    "import-outside-toplevel",      # C0415 - Lazy loading pattern
+    "wrong-import-position",        # C0413 - Conditional imports
+    "global-statement",             # W0603 - Module-level state
+    "cyclic-import",                # R0401 - Lazy imports handle this
+    "unused-argument",              # W0613 - Interface compatibility
+    "redefined-outer-name",         # W0621 - Common in callbacks
+    "try-except-raise",             # W0706 - Intentional for CancelledError
+    "unnecessary-ellipsis",         # W2301 - Protocol class methods
+    "no-name-in-module",            # E0611 - Protobuf imports
+    "not-callable",                 # E1102 - False positives with Optional
+    "attribute-defined-outside-init", # W0201 - HA entity pattern
+    "abstract-method",              # W0223 - Partial implementations
+    "no-else-return",               # R1705 - Style preference
+    # Complexity warnings (code reviewed and acceptable):
+    "too-many-arguments",           # R0913
+    "too-many-locals",              # R0914
+    "too-many-branches",            # R0912
+    "too-many-statements",          # R0915
+    "too-many-return-statements",   # R0911
+    "too-many-nested-blocks",       # R1702
+    "too-many-instance-attributes", # R0902
+    "too-many-public-methods",      # R0904
+    "too-many-lines",               # C0302
+    "too-many-ancestors",           # R0901
+    # Style preferences:
+    "missing-function-docstring",   # C0116 - Not all internal funcs need docs
+    "missing-module-docstring",     # C0114 - Not all modules need docs
+    "missing-class-docstring",      # C0115 - Not all classes need docs
+    "line-too-long",                # C0301 - Handled by ruff
+    "duplicate-code",               # R0801 - Some duplication is acceptable
+    "too-few-public-methods",       # R0903 - Data classes are fine
+    "consider-using-f-string",      # C0209 - Existing % formatting is fine
+    "bad-indentation",              # W0311 - Generated pb2 files use 2-space
+    "invalid-name",                 # C0103 - Allow short names in math/crypto
+    "no-member",                    # E1101 - False positives with dynamic attrs
+    "import-error",                 # E0401 - Optional dependencies
+    "reimported",                   # W0404 - Conditional imports
+    "too-many-positional-arguments", # R0917 - Complex functions
+    "singleton-comparison",         # C0121 - Style preference
+    "useless-import-alias",         # C0414 - Re-export pattern
+    "undefined-all-variable",       # E0603 - Dynamic __all__
+    "logging-not-lazy",             # W1201 - Performance not critical here
+    "logging-fstring-interpolation", # W1203 - f-strings in logging acceptable
+    "useless-return",               # R1711 - Explicit returns for clarity
+    "arguments-differ",             # W0221 - Overrides with different signatures
+    "ungrouped-imports",            # C0412 - Import order handled by ruff
+    "too-many-boolean-expressions", # R0916 - Complex conditions acceptable
+    "simplifiable-condition",       # R1726 - Explicit is clearer
+    "chained-comparison",           # R1716 - Explicit is clearer
+    "no-else-raise",                # R1720 - Style preference
+    "no-else-continue",             # R1724 - Style preference
+    "consider-iterating-dictionary", # C0201 - Explicit .keys() is clearer
+    "unnecessary-lambda-assignment", # C3001 - Lambdas for callbacks
+    "unused-import",                # W0611 - Forward compatibility imports
+    "duplicate-except",             # W0705 - Intentional for specific handling
+    "raise-missing-from",           # W0707 - Handled where needed
+    # False positives with dynamic types and Home Assistant APIs:
+    "unexpected-keyword-arg",       # E1123 - HA API changes
+    "no-value-for-parameter",       # E1120 - Dynamic method signatures
+    "too-many-function-args",       # E1121 - HA API changes
+    "assignment-from-none",         # E1128 - Optional returns
+    "not-an-iterable",              # E1133 - Dynamic types
+    "possibly-used-before-assignment", # E0606 - Control flow analysis
+    "super-init-not-called",        # W0231 - Abstract base patterns
+    "not-async-context-manager",    # E1701 - Optional async context
+    "unused-variable",              # W0612 - Intentional placeholder
+]
+
+[tool.pylint.design]
+# Reasonable limits for complex integration code
+max-args = 10
+max-locals = 25
+max-returns = 10
+max-branches = 20
+max-statements = 100

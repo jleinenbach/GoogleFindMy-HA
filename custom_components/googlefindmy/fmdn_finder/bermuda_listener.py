@@ -591,8 +591,6 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
 
     # Generate EID
     try:
-        import time as time_module  # noqa: PLC0415
-
         from ..FMDNCrypto.eid_generator import (  # noqa: PLC0415
             EidVariant,
             generate_eid_variant,
@@ -601,7 +599,7 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
         # Calculate beacon time counter
         rotation_period = 1024  # Default FMDN rotation period in seconds
         pair_date = getattr(identity, "pair_date", None) or 0
-        current_time = int(time_module.time())
+        current_time = int(time.time())
         beacon_time_counter = (current_time - pair_date) // rotation_period
 
         # Determine EID variant - check EID resolver's persisted lock first
