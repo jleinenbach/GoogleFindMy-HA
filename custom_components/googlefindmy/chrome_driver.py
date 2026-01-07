@@ -5,6 +5,8 @@ import logging
 import os
 import platform
 import shutil
+import subprocess
+import time
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -72,6 +74,25 @@ def _reset_uc_cache(module: Any | None = None) -> None:
 type ChromeOptions = Any
 
 
+def _kill_existing_chrome_processes() -> None:
+    """Terminate any existing Chrome processes to avoid conflicts.
+
+    This helps prevent issues when Chrome is already running or has zombie processes.
+    """
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(
+                ["taskkill", "/f", "/im", "chrome.exe"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            subprocess.run(["pkill", "-f", "chrome"], capture_output=True, check=False)
+        time.sleep(2)  # Allow time for processes to terminate
+    except Exception:  # pragma: no cover - defensive, best-effort cleanup
+        LOGGER.debug("Failed to kill existing Chrome processes (non-fatal)")
+
+
 def find_chrome() -> str | None:
     """Locate the Chrome executable on the current system.
 
@@ -134,6 +155,9 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--allow-running-insecure-content")
 
     return chrome_options
 
@@ -158,13 +182,27 @@ def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
     if chrome_path:
         options.binary_location = chrome_path
 
-    return cast(WebDriver, _get_uc_module().Chrome(options=options))
+    return cast(WebDriver, _get_uc_module().Chrome(options=options, version_main=None))
 
 
 def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> WebDriver:
-    """Backward-compatible wrapper for driver creation."""
+    """Backward-compatible wrapper for driver creation with multiple fallbacks.
+
+    Attempts driver creation in this order:
+    1. Standard creation with version_main=None for Chrome version compatibility
+    2. Fallback with explicit Chrome path from system
+    3. Headless mode as last resort
+    """
+    # Kill any existing Chrome processes to avoid conflicts
+    _kill_existing_chrome_processes()
+
     try:
-        return get_driver(chrome_path, headless=headless)
+        options = get_options(headless=headless)
+        if chrome_path:
+            options.binary_location = chrome_path
+        return cast(
+            WebDriver, _get_uc_module().Chrome(options=options, version_main=None)
+        )
     except Exception as err:  # noqa: BLE001
         LOGGER.warning("Default ChromeDriver startup failed: %s", err)
 
@@ -177,11 +215,32 @@ def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> 
         fallback_options = get_options(headless=headless)
         fallback_options.binary_location = fallback_path
         try:
-            return cast(WebDriver, _get_uc_module().Chrome(options=fallback_options))
+            return cast(
+                WebDriver,
+                _get_uc_module().Chrome(options=fallback_options, version_main=None),
+            )
         except Exception as fallback_err:  # noqa: BLE001
             LOGGER.warning(
-                "ChromeDriver failed using system binary: %s", fallback_err
+                "ChromeDriver failed using system binary: %s - trying headless mode",
+                fallback_err,
             )
+
+            # Last resort: try headless mode
+            if not headless:
+                try:
+                    headless_options = get_options(headless=True)
+                    headless_options.binary_location = fallback_path
+                    return cast(
+                        WebDriver,
+                        _get_uc_module().Chrome(
+                            options=headless_options, version_main=None
+                        ),
+                    )
+                except Exception as headless_err:  # noqa: BLE001
+                    LOGGER.warning(
+                        "ChromeDriver headless fallback also failed: %s", headless_err
+                    )
+
             raise RuntimeError(
                 "Chrome driver startup failed using bundled and system binaries"
             ) from fallback_err
