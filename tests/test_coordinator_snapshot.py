@@ -76,7 +76,7 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
         "device_tracker.googlefindmy_device_42",
     )
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
+        "custom_components.googlefindmy.coordinator.main.er.async_get",
         lambda hass: entity_registry,
     )
 
@@ -121,7 +121,7 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
         "device_tracker.googlefindmy_device_42",
     )
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
+        "custom_components.googlefindmy.coordinator.main.er.async_get",
         lambda hass: entity_registry,
     )
 
@@ -163,7 +163,7 @@ def test_snapshot_logs_formats_when_entity_missing(
 
     entity_registry = _DummyEntityRegistry()
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
+        "custom_components.googlefindmy.coordinator.main.er.async_get",
         lambda hass: entity_registry,
     )
 
@@ -228,7 +228,7 @@ def test_history_helper_preserves_last_seen(monkeypatch: pytest.MonkeyPatch) -> 
         return {entity_ids[0]: [history_state]}
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.recorder_history.get_last_state_changes",
+        "custom_components.googlefindmy.coordinator.main.recorder_history.get_last_state_changes",
         _fake_get_last_state_changes,
         raising=False,
     )

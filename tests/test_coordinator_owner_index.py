@@ -37,7 +37,7 @@ def owner_index_coordinator(
         return api
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.GoogleFindMyAPI",
+        "custom_components.googlefindmy.coordinator.main.GoogleFindMyAPI",
         _factory,
     )
     loop = asyncio.new_event_loop()

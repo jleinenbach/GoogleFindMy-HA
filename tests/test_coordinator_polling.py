@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.coordinator_polling import (
+from custom_components.googlefindmy.coordinator.helpers.polling import (
     calculate_location_age_hours,
     get_age_log_level,
     should_preserve_previous_coordinates,

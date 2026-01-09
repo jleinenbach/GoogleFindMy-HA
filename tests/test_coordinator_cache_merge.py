@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from custom_components.googlefindmy.coordinator_cache import (
+from custom_components.googlefindmy.coordinator.helpers.cache import (
     compare_location_freshness,
     fill_missing_coordinates,
     merge_cache_row,

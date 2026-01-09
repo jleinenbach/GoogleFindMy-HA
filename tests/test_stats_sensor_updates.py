@@ -329,7 +329,7 @@ def test_history_fallback_increments_history_stat(
             "device_tracker.googlefindmy_device_1",
         )
         monkeypatch.setattr(
-            "custom_components.googlefindmy.coordinator.er.async_get",
+            "custom_components.googlefindmy.coordinator.main.er.async_get",
             lambda _hass: registry,
         )
 
@@ -350,7 +350,7 @@ def test_history_fallback_increments_history_stat(
             return {entity_ids[0]: [history_state]}
 
         monkeypatch.setattr(
-            "custom_components.googlefindmy.coordinator.recorder_history.get_last_state_changes",
+            "custom_components.googlefindmy.coordinator.main.recorder_history.get_last_state_changes",
             _fake_get_last_state_changes,
             raising=False,
         )
@@ -360,7 +360,7 @@ def test_history_fallback_increments_history_stat(
                 return func(*args)
 
         monkeypatch.setattr(
-            "custom_components.googlefindmy.coordinator.get_recorder",
+            "custom_components.googlefindmy.coordinator.main.get_recorder",
             lambda _hass: _RecorderStub(),
             raising=False,
         )

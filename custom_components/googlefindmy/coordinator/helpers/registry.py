@@ -16,7 +16,7 @@ from collections.abc import Collection, Mapping
 from typing import Any
 
 # Re-export constants used by this module's functions
-from .const import (
+from ...const import (
     LEGACY_SERVICE_IDENTIFIER,
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
 )

@@ -21,7 +21,7 @@ KEY RISKS COVERED:
 
 from __future__ import annotations
 
-from custom_components.googlefindmy.coordinator_subentry import (
+from custom_components.googlefindmy.coordinator.helpers.subentry import (
     format_epoch_utc,
     group_devices_by_subentry,
     normalize_epoch_seconds,
@@ -571,7 +571,7 @@ class TestEdgeCases:
 # Phase 6: New Helper Function Tests
 # ---------------------------------------------------------------------------
 
-from custom_components.googlefindmy.coordinator_subentry import (
+from custom_components.googlefindmy.coordinator.helpers.subentry import (
     detect_missing_core_subentry_keys,
     extract_subentry_group_key,
     filter_provisional_identifier,

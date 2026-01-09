@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from custom_components.googlefindmy.coordinator_cache import (
+from custom_components.googlefindmy.coordinator.helpers.cache import (
     DEFAULT_SNAPSHOT_FIELDS,
     build_base_snapshot_entry,
     determine_location_status,

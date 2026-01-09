@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from custom_components.googlefindmy.coordinator_update import (
+from custom_components.googlefindmy.coordinator.helpers.update import (
     calculate_presence_ttl,
     filter_and_dedupe_devices,
     is_fatal_fcm_auth_error,

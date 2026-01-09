@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from .coordinator_geo import haversine_distance
+from .geo import haversine_distance
 
 __all__ = [
     "DEFAULT_SNAPSHOT_FIELDS",

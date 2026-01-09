@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, TypeVar
 
-from .coordinator_subentry import normalize_epoch_seconds
+from .subentry import normalize_epoch_seconds
 
 __all__ = [
     "extract_pair_date",

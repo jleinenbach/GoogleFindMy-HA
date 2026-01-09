@@ -31,7 +31,7 @@ class TestNormalizeDeviceType:
 
     def test_int_passthrough(self) -> None:
         """Int values should be returned as-is."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_device_type,
         )
 
@@ -42,7 +42,7 @@ class TestNormalizeDeviceType:
 
     def test_bool_returns_none(self) -> None:
         """Bool values should return None (not coerced to 0/1)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_device_type,
         )
 
@@ -51,7 +51,7 @@ class TestNormalizeDeviceType:
 
     def test_string_digit_converted(self) -> None:
         """Digit-only strings should be converted to int."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_device_type,
         )
 
@@ -61,7 +61,7 @@ class TestNormalizeDeviceType:
 
     def test_string_non_digit_returns_none(self) -> None:
         """Non-digit strings should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_device_type,
         )
 
@@ -74,7 +74,7 @@ class TestNormalizeDeviceType:
 
     def test_none_returns_none(self) -> None:
         """None input should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_device_type,
         )
 
@@ -82,7 +82,7 @@ class TestNormalizeDeviceType:
 
     def test_other_types_return_none(self) -> None:
         """Non-int/bool/str types should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_device_type,
         )
 
@@ -108,7 +108,7 @@ class TestNormalizeFastPairModelId:
 
     def test_string_passthrough_trimmed(self) -> None:
         """String values should be trimmed."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -118,7 +118,7 @@ class TestNormalizeFastPairModelId:
 
     def test_empty_string_returns_none(self) -> None:
         """Empty or whitespace-only strings should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -128,7 +128,7 @@ class TestNormalizeFastPairModelId:
 
     def test_bytes_decoded(self) -> None:
         """Bytes should be decoded to string."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -137,7 +137,7 @@ class TestNormalizeFastPairModelId:
 
     def test_bytearray_decoded(self) -> None:
         """Bytearray should be decoded to string."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -145,7 +145,7 @@ class TestNormalizeFastPairModelId:
 
     def test_bytes_invalid_utf8_hex_encoded(self) -> None:
         """Non-UTF8 bytes should be hex-encoded."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -156,7 +156,7 @@ class TestNormalizeFastPairModelId:
 
     def test_empty_bytes_returns_none(self) -> None:
         """Empty bytes should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -165,7 +165,7 @@ class TestNormalizeFastPairModelId:
 
     def test_none_returns_none(self) -> None:
         """None input should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -173,7 +173,7 @@ class TestNormalizeFastPairModelId:
 
     def test_other_types_return_none(self) -> None:
         """Non-string/bytes types should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_fast_pair_model_id,
         )
 
@@ -195,7 +195,9 @@ class TestLookupPrio:
 
     def test_returns_first_match_from_first_source(self) -> None:
         """Should return value from first source that has the key."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         source1 = {"key1": "value1"}
         source2 = {"key1": "value2", "key2": "value2"}
@@ -205,7 +207,9 @@ class TestLookupPrio:
 
     def test_falls_back_to_later_source(self) -> None:
         """Should fall back to later source if key not in earlier ones."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         source1 = {"other": "value1"}
         source2 = {"key1": "value2"}
@@ -215,7 +219,9 @@ class TestLookupPrio:
 
     def test_multiple_lookup_keys_tried_in_order(self) -> None:
         """Should try lookup keys in order within each source."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         source = {"key2": "value2", "key1": "value1"}
 
@@ -225,7 +231,9 @@ class TestLookupPrio:
 
     def test_none_keys_filtered(self) -> None:
         """None values in lookup_keys should be filtered out."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         source = {"key1": "value1"}
 
@@ -234,7 +242,9 @@ class TestLookupPrio:
 
     def test_returns_none_when_no_match(self) -> None:
         """Should return None when no key matches in any source."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         source = {"other": "value"}
 
@@ -243,21 +253,27 @@ class TestLookupPrio:
 
     def test_handles_empty_sources(self) -> None:
         """Should handle empty source dicts."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         result = lookup_prio(("key1",), {}, {})
         assert result is None
 
     def test_handles_no_sources(self) -> None:
         """Should handle no sources provided."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         result = lookup_prio(("key1",))
         assert result is None
 
     def test_handles_non_mapping_sources(self) -> None:
         """Should skip non-mapping sources."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         valid_source = {"key1": "value1"}
 
@@ -266,7 +282,9 @@ class TestLookupPrio:
 
     def test_preserves_value_types(self) -> None:
         """Should preserve the type of values."""
-        from custom_components.googlefindmy.coordinator_identity import lookup_prio
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            lookup_prio,
+        )
 
         source: dict[str, Any] = {
             "int_key": 42,
@@ -294,7 +312,7 @@ class TestLookupPrioWithSource:
 
     def test_returns_value_and_source_label(self) -> None:
         """Should return both value and source label."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio_with_source,
         )
 
@@ -309,7 +327,7 @@ class TestLookupPrioWithSource:
 
     def test_returns_first_non_none_value(self) -> None:
         """Should skip None values and return first non-None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio_with_source,
         )
 
@@ -326,7 +344,7 @@ class TestLookupPrioWithSource:
 
     def test_falls_back_to_later_sources(self) -> None:
         """Should fall back to later sources if key not found."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio_with_source,
         )
 
@@ -343,7 +361,7 @@ class TestLookupPrioWithSource:
 
     def test_returns_none_tuple_when_no_match(self) -> None:
         """Should return (None, None) when no match found."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio_with_source,
         )
 
@@ -355,7 +373,7 @@ class TestLookupPrioWithSource:
 
     def test_handles_non_mapping_sources(self) -> None:
         """Should skip non-mapping sources."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio_with_source,
         )
 
@@ -371,7 +389,7 @@ class TestLookupPrioWithSource:
 
     def test_none_keys_filtered(self) -> None:
         """None values in lookup_keys should be filtered out."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio_with_source,
         )
 
@@ -398,7 +416,9 @@ class TestStoreIfValue:
 
     def test_stores_non_none_value(self) -> None:
         """Should store non-None values."""
-        from custom_components.googlefindmy.coordinator_identity import store_if_value
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            store_if_value,
+        )
 
         target: dict[str, Any] = {}
         store_if_value(target, "key1", "value1")
@@ -406,7 +426,9 @@ class TestStoreIfValue:
 
     def test_skips_none_value(self) -> None:
         """Should not store None values."""
-        from custom_components.googlefindmy.coordinator_identity import store_if_value
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            store_if_value,
+        )
 
         target: dict[str, Any] = {"existing": "value"}
         store_if_value(target, "key1", None)
@@ -414,7 +436,9 @@ class TestStoreIfValue:
 
     def test_stores_falsy_non_none_values(self) -> None:
         """Should store falsy values that are not None."""
-        from custom_components.googlefindmy.coordinator_identity import store_if_value
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            store_if_value,
+        )
 
         target: dict[str, Any] = {}
         store_if_value(target, "zero", 0)
@@ -431,7 +455,9 @@ class TestStoreIfValue:
 
     def test_overwrites_existing_value(self) -> None:
         """Should overwrite existing values."""
-        from custom_components.googlefindmy.coordinator_identity import store_if_value
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
+            store_if_value,
+        )
 
         target = {"key1": "old_value"}
         store_if_value(target, "key1", "new_value")
@@ -452,7 +478,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_int_epoch_seconds(self) -> None:
         """Should accept epoch seconds as int."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -460,7 +486,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_float_epoch_seconds(self) -> None:
         """Should accept epoch seconds as float, truncate to int."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -470,7 +496,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_string_epoch_seconds(self) -> None:
         """Should accept epoch seconds as string."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -478,7 +504,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_milliseconds_converted(self) -> None:
         """Should convert milliseconds to seconds."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -487,7 +513,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_zero_returns_none(self) -> None:
         """Zero timestamps should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -495,7 +521,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_negative_returns_none(self) -> None:
         """Negative timestamps should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -504,7 +530,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_mapping_with_seconds_field(self) -> None:
         """Should extract seconds from Timestamp-like mapping."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -513,7 +539,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_mapping_with_zero_seconds_returns_none(self) -> None:
         """Mapping with zero seconds should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -522,7 +548,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_mapping_nanos_only_returns_none(self) -> None:
         """Mapping with only nanos (no valid seconds) should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -534,7 +560,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_none_returns_none(self) -> None:
         """None input should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -542,7 +568,7 @@ class TestNormalizeIdentityTimestamp:
 
     def test_invalid_string_returns_none(self) -> None:
         """Invalid string should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -563,7 +589,7 @@ class TestExtractTimestampFromKeys:
 
     def test_extracts_from_first_key(self) -> None:
         """Should extract from first matching key."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_timestamp_from_keys,
         )
 
@@ -573,7 +599,7 @@ class TestExtractTimestampFromKeys:
 
     def test_falls_back_to_later_key(self) -> None:
         """Should fall back to later key if first not present."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_timestamp_from_keys,
         )
 
@@ -583,7 +609,7 @@ class TestExtractTimestampFromKeys:
 
     def test_skips_invalid_timestamps(self) -> None:
         """Should skip keys with invalid timestamps."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_timestamp_from_keys,
         )
 
@@ -593,7 +619,7 @@ class TestExtractTimestampFromKeys:
 
     def test_returns_none_when_no_valid_key(self) -> None:
         """Should return None when no valid timestamp found."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_timestamp_from_keys,
         )
 
@@ -603,7 +629,7 @@ class TestExtractTimestampFromKeys:
 
     def test_none_payload_returns_none(self) -> None:
         """None payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_timestamp_from_keys,
         )
 
@@ -612,7 +638,7 @@ class TestExtractTimestampFromKeys:
 
     def test_non_mapping_payload_returns_none(self) -> None:
         """Non-mapping payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_timestamp_from_keys,
         )
 
@@ -633,7 +659,7 @@ class TestExtractPairDate:
 
     def test_extracts_pair_date(self) -> None:
         """Should extract pair_date from direct key."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -642,7 +668,7 @@ class TestExtractPairDate:
 
     def test_extracts_pairDate_camelcase(self) -> None:
         """Should extract pairDate (camelCase)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -651,7 +677,7 @@ class TestExtractPairDate:
 
     def test_extracts_pair_date_unix(self) -> None:
         """Should extract pair_date_unix."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -660,7 +686,7 @@ class TestExtractPairDate:
 
     def test_extracts_pairingDate(self) -> None:
         """Should extract pairingDate."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -669,7 +695,7 @@ class TestExtractPairDate:
 
     def test_extracts_pairedAt(self) -> None:
         """Should extract pairedAt."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -678,7 +704,7 @@ class TestExtractPairDate:
 
     def test_extracts_paired_at(self) -> None:
         """Should extract paired_at."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -687,7 +713,7 @@ class TestExtractPairDate:
 
     def test_extracts_from_device_registration(self) -> None:
         """Should extract from nested deviceRegistration."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -700,7 +726,7 @@ class TestExtractPairDate:
 
     def test_extracts_from_device_registration_snake_case(self) -> None:
         """Should extract from nested device_registration (snake_case)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -713,7 +739,7 @@ class TestExtractPairDate:
 
     def test_extracts_from_information_nested(self) -> None:
         """Should extract from nested information dict."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -726,7 +752,7 @@ class TestExtractPairDate:
 
     def test_direct_takes_priority_over_nested(self) -> None:
         """Direct keys should take priority over nested."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -740,7 +766,7 @@ class TestExtractPairDate:
 
     def test_none_payload_returns_none(self) -> None:
         """None payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -748,7 +774,7 @@ class TestExtractPairDate:
 
     def test_non_mapping_payload_returns_none(self) -> None:
         """Non-mapping payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -756,7 +782,7 @@ class TestExtractPairDate:
 
     def test_empty_payload_returns_none(self) -> None:
         """Empty payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -776,7 +802,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_secrets_creation_date(self) -> None:
         """Should extract secrets_creation_date."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -785,7 +811,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_secretsCreationDate_camelcase(self) -> None:
         """Should extract secretsCreationDate (camelCase)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -794,7 +820,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_creation_date(self) -> None:
         """Should extract generic creation_date."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -803,7 +829,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_creationDate_camelcase(self) -> None:
         """Should extract creationDate (camelCase)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -812,7 +838,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_from_encrypted_user_secrets(self) -> None:
         """Should extract from nested encrypted_user_secrets."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -825,7 +851,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_from_encryptedUserSecrets_camelcase(self) -> None:
         """Should extract from nested encryptedUserSecrets (camelCase)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -838,7 +864,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_from_device_registration(self) -> None:
         """Should extract from nested deviceRegistration."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -851,7 +877,7 @@ class TestExtractSecretsCreationDate:
 
     def test_extracts_from_device_registration_snake_case(self) -> None:
         """Should extract from nested device_registration (snake_case)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -864,7 +890,7 @@ class TestExtractSecretsCreationDate:
 
     def test_direct_takes_priority_over_nested(self) -> None:
         """Direct keys should take priority over nested."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -878,7 +904,7 @@ class TestExtractSecretsCreationDate:
 
     def test_none_payload_returns_none(self) -> None:
         """None payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -886,7 +912,7 @@ class TestExtractSecretsCreationDate:
 
     def test_non_mapping_payload_returns_none(self) -> None:
         """Non-mapping payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -906,7 +932,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_extracts_time_anchors_debug(self) -> None:
         """Should extract time_anchors_debug."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -916,7 +942,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_extracts_timeAnchorsDebug_camelcase(self) -> None:
         """Should extract timeAnchorsDebug (camelCase)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -926,7 +952,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_extracts_time_anchors(self) -> None:
         """Should extract time_anchors (shorter form)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -936,7 +962,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_extracts_timeAnchors_camelcase(self) -> None:
         """Should extract timeAnchors (camelCase, shorter form)."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -946,7 +972,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_first_key_takes_priority(self) -> None:
         """First matching key should take priority."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -958,7 +984,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_none_payload_returns_none(self) -> None:
         """None payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -966,7 +992,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_non_mapping_payload_returns_none(self) -> None:
         """Non-mapping payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -974,7 +1000,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_empty_payload_returns_none(self) -> None:
         """Empty payload should return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -982,7 +1008,7 @@ class TestExtractTimeAnchorsDebug:
 
     def test_preserves_any_value_type(self) -> None:
         """Should preserve any value type."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -1011,7 +1037,7 @@ class TestBranchCoverage:
 
     def test_normalize_identity_timestamp_mapping_with_valid_seconds(self) -> None:
         """Mapping with valid seconds should return at line 214, skipping nanos check."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -1021,7 +1047,7 @@ class TestBranchCoverage:
 
     def test_normalize_identity_timestamp_mapping_no_seconds_no_nanos(self) -> None:
         """Mapping without seconds and without nanos should fall through to return None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             normalize_identity_timestamp,
         )
 
@@ -1031,7 +1057,7 @@ class TestBranchCoverage:
 
     def test_extract_pair_date_registration_returns_none(self) -> None:
         """Test when deviceRegistration exists but nested call returns None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -1045,7 +1071,7 @@ class TestBranchCoverage:
 
     def test_extract_pair_date_information_returns_none(self) -> None:
         """Test when information exists but nested call returns None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -1058,7 +1084,7 @@ class TestBranchCoverage:
 
     def test_extract_pair_date_registration_none_falls_to_information(self) -> None:
         """Test when deviceRegistration returns None but information has value."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
         )
 
@@ -1070,7 +1096,7 @@ class TestBranchCoverage:
 
     def test_extract_secrets_creation_encrypted_returns_none(self) -> None:
         """Test when encrypted_user_secrets exists but returns None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -1080,7 +1106,7 @@ class TestBranchCoverage:
 
     def test_extract_secrets_creation_registration_returns_none(self) -> None:
         """Test when deviceRegistration exists but nested call returns None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -1095,7 +1121,7 @@ class TestBranchCoverage:
         self,
     ) -> None:
         """Test when encrypted returns None but registration has value."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_secrets_creation_date,
         )
 
@@ -1107,7 +1133,7 @@ class TestBranchCoverage:
 
     def test_extract_time_anchors_debug_not_found_in_any_key(self) -> None:
         """Test when payload has keys but none match anchor keys."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -1116,7 +1142,7 @@ class TestBranchCoverage:
 
     def test_extract_time_anchors_debug_returns_none_for_none_value(self) -> None:
         """Test when anchor key exists but value is None - returns None."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_time_anchors_debug,
         )
 
@@ -1132,7 +1158,7 @@ class TestIdentityHelperIntegration:
 
     def test_full_payload_extraction_flow(self) -> None:
         """Test extracting all identity-related data from a full payload."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
             extract_secrets_creation_date,
             extract_time_anchors_debug,
@@ -1156,7 +1182,7 @@ class TestIdentityHelperIntegration:
 
     def test_priority_lookup_with_multiple_sources(self) -> None:
         """Test priority lookup across cache, data, and last sources."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             lookup_prio,
             lookup_prio_with_source,
         )
@@ -1186,7 +1212,7 @@ class TestIdentityHelperIntegration:
 
     def test_nested_registration_extraction(self) -> None:
         """Test extracting dates from nested device registration structures."""
-        from custom_components.googlefindmy.coordinator_identity import (
+        from custom_components.googlefindmy.coordinator.helpers.identity import (
             extract_pair_date,
             extract_secrets_creation_date,
         )

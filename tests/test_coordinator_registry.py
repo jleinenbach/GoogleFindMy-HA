@@ -20,7 +20,7 @@ KEY RISKS COVERED:
 
 from __future__ import annotations
 
-from custom_components.googlefindmy.coordinator_registry import (
+from custom_components.googlefindmy.coordinator.helpers.registry import (
     LEGACY_SERVICE_IDENTIFIER,
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
     build_legacy_device_registry_kwargs,
@@ -723,7 +723,7 @@ class TestEdgeCases:
 
 from unittest.mock import Mock
 
-from custom_components.googlefindmy.coordinator_registry import (
+from custom_components.googlefindmy.coordinator.helpers.registry import (
     extract_subentry_links,
     has_hub_link,
     has_subentry_link,
@@ -1084,7 +1084,7 @@ class TestResolveTrackerSubentryCandidate:
 # Phase 9: Service Device Helper Functions
 # ---------------------------------------------------------------------------
 
-from custom_components.googlefindmy.coordinator_registry import (
+from custom_components.googlefindmy.coordinator.helpers.registry import (
     extract_service_subentry_ids,
     should_defer_service_subentry,
 )

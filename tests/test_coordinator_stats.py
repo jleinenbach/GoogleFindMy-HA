@@ -22,7 +22,7 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.coordinator_stats import (
+from custom_components.googlefindmy.coordinator.helpers.stats import (
     ApiStatus,
     DiagnosticsBuffer,
     FcmStatus,

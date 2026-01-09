@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from custom_components.googlefindmy.coordinator_cache import (
+from custom_components.googlefindmy.coordinator.helpers.cache import (
     normalize_location_fields,
     preserve_metadata_fields,
     should_clear_metadata_only_flag,

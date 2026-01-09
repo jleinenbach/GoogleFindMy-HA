@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 
-from custom_components.googlefindmy.coordinator_geo import (
+from custom_components.googlefindmy.coordinator.helpers.geo import (
     clamp,
     coerce_float,
     haversine_distance,

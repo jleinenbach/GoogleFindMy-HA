@@ -71,7 +71,7 @@ def test_find_tracker_entity_entry_uses_fallback(monkeypatch: pytest.MonkeyPatch
         config_entry_id="entry-42",
     )
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
+        "custom_components.googlefindmy.coordinator.main.er.async_get",
         lambda hass: registry,
     )
 

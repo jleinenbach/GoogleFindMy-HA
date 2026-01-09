@@ -198,7 +198,8 @@ def _load_can_request_location_impl() -> Any:
         .parent.parent
         / "custom_components"
         / "googlefindmy"
-        / "coordinator.py"
+        / "coordinator"
+        / "main.py"
     )
     return compile_class_method_from_module(
         module_path=coordinator_path,

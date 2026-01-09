@@ -69,147 +69,147 @@ from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from .coordinator_cache import (
+from .helpers.cache import (
     build_base_snapshot_entry as _build_base_snapshot_entry_impl,
 )
-from .coordinator_cache import (
+from .helpers.cache import (
     determine_location_status,
     epoch_to_datetime_utc,
     is_presence_expired,
 )
-from .coordinator_geo import (
+from .helpers.geo import (
     clamp as _clamp,
 )
-from .coordinator_geo import (
+from .helpers.geo import (
     coerce_float as _coerce_float_impl,
 )
-from .coordinator_geo import (
+from .helpers.geo import (
     haversine_distance as _haversine_distance_impl,
 )
-from .coordinator_geo import (
+from .helpers.geo import (
     safe_accuracy,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     extract_pair_date as _extract_pair_date_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     extract_secrets_creation_date as _extract_secrets_creation_date_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     extract_time_anchors_debug as _extract_time_anchors_debug_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     lookup_prio as _lookup_prio_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     lookup_prio_with_source as _lookup_prio_with_source_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     normalize_device_type as _normalize_device_type_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     normalize_fast_pair_model_id as _normalize_fast_pair_model_id_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     normalize_identity_timestamp as _normalize_identity_timestamp_impl,
 )
-from .coordinator_identity import (
+from .helpers.identity import (
     store_if_value as _store_if_value_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     extract_device_display_name as _extract_display_name_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     extract_service_subentry_ids as _extract_service_subentry_ids_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     has_hub_link as _has_hub_link_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     has_subentry_link as _has_subentry_link_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     is_hub_device_check as _is_hub_device_check_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     normalize_device_name as _normalize_device_name_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     parse_device_identifier as _parse_identifier_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     resolve_tracker_subentry_candidate as _resolve_tracker_subentry_impl,
 )
-from .coordinator_registry import (
+from .helpers.registry import (
     should_defer_service_subentry as _should_defer_service_subentry_impl,
 )
-from .coordinator_stats import (
+from .helpers.stats import (
     ApiStatus,
     DiagnosticsBuffer,
     FcmStatus,
     StatusSnapshot,
     format_recent_errors,
 )
-from .coordinator_stats import (
+from .helpers.stats import (
     get_duration as _get_duration_impl,
 )
-from .coordinator_stats import (
+from .helpers.stats import (
     short_error_message as _short_error_message_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     detect_missing_core_subentry_keys as _detect_missing_core_keys_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     extract_subentry_group_key as _extract_group_key_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     filter_provisional_identifier as _filter_provisional_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     format_epoch_utc as _format_epoch_utc_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     group_devices_by_subentry as _group_devices_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     normalize_epoch_seconds as _normalize_epoch_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     parse_last_seen_timestamp as _parse_last_seen_impl,
 )
-from .coordinator_subentry import (
+from .helpers.subentry import (
     sanitize_subentry_identifier as _sanitize_subentry_id_impl,
 )
-from .coordinator_update import (
+from .helpers.update import (
     calculate_presence_ttl as _calculate_presence_ttl_impl,
 )
-from .coordinator_update import (
+from .helpers.update import (
     filter_and_dedupe_devices as _filter_and_dedupe_impl,
 )
-from .coordinator_update import (
+from .helpers.update import (
     is_fatal_fcm_auth_error as _is_fatal_fcm_auth_error_impl,
 )
-from .coordinator_update import (
+from .helpers.update import (
     is_poll_cycle_due as _is_poll_cycle_due_impl,
 )
-from .coordinator_update import (
+from .helpers.update import (
     normalize_device_list_payload as _normalize_device_list_impl,
 )
-from .coordinator_update import (
+from .helpers.update import (
     should_defer_empty_list as _should_defer_empty_list_impl,
 )
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
 
-    from . import ConfigEntrySubentryDefinition, ConfigEntrySubEntryManager
-    from .google_home_filter import GoogleHomeFilter as GoogleHomeFilterProtocol
+    from .. import ConfigEntrySubentryDefinition, ConfigEntrySubEntryManager
+    from ..google_home_filter import GoogleHomeFilter as GoogleHomeFilterProtocol
 else:  # pragma: no cover - typing fallback for runtime imports
     Event = Any
     GoogleHomeFilterProtocol = Any
@@ -236,9 +236,9 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
-from .api import GoogleFindMyAPI
-from .Auth.token_cache import TokenCache
-from .const import (
+from ..api import GoogleFindMyAPI
+from ..Auth.token_cache import TokenCache
+from ..const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
     CACHE_KEY_LAST_MODE_SWITCH,
     # Credential meta for Repairs placeholders
@@ -282,13 +282,13 @@ from .const import (
     issue_id_for,
     service_device_identifier,
 )
-from .ha_typing import DataUpdateCoordinator, callback
-from .KeyBackup.cloud_key_decryptor import decrypt_eik
-from .NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
-from .SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+from ..ha_typing import DataUpdateCoordinator, callback
+from ..KeyBackup.cloud_key_decryptor import decrypt_eik
+from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
+from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
-from .SpotApi.spot_request import SpotAuthPermanentError
+from ..SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -475,7 +475,7 @@ _MISSING = object()
 def _get_common_pb2() -> Any:
     """Import Common_pb2 lazily to defer protobuf initialization."""
 
-    from . import get_proto_decoder
+    from .. import get_proto_decoder
 
     return get_proto_decoder("Common_pb2")
 
@@ -1177,7 +1177,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return []
 
         try:
-            from . import ConfigEntrySubentryDefinition  # local import to avoid cycles
+            from .. import ConfigEntrySubentryDefinition  # local import to avoid cycles
         except Exception as err:  # pragma: no cover - defensive logging
             _LOGGER.debug(
                 "Skipping core subentry repair: definition factory import failed (%s)",
@@ -2783,7 +2783,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         Uses Phase 12 helpers for identifier extraction and unique_id generation.
         """
-        from .coordinator_registry import (
+        from .helpers.registry import (
             build_canonical_unique_id,
             build_entity_unique_id_candidates,
             extract_canonical_device_id,
@@ -6074,7 +6074,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
                         # If we only got a semantic location, preserve previous coordinates.
                         # Use Phase 11 helper for the check
-                        from .coordinator_polling import (
+                        from .helpers.polling import (
                             calculate_location_age_hours,
                             get_age_log_level,
                             should_preserve_previous_coordinates,
@@ -6930,7 +6930,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         # Shallow copy to avoid caller-side mutation
-        from .coordinator_cache import (
+        from .helpers.cache import (
             preserve_metadata_fields,
             should_clear_metadata_only_flag,
         )
@@ -7371,7 +7371,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         Uses helper functions from coordinator_cache for decision logic while
         preserving metadata fields via _update_preserve_metadata.
         """
-        from .coordinator_cache import (
+        from .helpers.cache import (
             LOCATION_FIELDS,
             fill_missing_coordinates,
             preserve_monotonic_timestamp,

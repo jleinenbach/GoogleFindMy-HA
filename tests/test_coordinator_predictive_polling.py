@@ -68,7 +68,7 @@ async def coordinator(monkeypatch: pytest.MonkeyPatch):
         AsyncMock(return_value=None),
     )
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.GoogleFindMyAPI",
+        "custom_components.googlefindmy.coordinator.main.GoogleFindMyAPI",
         lambda *args, **kwargs: _DummyAPI(),
     )
 

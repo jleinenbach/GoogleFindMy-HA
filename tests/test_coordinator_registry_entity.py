@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from custom_components.googlefindmy.coordinator_registry import (
+from custom_components.googlefindmy.coordinator.helpers.registry import (
     build_canonical_unique_id,
     build_entity_unique_id_candidates,
     extract_canonical_device_id,
