@@ -5,15 +5,12 @@ Phase 11 of coordinator refactoring: Extracted from _async_start_poll_cycle.
 These functions handle:
 - Location age calculation and logging decisions
 - Semantic location coordinate preservation
-- Poll error classification
-- Device labeling for logs
 
 All functions are pure (no side effects) for easy testing and reuse.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any
 
 # Age thresholds for log level determination
@@ -21,11 +18,8 @@ _AGE_THRESHOLD_INFO_HOURS = 24  # Log at INFO level above this
 _AGE_THRESHOLD_DEBUG_HOURS = 1  # Log at DEBUG level above this
 
 __all__ = [
-    "build_poll_device_label",
     "calculate_location_age_hours",
-    "classify_poll_error_type",
     "get_age_log_level",
-    "normalize_semantic_name",
     "should_preserve_previous_coordinates",
 ]
 
@@ -103,82 +97,3 @@ def should_preserve_previous_coordinates(location: dict[str, Any]) -> bool:
         return False
 
     return True
-
-
-def normalize_semantic_name(value: Any) -> str | None:
-    """Normalize and validate a semantic_name field.
-
-    Strips whitespace and returns None for invalid/empty values.
-
-    Args:
-        value: The semantic_name value to normalize.
-
-    Returns:
-        Normalized string, or None if invalid/empty.
-    """
-    if not isinstance(value, str):
-        return None
-
-    stripped = value.strip()
-    return stripped if stripped else None
-
-
-def classify_poll_error_type(exc: BaseException | None) -> str:
-    """Classify a poll exception for error handling and metrics.
-
-    Categories:
-    - "timeout": TimeoutError or asyncio.TimeoutError
-    - "connection": ConnectionError, OSError
-    - "data": ValueError, KeyError, TypeError
-    - "unknown": All other exceptions
-
-    Args:
-        exc: The exception to classify.
-
-    Returns:
-        Error type string.
-    """
-    if exc is None:
-        return "unknown"
-
-    # Timeout errors
-    if isinstance(exc, TimeoutError):
-        return "timeout"
-
-    # Connection/network errors
-    if isinstance(exc, (ConnectionError, OSError)):
-        return "connection"
-
-    # Data/parsing errors
-    if isinstance(exc, (ValueError, KeyError, TypeError)):
-        return "data"
-
-    return "unknown"
-
-
-def build_poll_device_label(device: Any) -> str:
-    """Build a device label for logging purposes.
-
-    Uses the device name if available and valid, otherwise falls back
-    to the device ID. Returns "unknown" if neither is available.
-
-    Args:
-        device: The device dictionary.
-
-    Returns:
-        Device label string.
-    """
-    if not isinstance(device, Mapping):
-        return "unknown"
-
-    # Try to use name
-    name = device.get("name")
-    if isinstance(name, str) and name.strip():
-        return name.strip()
-
-    # Fall back to ID
-    dev_id = device.get("id")
-    if isinstance(dev_id, str) and dev_id:
-        return dev_id
-
-    return "unknown"

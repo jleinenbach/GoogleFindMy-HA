@@ -7,9 +7,6 @@ Test categories:
 1. calculate_location_age_hours - Calculate age of location data
 2. get_age_log_level - Determine logging level based on age
 3. should_preserve_previous_coordinates - Check if previous coords should be used
-4. normalize_semantic_name - Normalize semantic_name field
-5. classify_poll_error_type - Classify poll exception types
-6. build_poll_device_label - Build device label for logging
 
 REQUIREMENT: 100% test coverage for all extracted functions.
 
@@ -17,7 +14,6 @@ KEY RISKS COVERED:
 - Location age calculation with missing/invalid timestamps
 - Log level determination edge cases
 - Semantic-only location handling
-- Exception classification for proper error handling
 """
 
 from __future__ import annotations
@@ -27,11 +23,8 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy.coordinator_polling import (
-    build_poll_device_label,
     calculate_location_age_hours,
-    classify_poll_error_type,
     get_age_log_level,
-    normalize_semantic_name,
     should_preserve_previous_coordinates,
 )
 
@@ -240,166 +233,3 @@ class TestShouldPreservePreviousCoordinates:
             "semantic_name": "Home",
         }
         assert should_preserve_previous_coordinates(location) is False
-
-
-# ---------------------------------------------------------------------------
-# normalize_semantic_name Tests
-# ---------------------------------------------------------------------------
-
-
-class TestNormalizeSemanticName:
-    """Tests for normalize_semantic_name function.
-
-    Normalizes and validates semantic_name field.
-    """
-
-    def test_returns_valid_string(self) -> None:
-        """Should return valid non-empty string."""
-        assert normalize_semantic_name("Home") == "Home"
-
-    def test_strips_whitespace(self) -> None:
-        """Should strip leading/trailing whitespace."""
-        assert normalize_semantic_name("  Work  ") == "Work"
-
-    def test_returns_none_for_empty_string(self) -> None:
-        """Should return None for empty string."""
-        assert normalize_semantic_name("") is None
-
-    def test_returns_none_for_whitespace_only(self) -> None:
-        """Should return None for whitespace-only string."""
-        assert normalize_semantic_name("   ") is None
-
-    def test_returns_none_for_none(self) -> None:
-        """Should return None for None input."""
-        assert normalize_semantic_name(None) is None
-
-    def test_returns_none_for_non_string(self) -> None:
-        """Should return None for non-string types."""
-        assert normalize_semantic_name(123) is None
-        assert normalize_semantic_name(["Home"]) is None
-        assert normalize_semantic_name({"name": "Home"}) is None
-
-    def test_preserves_internal_whitespace(self) -> None:
-        """Should preserve internal whitespace."""
-        assert normalize_semantic_name("My Home Location") == "My Home Location"
-
-    def test_handles_unicode(self) -> None:
-        """Should handle unicode characters."""
-        assert normalize_semantic_name("家") == "家"
-        assert normalize_semantic_name("Büro") == "Büro"
-
-
-# ---------------------------------------------------------------------------
-# classify_poll_error_type Tests
-# ---------------------------------------------------------------------------
-
-
-class TestClassifyPollErrorType:
-    """Tests for classify_poll_error_type function.
-
-    Classifies poll exceptions for proper error handling and metrics.
-    """
-
-    def test_classifies_timeout_error(self) -> None:
-        """Should classify TimeoutError as 'timeout'."""
-        assert classify_poll_error_type(TimeoutError()) == "timeout"
-
-    def test_classifies_asyncio_timeout(self) -> None:
-        """Should classify asyncio.TimeoutError as 'timeout'."""
-
-        assert classify_poll_error_type(TimeoutError()) == "timeout"
-
-    def test_classifies_connection_error(self) -> None:
-        """Should classify ConnectionError as 'connection'."""
-        assert classify_poll_error_type(ConnectionError()) == "connection"
-
-    def test_classifies_oserror_as_connection(self) -> None:
-        """Should classify OSError as 'connection'."""
-        assert classify_poll_error_type(OSError()) == "connection"
-
-    def test_classifies_value_error_as_data(self) -> None:
-        """Should classify ValueError as 'data'."""
-        assert classify_poll_error_type(ValueError()) == "data"
-
-    def test_classifies_key_error_as_data(self) -> None:
-        """Should classify KeyError as 'data'."""
-        assert classify_poll_error_type(KeyError()) == "data"
-
-    def test_classifies_type_error_as_data(self) -> None:
-        """Should classify TypeError as 'data'."""
-        assert classify_poll_error_type(TypeError()) == "data"
-
-    def test_classifies_unknown_exception(self) -> None:
-        """Should classify unknown exceptions as 'unknown'."""
-        assert classify_poll_error_type(RuntimeError()) == "unknown"
-        assert classify_poll_error_type(Exception()) == "unknown"
-
-    def test_classifies_none_as_unknown(self) -> None:
-        """Should classify None as 'unknown'."""
-        assert classify_poll_error_type(None) == "unknown"
-
-
-# ---------------------------------------------------------------------------
-# build_poll_device_label Tests
-# ---------------------------------------------------------------------------
-
-
-class TestBuildPollDeviceLabel:
-    """Tests for build_poll_device_label function.
-
-    Builds a device label for logging purposes.
-    """
-
-    def test_uses_name_when_available(self) -> None:
-        """Should use device name when available."""
-        device = {"id": "device-123", "name": "My Phone"}
-        assert build_poll_device_label(device) == "My Phone"
-
-    def test_falls_back_to_id(self) -> None:
-        """Should fall back to device ID when name missing."""
-        device: dict[str, Any] = {"id": "device-123"}
-        assert build_poll_device_label(device) == "device-123"
-
-    def test_handles_empty_name(self) -> None:
-        """Should fall back to ID for empty name."""
-        device = {"id": "device-123", "name": ""}
-        assert build_poll_device_label(device) == "device-123"
-
-    def test_handles_whitespace_name(self) -> None:
-        """Should fall back to ID for whitespace-only name."""
-        device = {"id": "device-123", "name": "   "}
-        assert build_poll_device_label(device) == "device-123"
-
-    def test_handles_none_name(self) -> None:
-        """Should fall back to ID for None name."""
-        device: dict[str, Any] = {"id": "device-123", "name": None}
-        assert build_poll_device_label(device) == "device-123"
-
-    def test_handles_non_string_name(self) -> None:
-        """Should fall back to ID for non-string name."""
-        device: dict[str, Any] = {"id": "device-123", "name": 123}
-        assert build_poll_device_label(device) == "device-123"
-
-    def test_handles_missing_id_with_name(self) -> None:
-        """Should use name even when ID is missing."""
-        device: dict[str, Any] = {"name": "My Phone"}
-        assert build_poll_device_label(device) == "My Phone"
-
-    def test_handles_missing_id_and_name(self) -> None:
-        """Should return 'unknown' when both ID and name are missing."""
-        device: dict[str, Any] = {"other_field": "value"}
-        assert build_poll_device_label(device) == "unknown"
-
-    def test_handles_empty_device(self) -> None:
-        """Should return 'unknown' for empty device."""
-        assert build_poll_device_label({}) == "unknown"
-
-    def test_handles_non_dict(self) -> None:
-        """Should return 'unknown' for non-dict input."""
-        assert build_poll_device_label(None) == "unknown"
-        assert build_poll_device_label("not a dict") == "unknown"
-
-    def test_strips_name_whitespace(self) -> None:
-        """Should strip whitespace from name."""
-        device = {"id": "device-123", "name": "  My Phone  "}
-        assert build_poll_device_label(device) == "My Phone"

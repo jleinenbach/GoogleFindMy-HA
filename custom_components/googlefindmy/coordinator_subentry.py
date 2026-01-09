@@ -13,10 +13,6 @@ Contents (Phase 5):
 Contents (Phase 6 - _refresh_subentry_index helpers):
 - filter_provisional_identifier(): Filter provisional subentry IDs
 - extract_subentry_group_key(): Extract group key from subentry data
-- build_device_index_from_list(): Build device index from device list
-- normalize_features_list(): Normalize a features list
-- normalize_visible_device_id_list(): Normalize visible device IDs
-- compute_stable_subentry_id(): Compute stable subentry ID
 - detect_missing_core_subentry_keys(): Detect missing core keys
 """
 
@@ -35,13 +31,9 @@ __all__ = [
     "parse_last_seen_timestamp",
     "sanitize_subentry_identifier",
     # Phase 6
-    "build_device_index_from_list",
-    "compute_stable_subentry_id",
     "detect_missing_core_subentry_keys",
     "extract_subentry_group_key",
     "filter_provisional_identifier",
-    "normalize_features_list",
-    "normalize_visible_device_id_list",
 ]
 
 
@@ -289,122 +281,6 @@ def extract_subentry_group_key(
         return str(subentry_id)
 
     return fallback
-
-
-def build_device_index_from_list(
-    devices: Sequence[Any],
-    ignored_ids: set[str],
-) -> dict[str, dict[str, Any]]:
-    """Build a device index from a list of device dicts.
-
-    Pure function that processes device dicts and builds an index.
-    Handles both 'id' and 'device_id' fields.
-
-    Args:
-        devices: Sequence of device dicts.
-        ignored_ids: Set of device IDs to ignore.
-
-    Returns:
-        Dict mapping device_id to device info dict.
-    """
-    device_index: dict[str, dict[str, Any]] = {}
-
-    for dev in devices:
-        if not isinstance(dev, Mapping):
-            continue
-
-        dev_id = dev.get("id")
-        if not isinstance(dev_id, str) or not dev_id:
-            # Fallback to device_id field
-            fallback_id = dev.get("device_id")
-            if isinstance(fallback_id, str) and fallback_id:
-                dev_id = fallback_id
-            else:
-                continue
-
-        if dev_id in ignored_ids:
-            continue
-
-        name = dev.get("name") if isinstance(dev.get("name"), str) else None
-        device_index.setdefault(dev_id, {"id": dev_id, "name": name})
-
-    return device_index
-
-
-def normalize_features_list(
-    raw_features: Any,
-    default_features: tuple[str, ...] = (),
-) -> tuple[str, ...]:
-    """Normalize a features list to a sorted tuple of unique strings.
-
-    Args:
-        raw_features: Raw features as list, tuple, set, or other type.
-        default_features: Default features if raw_features is invalid.
-
-    Returns:
-        Sorted tuple of unique feature strings.
-    """
-    if not isinstance(raw_features, (list, tuple, set)):
-        return default_features
-
-    normalized = tuple(
-        sorted({str(feature) for feature in raw_features if isinstance(feature, str)})
-    )
-
-    return normalized if normalized else default_features
-
-
-def normalize_visible_device_id_list(
-    raw_allowed: Any,
-) -> set[str] | None:
-    """Normalize a list of visible device IDs.
-
-    Strips namespace prefixes (entry_id:device_id format) and filters
-    empty/invalid entries.
-
-    Args:
-        raw_allowed: Raw list of device IDs.
-
-    Returns:
-        Set of normalized device IDs, or None if empty/invalid.
-    """
-    if not isinstance(raw_allowed, (list, tuple, set)):
-        return None
-
-    collected: set[str] = set()
-    for item in raw_allowed:
-        if not isinstance(item, str) or not item:
-            continue
-        # Strip namespace prefix if present
-        cleaned = item.rsplit(":", 1)[-1] if ":" in item else item
-        if cleaned:
-            collected.add(cleaned)
-
-    return collected if collected else None
-
-
-def compute_stable_subentry_id(
-    entry_id: str | None,
-    group_key: str,
-    provisional_seen: bool,
-) -> str | None:
-    """Compute a stable subentry ID from entry_id and group_key.
-
-    Args:
-        entry_id: The config entry ID.
-        group_key: The subentry group key.
-        provisional_seen: Whether a provisional ID was seen for this group.
-
-    Returns:
-        Stable subentry ID string, or None if cannot be computed.
-    """
-    if not isinstance(entry_id, str) or not entry_id:
-        return None
-
-    if provisional_seen:
-        return None
-
-    return f"{entry_id}-{group_key}-subentry"
 
 
 def detect_missing_core_subentry_keys(

@@ -27,23 +27,18 @@ __all__ = [
     "build_canonical_unique_id",
     "build_entity_unique_id_candidates",
     "build_legacy_device_registry_kwargs",
-    "detect_extraneous_service_identifiers",
-    "determine_removal_subentry_id",
     "extract_canonical_device_id",
     "extract_device_display_name",
     "extract_service_subentry_ids",
     "extract_subentry_links",
     "has_hub_link",
     "has_subentry_link",
-    "has_user_defined_name",
     "is_hub_device_check",
-    "is_legacy_unique_id",
     "match_entity_by_device_id",
     "needs_legacy_kwarg_retry",
     "normalize_device_name",
     "parse_device_identifier",
     "resolve_tracker_subentry_candidate",
-    "sanitize_entry_title",
     "should_defer_service_subentry",
 ]
 
@@ -428,40 +423,6 @@ def resolve_tracker_subentry_candidate(
 # ---------------------------------------------------------------------------
 
 
-def sanitize_entry_title(entry_title: Any) -> str | None:
-    """Sanitize and validate an entry title.
-
-    Strips leading/trailing whitespace. Returns None for empty
-    or non-string inputs.
-
-    Args:
-        entry_title: The entry title to sanitize.
-
-    Returns:
-        Sanitized title string, or None if invalid/empty.
-    """
-    if not isinstance(entry_title, str):
-        return None
-    stripped = entry_title.strip()
-    return stripped if stripped else None
-
-
-def has_user_defined_name(name_by_user: str | None) -> bool:
-    """Check if a user has set a custom device name.
-
-    Returns True only for non-empty stripped strings.
-
-    Args:
-        name_by_user: The user-defined name to check.
-
-    Returns:
-        True if the user has set a non-empty name.
-    """
-    if not isinstance(name_by_user, str):
-        return False
-    return bool(name_by_user.strip())
-
-
 def extract_service_subentry_ids(
     entry_subentries: Any,
     entry_service_subentry_id: str | None,
@@ -558,69 +519,6 @@ def should_defer_service_subentry(
 
     # Defer if not found
     return True
-
-
-def detect_extraneous_service_identifiers(
-    device_identifiers: Collection[Any],
-    target_identifiers: set[tuple[str, str]],
-    domain: str,
-) -> set[tuple[str, str]]:
-    """Find :service identifiers not in target set.
-
-    Identifies device identifiers that:
-    1. Are 2-tuples with matching domain
-    2. Have second element ending in ':service'
-    3. Are not in the target_identifiers set
-
-    Args:
-        device_identifiers: Current device identifiers.
-        target_identifiers: Target identifiers to keep.
-        domain: The integration domain to match.
-
-    Returns:
-        Set of extraneous service identifier tuples.
-    """
-    extraneous: set[tuple[str, str]] = set()
-
-    for identifier in device_identifiers:
-        if not isinstance(identifier, tuple) or len(identifier) != 2:
-            continue
-        ident_domain, ident_value = identifier
-        if ident_domain != domain:
-            continue
-        if not isinstance(ident_value, str):
-            continue
-        if not ident_value.endswith(":service"):
-            continue
-        if identifier not in target_identifiers:
-            extraneous.add(identifier)
-
-    return extraneous
-
-
-def determine_removal_subentry_id(
-    current_service_links: set[str],
-    dev_config_subentry_id: str | None,
-) -> str | None:
-    """Determine which subentry ID to remove from device.
-
-    Prefers items from current_service_links, falls back to
-    dev_config_subentry_id.
-
-    Args:
-        current_service_links: Set of current service link IDs.
-        dev_config_subentry_id: The device's config_subentry_id.
-
-    Returns:
-        Subentry ID to remove, or None if nothing to remove.
-    """
-    if current_service_links:
-        return next(iter(current_service_links))
-
-    if isinstance(dev_config_subentry_id, str) and dev_config_subentry_id.strip():
-        return dev_config_subentry_id.strip()
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -795,46 +693,6 @@ def build_canonical_unique_id(
     parts.append(device_id)
 
     return ":".join(parts)
-
-
-def is_legacy_unique_id(unique_id: Any, domain: str) -> bool:
-    """Detect if a unique_id is in legacy format.
-
-    Legacy formats use underscore separation:
-    - domain_device_id
-    - domain_entry_id_device_id
-
-    Modern formats use colon separation:
-    - entry_id:device_id
-    - entry_id:subentry:device_id
-
-    Args:
-        unique_id: The unique_id to check.
-        domain: The integration domain.
-
-    Returns:
-        True if unique_id is in legacy underscore format.
-    """
-    if not isinstance(unique_id, str) or not unique_id:
-        return False
-
-    prefix = f"{domain}_"
-
-    # Must start with domain_
-    if not unique_id.startswith(prefix):
-        return False
-
-    # Must have content after prefix
-    suffix = unique_id[len(prefix) :]
-    if not suffix:
-        return False
-
-    # Legacy format uses underscores, not colons
-    # If it contains colons, it's the modern format
-    if ":" in unique_id:
-        return False
-
-    return True
 
 
 def match_entity_by_device_id(
