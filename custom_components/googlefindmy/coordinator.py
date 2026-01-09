@@ -75,6 +75,15 @@ from .coordinator_geo import (
     haversine_distance as _haversine_distance_impl,
     safe_accuracy,
 )
+from .coordinator_stats import (
+    ApiStatus,
+    DiagnosticsBuffer,
+    FcmStatus,
+    StatusSnapshot,
+    format_recent_errors,
+    get_duration as _get_duration_impl,
+    short_error_message as _short_error_message_impl,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -287,47 +296,7 @@ def _update_preserve_metadata(
 # _clamp is imported from coordinator_geo (module extraction Phase 1)
 
 
-# --- BEGIN: Diagnostics buffer & helpers (top-level) ---------------------------
-@dataclass
-class DiagnosticsBuffer:
-    """Bounded, deduplicated in-memory buffer for warnings and errors.
-
-    This buffer is used to expose runtime findings via diagnostics.py.
-    Sensitive data MUST NOT be stored here (no tokens, no coordinates).
-    The buffer is intentionally small and deduplicated to avoid large dumps.
-    """
-
-    max_items: int = 200
-    warnings: dict[str, dict[str, Any]] = field(default_factory=dict)
-    errors: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    def _add(
-        self, bucket: dict[str, dict[str, Any]], key: str, payload: dict[str, Any]
-    ) -> None:
-        """Add payload once (dedup by key); bounded to max_items."""
-        if key in bucket:
-            return
-        if len(bucket) >= self.max_items:
-            return
-        bucket[key] = payload
-
-    def add_warning(self, code: str, context: dict[str, Any]) -> None:
-        """Record a warning with a semantic code and redacted context."""
-        key = f"{code}:{context.get('device_id', '?')}"
-        self._add(self.warnings, key, context)
-
-    def add_error(self, code: str, context: dict[str, Any]) -> None:
-        """Record an error with a semantic code and redacted context."""
-        key = f"{code}:{context.get('device_id', '?')}:{context.get('arg', '')}"
-        self._add(self.errors, key, context)
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a minimal, redacted, diagnostics-friendly dict."""
-        return {
-            "summary": {"warnings": len(self.warnings), "errors": len(self.errors)},
-            "warnings": list(self.warnings.values()),
-            "errors": list(self.errors.values()),
-        }
+# DiagnosticsBuffer is imported from coordinator_stats (module extraction Phase 2)
 
 
 # --- Subentry metadata ---------------------------------------------------------
@@ -678,31 +647,7 @@ def _sync_get_last_gps_from_history(
         return None
 
 
-@dataclass(frozen=True)
-class StatusSnapshot:
-    """Lightweight status descriptor shared with diagnostic entities/tests."""
-
-    state: str
-    reason: str | None = None
-    changed_at: float | None = None
-
-
-class ApiStatus:
-    """String constants describing the coordinator's polling state."""
-
-    UNKNOWN = "unknown"
-    OK = "ok"
-    ERROR = "error"
-    REAUTH = "reauth_required"
-
-
-class FcmStatus:
-    """String constants representing push-transport health."""
-
-    UNKNOWN = "unknown"
-    CONNECTED = "connected"
-    DEGRADED = "degraded"
-    DISCONNECTED = "disconnected"
+# StatusSnapshot, ApiStatus, FcmStatus are imported from coordinator_stats (Phase 2)
 
 
 @dataclass
@@ -5529,14 +5474,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             pass
 
     def _short_error_message(self, exc: Exception | str) -> str:
-        """Return a compact, single-line error string (no PII redaction beyond truncation)."""
-        msg = str(exc)
-        # collapse newlines/whitespace
-        msg = " ".join(msg.split())
-        # bound message length
-        if len(msg) > 180:
-            msg = msg[:177] + "..."
-        return msg
+        """Return a compact, single-line error string."""
+        return _short_error_message_impl(exc)
 
     def _append_recent_error(self, err_type: str, message: str) -> None:
         """Append a (timestamp, type, message) triple to the bounded deque."""
@@ -5563,14 +5502,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return float(val) if isinstance(val, (int, float)) else None
 
     def _get_duration(self, start_key: str, end_key: str) -> float | None:
-        start = self.get_metric(start_key)
-        end = self.get_metric(end_key)
-        if start is None or end is None:
-            return None
-        try:
-            return max(0.0, float(end) - float(start))
-        except Exception:
-            return None
+        """Calculate duration between two metric keys."""
+        return _get_duration_impl(self.get_metric(start_key), self.get_metric(end_key))
 
     def get_setup_duration_seconds(self) -> float | None:
         """Duration between 'setup_start_monotonic' and 'setup_end_monotonic'."""
@@ -5578,14 +5511,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     def get_fcm_acquire_duration_seconds(self) -> float | None:
         """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
-        start = self.get_metric("setup_start_monotonic")
-        fcm = self.get_metric("fcm_acquired_monotonic")
-        if start is None or fcm is None:
-            return None
-        try:
-            return max(0.0, float(fcm) - float(start))
-        except Exception:
-            return None
+        return _get_duration_impl(
+            self.get_metric("setup_start_monotonic"),
+            self.get_metric("fcm_acquired_monotonic"),
+        )
 
     def get_last_poll_duration_seconds(self) -> float | None:
         """Duration of the most recent sequential polling cycle (if recorded)."""
@@ -5593,10 +5522,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     def get_recent_errors(self) -> list[dict[str, Any]]:
         """Return a JSON-friendly copy of recent error triples."""
-        out: list[dict[str, Any]] = []
-        for ts, et, msg in list(self.recent_errors):
-            out.append({"timestamp": ts, "error_type": et, "message": msg})
-        return out
+        return format_recent_errors(self.recent_errors)
 
     # ---------------------------- HA Coordinator ----------------------------
     def _is_fcm_ready_soft(self) -> bool:
