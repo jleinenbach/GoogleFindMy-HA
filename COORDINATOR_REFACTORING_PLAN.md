@@ -21,7 +21,7 @@
 
 ## Fortschritt
 
-### ✅ Abgeschlossene Phasen (1-13)
+### ✅ Abgeschlossene Phasen (1-14)
 
 | Phase | Modul/Funktion | Status | Tests | Komplexität |
 |-------|----------------|--------|-------|-------------|
@@ -38,14 +38,14 @@
 | 11 | `_async_start_poll_cycle` → `coordinator_polling.py` | ✅ Fertig | 55 Tests | A (Ø 4.17) |
 | 12 | `_find_tracker_entity_entry` → `coordinator_registry.py` | ✅ Fertig | 54 Tests | B (Ø 7.19) |
 | 13 | `update_device_cache` → `coordinator_cache.py` | ✅ Fertig | 64 Tests | B (Ø 6.23) |
+| 14 | `async_locate_device` → `coordinator_locate.py` | ✅ Fertig | 59 Tests | B (Ø 7.14) |
 
-**Gesamt Phase 1-13: 741 Tests, 46 extrahierte Pure Functions, Durchschnittskomplexität A-B**
+**Gesamt Phase 1-14: 800 Tests, 53 extrahierte Pure Functions, Durchschnittskomplexität A-B**
 
-### 🚧 Ausstehende Phasen (14-15): Verbleibende High-Complexity Funktionen
+### 🚧 Ausstehende Phasen (15): Verbleibende High-Complexity Funktionen
 
 | Phase | Funktion | Komplexität | Zielmodul | Status |
 |-------|----------|-------------|-----------|--------|
-| 14 | `async_locate_device` | E (40) | Neue Helpers → `coordinator_locate.py` | ⏳ Pending |
 | 15 | `_merge_with_existing_cache_row` | E (37) | Neue Helpers → `coordinator_cache.py` | ⏳ Pending |
 
 ---
