@@ -205,6 +205,13 @@ from .helpers.update import (
     should_defer_empty_list as _should_defer_empty_list_impl,
 )
 
+# Operations classes - currently empty mixins for future method extraction
+from .identity import IdentityOperations
+from .locate import LocateOperations
+from .polling import PollingOperations
+from .registry import RegistryOperations
+from .subentry import SubentryOperations
+
 if TYPE_CHECKING:
     from homeassistant.core import Event
 
@@ -784,7 +791,14 @@ class DeviceIdentity:
     time_anchors_debug: Any | None = None
 
 
-class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
+class GoogleFindMyCoordinator(
+    RegistryOperations,
+    SubentryOperations,
+    PollingOperations,
+    IdentityOperations,
+    LocateOperations,
+    DataUpdateCoordinator[list[dict[str, Any]]],
+):
     """Coordinator that manages polling, cache, and push updates for Google Find My Device.
 
     Thread-safety & event loop rules (IMPORTANT):
