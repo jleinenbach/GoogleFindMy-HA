@@ -2712,7 +2712,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self._apply_pending_via_updates()
 
     def _find_tracker_entity_entry(self, device_id: str) -> EntityRegistryEntry | None:
-        """Return the registry entry for a tracker and migrate legacy unique IDs."""
+        """Return the registry entry for a tracker and migrate legacy unique IDs.
+
+        Uses Phase 12 helpers for identifier extraction and unique_id generation.
+        """
+        from .coordinator_registry import (
+            build_canonical_unique_id,
+            build_entity_unique_id_candidates,
+            extract_canonical_device_id,
+            match_entity_by_device_id,
+        )
 
         ent_reg = er.async_get(self.hass)
         device_reg = dr.async_get(self.hass)
@@ -2724,14 +2733,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         canonical_device_id = device_id
         registry_identifier: str | None = None
 
+        # Use helper to extract canonical device ID from identifiers
         if registry_device is not None:
-            registry_identifier = self._extract_our_identifier(registry_device)
-            registry_uuid = getattr(registry_device, "id", None)
-            if registry_uuid == device_id:
-                _LOGGER.debug(
-                    "Tracker entity lookup received registry UUID=%s; attempting canonical mapping",
-                    registry_uuid,
-                )
+            identifiers = getattr(registry_device, "identifiers", None)
+            registry_identifier = extract_canonical_device_id(
+                identifiers,
+                DOMAIN,
+                entry_id=entry_id,
+                service_prefix=f"{SERVICE_DEVICE_ID_PREFIX}:",
+            )
             if registry_identifier:
                 canonical_device_id = registry_identifier
                 if canonical_device_id != device_id:
@@ -2744,7 +2754,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 _LOGGER.debug(
                     "Tracker entity lookup found device %s but no matching identifier in %s",
                     device_id,
-                    registry_device.identifiers,
+                    identifiers,
                 )
         else:
             _LOGGER.debug(
@@ -2766,8 +2776,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         canonical_unique_id: str | None = None
         tracker_subentry_identifier: str | None = None
+        tracker_subentry_key: str = TRACKER_SUBENTRY_KEY
         if entry_id:
-            tracker_subentry_key = TRACKER_SUBENTRY_KEY
             tracker_meta: Any | None = None
             meta_getter = getattr(self, "get_subentry_metadata", None)
             if callable(meta_getter):
@@ -2801,14 +2811,10 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             ):
                 tracker_subentry_identifier = tracker_subentry_key
 
-            parts: list[str] = []
-            for part in (entry_id, tracker_subentry_identifier, canonical_device_id):
-                if isinstance(part, str) and part:
-                    stripped = part.strip()
-                    if stripped:
-                        parts.append(stripped)
-            if parts:
-                canonical_unique_id = ":".join(parts)
+            # Use helper to build canonical unique_id
+            canonical_unique_id = build_canonical_unique_id(
+                entry_id, tracker_subentry_identifier, canonical_device_id
+            )
 
         def _get_entry_for_unique_id(
             unique_id: str,
@@ -2866,19 +2872,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
                 return entry
 
-        candidate_unique_ids: list[str] = []
-        if entry_id:
-            if tracker_subentry_identifier:
-                candidate_unique_ids.append(
-                    f"{entry_id}:{tracker_subentry_identifier}:{canonical_device_id}"
-                )
-            if tracker_subentry_key:
-                candidate_unique_ids.append(
-                    f"{entry_id}:{tracker_subentry_key}:{canonical_device_id}"
-                )
-            candidate_unique_ids.append(f"{entry_id}:{canonical_device_id}")
-            candidate_unique_ids.append(f"{DOMAIN}_{entry_id}_{canonical_device_id}")
-        candidate_unique_ids.append(f"{DOMAIN}_{canonical_device_id}")
+        # Use helper to build candidate unique_ids
+        candidate_unique_ids = build_entity_unique_id_candidates(
+            canonical_device_id,
+            entry_id,
+            tracker_subentry_identifier,
+            DOMAIN,
+            subentry_key=tracker_subentry_key if tracker_subentry_key != tracker_subentry_identifier else None,
+        )
 
         for unique_id in candidate_unique_ids:
             entry = _get_entry_for_unique_id(unique_id)
@@ -2921,13 +2922,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return entry
 
         for entry in ent_registry_values:
-            if entry.domain != DEVICE_TRACKER_DOMAIN or entry.platform != DOMAIN:
+            # Use helper for fallback entity matching
+            if not match_entity_by_device_id(
+                getattr(entry, "unique_id", ""),
+                getattr(entry, "config_entry_id", None),
+                canonical_device_id,
+                entry_id,
+                domain=DEVICE_TRACKER_DOMAIN,
+                platform=DOMAIN,
+                entity_domain=getattr(entry, "domain", ""),
+                entity_platform=getattr(entry, "platform", ""),
+            ):
                 continue
             unique_id = getattr(entry, "unique_id", "")
-            if not isinstance(unique_id, str) or canonical_device_id not in unique_id:
-                continue
-            if entry.config_entry_id and entry.config_entry_id != entry_id:
-                continue
 
             if canonical_unique_id and unique_id != canonical_unique_id:
                 _LOGGER.info(
@@ -6248,10 +6255,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             location["semantic_name"] = raw_semantic_name
 
                         # If we only got a semantic location, preserve previous coordinates.
-                        if (
-                            location.get("latitude") is None
-                            or location.get("longitude") is None
-                        ) and location.get("semantic_name"):
+                        # Use Phase 11 helper for the check
+                        from .coordinator_polling import (
+                            calculate_location_age_hours,
+                            get_age_log_level,
+                            should_preserve_previous_coordinates,
+                        )
+
+                        if should_preserve_previous_coordinates(location):
                             prev = self._device_location_data.get(dev_id, {})
                             if prev:
                                 location["latitude"] = prev.get("latitude")
@@ -6290,18 +6301,19 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                         # Skip redundant fusion inside update_device_cache when reusing this payload.
                         location["_fusion_preapplied"] = True
 
-                        # Age diagnostics (informational)
+                        # Age diagnostics (informational) - use Phase 11 helpers
                         wall_now = time.time()
                         last_seen = location.get("last_seen", 0)
-                        if last_seen:
-                            age_hours = max(0.0, (wall_now - float(last_seen)) / 3600.0)
-                            if age_hours > 24:
+                        age_hours = calculate_location_age_hours(last_seen, wall_now)
+                        if age_hours is not None:
+                            log_level, should_log = get_age_log_level(age_hours)
+                            if should_log and log_level == "info":
                                 _LOGGER.info(
                                     "Using old location data for %s (age=%.1fh)",
                                     dev_name,
                                     age_hours,
                                 )
-                            elif age_hours > 1:
+                            elif should_log and log_level == "debug":
                                 _LOGGER.debug(
                                     "Using location data for %s (age=%.1fh)",
                                     dev_name,
