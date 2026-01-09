@@ -7,14 +7,12 @@ Test categories:
 1. extract_canonical_device_id - Extract device ID from registry identifiers
 2. build_entity_unique_id_candidates - Generate unique_id lookup candidates
 3. build_canonical_unique_id - Build canonical unique_id format
-4. is_legacy_unique_id - Detect legacy unique_id formats
-5. match_entity_by_device_id - Match entity registry entry by device ID
+4. match_entity_by_device_id - Match entity registry entry by device ID
 
 REQUIREMENT: 100% test coverage for all extracted functions.
 
 KEY RISKS COVERED:
 - ID extraction from various identifier formats
-- Legacy unique_id detection and patterns
 - Multi-account scoping with entry_id
 - Malformed or missing identifiers
 """
@@ -27,7 +25,6 @@ from custom_components.googlefindmy.coordinator_registry import (
     build_canonical_unique_id,
     build_entity_unique_id_candidates,
     extract_canonical_device_id,
-    is_legacy_unique_id,
     match_entity_by_device_id,
 )
 
@@ -358,63 +355,6 @@ class TestBuildCanonicalUniqueId:
             device_id=None,
         )
         assert result is None
-
-
-# ---------------------------------------------------------------------------
-# is_legacy_unique_id Tests
-# ---------------------------------------------------------------------------
-
-
-class TestIsLegacyUniqueId:
-    """Tests for is_legacy_unique_id function.
-
-    Detects if a unique_id is in legacy format.
-    """
-
-    def test_detects_domain_prefix_format(self) -> None:
-        """Should detect domain_device format as legacy."""
-        assert is_legacy_unique_id("googlefindmy_device-123", "googlefindmy") is True
-
-    def test_detects_domain_entry_device_format(self) -> None:
-        """Should detect domain_entry_device format as legacy."""
-        assert (
-            is_legacy_unique_id("googlefindmy_entry123_device-456", "googlefindmy")
-            is True
-        )
-
-    def test_canonical_not_legacy(self) -> None:
-        """Should not detect canonical format as legacy."""
-        assert (
-            is_legacy_unique_id("entry123:tracker:device-456", "googlefindmy") is False
-        )
-
-    def test_entry_device_not_legacy(self) -> None:
-        """Should not detect entry:device format as legacy."""
-        assert is_legacy_unique_id("entry123:device-456", "googlefindmy") is False
-
-    def test_handles_none_unique_id(self) -> None:
-        """Should return False for None unique_id."""
-        assert is_legacy_unique_id(None, "googlefindmy") is False
-
-    def test_handles_empty_unique_id(self) -> None:
-        """Should return False for empty unique_id."""
-        assert is_legacy_unique_id("", "googlefindmy") is False
-
-    def test_handles_non_string_unique_id(self) -> None:
-        """Should return False for non-string unique_id."""
-        assert is_legacy_unique_id(123, "googlefindmy") is False
-
-    def test_different_domain_not_legacy(self) -> None:
-        """Should not detect as legacy if domain doesn't match."""
-        assert is_legacy_unique_id("otherdomain_device-123", "googlefindmy") is False
-
-    def test_just_domain_not_legacy(self) -> None:
-        """Should not detect just domain prefix as legacy."""
-        assert is_legacy_unique_id("googlefindmy_", "googlefindmy") is False
-
-    def test_case_sensitive_domain(self) -> None:
-        """Should be case-sensitive for domain matching."""
-        assert is_legacy_unique_id("GOOGLEFINDMY_device-123", "googlefindmy") is False
 
 
 # ---------------------------------------------------------------------------
