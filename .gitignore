@@ -8,3 +8,4 @@ node_modules/
 .npm-cache/
 *.egg-info/
 .hypothesis/
+jscpd-report/
