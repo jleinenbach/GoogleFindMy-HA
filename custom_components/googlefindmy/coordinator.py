@@ -84,6 +84,13 @@ from .coordinator_stats import (
     get_duration as _get_duration_impl,
     short_error_message as _short_error_message_impl,
 )
+from .coordinator_cache import (
+    build_base_snapshot_entry as _build_base_snapshot_entry_impl,
+    determine_location_status,
+    epoch_to_datetime_utc,
+    is_presence_expired,
+    should_allow_location_update,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -6550,32 +6557,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     # ---------------------------- Snapshot helpers --------------------------
     def _build_base_snapshot_entry(self, device_dict: dict[str, Any]) -> dict[str, Any]:
-        """Create the base snapshot entry for a device (no cache lookups here).
-
-        This centralizes the common fields to keep snapshot builders DRY.
-
-        Args:
-            device_dict: A dictionary containing basic device info (id, name).
-
-        Returns:
-            A dictionary with default fields for a device snapshot.
-        """
-        dev_id = device_dict["id"]
-        dev_name = device_dict.get("name", dev_id)
-        return {
-            "name": dev_name,
-            "id": dev_id,
-            "device_id": dev_id,
-            "latitude": None,
-            "longitude": None,
-            "altitude": None,
-            "accuracy": None,
-            "last_seen": None,
-            "status": "Waiting for location poll",
-            "is_own_report": None,
-            "semantic_name": None,
-            "battery_level": None,
-        }
+        """Create the base snapshot entry for a device."""
+        return _build_base_snapshot_entry_impl(device_dict)
 
     def _update_entry_from_cache(self, entry: dict[str, Any], wall_now: float) -> bool:
         """Update the given snapshot entry in place from the in-memory cache.
@@ -6603,12 +6586,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         last_updated_ts = cached.get("last_updated", 0) if isinstance(cached, Mapping) else 0
         age = max(0.0, wall_now - float(last_updated_ts))
-        if age < self.location_poll_interval:
-            entry["status"] = "Location data current"
-        elif age < self.location_poll_interval * 2:
-            entry["status"] = "Location data aging"
-        else:
-            entry["status"] = "Location data stale"
+        entry["status"] = determine_location_status(age, self.location_poll_interval)
         return True
 
     def _build_snapshot_from_cache(
@@ -7837,21 +7815,9 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         return True
 
     def get_device_last_seen(self, device_id: str) -> datetime | None:
-        """Return last_seen as timezone-aware datetime (UTC) if cached.
-
-        Args:
-            device_id: The canonical ID of the device.
-
-        Returns:
-            A timezone-aware datetime object or None.
-        """
+        """Return last_seen as timezone-aware datetime (UTC) if cached."""
         ts = self._device_location_data.get(device_id, {}).get("last_seen")
-        if ts is None:
-            return None
-        try:
-            return datetime.fromtimestamp(float(ts), tz=UTC)
-        except Exception:
-            return None
+        return epoch_to_datetime_utc(ts)
 
     def get_device_display_name(self, device_id: str) -> str | None:
         """Return the human-readable device name if known.
@@ -7874,31 +7840,20 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     # ---------------------------- Presence & Purge API ----------------------------
     def is_device_present(self, device_id: str) -> bool:
-        """Return True if the given device_id is present (TTL-smoothed).
-
-        Presence is determined by the last time the device appeared in the full list
-        and a time-to-live (`_presence_ttl_s`). This avoids availability flips on
-        transient empty lists.
-        """
+        """Return True if the given device_id is present (TTL-smoothed)."""
         ts = self._present_last_seen.get(device_id, 0.0)
-        if not ts:
-            return False
-        return (time.monotonic() - float(ts)) <= float(self._presence_ttl_s)
+        return not is_presence_expired(ts, time.monotonic(), self._presence_ttl_s)
 
     def get_absent_device_ids(self) -> list[str]:
-        """Return ids known by name/cache that are **expired** under the presence TTL.
-
-        Useful for diagnostics. This does not imply automatic removal.
-        """
+        """Return ids known by name/cache that are expired under the presence TTL."""
         now_mono = time.monotonic()
-
-        def expired(dev_id: str) -> bool:
-            ts = self._present_last_seen.get(dev_id, 0.0)
-            return (not ts) or ((now_mono - float(ts)) > float(self._presence_ttl_s))
-
+        ttl = self._presence_ttl_s
         name_cache = self._ensure_device_name_cache()
         known = set(name_cache) | set(self._device_location_data)
-        return sorted([d for d in known if expired(d)])
+        return sorted([
+            d for d in known
+            if is_presence_expired(self._present_last_seen.get(d, 0.0), now_mono, ttl)
+        ])
 
     def purge_device(self, device_id: str) -> None:
         """Remove all cached data and cooldown state for a device (thread-safe publish).
