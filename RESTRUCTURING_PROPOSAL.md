@@ -395,11 +395,22 @@ custom_components/googlefindmy/
 
 ---
 
-### Phase 2-6: Methoden-Extraktion (unverändert)
+### Phase 2-6: Methoden-Extraktion
 
-Die Phasen 2-6 bleiben identisch zur vorherigen Planung:
+**Phase 2:** RegistryOperations extrahieren
+- **Status:** IN ARBEIT (Commit ded1a9f)
+- **Erledigt:** 5 Device-Registry-Helper-Methoden (129 Zeilen)
+  - `_call_device_registry_api`
+  - `_device_registry_kwargs_need_legacy_retry`
+  - `_device_registry_build_legacy_kwargs`
+  - `_device_registry_config_subentry_kwarg_name`
+  - `_device_registry_allows_translation_update`
+- **Ausstehend:** ~4 große Methoden (~1.500+ Zeilen)
+  - `_ensure_service_device_exists` (~537 Zeilen)
+  - `_find_tracker_entity_entry` (~359 Zeilen)
+  - `_reindex_poll_targets_from_device_registry` (~65 Zeilen)
+  - `_ensure_registry_for_devices` (~600+ Zeilen)
 
-- **Phase 2:** RegistryOperations extrahieren (11 Methoden, ~1.682 Zeilen)
 - **Phase 3:** SubentryOperations extrahieren (17 Methoden, ~766 Zeilen)
 - **Phase 4:** PollingOperations extrahieren (6 Methoden, ~495 Zeilen)
 - **Phase 5:** IdentityOperations extrahieren (4+ Methoden, ~776 Zeilen)
