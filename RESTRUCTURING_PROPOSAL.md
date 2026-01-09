@@ -14,10 +14,12 @@
 > den Git-Log für den aktuellen Stand.
 
 **Kernentscheidungen:**
-1. Option A: `coordinator.py` BLEIBT im Root
-2. `coordinator/` Package enthält Operations-Klassen (Methoden mit `self`)
-3. `coordinator/helpers/` enthält Pure Functions (von `coordinator_*.py`)
-4. Externe Module (Auth/, NovaApi/, etc.) werden NICHT verändert
+1. **Option B: `coordinator.py` wird zum Package `coordinator/`**
+2. `coordinator/main.py` enthält die Hauptklasse GoogleFindMyCoordinator
+3. `coordinator/__init__.py` re-exportiert alles für Rückwärtskompatibilität
+4. `coordinator/helpers/` enthält Pure Functions (von `coordinator_*.py`)
+5. Operations-Klassen (Methoden mit `self`) kommen in `coordinator/*.py`
+6. Externe Module (Auth/, NovaApi/, etc.) werden NICHT verändert
 
 **Prüfkommando für aktuellen Stand:**
 ```bash
@@ -25,11 +27,14 @@
 ls -la custom_components/googlefindmy/coordinator/
 ls -la custom_components/googlefindmy/coordinator/helpers/
 
+# Gibt es noch coordinator.py im Root?
+ls custom_components/googlefindmy/coordinator.py 2>/dev/null
+
 # Gibt es noch coordinator_*.py im Root?
 ls custom_components/googlefindmy/coordinator_*.py 2>/dev/null
 
 # Tests laufen?
-pytest tests/ -v --tb=short
+python3.13 -m pytest tests/ -v --tb=short
 ```
 
 ---
@@ -53,7 +58,7 @@ pytest tests/ -v --tb=short
 | coordinator_identity.py | 410 | 10 | coordinator/helpers/identity.py |
 | coordinator_subentry.py | 302 | 8 | coordinator/helpers/subentry.py |
 | coordinator_update.py | 245 | 6 | coordinator/helpers/update.py |
-| coordinator_stats.py | 181 | 3 | coordinator/helpers/stats.py |
+| coordinator_stats.py | 181 | 3 | coordinator/stats.py |
 | coordinator_geo.py | 163 | 4 | coordinator/helpers/geo.py |
 | coordinator_polling.py | 99 | 3 | coordinator/helpers/polling.py |
 
@@ -74,13 +79,13 @@ Diese Verzeichnisse stammen aus GoogleFindMyTools oder sind etablierte Strukture
 
 ---
 
-## 3. Zielstruktur (Option A - Transparent)
+## 3. Zielstruktur (Option B - Sauberes Package)
 
 ```
 custom_components/googlefindmy/
-├── coordinator.py               # BLEIBT - Hauptklasse + Kernlogik (~2.500 Zeilen)
-├── coordinator/                 # NEU - Package für ausgelagerte Komponenten
-│   ├── __init__.py              # Re-exports aller Operations-Klassen
+├── coordinator/                 # coordinator.py wird zum PACKAGE (kein .py daneben!)
+│   ├── __init__.py              # Re-exports: GoogleFindMyCoordinator + alle Operations
+│   ├── main.py                  # GoogleFindMyCoordinator Hauptklasse (~2.500 Zeilen)
 │   ├── registry.py              # RegistryOperations (11 Methoden, ~1.350 Zeilen)
 │   ├── subentry.py              # SubentryOperations (17 Methoden, ~800 Zeilen)
 │   ├── polling.py               # PollingOperations (6 Methoden, ~500 Zeilen)
@@ -98,6 +103,15 @@ custom_components/googlefindmy/
 │       └── polling.py           # ← coordinator_polling.py (99 Zeilen, 3 Funcs)
 ```
 
+### Warum Option B?
+
+| Aspekt | Option A (coordinator.py bleibt) | Option B (coordinator/ Package) |
+|--------|----------------------------------|--------------------------------|
+| Python-Konflikt | Namenskonflikt möglich (Modul vs Package) | Sauber: Ein Name = Ein Package |
+| Import-Pfade | `from .coordinator import X` (Datei) | `from .coordinator import X` (Package __init__) |
+| Monkeypatching | Kompliziert durch duale Pfade | Einfach: alles in __init__.py re-exportiert |
+| Wartbarkeit | Zwei Konzepte mit gleichem Namen | Ein klares Package-Konzept |
+
 ### Unterschied: Operations-Klassen vs. Helpers
 
 | Komponente | Typ | Beschreibung |
@@ -111,7 +125,7 @@ custom_components/googlefindmy/
 
 | Komponente | Vorher | Nachher |
 |------------|-------:|--------:|
-| Gesamt-Zeilen | 8.342 | ~2.500 |
+| Gesamt-Zeilen | 8.342 | ~2.500 (in main.py) |
 | Methoden in Hauptklasse | 171 | ~50 |
 | Operations-Module | 0 | 5 |
 | Helper-Module im Root | 8 | 0 |
@@ -121,41 +135,29 @@ custom_components/googlefindmy/
 
 ## 5. Phasen-Plan (Detailliert)
 
-### ✅ Voraussetzungen (abgeschlossen)
+### Voraussetzungen (abgeschlossen)
 - [x] 8 Helper-Module extrahiert und integriert (coordinator_*.py)
 - [x] Tests für Helper-Funktionen vorhanden
 - [x] Halluzinierte Funktionen entfernt
 - [x] Alle Tests bestehen
 
-### Phase 0: Helpers verschieben (Risiko: Niedrig)
-**Ziel:** coordinator_*.py → coordinator/helpers/*.py
+### Phase 0: Package-Konversion (Risiko: Niedrig)
+**Ziel:** coordinator.py → coordinator/main.py, coordinator_*.py → coordinator/helpers/*.py
 
 **Schritte:**
+
 1. Verzeichnis erstellen:
    ```bash
    mkdir -p custom_components/googlefindmy/coordinator/helpers
    ```
 
-2. `coordinator/helpers/__init__.py` erstellen mit Re-exports:
-   ```python
-   """Pure helper functions for GoogleFindMyCoordinator."""
-   from .registry import (
-       extract_canonical_device_id,
-       build_entity_unique_id_candidates,
-       build_canonical_unique_id,
-       match_entity_by_device_id,
-       # ... alle 16 Funktionen
-   )
-   from .cache import (
-       normalize_location_fields,
-       preserve_metadata_fields,
-       should_clear_metadata_only_flag,
-       # ... alle 15 Funktionen
-   )
-   # ... weitere Module
+2. **coordinator.py → coordinator/main.py verschieben:**
+   ```bash
+   git mv custom_components/googlefindmy/coordinator.py \
+          custom_components/googlefindmy/coordinator/main.py
    ```
 
-3. Dateien verschieben (MIT Umbenennung):
+3. **Helper-Dateien verschieben (MIT Umbenennung):**
    ```bash
    git mv custom_components/googlefindmy/coordinator_registry.py \
           custom_components/googlefindmy/coordinator/helpers/registry.py
@@ -175,52 +177,165 @@ custom_components/googlefindmy/
           custom_components/googlefindmy/coordinator/helpers/polling.py
    ```
 
-4. Imports in coordinator.py aktualisieren:
+4. **Interne Imports in verschobenen Helper-Dateien aktualisieren:**
+   ```python
+   # In helpers/cache.py - ALT:
+   from .coordinator_geo import haversine_distance
+   # NEU:
+   from .geo import haversine_distance
+
+   # In helpers/identity.py - ALT:
+   from .coordinator_subentry import ensure_config_subentry_id
+   # NEU:
+   from .subentry import ensure_config_subentry_id
+
+   # In helpers/registry.py - ALT:
+   from .const import LEGACY_SERVICE_IDENTIFIER, ...
+   # NEU:
+   from ...const import LEGACY_SERVICE_IDENTIFIER, ...
+   ```
+
+5. **coordinator/helpers/__init__.py erstellen mit Re-exports:**
+   ```python
+   """Pure helper functions for GoogleFindMyCoordinator."""
+   from __future__ import annotations
+
+   from .registry import (
+       extract_canonical_device_id,
+       build_entity_unique_id_candidates,
+       build_canonical_unique_id,
+       match_entity_by_device_id,
+       # ... alle 16 Funktionen + Konstanten
+   )
+   from .cache import (
+       normalize_location_fields,
+       preserve_metadata_fields,
+       # ... alle 15 Funktionen
+   )
+   # ... weitere Module analog
+   ```
+
+6. **Imports in coordinator/main.py aktualisieren:**
    ```python
    # ALT:
    from .coordinator_registry import extract_canonical_device_id
-
    # NEU:
-   from .coordinator.helpers.registry import extract_canonical_device_id
-   # ODER (mit Re-exports):
-   from .coordinator.helpers import extract_canonical_device_id
+   from .helpers.registry import extract_canonical_device_id
+
+   # ALT:
+   from .api import GoogleFindMyAPI
+   # NEU:
+   from ..api import GoogleFindMyAPI
    ```
 
-5. Imports in Tests aktualisieren:
+7. **coordinator/__init__.py erstellen (WICHTIG für Rückwärtskompatibilität):**
    ```python
+   """Coordinator package for GoogleFindMy integration.
+
+   This package contains the GoogleFindMyCoordinator class and related components.
+   All public symbols are re-exported here for backwards compatibility.
+
+   Usage (unchanged):
+       from .coordinator import GoogleFindMyCoordinator
+   """
+   from __future__ import annotations
+
+   # Re-export main coordinator class
+   from .main import (
+       GoogleFindMyCoordinator,
+       DeviceIdentity,
+       SemanticLabelRecord,
+       SubentryMetadata,
+       CacheProtocol,
+       format_epoch_utc,
+       normalize_epoch_seconds,
+       _as_ha_attributes,
+       get_recorder,
+       _sync_get_last_gps_from_history,
+       _FCM_FALLBACK_POLL_AFTER_S,
+       _PREDICTION_BUFFER_S,
+   )
+
+   # Re-export stats classes from helpers
+   from .helpers.stats import (
+       ApiStatus,
+       DiagnosticsBuffer,
+       FcmStatus,
+       StatusSnapshot,
+   )
+
+   # Re-export helpers subpackage
+   from . import helpers
+
+   # Re-exports für Test-Monkeypatching (gleiche Module wie main.py importiert)
+   from ..api import GoogleFindMyAPI
+   from homeassistant.helpers import device_registry as dr
+   from homeassistant.helpers import entity_registry as er
+   from homeassistant.helpers.event import async_call_later
+   from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+   __all__ = [
+       # Main class
+       "GoogleFindMyCoordinator",
+       "DeviceIdentity",
+       "SemanticLabelRecord",
+       "SubentryMetadata",
+       "CacheProtocol",
+       # Functions
+       "format_epoch_utc",
+       "normalize_epoch_seconds",
+       "_as_ha_attributes",
+       "get_recorder",
+       # Stats
+       "ApiStatus",
+       "DiagnosticsBuffer",
+       "FcmStatus",
+       "StatusSnapshot",
+       # For monkeypatching
+       "GoogleFindMyAPI",
+       "DataUpdateCoordinator",
+       "dr",
+       "er",
+       "async_call_later",
+       # Subpackage
+       "helpers",
+   ]
+   ```
+
+8. **Imports in Tests aktualisieren:**
+   ```python
+   # Meiste Tests: UNVERÄNDERT (dank Re-exports)!
+   from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+   # Nur Helper-Tests ändern sich:
    # ALT:
    from custom_components.googlefindmy.coordinator_registry import ...
-
    # NEU:
    from custom_components.googlefindmy.coordinator.helpers.registry import ...
    ```
 
-6. `coordinator/__init__.py` erstellen (noch leer für Operations):
-   ```python
-   """Coordinator package for GoogleFindMy integration."""
-   # Operations-Klassen werden in späteren Phasen hinzugefügt
+9. **Tests ausführen:**
+   ```bash
+   python3.13 -m pytest tests/ -v --tb=short
    ```
 
-7. Tests ausführen:
-   ```bash
-   pytest tests/ -v --tb=short
-   ```
-
-8. Commit:
-   ```bash
-   git add -A
-   git commit -m "refactor: move coordinator helpers to coordinator/helpers/"
-   ```
+10. **Commit:**
+    ```bash
+    git add -A
+    git commit -m "refactor: convert coordinator.py to coordinator/ package (Option B)"
+    ```
 
 **Erfolgskriterien Phase 0:**
+- [ ] coordinator.py existiert NICHT mehr im Root
+- [ ] coordinator/main.py enthält GoogleFindMyCoordinator
 - [ ] Alle 8 Helper-Dateien in coordinator/helpers/
 - [ ] Keine coordinator_*.py mehr im Root
+- [ ] `from .coordinator import GoogleFindMyCoordinator` funktioniert (via __init__.py)
 - [ ] Alle Tests bestehen
-- [ ] Import-Pfade funktionieren
 
 ---
 
-### Phase 1: Package-Infrastruktur (Risiko: Niedrig)
+### Phase 1: Operations-Klassen erstellen (Risiko: Niedrig)
 **Ziel:** Leere Operations-Klassen erstellen, Vererbung einrichten
 
 **Schritte:**
@@ -231,7 +346,7 @@ custom_components/googlefindmy/
    from typing import TYPE_CHECKING
 
    if TYPE_CHECKING:
-       from ..coordinator import GoogleFindMyCoordinator
+       from .main import GoogleFindMyCoordinator
 
    class RegistryOperations:
        """Device registry operations (extracted methods)."""
@@ -242,31 +357,21 @@ custom_components/googlefindmy/
 
 3. coordinator/__init__.py aktualisieren:
    ```python
-   """Coordinator package for GoogleFindMy integration."""
+   # Zusätzlich zu bestehenden Re-exports:
    from .registry import RegistryOperations
    from .subentry import SubentryOperations
    from .polling import PollingOperations
    from .locate import LocateOperations
    from .identity import IdentityOperations
-
-   __all__ = [
-       "RegistryOperations",
-       "SubentryOperations",
-       "PollingOperations",
-       "LocateOperations",
-       "IdentityOperations",
-   ]
    ```
 
-4. coordinator.py Klasse erweitern:
+4. coordinator/main.py Klasse erweitern:
    ```python
-   from .coordinator import (
-       RegistryOperations,
-       SubentryOperations,
-       PollingOperations,
-       LocateOperations,
-       IdentityOperations,
-   )
+   from .registry import RegistryOperations
+   from .subentry import SubentryOperations
+   from .polling import PollingOperations
+   from .locate import LocateOperations
+   from .identity import IdentityOperations
 
    class GoogleFindMyCoordinator(
        RegistryOperations,
@@ -287,119 +392,26 @@ custom_components/googlefindmy/
 - [ ] 5 leere Operations-Klassen existieren
 - [ ] GoogleFindMyCoordinator erbt von allen 5
 - [ ] Alle Tests bestehen (keine Regression)
-- [ ] Import-Pfade funktionieren
 
 ---
 
-### Phase 2: RegistryOperations extrahieren (Risiko: Mittel)
-**Ziel:** Registry-Methoden von coordinator.py → coordinator/registry.py
+### Phase 2-6: Methoden-Extraktion (unverändert)
 
-**Methoden zu verschieben (11 Stück, ~1.682 Zeilen):**
-1. `_ensure_registry_for_devices` (L3207, ~671 Zeilen) ⚠️ F-Grade
-2. `_ensure_service_device_exists` (L2243, ~537 Zeilen) ⚠️ F-Grade
-3. `_find_tracker_entity_entry` (L2781, ~275 Zeilen)
-4. `_reindex_poll_targets_from_device_registry` (L3141, ~64 Zeilen)
-5. `_call_device_registry_api` (L2114, ~44 Zeilen)
-6. `_get_device_by_canonical_id`
-7. `_update_device_registry_entry`
-8. `_remove_device_registry_entry`
-9. `_list_registered_devices`
-10. `_sync_device_registry`
-11. `_validate_registry_state`
+Die Phasen 2-6 bleiben identisch zur vorherigen Planung:
+
+- **Phase 2:** RegistryOperations extrahieren (11 Methoden, ~1.682 Zeilen)
+- **Phase 3:** SubentryOperations extrahieren (17 Methoden, ~766 Zeilen)
+- **Phase 4:** PollingOperations extrahieren (6 Methoden, ~495 Zeilen)
+- **Phase 5:** IdentityOperations extrahieren (4+ Methoden, ~776 Zeilen)
+- **Phase 6:** LocateOperations extrahieren (~274+ Zeilen)
 
 **Schritte pro Methode:**
-1. Methode aus coordinator.py AUSSCHNEIDEN
-2. In coordinator/registry.py EINFÜGEN (in RegistryOperations Klasse)
+1. Methode aus coordinator/main.py AUSSCHNEIDEN
+2. In coordinator/registry.py (etc.) EINFÜGEN (in Operations-Klasse)
 3. Type-Hint anpassen: `def method(self: "GoogleFindMyCoordinator", ...)`
 4. Imports hinzufügen wenn nötig
 5. Tests ausführen
 6. Wenn Tests bestehen: Commit für diese Methode
-
-**WICHTIG:** Eine Methode nach der anderen! Nicht mehrere gleichzeitig.
-
-**Erfolgskriterien Phase 2:**
-- [ ] Alle 11 Registry-Methoden in coordinator/registry.py
-- [ ] coordinator.py ~1.682 Zeilen kürzer
-- [ ] Alle Tests bestehen
-- [ ] Keine zirkulären Imports
-
----
-
-### Phase 3: SubentryOperations extrahieren (Risiko: Mittel)
-**Ziel:** Subentry-Methoden von coordinator.py → coordinator/subentry.py
-
-**Methoden zu verschieben (17 Stück, ~766 Zeilen):**
-1. `_refresh_subentry_index` (L1314, ~453 Zeilen) ⚠️ F-Grade
-2. `_schedule_core_subentry_repair` (L1228, ~73 Zeilen)
-3. `_build_core_subentry_definitions` (L1165, ~62 Zeilen)
-4. `attach_subentry_manager` (L1109, ~31 Zeilen)
-5. `detach_subentry_manager`
-6. `_get_subentry_by_id`
-7. `_list_subentries`
-8. `_create_subentry`
-9. `_update_subentry`
-10. `_delete_subentry`
-11. `_validate_subentry`
-12. `_sync_subentries`
-13. `_migrate_legacy_subentries`
-14. `_repair_subentry_index`
-15. `_rebuild_subentry_cache`
-16. `_get_subentry_devices`
-17. `_link_device_to_subentry`
-
-**Schritte:** Analog zu Phase 2
-
-**Erfolgskriterien Phase 3:**
-- [ ] Alle 17 Subentry-Methoden in coordinator/subentry.py
-- [ ] coordinator.py ~766 Zeilen kürzer
-- [ ] Alle Tests bestehen
-
----
-
-### Phase 4: PollingOperations extrahieren (Risiko: Mittel)
-**Ziel:** Polling-Methoden von coordinator.py → coordinator/polling.py
-
-**Methoden zu verschieben (6 Stück, ~495 Zeilen):**
-1. `_async_start_poll_cycle` (L5879, ~449 Zeilen) ⚠️ F-Grade
-2. `_get_predicted_poll_time` (L6879, ~27 Zeilen)
-3. `is_polling`
-4. `force_poll_due`
-5. `last_poll_result`
-6. `_schedule_next_poll`
-
-**Erfolgskriterien Phase 4:**
-- [ ] Alle 6 Polling-Methoden in coordinator/polling.py
-- [ ] coordinator.py ~495 Zeilen kürzer
-- [ ] Alle Tests bestehen
-
----
-
-### Phase 5: IdentityOperations extrahieren (Risiko: Mittel)
-**Ziel:** Identity-Methoden von coordinator.py → coordinator/identity.py
-
-**Methoden zu verschieben (4+ Stück, ~776 Zeilen):**
-1. `get_active_device_identities` (L4503, ~725 Zeilen) ⚠️ F-Grade
-2. `_register_identity_key` (L7114, ~23 Zeilen)
-3. `_normalize_identity_key`
-4. `_validate_identity_key`
-
-**Erfolgskriterien Phase 5:**
-- [ ] Alle Identity-Methoden in coordinator/identity.py
-- [ ] coordinator.py ~776 Zeilen kürzer
-- [ ] Alle Tests bestehen
-
----
-
-### Phase 6: LocateOperations extrahieren (Risiko: Mittel)
-**Ziel:** Locate-Methoden von coordinator.py → coordinator/locate.py
-
-**Methoden zu verschieben (~274+ Zeilen):**
-1. `async_locate_device` (L7945, ~274 Zeilen)
-2. Weitere `*location*` Methoden
-
-**Erfolgskriterien Phase 6:**
-- [ ] Alle Locate-Methoden in coordinator/locate.py
-- [ ] Alle Tests bestehen
 
 ---
 
@@ -407,13 +419,13 @@ custom_components/googlefindmy/
 **Ziel:** Aufräumen und Dokumentation
 
 **Schritte:**
-1. Ungenutzte Imports in coordinator.py entfernen
+1. Ungenutzte Imports in coordinator/main.py entfernen
 2. Docstrings für alle Operations-Klassen vervollständigen
 3. Test-Coverage prüfen (Ziel: >90%)
 4. Diese RESTRUCTURING_PROPOSAL.md als abgeschlossen markieren
 
 **Erfolgskriterien Phase 7:**
-- [ ] coordinator.py bei ~2.500 Zeilen
+- [ ] coordinator/main.py bei ~2.500 Zeilen
 - [ ] Keine Linter-Warnungen
 - [ ] Alle Tests bestehen
 - [ ] Dokumentation aktuell
@@ -424,8 +436,8 @@ custom_components/googlefindmy/
 
 | Phase | Risiko | Begründung |
 |-------|--------|------------|
-| Phase 0: Helpers verschieben | Niedrig | Nur Pfade ändern, keine Logik |
-| Phase 1: Package-Infrastruktur | Niedrig | Leere Klassen, keine Funktionsänderung |
+| Phase 0: Package-Konversion | Niedrig | Python-saubere Struktur, Re-exports garantieren Kompatibilität |
+| Phase 1: Operations-Infrastruktur | Niedrig | Leere Klassen, keine Funktionsänderung |
 | Phase 2-6: Methoden-Extraktion | Mittel | Methodensignaturen bleiben gleich |
 | Phase 7: Cleanup | Niedrig | Nur kosmetisch |
 
@@ -437,16 +449,16 @@ custom_components/googlefindmy/
 
 ### Vor jeder Änderung:
 ```bash
-pytest tests/ -v --tb=short
+python3.13 -m pytest tests/ -v --tb=short
 ```
 
 ### Nach jeder Methoden-Verschiebung:
 ```bash
 # Spezifische Tests für geänderte Komponente
-pytest tests/test_coordinator*.py -v --tb=short
+python3.13 -m pytest tests/test_coordinator*.py -v --tb=short
 
 # Integrationstests
-pytest tests/test_integration*.py -v --tb=short
+python3.13 -m pytest tests/test_integration*.py -v --tb=short
 ```
 
 ### Bei Fehlern:
@@ -458,32 +470,37 @@ pytest tests/test_integration*.py -v --tb=short
 
 ## 8. Import-Änderungen Referenz
 
-### Für coordinator.py (intern):
+### Für andere Module im Package (button.py, sensor.py, etc.):
+```python
+# UNVERÄNDERT dank Re-exports in coordinator/__init__.py:
+from .coordinator import GoogleFindMyCoordinator
+```
+
+### Für coordinator/main.py (intern):
 ```python
 # ALT (vor Phase 0):
 from .coordinator_registry import extract_canonical_device_id
+from .api import GoogleFindMyAPI
 
 # NEU (nach Phase 0):
-from .coordinator.helpers.registry import extract_canonical_device_id
+from .helpers.registry import extract_canonical_device_id
+from ..api import GoogleFindMyAPI
 ```
 
 ### Für Tests:
 ```python
-# ALT:
+# Coordinator-Tests: UNVERÄNDERT
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+# Helper-Tests - ALT:
 from custom_components.googlefindmy.coordinator_registry import (
     extract_canonical_device_id,
 )
 
-# NEU:
+# Helper-Tests - NEU:
 from custom_components.googlefindmy.coordinator.helpers.registry import (
     extract_canonical_device_id,
 )
-```
-
-### Für externe Module (__init__.py, etc.):
-```python
-# UNVERÄNDERT - GoogleFindMyCoordinator bleibt exportiert:
-from .coordinator import GoogleFindMyCoordinator
 ```
 
 ---
@@ -496,18 +513,19 @@ Wenn du diese Datei liest und den Kontext verloren hast:
    ```bash
    git log --oneline -10
    ls -la custom_components/googlefindmy/coordinator/
+   ls custom_components/googlefindmy/coordinator.py 2>/dev/null
    ls custom_components/googlefindmy/coordinator_*.py 2>/dev/null
    ```
 
 2. **Tests ausführen:**
    ```bash
-   pytest tests/ -v --tb=short
+   python3.13 -m pytest tests/ -v --tb=short
    ```
 
 3. **Welche Phase ist dran?**
-   - Gibt es `coordinator/helpers/`? → Phase 0 abgeschlossen
-   - Gibt es `coordinator_*.py` im Root? → Phase 0 noch offen
-   - Sind Operations-Klassen gefüllt? → Prüfe Zeilenzahl in coordinator.py
+   - Gibt es `coordinator.py` im Root? → Phase 0 noch offen
+   - Gibt es `coordinator/main.py`? → Phase 0 abgeschlossen
+   - Sind Operations-Klassen gefüllt? → Prüfe Zeilenzahl in coordinator/main.py
 
 4. **Nächsten Schritt aus Phasen-Plan (Abschnitt 5) ausführen**
 
@@ -517,6 +535,5 @@ Wenn du diese Datei liest und den Kontext verloren hast:
 
 - Keine Umbenennungen von Auth/, NovaApi/, SpotApi/, FMDNCrypto/, KeyBackup/
 - Keine Änderung der externen API-Strukturen
-- `coordinator.py` BLEIBT im Root (Option A)
 - `eid_resolver.py` bleibt im Root
 - `fmdn_finder/` bleibt eigenständig
