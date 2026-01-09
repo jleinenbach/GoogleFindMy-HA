@@ -69,6 +69,13 @@ from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
+from .coordinator_geo import (
+    clamp as _clamp,
+    coerce_float as _coerce_float_impl,
+    haversine_distance as _haversine_distance_impl,
+    safe_accuracy,
+)
+
 if TYPE_CHECKING:
     from homeassistant.core import Event
 
@@ -277,13 +284,7 @@ def _update_preserve_metadata(
             target[key] = value
 
 
-def _clamp(value: float, lo: float, hi: float) -> float:
-    """Clamp value between lo and hi (inclusive)."""
-    try:
-        v = float(value)
-        return max(float(lo), min(float(hi), v))
-    except (TypeError, ValueError):
-        return float(lo)
+# _clamp is imported from coordinator_geo (module extraction Phase 1)
 
 
 # --- BEGIN: Diagnostics buffer & helpers (top-level) ---------------------------
@@ -4385,14 +4386,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     @staticmethod
     def _coerce_float(value: Any) -> float | None:
         """Return a float representation or ``None`` when conversion fails."""
-
-        try:
-            coerced = float(value)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(coerced):
-            return None
-        return coerced
+        return _coerce_float_impl(value)
 
     def _find_semantic_match(
         self, raw_name: str, mapping: Mapping[str, dict[str, float]]
@@ -7824,21 +7818,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     def _haversine_distance(
         self, lat1: float, lon1: float, lat2: float, lon2: float
     ) -> float:
-        """Return distance in meters between two WGS84 coordinates.
-
-        Implementation note:
-            Kept lightweight and allocation-free; called per candidate update only.
-        """
-        from math import atan2, cos, radians, sin, sqrt
-
-        R = 6371000.0  # Earth radius in meters
-        lat1_r, lon1_r = radians(float(lat1)), radians(float(lon1))
-        lat2_r, lon2_r = radians(float(lat2)), radians(float(lon2))
-        dlat = lat2_r - lat1_r
-        dlon = lon2_r - lon1_r
-        a = sin(dlat / 2.0) ** 2 + cos(lat1_r) * cos(lat2_r) * sin(dlon / 2.0) ** 2
-        c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
-        return R * c
+        """Return distance in meters between two WGS84 coordinates."""
+        return _haversine_distance_impl(lat1, lon1, lat2, lon2)
 
     def _apply_weighted_location_fusion(
         self, device_id: str, new_data: dict[str, Any]
@@ -7874,15 +7855,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         existing_acc_raw = self._coerce_float(existing.get("accuracy"))
         new_acc_raw = self._coerce_float(new_data.get("accuracy"))
 
-        def _safe_accuracy(value: float | None) -> float:
-            if value is None or not math.isfinite(value):
-                return 10000.0
-            if value < 0:
-                return 10000.0
-            return value
-
-        existing_acc = _safe_accuracy(existing_acc_raw)
-        new_acc = _safe_accuracy(new_acc_raw)
+        existing_acc = safe_accuracy(existing_acc_raw)
+        new_acc = safe_accuracy(new_acc_raw)
 
         try:
             dist = self._haversine_distance(
