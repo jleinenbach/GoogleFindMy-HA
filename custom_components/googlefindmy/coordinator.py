@@ -7543,7 +7543,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
     def _merge_with_existing_cache_row(
         self, device_id: str, incoming: dict[str, Any]
     ) -> dict[str, Any]:
-        """Merge accepted payloads with cached rows while respecting recency."""
+        """Merge accepted payloads with cached rows while respecting recency.
+
+        Uses helper functions from coordinator_cache for decision logic while
+        preserving metadata fields via _update_preserve_metadata.
+        """
+        from .coordinator_cache import (
+            LOCATION_FIELDS,
+            fill_missing_coordinates,
+            preserve_monotonic_timestamp,
+            should_allow_location_update,
+        )
 
         existing = self._device_location_data.get(device_id)
         if not existing:
@@ -7554,33 +7564,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         existing_rank = existing.get("source_rank")
         incoming_rank = incoming.get("source_rank")
 
-        location_fields = {
-            "latitude",
-            "longitude",
-            "accuracy",
-            "altitude",
-            "status",
-            "source_label",
-            "source_rank",
-            "is_own_report",
-            "last_seen",
-            "last_seen_utc",
-        }
+        # Use helper for timestamp/rank decision
+        allow_location_update = should_allow_location_update(
+            existing_seen, incoming_seen, existing_rank, incoming_rank
+        )
 
-        allow_location_update = True
-        if existing_seen is not None and incoming_seen is not None:
-            if incoming_seen < existing_seen:
-                allow_location_update = False
-            elif incoming_seen == existing_seen and (
-                existing_rank is not None
-                and (incoming_rank is None or existing_rank > incoming_rank)
-            ):
-                allow_location_update = False
-        elif existing_seen is not None and incoming_seen is None:
-            # FIX: Don't block updates without timestamp if position changed significantly
-            # This prevents the "tracker jumps back to previous location" issue (#128, #127, #131)
-            # Note: The timestamp preservation is handled later (lines ~7485-7491) so we only
-            # need to set allow_location_update here - no need to modify incoming dict.
+        # Handle case where distance check is needed (allow_location_update is None)
+        if allow_location_update is None:
             incoming_lat = self._coerce_float(incoming.get("latitude"))
             incoming_lon = self._coerce_float(incoming.get("longitude"))
             existing_lat = self._coerce_float(existing.get("latitude"))
@@ -7596,7 +7586,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     dist = self._haversine_distance(
                         existing_lat, existing_lon, incoming_lat, incoming_lon
                     )
-                    # Allow update if position changed by more than _LOCATION_SIGNIFICANT_CHANGE_M
                     if dist > _LOCATION_SIGNIFICANT_CHANGE_M:
                         allow_location_update = True
                         _LOGGER.debug(
@@ -7611,16 +7600,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                     allow_location_update = False
             else:
                 allow_location_update = False
-        elif (
-            existing_seen is None
-            and incoming_seen is None
-            and (
-                existing_rank is not None
-                and (incoming_rank is None or existing_rank > incoming_rank)
-            )
-        ):
-            allow_location_update = False
 
+        # Build merged result using _update_preserve_metadata
         merged = dict(existing)
         if allow_location_update:
             _update_preserve_metadata(merged, incoming)
@@ -7630,32 +7611,13 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 {
                     key: value
                     for key, value in incoming.items()
-                    if key not in location_fields
+                    if key not in LOCATION_FIELDS
                 },
             )
 
-        # Keep monotonic last_seen timestamps when payloads arrive without a newer value.
-        if existing_seen is not None and (
-            incoming_seen is None or incoming_seen < existing_seen
-        ):
-            merged["last_seen"] = existing.get("last_seen")
-            if existing.get("last_seen_utc") is not None:
-                merged["last_seen_utc"] = existing.get("last_seen_utc")
-        elif (
-            incoming_seen is not None
-            and existing_seen is not None
-            and incoming_seen == existing_seen
-            and merged.get("last_seen_utc") is None
-            and existing.get("last_seen_utc") is not None
-        ):
-            merged["last_seen_utc"] = existing.get("last_seen_utc")
-
-        for coord_field in ("latitude", "longitude", "accuracy", "altitude"):
-            if (
-                merged.get(coord_field) is None
-                and existing.get(coord_field) is not None
-            ):
-                merged[coord_field] = existing.get(coord_field)
+        # Use helpers for timestamp and coordinate handling
+        merged = preserve_monotonic_timestamp(existing, merged)
+        merged = fill_missing_coordinates(existing, merged)
 
         return merged
 
