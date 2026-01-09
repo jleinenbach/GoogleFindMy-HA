@@ -1078,3 +1078,526 @@ class TestResolveTrackerSubentryCandidate:
             tracker_subentry_ids={"tracker-provisional"},
         )
         assert result == "tracker-provisional"
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: Service Device Helper Functions
+# ---------------------------------------------------------------------------
+
+from custom_components.googlefindmy.coordinator_registry import (
+    detect_extraneous_service_identifiers,
+    determine_removal_subentry_id,
+    extract_service_subentry_ids,
+    has_user_defined_name,
+    sanitize_entry_title,
+    should_defer_service_subentry,
+)
+
+
+class TestSanitizeEntryTitle:
+    """Tests for sanitize_entry_title function.
+
+    This function strips and validates entry titles.
+    Returns None for invalid/empty inputs.
+    """
+
+    def test_valid_string_returned(self) -> None:
+        """Valid string should be returned stripped."""
+        assert sanitize_entry_title("My Entry") == "My Entry"
+
+    def test_whitespace_stripped(self) -> None:
+        """Leading/trailing whitespace should be stripped."""
+        assert sanitize_entry_title("  Entry Title  ") == "Entry Title"
+        assert sanitize_entry_title("\t\nTitle\n\t") == "Title"
+
+    def test_empty_string_returns_none(self) -> None:
+        """Empty string should return None."""
+        assert sanitize_entry_title("") is None
+
+    def test_whitespace_only_returns_none(self) -> None:
+        """Whitespace-only string should return None."""
+        assert sanitize_entry_title("   ") is None
+        assert sanitize_entry_title("\t\n") is None
+
+    def test_none_returns_none(self) -> None:
+        """None input should return None."""
+        assert sanitize_entry_title(None) is None
+
+    def test_non_string_returns_none(self) -> None:
+        """Non-string types should return None."""
+        assert sanitize_entry_title(123) is None
+        assert sanitize_entry_title(["list"]) is None
+        assert sanitize_entry_title({"key": "value"}) is None
+        assert sanitize_entry_title(True) is None
+
+
+class TestHasUserDefinedName:
+    """Tests for has_user_defined_name function.
+
+    This function checks if a user has set a custom name.
+    Returns True only for non-empty stripped strings.
+    """
+
+    def test_non_empty_string_returns_true(self) -> None:
+        """Non-empty string should return True."""
+        assert has_user_defined_name("Custom Name") is True
+
+    def test_whitespace_stripped_before_check(self) -> None:
+        """Whitespace should be stripped before checking."""
+        assert has_user_defined_name("  Name  ") is True
+
+    def test_empty_string_returns_false(self) -> None:
+        """Empty string should return False."""
+        assert has_user_defined_name("") is False
+
+    def test_whitespace_only_returns_false(self) -> None:
+        """Whitespace-only string should return False."""
+        assert has_user_defined_name("   ") is False
+        assert has_user_defined_name("\t\n") is False
+
+    def test_none_returns_false(self) -> None:
+        """None input should return False."""
+        assert has_user_defined_name(None) is False
+
+
+class TestExtractServiceSubentryIds:
+    """Tests for extract_service_subentry_ids function.
+
+    Extracts service subentry IDs from entry.subentries mapping.
+    """
+
+    def test_extracts_service_type_subentries(self) -> None:
+        """Should extract subentries with service type."""
+
+        class MockSubentry:
+            def __init__(self, subentry_type: str, data: dict | None = None):
+                self.subentry_type = subentry_type
+                self.data = data
+
+        subentries = {
+            "sub-1": MockSubentry("service"),
+            "sub-2": MockSubentry("tracker"),
+            "sub-3": MockSubentry("service"),
+        }
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"sub-1", "sub-3"}
+
+    def test_extracts_by_group_key(self) -> None:
+        """Should extract subentries with service group_key."""
+
+        class MockSubentry:
+            def __init__(self, subentry_type: str | None, data: dict | None):
+                self.subentry_type = subentry_type
+                self.data = data
+
+        subentries = {
+            "sub-1": MockSubentry(None, {"group_key": "_service_"}),
+            "sub-2": MockSubentry(None, {"group_key": "tracker"}),
+        }
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"sub-1"}
+
+    def test_skips_provisional_unless_matches_entry_id(self) -> None:
+        """Should skip provisional subentries unless they match entry_service_subentry_id."""
+
+        class MockSubentry:
+            def __init__(self, subentry_type: str):
+                self.subentry_type = subentry_type
+                self.data = None
+
+        subentries = {
+            "sub-1-provisional": MockSubentry("service"),
+            "sub-2": MockSubentry("service"),
+        }
+        # Without matching entry_service_subentry_id, provisional is skipped
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"sub-2"}
+
+        # With matching entry_service_subentry_id, provisional is included
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id="sub-1-provisional",
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"sub-1-provisional", "sub-2"}
+
+    def test_handles_none_subentries(self) -> None:
+        """Should return empty set for None subentries."""
+        result = extract_service_subentry_ids(
+            entry_subentries=None,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == set()
+
+    def test_handles_non_mapping_subentries(self) -> None:
+        """Should return empty set for non-Mapping subentries."""
+        result = extract_service_subentry_ids(
+            entry_subentries="not_a_mapping",
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == set()
+
+    def test_skips_invalid_subentry_ids(self) -> None:
+        """Should skip None and non-string subentry IDs."""
+
+        class MockSubentry:
+            def __init__(self, subentry_type: str):
+                self.subentry_type = subentry_type
+                self.data = None
+
+        subentries = {
+            None: MockSubentry("service"),
+            123: MockSubentry("service"),
+            "valid": MockSubentry("service"),
+        }
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"valid"}
+
+    def test_handles_subentry_without_data_attribute(self) -> None:
+        """Should handle subentries without data attribute."""
+
+        class MockSubentryNoData:
+            def __init__(self, subentry_type: str):
+                self.subentry_type = subentry_type
+
+        subentries = {"sub-1": MockSubentryNoData("service")}
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"sub-1"}
+
+    def test_handles_subentry_with_non_mapping_data(self) -> None:
+        """Should handle subentries with non-Mapping data."""
+
+        class MockSubentry:
+            def __init__(self, subentry_type: str | None, data):
+                self.subentry_type = subentry_type
+                self.data = data
+
+        subentries = {
+            "sub-1": MockSubentry(None, "not_a_mapping"),
+            "sub-2": MockSubentry("service", None),
+        }
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"sub-2"}
+
+    def test_empty_string_subentry_id_skipped(self) -> None:
+        """Should skip empty string subentry IDs."""
+
+        class MockSubentry:
+            def __init__(self, subentry_type: str):
+                self.subentry_type = subentry_type
+                self.data = None
+
+        subentries = {"": MockSubentry("service"), "valid": MockSubentry("service")}
+        result = extract_service_subentry_ids(
+            entry_subentries=subentries,
+            entry_service_subentry_id=None,
+            subentry_type_service="service",
+            service_subentry_key="_service_",
+        )
+        assert result == {"valid"}
+
+
+class TestShouldDeferServiceSubentry:
+    """Tests for should_defer_service_subentry function.
+
+    Checks if config_subentry_id should be deferred until registry catches up.
+    """
+
+    def test_returns_false_when_subentry_id_none(self) -> None:
+        """Should return False when service_subentry_id is None."""
+        result = should_defer_service_subentry(
+            service_subentry_id=None,
+            current_subentries={"sub-1": object()},
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is False
+
+    def test_returns_false_when_subentry_in_registry(self) -> None:
+        """Should return False when subentry_id is in current_subentries."""
+        result = should_defer_service_subentry(
+            service_subentry_id="sub-1",
+            current_subentries={"sub-1": object()},
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is False
+
+    def test_returns_true_when_subentry_not_in_registry(self) -> None:
+        """Should return True when subentry_id not in current_subentries."""
+        result = should_defer_service_subentry(
+            service_subentry_id="sub-2",
+            current_subentries={"sub-1": object()},
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is True
+
+    def test_returns_false_for_stable_default_pattern(self) -> None:
+        """Should return False for stable default subentry ID pattern."""
+        result = should_defer_service_subentry(
+            service_subentry_id="entry-123-_service_-subentry",
+            current_subentries={"other-sub": object()},
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is False
+
+    def test_returns_false_when_subentries_none(self) -> None:
+        """Should return False when current_subentries is None."""
+        result = should_defer_service_subentry(
+            service_subentry_id="sub-1",
+            current_subentries=None,
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is False
+
+    def test_returns_false_when_subentries_non_mapping(self) -> None:
+        """Should return False when current_subentries is not a Mapping."""
+        result = should_defer_service_subentry(
+            service_subentry_id="sub-1",
+            current_subentries="not_a_mapping",
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is False
+
+    def test_returns_true_when_entry_id_none(self) -> None:
+        """Should return True when entry_id is None and not in registry."""
+        result = should_defer_service_subentry(
+            service_subentry_id="sub-1",
+            current_subentries={"other": object()},
+            entry_id=None,
+            service_subentry_key="_service_",
+        )
+        assert result is True
+
+    def test_handles_empty_subentries(self) -> None:
+        """Should return True when current_subentries is empty."""
+        result = should_defer_service_subentry(
+            service_subentry_id="sub-1",
+            current_subentries={},
+            entry_id="entry-123",
+            service_subentry_key="_service_",
+        )
+        assert result is True
+
+
+class TestDetectExtraneousServiceIdentifiers:
+    """Tests for detect_extraneous_service_identifiers function.
+
+    Finds :service identifiers not in target set.
+    """
+
+    def test_finds_extraneous_service_identifiers(self) -> None:
+        """Should find :service identifiers not in target set."""
+        device_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("domain", "entry-1:sub-2:service"),
+            ("domain", "integration_entry-1"),
+        }
+        target_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("domain", "integration_entry-1"),
+        }
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=device_identifiers,
+            target_identifiers=target_identifiers,
+            domain="domain",
+        )
+        assert result == {("domain", "entry-1:sub-2:service")}
+
+    def test_returns_empty_when_no_extraneous(self) -> None:
+        """Should return empty set when no extraneous identifiers."""
+        identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("domain", "integration_entry-1"),
+        }
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=identifiers,
+            target_identifiers=identifiers,
+            domain="domain",
+        )
+        assert result == set()
+
+    def test_ignores_non_service_identifiers(self) -> None:
+        """Should ignore identifiers not ending in :service."""
+        device_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("domain", "regular-identifier"),
+            ("domain", "another-id"),
+        }
+        target_identifiers = {("domain", "entry-1:sub-1:service")}
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=device_identifiers,
+            target_identifiers=target_identifiers,
+            domain="domain",
+        )
+        assert result == set()
+
+    def test_ignores_different_domain(self) -> None:
+        """Should ignore identifiers from different domain."""
+        device_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("other_domain", "entry-1:sub-2:service"),
+        }
+        target_identifiers = {("domain", "entry-1:sub-1:service")}
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=device_identifiers,
+            target_identifiers=target_identifiers,
+            domain="domain",
+        )
+        assert result == set()
+
+    def test_handles_empty_device_identifiers(self) -> None:
+        """Should return empty set for empty device_identifiers."""
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=set(),
+            target_identifiers={("domain", "entry-1:sub-1:service")},
+            domain="domain",
+        )
+        assert result == set()
+
+    def test_handles_non_tuple_identifiers(self) -> None:
+        """Should skip non-tuple identifiers."""
+        device_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            "not_a_tuple",
+        }
+        target_identifiers = set()
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=device_identifiers,
+            target_identifiers=target_identifiers,
+            domain="domain",
+        )
+        assert result == {("domain", "entry-1:sub-1:service")}
+
+    def test_handles_wrong_length_tuple(self) -> None:
+        """Should skip tuples with wrong length."""
+        device_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("domain",),
+            ("domain", "a", "b"),
+        }
+        target_identifiers = set()
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=device_identifiers,
+            target_identifiers=target_identifiers,
+            domain="domain",
+        )
+        assert result == {("domain", "entry-1:sub-1:service")}
+
+    def test_handles_non_string_second_element(self) -> None:
+        """Should skip tuples with non-string second element."""
+        device_identifiers = {
+            ("domain", "entry-1:sub-1:service"),
+            ("domain", 123),
+            ("domain", None),
+        }
+        target_identifiers = set()
+        result = detect_extraneous_service_identifiers(
+            device_identifiers=device_identifiers,
+            target_identifiers=target_identifiers,
+            domain="domain",
+        )
+        assert result == {("domain", "entry-1:sub-1:service")}
+
+
+class TestDetermineRemovalSubentryId:
+    """Tests for determine_removal_subentry_id function.
+
+    Determines which subentry ID to remove from device.
+    """
+
+    def test_returns_first_from_service_links(self) -> None:
+        """Should return first item from current_service_links."""
+        result = determine_removal_subentry_id(
+            current_service_links={"sub-1", "sub-2"},
+            dev_config_subentry_id="other",
+        )
+        # Order is not guaranteed in sets, just check it's one of them
+        assert result in {"sub-1", "sub-2"}
+
+    def test_returns_config_subentry_when_no_links(self) -> None:
+        """Should return dev_config_subentry_id when no service links."""
+        result = determine_removal_subentry_id(
+            current_service_links=set(),
+            dev_config_subentry_id="config-sub",
+        )
+        assert result == "config-sub"
+
+    def test_returns_stripped_config_subentry(self) -> None:
+        """Should strip whitespace from dev_config_subentry_id."""
+        result = determine_removal_subentry_id(
+            current_service_links=set(),
+            dev_config_subentry_id="  config-sub  ",
+        )
+        assert result == "config-sub"
+
+    def test_returns_none_when_no_links_and_empty_config(self) -> None:
+        """Should return None when no links and empty config subentry."""
+        result = determine_removal_subentry_id(
+            current_service_links=set(),
+            dev_config_subentry_id="",
+        )
+        assert result is None
+
+    def test_returns_none_when_no_links_and_none_config(self) -> None:
+        """Should return None when no links and None config subentry."""
+        result = determine_removal_subentry_id(
+            current_service_links=set(),
+            dev_config_subentry_id=None,
+        )
+        assert result is None
+
+    def test_returns_none_when_no_links_and_whitespace_config(self) -> None:
+        """Should return None when no links and whitespace-only config."""
+        result = determine_removal_subentry_id(
+            current_service_links=set(),
+            dev_config_subentry_id="   ",
+        )
+        assert result is None
+
+    def test_prefers_links_over_config_subentry(self) -> None:
+        """Should prefer service links over config subentry ID."""
+        result = determine_removal_subentry_id(
+            current_service_links={"link-sub"},
+            dev_config_subentry_id="config-sub",
+        )
+        assert result == "link-sub"

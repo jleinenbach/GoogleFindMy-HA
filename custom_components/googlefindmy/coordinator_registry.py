@@ -25,15 +25,21 @@ __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
     "SERVICE_DEVICE_IDENTIFIER_PREFIX",
     "build_legacy_device_registry_kwargs",
+    "detect_extraneous_service_identifiers",
+    "determine_removal_subentry_id",
     "extract_device_display_name",
+    "extract_service_subentry_ids",
     "extract_subentry_links",
     "has_hub_link",
     "has_subentry_link",
+    "has_user_defined_name",
     "is_hub_device_check",
     "needs_legacy_kwarg_retry",
     "normalize_device_name",
     "parse_device_identifier",
     "resolve_tracker_subentry_candidate",
+    "sanitize_entry_title",
+    "should_defer_service_subentry",
 ]
 
 
@@ -410,3 +416,203 @@ def resolve_tracker_subentry_candidate(
 
     # No restrictions - accept as-is
     return candidate
+
+
+# ---------------------------------------------------------------------------
+# Phase 9: Service Device Helper Functions
+# ---------------------------------------------------------------------------
+
+
+def sanitize_entry_title(entry_title: Any) -> str | None:
+    """Sanitize and validate an entry title.
+
+    Strips leading/trailing whitespace. Returns None for empty
+    or non-string inputs.
+
+    Args:
+        entry_title: The entry title to sanitize.
+
+    Returns:
+        Sanitized title string, or None if invalid/empty.
+    """
+    if not isinstance(entry_title, str):
+        return None
+    stripped = entry_title.strip()
+    return stripped if stripped else None
+
+
+def has_user_defined_name(name_by_user: str | None) -> bool:
+    """Check if a user has set a custom device name.
+
+    Returns True only for non-empty stripped strings.
+
+    Args:
+        name_by_user: The user-defined name to check.
+
+    Returns:
+        True if the user has set a non-empty name.
+    """
+    if not isinstance(name_by_user, str):
+        return False
+    return bool(name_by_user.strip())
+
+
+def extract_service_subentry_ids(
+    entry_subentries: Any,
+    entry_service_subentry_id: str | None,
+    subentry_type_service: str,
+    service_subentry_key: str,
+) -> set[str]:
+    """Extract service subentry IDs from entry.subentries mapping.
+
+    Identifies subentries that are service-related by checking:
+    1. subentry_type == subentry_type_service
+    2. data.group_key == service_subentry_key
+
+    Provisional subentries (ending in '-provisional') are skipped unless
+    they match entry_service_subentry_id.
+
+    Args:
+        entry_subentries: The entry.subentries mapping.
+        entry_service_subentry_id: The entry's service subentry ID (if set).
+        subentry_type_service: The subentry type constant for service.
+        service_subentry_key: The group_key constant for service.
+
+    Returns:
+        Set of service subentry IDs.
+    """
+    if not isinstance(entry_subentries, Mapping):
+        return set()
+
+    result: set[str] = set()
+    for subentry_id, subentry in entry_subentries.items():
+        # Skip invalid subentry IDs
+        if not isinstance(subentry_id, str) or not subentry_id:
+            continue
+
+        # Skip provisional unless it matches entry_service_subentry_id
+        if (
+            subentry_id.endswith("-provisional")
+            and subentry_id != entry_service_subentry_id
+        ):
+            continue
+
+        # Check subentry_type
+        subentry_type = getattr(subentry, "subentry_type", None)
+
+        # Check group_key in data
+        group_key: Any = None
+        data_obj = getattr(subentry, "data", None)
+        if isinstance(data_obj, Mapping):
+            group_key = data_obj.get("group_key")
+
+        # Include if it's a service subentry
+        if subentry_type == subentry_type_service or (
+            isinstance(group_key, str) and group_key == service_subentry_key
+        ):
+            result.add(subentry_id)
+
+    return result
+
+
+def should_defer_service_subentry(
+    service_subentry_id: str | None,
+    current_subentries: Any,
+    entry_id: str | None,
+    service_subentry_key: str,
+) -> bool:
+    """Check if config_subentry_id should be deferred until registry catches up.
+
+    Returns True if the subentry_id is not in current_subentries and is not
+    the stable default pattern.
+
+    Args:
+        service_subentry_id: The service config_subentry_id to check.
+        current_subentries: The current entry.subentries mapping.
+        entry_id: The config entry ID.
+        service_subentry_key: The group_key constant for service.
+
+    Returns:
+        True if the subentry_id should be deferred.
+    """
+    if service_subentry_id is None:
+        return False
+
+    if not isinstance(current_subentries, Mapping):
+        return False
+
+    # Check if subentry is in registry
+    if service_subentry_id in current_subentries:
+        return False
+
+    # Check for stable default pattern
+    if isinstance(entry_id, str) and entry_id:
+        stable_default = f"{entry_id}-{service_subentry_key}-subentry"
+        if service_subentry_id == stable_default:
+            return False
+
+    # Defer if not found
+    return True
+
+
+def detect_extraneous_service_identifiers(
+    device_identifiers: Collection[Any],
+    target_identifiers: set[tuple[str, str]],
+    domain: str,
+) -> set[tuple[str, str]]:
+    """Find :service identifiers not in target set.
+
+    Identifies device identifiers that:
+    1. Are 2-tuples with matching domain
+    2. Have second element ending in ':service'
+    3. Are not in the target_identifiers set
+
+    Args:
+        device_identifiers: Current device identifiers.
+        target_identifiers: Target identifiers to keep.
+        domain: The integration domain to match.
+
+    Returns:
+        Set of extraneous service identifier tuples.
+    """
+    extraneous: set[tuple[str, str]] = set()
+
+    for identifier in device_identifiers:
+        if not isinstance(identifier, tuple) or len(identifier) != 2:
+            continue
+        ident_domain, ident_value = identifier
+        if ident_domain != domain:
+            continue
+        if not isinstance(ident_value, str):
+            continue
+        if not ident_value.endswith(":service"):
+            continue
+        if identifier not in target_identifiers:
+            extraneous.add(identifier)
+
+    return extraneous
+
+
+def determine_removal_subentry_id(
+    current_service_links: set[str],
+    dev_config_subentry_id: str | None,
+) -> str | None:
+    """Determine which subentry ID to remove from device.
+
+    Prefers items from current_service_links, falls back to
+    dev_config_subentry_id.
+
+    Args:
+        current_service_links: Set of current service link IDs.
+        dev_config_subentry_id: The device's config_subentry_id.
+
+    Returns:
+        Subentry ID to remove, or None if nothing to remove.
+    """
+    if current_service_links:
+        return next(iter(current_service_links))
+
+    if isinstance(dev_config_subentry_id, str) and dev_config_subentry_id.strip():
+        return dev_config_subentry_id.strip()
+
+    return None
