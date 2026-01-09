@@ -91,6 +91,12 @@ from .coordinator_cache import (
     is_presence_expired,
     should_allow_location_update,
 )
+from .coordinator_registry import (
+    build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
+    extract_device_display_name as _extract_display_name_impl,
+    needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
+    parse_device_identifier as _parse_identifier_impl,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -1993,7 +1999,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
     def _device_display_name(self, dev: dr.DeviceEntry, fallback: str) -> str:
         """Return the best human-friendly device name without sensitive data."""
-        return (dev.name_by_user or dev.name or fallback or "").strip()
+        return _extract_display_name_impl(dev.name_by_user, dev.name, fallback)
 
     def _entry_id(self) -> str | None:
         """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
@@ -2038,27 +2044,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         """
         entry_id = self._entry_id()
         for item in device.identifiers:
-            # Robust check: strict unpacking causes crashes with 3-tuple identifiers (e.g. 'hon')
-            if not isinstance(item, (tuple, list)) or len(item) != 2:
-                continue
-
-            domain, ident = item
-            if domain != DOMAIN or not isinstance(ident, str) or not ident:
-                continue
-
-            # Handle namespaced format "<entry_id>:<device_id>"
-            if ":" in ident:
-                if entry_id and ident.startswith(entry_id + ":"):
-                    return ident.split(":", 1)[1]  # return canonical device_id
-                # Identifier belongs to a different entry; ignore.
-                continue
-
-            # Skip service device identifiers (integration_<entry_id> or legacy "integration")
-            if ident.startswith(SERVICE_DEVICE_IDENTIFIER_PREFIX) or ident == LEGACY_SERVICE_IDENTIFIER:
-                continue
-
-            # Legacy format -> accept as-is
-            return ident
+            result = _parse_identifier_impl(
+                item,
+                DOMAIN,
+                entry_id,
+                SERVICE_DEVICE_IDENTIFIER_PREFIX,
+                LEGACY_SERVICE_IDENTIFIER,
+            )
+            if result is not None:
+                return result
         return None
 
     def _call_device_registry_api(
@@ -2110,42 +2104,15 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self, call: Callable[..., Any], err: TypeError, kwargs: Mapping[str, Any]
     ) -> bool:
         """Return True when ``kwargs`` must be rewritten for legacy cores."""
-
-        # Modern registries accept the renamed ``add_config_subentry_id`` keyword
-        # and should surface the original TypeError to callers. Only older
-        # versions that reject the new keyword should trigger a legacy rewrite.
         kwarg_name = self._device_registry_config_subentry_kwarg_name(call)
-        if kwarg_name == "add_config_subentry_id":
-            return False
-
-        err_str = str(err)
-        if "add_config_entry_id" in kwargs and "add_config_entry_id" in err_str:
-            return True
-        if "add_config_subentry_id" in kwargs and "add_config_subentry_id" in err_str:
-            return True
-        if (
-            "remove_config_subentry_id" in kwargs
-            and "remove_config_subentry_id" in err_str
-        ):
-            return True
-        return False
+        return _needs_legacy_retry_impl(kwarg_name, str(err), kwargs)
 
     @staticmethod
     def _device_registry_build_legacy_kwargs(
         kwargs: Mapping[str, Any],
     ) -> dict[str, Any]:
         """Translate modern device-registry kwargs to their legacy names."""
-
-        legacy_kwargs = dict(kwargs)
-        if "add_config_entry_id" in legacy_kwargs:
-            legacy_kwargs["config_entry_id"] = legacy_kwargs.pop("add_config_entry_id")
-        if "add_config_subentry_id" in legacy_kwargs:
-            legacy_kwargs["config_subentry_id"] = legacy_kwargs.pop(
-                "add_config_subentry_id"
-            )
-        if "remove_config_subentry_id" in legacy_kwargs:
-            legacy_kwargs.pop("remove_config_subentry_id")
-        return legacy_kwargs
+        return _build_legacy_kwargs_impl(kwargs)
 
     def _device_registry_config_subentry_kwarg_name(
         self, call: Callable[..., Any]
