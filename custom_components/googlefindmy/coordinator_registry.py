@@ -24,9 +24,12 @@ from .const import (
 __all__ = [
     "LEGACY_SERVICE_IDENTIFIER",
     "SERVICE_DEVICE_IDENTIFIER_PREFIX",
+    "build_canonical_unique_id",
+    "build_entity_unique_id_candidates",
     "build_legacy_device_registry_kwargs",
     "detect_extraneous_service_identifiers",
     "determine_removal_subentry_id",
+    "extract_canonical_device_id",
     "extract_device_display_name",
     "extract_service_subentry_ids",
     "extract_subentry_links",
@@ -34,6 +37,8 @@ __all__ = [
     "has_subentry_link",
     "has_user_defined_name",
     "is_hub_device_check",
+    "is_legacy_unique_id",
+    "match_entity_by_device_id",
     "needs_legacy_kwarg_retry",
     "normalize_device_name",
     "parse_device_identifier",
@@ -616,3 +621,264 @@ def determine_removal_subentry_id(
         return dev_config_subentry_id.strip()
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 12: Entity Lookup Helper Functions
+# ---------------------------------------------------------------------------
+
+
+def extract_canonical_device_id(
+    identifiers: Collection[Any] | None,
+    domain: str,
+    entry_id: str | None = None,
+    service_prefix: str = "",
+    legacy_service_id: str = "",
+) -> str | None:
+    """Extract canonical device ID from device registry identifiers.
+
+    Scans identifiers looking for a device ID matching the domain.
+    Supports both simple and namespaced (entry_id:device_id) formats.
+
+    Args:
+        identifiers: Set of identifier tuples from device registry.
+        domain: The integration domain to match.
+        entry_id: Optional entry_id for namespaced identifier matching.
+        service_prefix: Prefix for service device identifiers to skip.
+        legacy_service_id: Legacy service device identifier to skip.
+
+    Returns:
+        The canonical device ID, or None if not found.
+    """
+    if identifiers is None:
+        return None
+
+    if not isinstance(identifiers, Collection) or isinstance(
+        identifiers, (str, bytes, Mapping)
+    ):
+        return None
+
+    namespaced_result: str | None = None
+    simple_result: str | None = None
+
+    for identifier in identifiers:
+        # Must be 2-tuple
+        if not isinstance(identifier, (tuple, list)) or len(identifier) != 2:
+            continue
+
+        ident_domain, ident_value = identifier
+
+        # Must match domain
+        if ident_domain != domain:
+            continue
+
+        # Must be non-empty string
+        if not isinstance(ident_value, str) or not ident_value:
+            continue
+
+        # Skip service device identifiers
+        if service_prefix and ident_value.startswith(service_prefix):
+            continue
+        if legacy_service_id and ident_value == legacy_service_id:
+            continue
+
+        # Handle namespaced format
+        if ":" in ident_value:
+            if entry_id and ident_value.startswith(entry_id + ":"):
+                namespaced_result = ident_value.split(":", 1)[1]
+            # If entry_id doesn't match, skip this identifier
+            continue
+
+        # Simple format
+        simple_result = ident_value
+
+    # Prefer namespaced result when entry_id is provided
+    if namespaced_result is not None:
+        return namespaced_result
+
+    return simple_result
+
+
+def build_entity_unique_id_candidates(
+    device_id: str,
+    entry_id: str | None,
+    subentry_identifier: str | None,
+    domain: str,
+    subentry_key: str | None = None,
+) -> list[str]:
+    """Generate list of unique_id candidates for entity lookup.
+
+    Produces various unique_id formats in priority order for finding
+    an entity that may have been created with different ID schemes.
+
+    Args:
+        device_id: The device ID.
+        entry_id: The config entry ID.
+        subentry_identifier: The stable subentry identifier.
+        domain: The integration domain.
+        subentry_key: Optional subentry key if different from identifier.
+
+    Returns:
+        List of unique_id candidates in priority order (canonical first).
+    """
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        if candidate and candidate not in seen:
+            candidates.append(candidate)
+            seen.add(candidate)
+
+    # Build canonical format first (highest priority)
+    if entry_id and subentry_identifier and device_id:
+        add(f"{entry_id}:{subentry_identifier}:{device_id}")
+
+    # Subentry key variant (if different from identifier)
+    if entry_id and subentry_key and subentry_key != subentry_identifier and device_id:
+        add(f"{entry_id}:{subentry_key}:{device_id}")
+
+    # Entry:device format
+    if entry_id and device_id:
+        add(f"{entry_id}:{device_id}")
+
+    # Domain_entry_device format
+    if entry_id and device_id:
+        add(f"{domain}_{entry_id}_{device_id}")
+
+    # Legacy domain_device format
+    if device_id:
+        add(f"{domain}_{device_id}")
+
+    return candidates
+
+
+def build_canonical_unique_id(
+    entry_id: str | None,
+    subentry_identifier: str | None,
+    device_id: str | None,
+) -> str | None:
+    """Build canonical unique_id from components.
+
+    Format: entry_id:subentry_identifier:device_id
+    Skips empty components (except device_id which is required).
+
+    Args:
+        entry_id: The config entry ID.
+        subentry_identifier: The stable subentry identifier.
+        device_id: The device ID.
+
+    Returns:
+        Canonical unique_id string, or None if required parts are missing.
+    """
+    # Entry_id is required
+    if not entry_id or not isinstance(entry_id, str):
+        return None
+    entry_id = entry_id.strip()
+    if not entry_id:
+        return None
+
+    # Device_id is required
+    if not device_id or not isinstance(device_id, str):
+        return None
+    device_id = device_id.strip()
+    if not device_id:
+        return None
+
+    # Subentry_identifier is optional
+    parts: list[str] = [entry_id]
+
+    if subentry_identifier and isinstance(subentry_identifier, str):
+        stripped = subentry_identifier.strip()
+        if stripped:
+            parts.append(stripped)
+
+    parts.append(device_id)
+
+    return ":".join(parts)
+
+
+def is_legacy_unique_id(unique_id: Any, domain: str) -> bool:
+    """Detect if a unique_id is in legacy format.
+
+    Legacy formats use underscore separation:
+    - domain_device_id
+    - domain_entry_id_device_id
+
+    Modern formats use colon separation:
+    - entry_id:device_id
+    - entry_id:subentry:device_id
+
+    Args:
+        unique_id: The unique_id to check.
+        domain: The integration domain.
+
+    Returns:
+        True if unique_id is in legacy underscore format.
+    """
+    if not isinstance(unique_id, str) or not unique_id:
+        return False
+
+    prefix = f"{domain}_"
+
+    # Must start with domain_
+    if not unique_id.startswith(prefix):
+        return False
+
+    # Must have content after prefix
+    suffix = unique_id[len(prefix) :]
+    if not suffix:
+        return False
+
+    # Legacy format uses underscores, not colons
+    # If it contains colons, it's the modern format
+    if ":" in unique_id:
+        return False
+
+    return True
+
+
+def match_entity_by_device_id(
+    unique_id: Any,
+    config_entry_id: str | None,
+    device_id: str,
+    target_entry_id: str | None,
+    domain: str,
+    platform: str,
+    entity_domain: str,
+    entity_platform: str,
+) -> bool:
+    """Check if an entity registry entry matches device criteria.
+
+    Used for fallback entity lookup when direct unique_id match fails.
+
+    Args:
+        unique_id: The entity's unique_id.
+        config_entry_id: The entity's config_entry_id.
+        device_id: The device ID to match (must be contained in unique_id).
+        target_entry_id: The target entry ID to filter by (or None for no filter).
+        domain: The expected domain (e.g., "device_tracker").
+        platform: The expected platform (e.g., "googlefindmy").
+        entity_domain: The entity's actual domain.
+        entity_platform: The entity's actual platform.
+
+    Returns:
+        True if the entity matches all criteria.
+    """
+    # Validate required inputs
+    if not device_id or not isinstance(device_id, str):
+        return False
+
+    # Check domain and platform match
+    if entity_domain != domain or entity_platform != platform:
+        return False
+
+    # Check config_entry_id if target is specified
+    if target_entry_id is not None and config_entry_id is not None:
+        if config_entry_id != target_entry_id:
+            return False
+
+    # Check unique_id contains device_id
+    if not isinstance(unique_id, str):
+        return False
+
+    return device_id in unique_id
