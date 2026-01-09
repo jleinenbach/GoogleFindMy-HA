@@ -1,14 +1,23 @@
 """Subentry utilities for the coordinator.
 
 This module contains pure functions for subentry operations extracted from
-coordinator.py for improved testability and maintainability (Phase 5).
+coordinator.py for improved testability and maintainability (Phases 5 & 6).
 
-Contents:
+Contents (Phase 5):
 - sanitize_subentry_identifier(): Normalize subentry identifiers
 - normalize_epoch_seconds(): Epoch normalization with ms/s tolerance
 - format_epoch_utc(): Format epoch to ISO 8601 UTC string
 - parse_last_seen_timestamp(): Parse timestamp from various formats
 - group_devices_by_subentry(): Group devices by subentry key
+
+Contents (Phase 6 - _refresh_subentry_index helpers):
+- filter_provisional_identifier(): Filter provisional subentry IDs
+- extract_subentry_group_key(): Extract group key from subentry data
+- build_device_index_from_list(): Build device index from device list
+- normalize_features_list(): Normalize a features list
+- normalize_visible_device_id_list(): Normalize visible device IDs
+- compute_stable_subentry_id(): Compute stable subentry ID
+- detect_missing_core_subentry_keys(): Detect missing core keys
 """
 
 from __future__ import annotations
@@ -19,11 +28,20 @@ from datetime import UTC, datetime
 from typing import Any
 
 __all__ = [
+    # Phase 5
     "format_epoch_utc",
     "group_devices_by_subentry",
     "normalize_epoch_seconds",
     "parse_last_seen_timestamp",
     "sanitize_subentry_identifier",
+    # Phase 6
+    "build_device_index_from_list",
+    "compute_stable_subentry_id",
+    "detect_missing_core_subentry_keys",
+    "extract_subentry_group_key",
+    "filter_provisional_identifier",
+    "normalize_features_list",
+    "normalize_visible_device_id_list",
 ]
 
 
@@ -199,3 +217,210 @@ def group_devices_by_subentry(
         grouped.setdefault(target_key, []).append(dict(row))
 
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: _refresh_subentry_index Helpers
+# ---------------------------------------------------------------------------
+
+
+def filter_provisional_identifier(
+    identifier: str | None,
+    group_key: str,
+    entry_subentry_id: str | None,
+    core_service_key: str = "core_service",
+    core_tracker_key: str = "core_tracking",
+) -> tuple[str | None, bool]:
+    """Filter provisional subentry identifiers.
+
+    Provisional identifiers (ending with '-provisional') are filtered to None
+    unless they match the entry's stable subentry ID.
+
+    Args:
+        identifier: The subentry identifier to filter.
+        group_key: The group key for this subentry.
+        entry_subentry_id: The entry's stable subentry ID for this group.
+        core_service_key: The key for service subentries.
+        core_tracker_key: The key for tracker subentries.
+
+    Returns:
+        Tuple of (filtered_identifier, was_provisional_filtered).
+        was_provisional_filtered is True if a provisional ID was filtered.
+    """
+    if identifier is None:
+        return None, False
+
+    if not identifier.endswith("-provisional"):
+        return identifier, False
+
+    # Check if this provisional matches the entry's stable ID
+    if group_key == core_service_key and identifier == entry_subentry_id:
+        return identifier, False
+    if group_key == core_tracker_key and identifier == entry_subentry_id:
+        return identifier, False
+
+    # Filter out non-matching provisional IDs
+    return None, True
+
+
+def extract_subentry_group_key(
+    data: Mapping[str, Any] | None,
+    subentry_id: str | None,
+    fallback: str = "core_tracking",
+) -> str:
+    """Extract the group key from subentry data.
+
+    Falls back to subentry_id, then to the fallback value.
+
+    Args:
+        data: Subentry data dict containing optional 'group_key'.
+        subentry_id: Fallback subentry ID.
+        fallback: Final fallback value if nothing else found.
+
+    Returns:
+        The extracted group key as a string.
+    """
+    if data is not None:
+        group_key = data.get("group_key")
+        if group_key is not None:
+            return str(group_key)
+
+    if subentry_id is not None:
+        return str(subentry_id)
+
+    return fallback
+
+
+def build_device_index_from_list(
+    devices: Sequence[Any],
+    ignored_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Build a device index from a list of device dicts.
+
+    Pure function that processes device dicts and builds an index.
+    Handles both 'id' and 'device_id' fields.
+
+    Args:
+        devices: Sequence of device dicts.
+        ignored_ids: Set of device IDs to ignore.
+
+    Returns:
+        Dict mapping device_id to device info dict.
+    """
+    device_index: dict[str, dict[str, Any]] = {}
+
+    for dev in devices:
+        if not isinstance(dev, Mapping):
+            continue
+
+        dev_id = dev.get("id")
+        if not isinstance(dev_id, str) or not dev_id:
+            # Fallback to device_id field
+            fallback_id = dev.get("device_id")
+            if isinstance(fallback_id, str) and fallback_id:
+                dev_id = fallback_id
+            else:
+                continue
+
+        if dev_id in ignored_ids:
+            continue
+
+        name = dev.get("name") if isinstance(dev.get("name"), str) else None
+        device_index.setdefault(dev_id, {"id": dev_id, "name": name})
+
+    return device_index
+
+
+def normalize_features_list(
+    raw_features: Any,
+    default_features: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Normalize a features list to a sorted tuple of unique strings.
+
+    Args:
+        raw_features: Raw features as list, tuple, set, or other type.
+        default_features: Default features if raw_features is invalid.
+
+    Returns:
+        Sorted tuple of unique feature strings.
+    """
+    if not isinstance(raw_features, (list, tuple, set)):
+        return default_features
+
+    normalized = tuple(
+        sorted({str(feature) for feature in raw_features if isinstance(feature, str)})
+    )
+
+    return normalized if normalized else default_features
+
+
+def normalize_visible_device_id_list(
+    raw_allowed: Any,
+) -> set[str] | None:
+    """Normalize a list of visible device IDs.
+
+    Strips namespace prefixes (entry_id:device_id format) and filters
+    empty/invalid entries.
+
+    Args:
+        raw_allowed: Raw list of device IDs.
+
+    Returns:
+        Set of normalized device IDs, or None if empty/invalid.
+    """
+    if not isinstance(raw_allowed, (list, tuple, set)):
+        return None
+
+    collected: set[str] = set()
+    for item in raw_allowed:
+        if not isinstance(item, str) or not item:
+            continue
+        # Strip namespace prefix if present
+        cleaned = item.rsplit(":", 1)[-1] if ":" in item else item
+        if cleaned:
+            collected.add(cleaned)
+
+    return collected if collected else None
+
+
+def compute_stable_subentry_id(
+    entry_id: str | None,
+    group_key: str,
+    provisional_seen: bool,
+) -> str | None:
+    """Compute a stable subentry ID from entry_id and group_key.
+
+    Args:
+        entry_id: The config entry ID.
+        group_key: The subentry group key.
+        provisional_seen: Whether a provisional ID was seen for this group.
+
+    Returns:
+        Stable subentry ID string, or None if cannot be computed.
+    """
+    if not isinstance(entry_id, str) or not entry_id:
+        return None
+
+    if provisional_seen:
+        return None
+
+    return f"{entry_id}-{group_key}-subentry"
+
+
+def detect_missing_core_subentry_keys(
+    present_keys: set[str],
+    service_key: str = "core_service",
+    tracker_key: str = "core_tracking",
+) -> set[str]:
+    """Detect which core subentry keys are missing.
+
+    Args:
+        present_keys: Set of currently present subentry group keys.
+        service_key: The service subentry key.
+        tracker_key: The tracker subentry key.
+
+    Returns:
+        Set of missing core keys.
+    """
+    required = {service_key, tracker_key}
+    return required - present_keys
