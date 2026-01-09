@@ -7100,6 +7100,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             return
 
         # Shallow copy to avoid caller-side mutation
+        from .coordinator_cache import (
+            preserve_metadata_fields,
+            should_clear_metadata_only_flag,
+        )
+
         slot = dict(location_data)
 
         previous_cached = self._device_location_data.get(device_id)
@@ -7107,29 +7112,17 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             previous_cached = None
         comparison_cached = previous_cached
 
-        if isinstance(previous_cached, Mapping):
-            for metadata_key in _PERSISTED_METADATA_KEYS:
-                cached_value = previous_cached.get(metadata_key)
-                incoming_value = slot.get(metadata_key)
-                if cached_value is None or incoming_value is not None:
-                    continue
+        # Preserve metadata fields from previous cache using helper
+        slot = preserve_metadata_fields(previous_cached, slot, _PERSISTED_METADATA_KEYS)
 
-                if isinstance(cached_value, dict):
-                    slot[metadata_key] = dict(cached_value)
-                elif isinstance(cached_value, list):
-                    slot[metadata_key] = list(cached_value)
-                else:
-                    slot[metadata_key] = cached_value
-
+        # Handle metadata_only flag using helper
         incoming_metadata_only = location_data.get("metadata_only")
+        if should_clear_metadata_only_flag(slot, incoming_metadata_only):
+            slot.pop("metadata_only", None)
+
         has_location_payload = (
             slot.get("latitude") is not None or slot.get("longitude") is not None
         )
-        if slot.get("metadata_only") and incoming_metadata_only is False:
-            slot.pop("metadata_only", None)
-        elif slot.get("metadata_only") and has_location_payload and incoming_metadata_only is not True:
-            slot.pop("metadata_only", None)
-
         clear_metadata_only = has_location_payload and incoming_metadata_only is not True
         self._persist_anchor_metadata(
             device_id, slot, clear_metadata_only=clear_metadata_only
