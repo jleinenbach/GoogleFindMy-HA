@@ -123,10 +123,31 @@ from .coordinator_registry import (
     extract_device_display_name as _extract_display_name_impl,
 )
 from .coordinator_registry import (
+    extract_service_subentry_ids as _extract_service_subentry_ids_impl,
+)
+from .coordinator_registry import (
+    has_hub_link as _has_hub_link_impl,
+)
+from .coordinator_registry import (
+    has_subentry_link as _has_subentry_link_impl,
+)
+from .coordinator_registry import (
+    is_hub_device_check as _is_hub_device_check_impl,
+)
+from .coordinator_registry import (
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
 )
 from .coordinator_registry import (
+    normalize_device_name as _normalize_device_name_impl,
+)
+from .coordinator_registry import (
     parse_device_identifier as _parse_identifier_impl,
+)
+from .coordinator_registry import (
+    resolve_tracker_subentry_candidate as _resolve_tracker_subentry_impl,
+)
+from .coordinator_registry import (
+    should_defer_service_subentry as _should_defer_service_subentry_impl,
 )
 from .coordinator_stats import (
     ApiStatus,
@@ -140,6 +161,15 @@ from .coordinator_stats import (
 )
 from .coordinator_stats import (
     short_error_message as _short_error_message_impl,
+)
+from .coordinator_subentry import (
+    detect_missing_core_subentry_keys as _detect_missing_core_keys_impl,
+)
+from .coordinator_subentry import (
+    extract_subentry_group_key as _extract_group_key_impl,
+)
+from .coordinator_subentry import (
+    filter_provisional_identifier as _filter_provisional_impl,
 )
 from .coordinator_subentry import (
     format_epoch_utc as _format_epoch_utc_impl,
@@ -1326,29 +1356,35 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         if entry and getattr(entry, "subentries", None):
             for subentry in entry.subentries.values():
                 data = dict(getattr(subentry, "data", {}) or {})
-                group_key = str(
-                    data.get("group_key")
-                    or getattr(subentry, "subentry_id", None)
-                    or "core_tracking"
-                )
+                subentry_id_raw = getattr(subentry, "subentry_id", None)
+                group_key = _extract_group_key_impl(data, subentry_id_raw)
                 if group_key in (SERVICE_SUBENTRY_KEY, TRACKER_SUBENTRY_KEY):
                     core_group_keys_present.add(group_key)
-                identifier = _sanitize_subentry_identifier(
-                    getattr(subentry, "subentry_id", None)
-                )
-                if identifier is not None and identifier.endswith("-provisional"):
-                    if (
-                        group_key == SERVICE_SUBENTRY_KEY
-                        and identifier != entry_service_subentry_id
-                    ) or (
-                        group_key == TRACKER_SUBENTRY_KEY
-                        and identifier != entry_tracker_subentry_id
-                    ):
-                        if group_key == SERVICE_SUBENTRY_KEY:
-                            service_provisional_seen = True
-                        if group_key == TRACKER_SUBENTRY_KEY:
-                            tracker_provisional_seen = True
-                        identifier = None
+                identifier = _sanitize_subentry_identifier(subentry_id_raw)
+
+                # Use filter_provisional_identifier for service subentries
+                if group_key == SERVICE_SUBENTRY_KEY:
+                    identifier, was_filtered = _filter_provisional_impl(
+                        identifier,
+                        group_key,
+                        entry_service_subentry_id,
+                        SERVICE_SUBENTRY_KEY,
+                        TRACKER_SUBENTRY_KEY,
+                    )
+                    if was_filtered:
+                        service_provisional_seen = True
+                # Use filter_provisional_identifier for tracker subentries
+                elif group_key == TRACKER_SUBENTRY_KEY:
+                    identifier, was_filtered = _filter_provisional_impl(
+                        identifier,
+                        group_key,
+                        entry_tracker_subentry_id,
+                        SERVICE_SUBENTRY_KEY,
+                        TRACKER_SUBENTRY_KEY,
+                    )
+                    if was_filtered:
+                        tracker_provisional_seen = True
+
                 raw_entries.append(
                     (
                         group_key,
@@ -1359,10 +1395,11 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
 
         if entry is not None:
-            missing_core_keys = {
+            missing_core_keys = _detect_missing_core_keys_impl(
+                core_group_keys_present,
                 SERVICE_SUBENTRY_KEY,
                 TRACKER_SUBENTRY_KEY,
-            } - core_group_keys_present
+            )
         else:
             missing_core_keys = set()
 
@@ -2245,26 +2282,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         )
 
         entry_subentries = getattr(entry, "subentries", None)
-        service_subentry_ids: set[str] = set()
-        if isinstance(entry_subentries, Mapping):
-            for subentry_id, subentry in entry_subentries.items():
-                normalized_id = _normalize_subentry_id(subentry_id)
-                if normalized_id is None:
-                    continue
-                if (
-                    normalized_id.endswith("-provisional")
-                    and normalized_id != entry_service_subentry_id
-                ):
-                    continue
-                subentry_type = getattr(subentry, "subentry_type", None)
-                group_key: Any = None
-                data_obj = getattr(subentry, "data", None)
-                if isinstance(data_obj, Mapping):
-                    group_key = data_obj.get("group_key")
-                if subentry_type == SUBENTRY_TYPE_SERVICE or (
-                    isinstance(group_key, str) and group_key == SERVICE_SUBENTRY_KEY
-                ):
-                    service_subentry_ids.add(normalized_id)
+        service_subentry_ids = _extract_service_subentry_ids_impl(
+            entry_subentries,
+            entry_service_subentry_id,
+            SUBENTRY_TYPE_SERVICE,
+            SERVICE_SUBENTRY_KEY,
+        )
 
         def _is_real_service_subentry(candidate: Any) -> str | None:
             """Return candidate when it matches a confirmed service subentry.
@@ -2307,32 +2330,29 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 break
 
         current_subentries = getattr(entry, "subentries", None)
-        if (
+        if _should_defer_service_subentry_impl(
+            service_config_subentry_id,
+            current_subentries,
+            entry_id,
+            SERVICE_SUBENTRY_KEY,
+        ):
+            _LOGGER.debug(
+                "[%s] Deferring unknown service config_subentry_id %s until registry catches up",
+                entry.entry_id,
+                service_config_subentry_id,
+            )
+            service_config_subentry_id = None
+        elif (
             service_config_subentry_id is not None
             and isinstance(current_subentries, Mapping)
-            and service_config_subentry_id
-            not in {_normalize_subentry_id(key) for key in current_subentries}
+            and service_config_subentry_id not in current_subentries
         ):
-            stable_default: str | None = None
-            if isinstance(entry_id, str) and entry_id:
-                stable_default = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-subentry"
-
-            if (
-                stable_default is not None
-                and service_config_subentry_id == stable_default
-            ):
-                _LOGGER.debug(
-                    "[%s] Applying stable default service config_subentry_id %s (registry not ready)",
-                    entry.entry_id,
-                    service_config_subentry_id,
-                )
-            else:
-                _LOGGER.debug(
-                    "[%s] Deferring unknown service config_subentry_id %s until registry catches up",
-                    entry.entry_id,
-                    service_config_subentry_id,
-                )
-                service_config_subentry_id = None
+            # Log when using stable default (not deferred but also not in subentries)
+            _LOGGER.debug(
+                "[%s] Applying stable default service config_subentry_id %s (registry not ready)",
+                entry.entry_id,
+                service_config_subentry_id,
+            )
 
         service_subentry_identifier: tuple[str, str] | None = None
         if service_config_subentry_id is not None:
@@ -2425,10 +2445,12 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         def _service_has_service_link(device: Any) -> bool:
             if service_config_subentry_id is None:
                 return False
-            return service_config_subentry_id in _service_entry_links(device)
+            links = _service_entry_links(device)
+            return _has_subentry_link_impl(links, service_config_subentry_id)
 
         def _service_has_hub_link(device: Any) -> bool:
-            return None in _service_entry_links(device)
+            links = _service_entry_links(device)
+            return _has_hub_link_impl(links)
 
         def _detach_service_hub_link(device: Any) -> Any:
             update_call = getattr(dev_reg, "async_update_device", None)
@@ -3253,56 +3275,25 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         )
 
         entry_subentries = getattr(entry, "subentries", None)
-        tracker_subentry_ids: set[str] = set()
-        if isinstance(entry_subentries, Mapping):
-            for subentry_id, subentry in entry_subentries.items():
-                normalized_id = _normalize_tracker_subentry_id(subentry_id)
-                if normalized_id is None:
-                    continue
-                if (
-                    normalized_id.endswith("-provisional")
-                    and normalized_id != entry_tracker_subentry_id
-                ):
-                    continue
-                subentry_type = getattr(subentry, "subentry_type", None)
-                group_key: Any = None
-                data_obj = getattr(subentry, "data", None)
-                if isinstance(data_obj, Mapping):
-                    group_key = data_obj.get("group_key")
-                if subentry_type == SUBENTRY_TYPE_TRACKER or (
-                    isinstance(group_key, str) and group_key == TRACKER_SUBENTRY_KEY
-                ):
-                    tracker_subentry_ids.add(normalized_id)
-
-        def _resolve_tracker_subentry(candidate: Any) -> str | None:
-            normalized_candidate = _normalize_tracker_subentry_id(candidate)
-            if normalized_candidate is None:
-                return None
-
-            if entry_tracker_subentry_id is not None:
-                if normalized_candidate != entry_tracker_subentry_id:
-                    return None
-                if (
-                    tracker_subentry_ids
-                    and normalized_candidate not in tracker_subentry_ids
-                ):
-                    return None
-                return normalized_candidate
-
-            if tracker_subentry_ids and normalized_candidate in tracker_subentry_ids:
-                return normalized_candidate
-
-            if not tracker_subentry_ids:
-                return normalized_candidate
-
-            return None
+        # Reuse extract_service_subentry_ids with tracker type constants
+        tracker_subentry_ids = _extract_service_subentry_ids_impl(
+            entry_subentries,
+            entry_tracker_subentry_id,
+            SUBENTRY_TYPE_TRACKER,
+            TRACKER_SUBENTRY_KEY,
+        )
 
         tracker_config_subentry_id = None
         tracker_meta_identifier: Any | None = None
         if tracker_meta is not None:
             tracker_meta_identifier = getattr(tracker_meta, "config_subentry_id", None)
         for candidate in (tracker_meta_identifier, entry_tracker_subentry_id):
-            resolved_tracker = _resolve_tracker_subentry(candidate)
+            normalized_candidate = _normalize_tracker_subentry_id(candidate)
+            resolved_tracker = _resolve_tracker_subentry_impl(
+                normalized_candidate,
+                entry_tracker_subentry_id,
+                tracker_subentry_ids,
+            )
             if resolved_tracker is not None:
                 tracker_config_subentry_id = resolved_tracker
                 break
@@ -3329,10 +3320,8 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         get_device_by_id = getattr(dev_reg, "async_get", None)
         created_or_updated = 0
 
-        def _normalized_name(name: Any) -> str | None:
-            if isinstance(name, str) and name.strip():
-                return name.strip().casefold()
-            return None
+        # Use imported helper for name normalization
+        _normalized_name = _normalize_device_name_impl
 
         hub_device = None
         hub_device_id: str | None = None
@@ -3376,20 +3365,14 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
 
         def _is_hub_device(device: Any | None) -> bool:
             """Return True when ``device`` represents the hub/service anchor."""
-
             if device is None:
                 return False
-            if (
-                hub_device_id is not None
-                and getattr(device, "id", None) == hub_device_id
-            ):
-                return True
-            identifiers = getattr(device, "identifiers", None)
-            if isinstance(identifiers, Collection) and not isinstance(
-                identifiers, (str, bytes, Mapping)
-            ):
-                return parent_identifier in identifiers
-            return False
+            return _is_hub_device_check_impl(
+                getattr(device, "id", None),
+                hub_device_id,
+                getattr(device, "identifiers", None),
+                parent_identifier,
+            )
 
         def _resolve_hub_name(
             use_name: str | None, *, device_label: str, device_id: str | None
