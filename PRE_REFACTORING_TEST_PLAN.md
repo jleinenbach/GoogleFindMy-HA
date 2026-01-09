@@ -1,425 +1,362 @@
 # Pre-Refactoring Test Plan
 
-**Ziel**: Sicherstellen, dass alle kritischen Funktionen vor dem Refactoring ausreichend getestet sind, um Regressionen zu erkennen.
+**Ziel**: Sicherstellen, dass alle kritischen Funktionen vor dem Refactoring **100% Test-Coverage** haben, mit besonderem Fokus auf Risiken und Edge-Cases.
+
+---
+
+## ⚠️ KRITISCHE ANFORDERUNG: 100% TEST-COVERAGE
+
+> **KEINE Extraktion ohne vorherige Tests!**
+>
+> Jede zu extrahierende Funktion MUSS vor dem Refactoring:
+> 1. **100% Branch-Coverage** haben
+> 2. **Risiko-fokussierte Tests** für alle Edge-Cases
+> 3. **Alle Tests müssen bestehen**
 
 ---
 
 ## 1. Aktuelle Test-Abdeckung
 
-### 1.1 Vorhandene Coordinator-Tests (17 Dateien)
+### 1.1 Abgeschlossene Phasen (1-5)
 
-| Test-Datei | Tests | Fokus |
-|------------|-------|-------|
-| `test_coordinator.py` | ~15 | Basis-Funktionalität |
-| `test_coordinator_device_registry.py` | 40 | Device-Registry ✅ |
-| `test_coordinator_significance.py` | 10 | Signifikanz-Updates ✅ |
-| `test_coordinator_subentry_repair.py` | ~8 | Subentry-Reparatur ✅ |
-| `test_coordinator_subentry_visibility.py` | 3 | Sichtbarkeit |
-| `test_coordinator_status.py` | ~12 | Status-Management |
-| `test_coordinator_semantic_mappings.py` | ~8 | Semantic Labels |
-| `test_coordinator_timeout.py` | ~6 | Timeout-Handling |
-| `test_coordinator_snapshot.py` | ~5 | Snapshot-Building |
-| Weitere... | ~30 | Diverse |
+| Modul | Tests | Coverage | Status |
+|-------|-------|----------|--------|
+| `coordinator_geo.py` | 52 | 100% | ✅ Fertig |
+| `coordinator_stats.py` | 63 | 100% | ✅ Fertig |
+| `coordinator_cache.py` | 48 | 100% | ✅ Fertig |
+| `coordinator_registry.py` | 56 | 100% | ✅ Fertig |
+| `coordinator_subentry.py` | 70 | 100% | ✅ Fertig |
 
-### 1.2 Abdeckung kritischer Funktionen
+### 1.2 Ausstehende Phasen (6-10) - Coverage-Status
 
-| Funktion | Komplexität | Tests vorhanden | Lücken |
-|----------|-------------|-----------------|--------|
-| `_refresh_subentry_index` | 139 | ⚠️ Teilweise | Edge-Cases fehlen |
-| `get_active_device_identities` | 128 | ⚠️ Indirekt | Direkte Unit-Tests fehlen |
-| `_ensure_registry_for_devices` | 126 | ✅ Gut | - |
-| `_ensure_service_device_exists` | 108 | ✅ Gut | - |
-| `_async_update_data` | 100 | ⚠️ Teilweise | Error-Paths |
-| `update_device_cache` | 45 | ✅ Gut | - |
-| `_haversine_distance` | ~5 | ✅ Vorhanden | Mehr Edge-Cases |
-| `_is_significant_update` | ~15 | ✅ Gut | - |
-| `_merge_with_existing_cache_row` | 37 | ⚠️ Teilweise | Fusion-Logik |
+| Funktion | Komplexität | Aktuelle Coverage | Ziel | Lücken |
+|----------|-------------|-------------------|------|--------|
+| `_refresh_subentry_index` | 139 | ⚠️ ~60% | 100% | Edge-Cases, Race-Conditions |
+| `get_active_device_identities` | 128 | ⚠️ ~50% | 100% | Multi-Account, Key-Priority |
+| `_ensure_registry_for_devices` | 126 | ⚠️ ~70% | 100% | Link-Healing, Legacy-Compat |
+| `_ensure_service_device_exists` | 108 | ⚠️ ~65% | 100% | Multi-Account, Updates |
+| `_async_update_data` | 100 | ⚠️ ~55% | 100% | Error-Paths, State-Updates |
 
 ---
 
-## 2. Erforderliche Tests vor Refactoring
+## 2. Risiko-Kategorien und Test-Anforderungen
 
-### 2.1 Phase 1: `coordinator_geo.py` - NIEDRIG RISIKO
-
-**Benötigte Tests**: `tests/test_coordinator_geo.py`
+### 2.1 Eingabe-Validierung (RISIKO: Crash)
 
 ```python
-# Haversine Distance Tests
-def test_haversine_distance_same_point():
-    """Distance between identical points should be 0."""
-
-def test_haversine_distance_known_cities():
-    """Verify with known distances (Berlin-Munich ~504km)."""
-
-def test_haversine_distance_antipodal():
-    """Maximum distance (antipodal points) ~20,000km."""
-
-def test_haversine_distance_symmetry():
-    """d(A,B) == d(B,A)."""
-
-# Coordinate Normalization Tests
-def test_normalize_coords_valid():
-    """Valid lat/lon should pass through."""
-
-def test_normalize_coords_out_of_range():
-    """Lat > 90 or Lon > 180 should return None."""
-
-def test_normalize_coords_string_input():
-    """String numbers should be converted."""
-
-def test_normalize_coords_none_handling():
-    """None input should return None."""
-
-# Significance Tests (bereits vorhanden, erweitern)
-def test_significant_update_distance_threshold():
-    """Movement > threshold is significant."""
-
-def test_significant_update_accuracy_improvement():
-    """Better accuracy is significant."""
-
-def test_significant_update_same_location():
-    """Same location with same accuracy is not significant."""
-
-# Weighted Fusion Tests
-def test_weighted_fusion_single_location():
-    """Single location returns unchanged."""
-
-def test_weighted_fusion_accuracy_weighting():
-    """More accurate location has higher weight."""
-
-def test_weighted_fusion_equal_accuracy():
-    """Equal accuracy results in average."""
+# MUSS getestet werden:
+- Leere Listen/Dicts
+- None-Werte
+- Fehlende Keys in Dicts
+- Ungültige Typen
+- Sehr große Datenmengen (Performance)
 ```
 
-**Property-Based Tests (Hypothesis)**:
+### 2.2 State-Konsistenz (RISIKO: Daten-Korruption)
+
 ```python
-@given(
-    lat=st.floats(min_value=-90, max_value=90, allow_nan=False),
-    lon=st.floats(min_value=-180, max_value=180, allow_nan=False),
-)
-def test_haversine_distance_to_self_is_zero(lat, lon):
-    assert haversine_distance(lat, lon, lat, lon) == 0
+# MUSS getestet werden:
+- State vor/nach Operation
+- Parallele Aufrufe (Race-Conditions)
+- Partial Failure (Rollback?)
+- Idempotenz (mehrfacher Aufruf = gleicher State)
+```
 
-@given(
-    lat1=st.floats(min_value=-90, max_value=90, allow_nan=False),
-    lon1=st.floats(min_value=-180, max_value=180, allow_nan=False),
-    lat2=st.floats(min_value=-90, max_value=90, allow_nan=False),
-    lon2=st.floats(min_value=-180, max_value=180, allow_nan=False),
-)
-def test_haversine_symmetric(lat1, lon1, lat2, lon2):
-    d1 = haversine_distance(lat1, lon1, lat2, lon2)
-    d2 = haversine_distance(lat2, lon2, lat1, lon1)
-    assert abs(d1 - d2) < 0.001
+### 2.3 Fehlerbehandlung (RISIKO: Silent Failures)
 
-@given(
-    lat1=st.floats(min_value=-90, max_value=90, allow_nan=False),
-    lon1=st.floats(min_value=-180, max_value=180, allow_nan=False),
-    lat2=st.floats(min_value=-90, max_value=90, allow_nan=False),
-    lon2=st.floats(min_value=-180, max_value=180, allow_nan=False),
-)
-def test_haversine_non_negative(lat1, lon1, lat2, lon2):
-    assert haversine_distance(lat1, lon1, lat2, lon2) >= 0
+```python
+# MUSS getestet werden:
+- Exception-Handling
+- Timeout-Verhalten
+- Rate-Limiting
+- Auth-Fehler
+- Netzwerk-Fehler
+```
+
+### 2.4 Kompatibilität (RISIKO: Regression)
+
+```python
+# MUSS getestet werden:
+- Legacy-HA-Versionen
+- Multi-Account-Szenarien
+- Migration von alten Daten
+- Backwards-Compatibility
 ```
 
 ---
 
-### 2.2 Phase 2: `coordinator_stats.py` - NIEDRIG RISIKO
+## 3. Test-Anforderungen pro Phase
 
-**Benötigte Tests**: `tests/test_coordinator_stats.py`
+### Phase 6: `_refresh_subentry_index` (Komplexität 139)
+
+**Test-Datei**: `tests/test_coordinator_subentry_index.py`
+
+**Mindest-Tests (15)**:
 
 ```python
-# Metric Tests
-def test_increment_stat_new_key():
-    """New stat starts at 1."""
+class TestRefreshSubentryIndexRisks:
+    """100% Coverage für _refresh_subentry_index."""
 
-def test_increment_stat_existing():
-    """Existing stat increments."""
+    # === EINGABE-VALIDIERUNG ===
+    def test_empty_device_list_returns_empty_index(self): ...
+    def test_none_in_device_list_filtered(self): ...
+    def test_malformed_device_dict_skipped(self): ...
+    def test_missing_required_keys_handled(self): ...
 
-def test_safe_update_metric():
-    """Metric update works without errors."""
+    # === SUBENTRY-ID-LOGIK ===
+    def test_extracts_subentry_from_device(self): ...
+    def test_duplicate_subentry_ids_deduplicated(self): ...
+    def test_provisional_ids_not_persisted(self): ...
+    def test_stable_subentry_identifier_consistency(self): ...
 
-def test_get_metric_missing():
-    """Missing metric returns None."""
+    # === STATE-KONSISTENZ ===
+    def test_preserves_existing_metadata_for_known_keys(self): ...
+    def test_removes_stale_entries_not_in_devices(self): ...
+    def test_concurrent_refresh_calls_safe(self): ...
+    def test_refresh_idempotent(self): ...
 
-# Duration Tests
-def test_get_duration_valid():
-    """Duration between two timestamps."""
+    # === PERFORMANCE ===
+    def test_handles_100_plus_devices(self): ...
 
-def test_get_duration_missing_end():
-    """Missing end returns None."""
-
-# Persistence Tests
-async def test_async_load_stats_new():
-    """Fresh installation has empty stats."""
-
-async def test_async_save_stats():
-    """Stats are persisted correctly."""
-
-async def test_debounced_save_stats():
-    """Multiple saves are debounced."""
-
-# Error Tracking Tests
-def test_append_recent_error():
-    """Error is added to list."""
-
-def test_recent_errors_max_size():
-    """Error list has max size limit."""
-
-def test_note_error_with_exception():
-    """Exception is properly formatted."""
-
-# Diagnostics Buffer Tests
-def test_diagnostics_buffer_add_warning():
-    """Warning is categorized correctly."""
-
-def test_diagnostics_buffer_add_error():
-    """Error is categorized correctly."""
-
-def test_diagnostics_buffer_to_dict():
-    """Serialization works."""
+    # === LISTENER-BENACHRICHTIGUNG ===
+    def test_notifies_listeners_on_change(self): ...
+    def test_no_notification_when_unchanged(self): ...
 ```
+
+**Coverage-Ziel**: 100% Branch-Coverage
 
 ---
 
-### 2.3 Phase 3: `coordinator_cache.py` - MITTLERES RISIKO
+### Phase 7: `get_active_device_identities` (Komplexität 128)
 
-**Benötigte Tests**: `tests/test_coordinator_cache.py`
+**Test-Datei**: `tests/test_coordinator_identity.py`
+
+**Mindest-Tests (12)**:
 
 ```python
-# Cache Update Tests (erweitern bestehende)
-def test_update_cache_new_device():
-    """New device is added to cache."""
+class TestGetActiveDeviceIdentitiesRisks:
+    """100% Coverage für get_active_device_identities."""
 
-def test_update_cache_existing_device():
-    """Existing device is updated."""
+    # === KEY-AUSWAHL ===
+    def test_prefers_primary_key(self): ...
+    def test_fallback_to_secondary_key(self): ...
+    def test_no_valid_key_skips_device(self): ...
+    def test_key_priority_order_respected(self): ...
 
-def test_update_cache_stale_data_rejected():
-    """Older timestamp is rejected."""
+    # === MULTI-ACCOUNT ===
+    def test_multiple_accounts_handled(self): ...
+    def test_account_isolation_enforced(self): ...
+    def test_cross_account_device_id_collision(self): ...
 
-def test_update_cache_metadata_only():
-    """Metadata-only update preserves location."""
+    # === DEVICE-STATUS ===
+    def test_skips_disabled_devices(self): ...
+    def test_skips_ignored_devices(self): ...
+    def test_includes_enabled_devices(self): ...
 
-# Merge Tests
-def test_merge_preserves_newer_location():
-    """Newer location wins."""
-
-def test_merge_preserves_better_accuracy():
-    """Better accuracy wins on same timestamp."""
-
-def test_merge_fusion_overlapping():
-    """Overlapping locations are fused."""
-
-# Last Seen Tests
-def test_get_device_last_seen_exists():
-    """Returns datetime for known device."""
-
-def test_get_device_last_seen_missing():
-    """Returns None for unknown device."""
-
-def test_seed_device_last_seen():
-    """Seeding sets initial timestamp."""
-
-# Presence Tests
-def test_is_device_present_active():
-    """Recently seen device is present."""
-
-def test_is_device_present_stale():
-    """Old device is not present."""
-
-def test_get_absent_device_ids():
-    """Returns list of stale devices."""
-
-# Purge Tests
-def test_purge_device():
-    """Device is removed from all caches."""
+    # === EID-INTEGRATION ===
+    def test_includes_eid_when_available(self): ...
+    def test_handles_missing_eid(self): ...
 ```
+
+**Coverage-Ziel**: 100% Branch-Coverage
 
 ---
 
-### 2.4 Phase 4: `coordinator_registry.py` - HOHES RISIKO
+### Phase 8: `_ensure_registry_for_devices` (Komplexität 126)
 
-**Benötigte Tests**: Erweitern `tests/test_coordinator_device_registry.py`
+**Test-Datei**: `tests/test_coordinator_registry_ensure.py`
+
+**Mindest-Tests (15)**:
 
 ```python
-# Service Device Tests
-def test_ensure_service_device_creates():
-    """Service device is created if missing."""
+class TestEnsureRegistryForDevicesRisks:
+    """100% Coverage für _ensure_registry_for_devices."""
 
-def test_ensure_service_device_updates():
-    """Service device is updated if changed."""
+    # === DEVICE-ERSTELLUNG ===
+    def test_creates_new_tracker_device(self): ...
+    def test_updates_existing_device(self): ...
+    def test_skips_ignored_device(self): ...
+    def test_returns_created_count(self): ...
 
-def test_ensure_service_device_subentry_links():
-    """Subentry links are maintained."""
+    # === SUBENTRY-LINKS ===
+    def test_creates_subentry_link(self): ...
+    def test_heals_broken_subentry_link(self): ...
+    def test_removes_orphaned_hub_link(self): ...
+    def test_preserves_valid_links(self): ...
 
-# Tracker Device Tests
-def test_ensure_registry_creates_tracker():
-    """Tracker device is created."""
+    # === LEGACY-KOMPATIBILITÄT ===
+    def test_legacy_kwargs_for_old_ha(self): ...
+    def test_modern_kwargs_for_new_ha(self): ...
+    def test_retry_with_legacy_on_typeerror(self): ...
 
-def test_ensure_registry_updates_tracker():
-    """Tracker device is updated."""
+    # === NAME-RESOLUTION ===
+    def test_resolves_hub_name_from_device(self): ...
+    def test_resolves_hub_name_from_cache(self): ...
+    def test_resolves_hub_name_fallback(self): ...
 
-def test_ensure_registry_skips_ignored():
-    """Ignored devices are skipped."""
-
-def test_ensure_registry_heals_subentry_links():
-    """Broken subentry links are repaired."""
-
-# Entity Lookup Tests
-def test_find_tracker_entity_exists():
-    """Returns entity for valid device."""
-
-def test_find_tracker_entity_missing():
-    """Returns None for unknown device."""
-
-def test_find_tracker_entity_multiple_matches():
-    """Handles multiple entity matches."""
-
-# Hub Name Resolution Tests
-def test_resolve_hub_name_from_device():
-    """Hub name from device entry."""
-
-def test_resolve_hub_name_from_coordinator():
-    """Hub name from coordinator cache."""
-
-def test_resolve_hub_name_fallback():
-    """Fallback to entry data."""
-
-# Legacy Compatibility Tests
-def test_device_registry_legacy_kwargs():
-    """Legacy HA versions get correct kwargs."""
-
-def test_device_registry_modern_kwargs():
-    """Modern HA versions use new kwargs."""
+    # === ERROR-HANDLING ===
+    def test_handles_registry_api_error(self): ...
 ```
+
+**Coverage-Ziel**: 100% Branch-Coverage
 
 ---
 
-### 2.5 Phase 5: `coordinator_subentry.py` - HÖCHSTES RISIKO
+### Phase 9: `_ensure_service_device_exists` (Komplexität 108)
 
-**Benötigte Tests**: Erweitern `tests/test_coordinator_subentry_*.py`
+**Test-Datei**: `tests/test_coordinator_registry_service_device.py`
+
+**Mindest-Tests (10)**:
 
 ```python
-# Subentry Index Tests
-def test_refresh_index_empty():
-    """Empty device list creates empty index."""
+class TestEnsureServiceDeviceExistsRisks:
+    """100% Coverage für _ensure_service_device_exists."""
 
-def test_refresh_index_single_device():
-    """Single device is indexed correctly."""
+    # === ERSTELLUNG ===
+    def test_creates_service_device_if_missing(self): ...
+    def test_does_not_duplicate_service_device(self): ...
 
-def test_refresh_index_multiple_subentries():
-    """Multiple subentries are handled."""
+    # === UPDATES ===
+    def test_updates_service_device_name(self): ...
+    def test_no_update_when_unchanged(self): ...
 
-def test_refresh_index_device_visibility():
-    """Device visibility is respected."""
+    # === MULTI-ACCOUNT ===
+    def test_creates_per_account_service_device(self): ...
+    def test_service_device_identifiers_unique(self): ...
 
-def test_refresh_index_provisional_ids_discarded():
-    """Provisional IDs are not persisted."""
+    # === SUBENTRY-LINKS ===
+    def test_service_device_subentry_link(self): ...
+    def test_service_device_config_entry_link(self): ...
 
-# Subentry Metadata Tests
-def test_get_subentry_metadata_exists():
-    """Returns metadata for valid key."""
-
-def test_get_subentry_metadata_missing():
-    """Returns None for unknown key."""
-
-def test_stable_subentry_identifier():
-    """Identifier is stable across refreshes."""
-
-# Visibility Tests
-def test_is_device_visible_in_subentry():
-    """Visible device returns True."""
-
-def test_is_device_not_visible():
-    """Hidden device returns False."""
-
-def test_get_device_location_for_subentry():
-    """Location data for subentry."""
-
-# Snapshot Tests
-def test_group_snapshot_by_subentry():
-    """Devices are grouped correctly."""
-
-def test_store_subentry_snapshots():
-    """Snapshots are persisted."""
-
-def test_get_subentry_snapshot():
-    """Snapshot is retrievable."""
-
-# Core Subentry Definition Tests
-def test_build_core_subentry_definitions():
-    """Default subentries are created."""
-
-def test_schedule_core_subentry_repair():
-    """Missing subentries trigger repair."""
-
-def test_cancel_pending_repair():
-    """Pending repair can be cancelled."""
+    # === ERROR-HANDLING ===
+    def test_handles_registry_error(self): ...
+    def test_handles_missing_entry_data(self): ...
 ```
+
+**Coverage-Ziel**: 100% Branch-Coverage
 
 ---
 
-## 3. Test-Ausführungs-Strategie
+### Phase 10: `_async_update_data` (Komplexität 100)
 
-### 3.1 Vor jedem Refactoring-Schritt
+**Test-Datei**: `tests/test_coordinator_update_data.py`
+
+**Mindest-Tests (12)**:
+
+```python
+class TestAsyncUpdateDataRisks:
+    """100% Coverage für _async_update_data."""
+
+    # === API-FEHLER ===
+    def test_handles_api_timeout(self): ...
+    def test_handles_api_auth_error(self): ...
+    def test_handles_api_rate_limit(self): ...
+    def test_handles_api_network_error(self): ...
+
+    # === DATEN-VERARBEITUNG ===
+    def test_processes_new_devices(self): ...
+    def test_updates_existing_devices(self): ...
+    def test_handles_empty_response(self): ...
+    def test_handles_malformed_response(self): ...
+
+    # === STATE-UPDATES ===
+    def test_updates_last_successful_poll(self): ...
+    def test_triggers_entity_updates(self): ...
+    def test_increments_poll_counter(self): ...
+
+    # === FCM-INTEGRATION ===
+    def test_respects_fcm_ready_state(self): ...
+```
+
+**Coverage-Ziel**: 100% Branch-Coverage
+
+---
+
+## 4. Test-Ausführungs-Strategie
+
+### 4.1 Coverage-Messung
 
 ```bash
-# 1. Alle bestehenden Tests müssen bestehen
-python3.13 -m pytest tests/test_coordinator*.py -v
-
-# 2. Coverage für betroffene Funktionen prüfen
+# Coverage für spezifische Funktion messen
 python3.13 -m pytest tests/test_coordinator*.py \
     --cov=custom_components.googlefindmy.coordinator \
+    --cov-report=term-missing \
+    --cov-report=html
+
+# Nur bestimmte Zeilen prüfen (z.B. Zeile 1214-1400 für _refresh_subentry_index)
+python3.13 -m pytest tests/test_coordinator_subentry_index.py -v \
+    --cov=custom_components.googlefindmy.coordinator \
     --cov-report=term-missing
-
-# 3. Neue Tests für zu extrahierende Funktionen schreiben
-python3.13 -m pytest tests/test_coordinator_geo.py -v
-
-# 4. Smoke-Test der Integration
-python3.13 -m pytest tests/ -k "coordinator" --tb=short
 ```
 
-### 3.2 Nach jedem Refactoring-Schritt
+### 4.2 Branch-Coverage prüfen
 
 ```bash
-# 1. Alle Tests müssen weiterhin bestehen
+# Branch-Coverage aktivieren
+python3.13 -m pytest tests/ \
+    --cov=custom_components.googlefindmy.coordinator \
+    --cov-branch \
+    --cov-report=term-missing
+```
+
+### 4.3 Vor jedem Refactoring-Schritt
+
+```bash
+# 1. Alle Tests bestehen
 python3.13 -m pytest tests/test_coordinator*.py -v
 
-# 2. Neue Modul-Tests müssen bestehen
-python3.13 -m pytest tests/test_coordinator_geo.py -v
+# 2. Coverage für zu extrahierende Funktion = 100%
+python3.13 -m pytest tests/test_coordinator_subentry_index.py \
+    --cov=custom_components.googlefindmy.coordinator \
+    --cov-branch \
+    --cov-fail-under=100
 
-# 3. Full CI-Check
-ruff check . && mypy --strict custom_components/googlefindmy && pytest
+# 3. Komplexitäts-Check
+python3.13 -m radon cc custom_components/googlefindmy/coordinator.py -s --min D
 ```
 
 ---
 
-## 4. Risiko-Matrix mit Test-Anforderungen
+## 5. Definition of Done (Test-Phase)
 
-| Phase | Modul | Risiko | Min. Tests vor Start | Kritische Pfade |
-|-------|-------|--------|---------------------|-----------------|
-| 1 | coordinator_geo.py | Niedrig | 15 | Haversine, Normalize |
-| 2 | coordinator_stats.py | Niedrig | 20 | Persistence, Metrics |
-| 3 | coordinator_cache.py | Mittel | 25 | Update, Merge, Fusion |
-| 4 | coordinator_registry.py | Hoch | 40 | Device-Creation, Links |
-| 5 | coordinator_subentry.py | Sehr Hoch | 30 | Index-Refresh, Visibility |
+### Checkliste pro zu extrahierende Funktion
+
+- [ ] Test-Datei erstellt
+- [ ] Alle Risiko-Kategorien abgedeckt:
+  - [ ] Eingabe-Validierung
+  - [ ] State-Konsistenz
+  - [ ] Fehlerbehandlung
+  - [ ] Kompatibilität
+- [ ] 100% Branch-Coverage erreicht
+- [ ] Alle Tests bestehen
+- [ ] Property-Based Tests (Hypothesis) für mathematische Logik
+- [ ] Performance-Tests für große Datenmengen
+
+### Checkliste nach Extraktion
+
+- [ ] Alle vorherigen Tests bestehen weiterhin
+- [ ] Neue Unit-Tests für extrahierte Helper
+- [ ] Coverage für neue Helper = 100%
+- [ ] Radon zeigt Komplexitäts-Reduktion
 
 ---
 
-## 5. Definition of Done (pro Phase)
+## 6. Risiko-Matrix
 
-- [ ] Alle vorhandenen Tests bestehen (0 Failures)
-- [ ] Neue Unit-Tests für extrahierte Funktionen geschrieben
-- [ ] Property-Based Tests für mathematische Funktionen
-- [ ] Coverage für extrahiertes Modul > 90%
-- [ ] Keine neuen mypy/ruff Errors
-- [ ] Code-Review durchgeführt
-- [ ] Integration-Test bestanden
+| Phase | Funktion | Risiko | Min. Tests | Kritische Pfade |
+|-------|----------|--------|-----------|-----------------|
+| 6 | `_refresh_subentry_index` | SEHR HOCH | 15 | Subentry-Logik, State |
+| 7 | `get_active_device_identities` | HOCH | 12 | Key-Priority, Multi-Account |
+| 8 | `_ensure_registry_for_devices` | HOCH | 15 | Registry-API, Links |
+| 9 | `_ensure_service_device_exists` | MITTEL | 10 | Service-Device |
+| 10 | `_async_update_data` | HOCH | 12 | API, Error-Handling |
 
 ---
 
-## 6. Nächste Schritte
+## 7. Nächste Schritte
 
-1. [ ] `tests/test_coordinator_geo.py` erstellen mit ~15 Tests
-2. [ ] Property-Based Tests für Geo-Funktionen hinzufügen
-3. [ ] Bestehende Tests ausführen als Baseline
-4. [ ] Erst dann Phase 1 Extraktion starten
+1. [ ] `tests/test_coordinator_subentry_index.py` erstellen
+2. [ ] 100% Coverage für `_refresh_subentry_index` erreichen
+3. [ ] Alle 15 Mindest-Tests bestehen
+4. [ ] Erst dann Phase 6 Extraktion starten
+5. [ ] Prozess für Phase 7-10 wiederholen

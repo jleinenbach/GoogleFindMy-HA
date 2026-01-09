@@ -1,516 +1,540 @@
 # Coordinator.py Refactoring Plan
 
 **Datei**: `custom_components/googlefindmy/coordinator.py`
-**Aktuelle Größe**: 8761 Zeilen, 199 Methoden
+**Aktuelle Größe**: 8532 Zeilen (Stand: 2026-01-09)
 **Zielgröße**: ~2000-2500 Zeilen im Hauptmodul
-**Branch**: `claude/1.7.0-3-coordinator-refactoring` (basiert auf `1.7.0-3`)
-
-> ⚠️ **WICHTIG**: Vor jeder Phase müssen die Tests gemäß [PRE_REFACTORING_TEST_PLAN.md](PRE_REFACTORING_TEST_PLAN.md) geschrieben und bestanden sein!
+**Branch**: `claude/1.7.0-3-refactoring-KVUvG`
 
 ---
 
-## 0. Lessons Learned (aus fehlgeschlagenem Versuch)
+## ⚠️ KRITISCHE ANFORDERUNG: TDD MIT 100% TEST-COVERAGE
 
-### Was schief ging:
-1. **Branch-Basis**: Arbeit wurde auf veraltetem Branch durchgeführt (2339 Commits hinter `1.7.0-3`)
-2. **Zwei getrennte Branches**: Phase 1-3 auf einem Branch, Phase 4 auf anderem - nicht synchronisiert
-3. **Keine Integration mit coordinator.py**: Module wurden extrahiert, aber coordinator.py nicht angepasst
-
-### Was funktioniert hat:
-1. **TDD-Ansatz**: Tests VOR Extraktion schreiben funktioniert gut
-2. **Hohe Testabdeckung**: 99% Coverage für extrahierte Module erreichbar
-3. **Pure Functions**: Standalone-Hilfsfunktionen lassen sich gut extrahieren und testen
-
-### Backup der vorherigen Arbeit:
-Die extrahierten Module sind in `/tmp/refactoring-backup/` gesichert:
-- `coordinator_geo.py` + Tests (53 Tests)
-- `coordinator_stats.py` + Tests (58 Tests)
-- `coordinator_cache.py` + Tests (53 Tests)
-- `coordinator_registry.py` + Tests (74 Tests)
-
-**Hinweis**: Diese Module wurden für eine ÄLTERE Version von coordinator.py geschrieben und müssen für 1.7.0-3 neu validiert/angepasst werden!
+> **VOR jeder Refactoring-Phase müssen folgende Bedingungen erfüllt sein:**
+>
+> 1. **100% Test-Coverage** für alle zu extrahierenden Funktionen
+> 2. **Risiko-fokussierte Tests**: Edge-Cases, Fehlerbehandlung, Grenzwerte
+> 3. **Keine Extraktion ohne vorherige Tests**
+>
+> Siehe [PRE_REFACTORING_TEST_PLAN.md](PRE_REFACTORING_TEST_PLAN.md) für Details.
 
 ---
 
-## 1. Analyse der aktuellen Struktur
+## Fortschritt
 
-### 1.1 Klassen und Top-Level-Funktionen (24)
+### ✅ Abgeschlossene Phasen (1-5)
 
-| Zeile | Name | Typ | Beschreibung |
-|-------|------|-----|--------------|
-| 176 | `CacheProtocol` | Protocol | Cache-Interface |
-| 255 | `_update_preserve_metadata` | Function | Metadata-Update |
-| 280 | `_clamp` | Function | Value-Clamping |
-| 291 | `DiagnosticsBuffer` | Class | Diagnostik-Puffer |
-| 334 | `SubentryMetadata` | Dataclass | Subentry-Daten |
-| 359-517 | Diverse Helpers | Functions | Parsing/Normalisierung |
-| 585 | `_RecorderHistoryProxy` | Class | Recorder-Proxy |
-| 681-723 | Status-Dataclasses | Classes | StatusSnapshot, ApiStatus, etc. |
-| 723 | `DeviceIdentity` | Dataclass | Geräte-Identität |
-| 767 | `GoogleFindMyCoordinator` | Class | Haupt-Koordinator |
+| Phase | Modul | Status | Tests | Komplexität |
+|-------|-------|--------|-------|-------------|
+| 1 | `coordinator_geo.py` | ✅ Fertig | 52 Tests | A (Ø 2.5) |
+| 2 | `coordinator_stats.py` | ✅ Fertig | 63 Tests | A (Ø 1.8) |
+| 3 | `coordinator_cache.py` | ✅ Fertig | 48 Tests | A (Ø 5.0) |
+| 4 | `coordinator_registry.py` | ✅ Fertig | 56 Tests | A (Ø 6.75) |
+| 5 | `coordinator_subentry.py` | ✅ Fertig | 70 Tests | A (Ø 4.6) |
 
-### 1.2 Methoden-Kategorien im Koordinator
+**Gesamt: 289 Tests, 956 extrahierte Zeilen, Durchschnittskomplexität A (3.59)**
 
-| Kategorie | Anzahl | Kandidat für Extraktion |
-|-----------|--------|------------------------|
-| Subentry-Management | 25 | ✅ `coordinator_subentry.py` |
-| Device-Registry | 43 | ✅ `coordinator_registry.py` |
-| Cache/Geo | 18 | ✅ `coordinator_geo.py` |
-| Stats/Status | 27 | ✅ `coordinator_stats.py` |
-| Identity/EID | 24 | ⚠️ Teilweise (EidResolver existiert) |
-| Actions (Sound/Locate) | 10 | ⚠️ Evtl. `coordinator_actions.py` |
-| Lifecycle (Setup/Shutdown) | 15 | ❌ Bleibt im Kern |
-| Sonstige | ~37 | ❌ Bleibt im Kern |
+### 🚧 Ausstehende Phasen (6-10): Komplexe Funktionen
 
-### 1.3 Hoch-Komplexe Funktionen (F-Rating)
-
-| Funktion | Komplexität | Kategorie | Extraktion |
-|----------|-------------|-----------|------------|
-| `_refresh_subentry_index` | 139 | Subentry | → `coordinator_subentry.py` |
-| `get_active_device_identities` | 128 | Identity | → Vereinfachen |
-| `_ensure_registry_for_devices` | 126 | Registry | → `coordinator_registry.py` |
-| `_ensure_service_device_exists` | 108 | Registry | → `coordinator_registry.py` |
-| `_async_update_data` | 100 | Kern | → Phasen extrahieren |
-| `_async_start_poll_cycle` | 62 | Kern | → Vereinfachen |
-| `_find_tracker_entity_entry` | 50 | Registry | → `coordinator_registry.py` |
-| `update_device_cache` | 45 | Cache | → `coordinator_cache.py` |
-| `async_locate_device` | 40 | Actions | → `coordinator_actions.py` |
-| `_merge_with_existing_cache_row` | 37 | Cache | → `coordinator_cache.py` |
+| Phase | Funktion | Komplexität | Zielmodul | Status |
+|-------|----------|-------------|-----------|--------|
+| 6 | `_refresh_subentry_index` | F (139) | Neue Helpers → `coordinator_subentry.py` | ⏳ Pending |
+| 7 | `get_active_device_identities` | F (128) | Neue Helpers → `coordinator_identity.py` | ⏳ Pending |
+| 8 | `_ensure_registry_for_devices` | F (126) | Neue Helpers → `coordinator_registry.py` | ⏳ Pending |
+| 9 | `_ensure_service_device_exists` | F (108) | Neue Helpers → `coordinator_registry.py` | ⏳ Pending |
+| 10 | `_async_update_data` | F (100) | Phasen-Extraktion | ⏳ Pending |
 
 ---
 
-## 2. Geplante Module
+## Best Practice: Modul-Organisation
 
-### 2.1 `coordinator_subentry.py` (~600-800 Zeilen)
+### ❌ ANTI-PATTERN: Komplexe Methoden in Helper-Module verschieben
 
-**Verantwortlichkeit**: Subentry-Verwaltung und -Index
-
-**Zu extrahierende Methoden**:
 ```python
-# Aus GoogleFindMyCoordinator
-_refresh_subentry_index()           # Komplexität 139 - KRITISCH
-_build_core_subentry_definitions()
-_schedule_core_subentry_repair()
-_cancel_pending_subentry_repair()
-attach_subentry_manager()
-_default_subentry_key()
-async_wait_subentry_visibility_updates()
-_group_snapshot_by_subentry()
-_store_subentry_snapshots()
-_resolve_subentry_key_for_feature()
-get_subentry_key_for_feature()
-get_subentry_metadata()
-stable_subentry_identifier()
-get_subentry_snapshot()
-is_device_visible_in_subentry()
-get_device_location_data_for_subentry()
-get_device_last_seen_for_subentry()
-```
-
-**Zu extrahierende Klassen**:
-```python
-SubentryMetadata  # Dataclass
-```
-
-**Schnittstelle zum Koordinator**:
-```python
-class SubentryManager:
-    def __init__(self, coordinator: GoogleFindMyCoordinator): ...
-    def refresh_index(self, visible_devices: Sequence[...]) -> None: ...
-    def get_metadata(self, subentry_key: str) -> SubentryMetadata | None: ...
-    # ...
-```
-
----
-
-### 2.2 `coordinator_registry.py` (~800-1000 Zeilen)
-
-**Verantwortlichkeit**: Device-Registry-Operationen
-
-**Zu extrahierende Methoden**:
-```python
-# Aus GoogleFindMyCoordinator
-_ensure_registry_for_devices()      # Komplexität 126 - KRITISCH
-_ensure_service_device_exists()     # Komplexität 108 - KRITISCH
-_find_tracker_entity_entry()        # Komplexität 50
-find_tracker_entity_entry()
-_ensure_device_name_cache()
-_apply_pending_via_updates()
-_sync_owner_index()
-_reindex_poll_targets_from_device_registry()
-_call_device_registry_api()
-_device_registry_kwargs_need_legacy_retry()
-_device_registry_build_legacy_kwargs()
-_device_registry_config_subentry_kwarg_name()
-_device_registry_allows_translation_update()
-_extract_our_identifier()
-_device_display_name()
-```
-
-**Nested Functions zu extrahieren** (aus `_ensure_registry_for_devices`):
-```python
-_normalize_tracker_subentry_id()
-_resolve_tracker_subentry()
-_normalized_name()
-_track_hub_name()
-_is_hub_device()
-_resolve_hub_name()
-_subentry_links()
-_has_tracker_link()
-_has_hub_link()
-_remove_hub_link()
-_update_device_with_kwargs()
-_refresh_device_entry()
-_heal_tracker_device_subentry()
-```
-
-**Schnittstelle**:
-```python
-class RegistryManager:
-    def __init__(self, coordinator: GoogleFindMyCoordinator): ...
-    def ensure_devices(self, devices: list[dict], ignored: set[str]) -> int: ...
-    def ensure_service_device(self, entry: ConfigEntry) -> None: ...
-    def find_tracker_entity(self, device_id: str) -> EntityRegistryEntry | None: ...
-```
-
----
-
-### 2.3 `coordinator_geo.py` (~200-300 Zeilen)
-
-**Verantwortlichkeit**: Geografische Berechnungen
-
-**Zu extrahierende Methoden**:
-```python
-_haversine_distance()
-_apply_weighted_location_fusion()
-_normalize_coords()
-_is_significant_update()
-_coerce_float()
-_clamp()  # Top-level function
-```
-
-**Zu extrahierende Hilfsfunktionen**:
-```python
-_safe_accuracy()  # Nested in _apply_weighted_location_fusion
-```
-
-**Schnittstelle**:
-```python
-def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float: ...
-def is_significant_update(old_data: dict, new_data: dict, threshold_m: float = 50) -> bool: ...
-def normalize_coords(lat: Any, lon: Any) -> tuple[float, float] | None: ...
-def apply_weighted_fusion(locations: list[dict]) -> dict: ...
-```
-
----
-
-### 2.4 `coordinator_cache.py` (~400-500 Zeilen)
-
-**Verantwortlichkeit**: Location-Cache und Device-Daten
-
-**Zu extrahierende Methoden**:
-```python
-update_device_cache()               # Komplexität 45
-_merge_with_existing_cache_row()    # Komplexität 37
-get_device_location_data()
-prime_device_location_cache()
-seed_device_last_seen()
-_track_device_interval()
-_persist_anchor_metadata()
-get_device_last_seen()
-get_device_display_name()
-get_device_name_map()
-is_device_present()
-get_absent_device_ids()
-purge_device()
-_build_base_snapshot_entry()
-_update_entry_from_cache()
-_build_snapshot_from_cache()
-```
-
-**Schnittstelle**:
-```python
-class LocationCache:
-    def __init__(self, coordinator: GoogleFindMyCoordinator): ...
-    def update(self, device_id: str, new_data: dict, wall_now: float) -> bool: ...
-    def get_location(self, device_id: str) -> dict | None: ...
-    def get_last_seen(self, device_id: str) -> datetime | None: ...
-```
-
----
-
-### 2.5 `coordinator_stats.py` (~300-400 Zeilen)
-
-**Verantwortlichkeit**: Statistiken und Metriken
-
-**Zu extrahierende Methoden**:
-```python
-_async_load_stats()
-_async_save_stats()
-_async_save_sound_uuids()
-_debounced_save_stats()
-_schedule_stats_persist()
-_increment_stat_on_loop()
-increment_stat()
-safe_update_metric()
-get_metric()
-_get_duration()
-get_setup_duration_seconds()
-get_fcm_acquire_duration_seconds()
-get_last_poll_duration_seconds()
-get_recent_errors()
-_append_recent_error()
-note_error()
-_short_error_message()
-```
-
-**Zu extrahierende Klassen**:
-```python
-DiagnosticsBuffer
-StatusSnapshot
-ApiStatus
-FcmStatus
-```
-
-**Schnittstelle**:
-```python
-class StatsManager:
-    def __init__(self, coordinator: GoogleFindMyCoordinator): ...
-    async def load(self) -> None: ...
-    async def save(self) -> None: ...
-    def increment(self, stat_name: str) -> None: ...
-    def get_metric(self, key: str) -> float | None: ...
-```
-
----
-
-### 2.6 `coordinator_actions.py` (~300-400 Zeilen) - OPTIONAL
-
-**Verantwortlichkeit**: Device-Aktionen (Locate, Sound)
-
-**Zu extrahierende Methoden**:
-```python
-async_locate_device()               # Komplexität 40
-async_play_sound()
-async_stop_sound()
-can_play_sound()
-can_request_location()
-_get_device_lock()
-push_updated()
-_api_push_ready()
-_note_push_transport_problem()
-```
-
----
-
-## 3. Extraktions-Reihenfolge
-
-### Phase 1: Geografische Utilities (Niedrigstes Risiko)
-1. `coordinator_geo.py` erstellen
-2. Standalone-Funktionen extrahieren
-3. Tests schreiben
-4. Imports im Koordinator anpassen
-
-### Phase 2: Stats-Modul (Niedriges Risiko)
-1. `coordinator_stats.py` erstellen
-2. Dataclasses verschieben
-3. Stats-Methoden extrahieren
-4. Tests anpassen
-
-### Phase 3: Cache-Modul (Mittleres Risiko)
-1. `coordinator_cache.py` erstellen
-2. Cache-Methoden extrahieren
-3. Schnittstelle definieren
-4. Integration testen
-
-### Phase 4: Registry-Modul (Höheres Risiko)
-1. `coordinator_registry.py` erstellen
-2. Nested Functions in Top-Level umwandeln
-3. Komplexe Methoden aufteilen
-4. Extensive Tests
-
-### Phase 5: Subentry-Modul (Höchstes Risiko)
-1. `coordinator_subentry.py` erstellen
-2. `_refresh_subentry_index` in Phasen aufteilen
-3. State-Management anpassen
-4. Integration sorgfältig testen
-
----
-
-## 4. Komplexitäts-Reduktion innerhalb der Module
-
-### 4.1 `_refresh_subentry_index` (139 → Ziel: <20)
-
-**Strategie**: Aufteilen in Phasen
-```python
-def _refresh_subentry_index(self, visible_devices):
-    # Phase 1: Collect subentry candidates
-    candidates = self._collect_subentry_candidates(visible_devices)
-
-    # Phase 2: Validate and filter
-    validated = self._validate_subentry_candidates(candidates)
-
-    # Phase 3: Build index
-    self._build_subentry_index(validated)
-
-    # Phase 4: Register devices
-    self._register_devices_to_subentries(validated)
-
-    # Phase 5: Update snapshots
-    self._update_subentry_snapshots()
-```
-
-### 4.2 `_ensure_registry_for_devices` (126 → Ziel: <20)
-
-**Strategie**: Nested Functions extrahieren + Phasen
-```python
-def _ensure_registry_for_devices(self, devices, ignored):
-    ctx = RegistryContext(devices=devices, ignored=ignored, ...)
-
-    # Phase 1: Normalize and validate
-    normalized = self._normalize_device_entries(ctx)
-
-    # Phase 2: Ensure tracker devices
-    self._ensure_tracker_devices(ctx, normalized)
-
-    # Phase 3: Heal subentry links
-    self._heal_subentry_links(ctx)
-
-    # Phase 4: Cleanup orphaned
-    self._cleanup_orphaned_devices(ctx)
-
-    return ctx.created_count
-```
-
-### 4.3 `get_active_device_identities` (128 → Ziel: <25)
-
-**Strategie**: Helper-Funktionen extrahieren
-```python
-def get_active_device_identities(self):
-    # Extract nested functions to module level
-    identities = []
-    for device in self._get_enabled_devices():
-        identity = self._build_device_identity(device)
-        if identity:
-            identities.append(identity)
-    return identities
-
-def _build_device_identity(self, device: dict) -> DeviceIdentity | None:
-    # Consolidated logic from nested functions
+# FALSCH: Gesamte komplexe Methode verschieben
+# coordinator_subentry.py
+def refresh_subentry_index(coordinator, visible_devices):  # Komplexität 139!
+    # Monolithischer Code mit Side-Effects
     ...
 ```
 
----
+**Problem:**
+- Zerstört die niedrige Komplexität der bestehenden Module
+- Bricht das "Pure Functions"-Pattern
+- Side-Effects und State-Abhängigkeiten bleiben
 
-## 5. Abhängigkeiten und Import-Struktur
-
-### 5.1 Import-Hierarchie
-```
-coordinator.py
-├── coordinator_geo.py      (keine Abhängigkeiten)
-├── coordinator_stats.py    (keine Abhängigkeiten)
-├── coordinator_cache.py    (importiert coordinator_geo)
-├── coordinator_registry.py (importiert coordinator_cache)
-└── coordinator_subentry.py (importiert coordinator_registry)
-```
-
-### 5.2 Zirkuläre Imports vermeiden
-
-**Problem**: Module müssen auf `GoogleFindMyCoordinator` zugreifen.
-
-**Lösung**: Protocol-basierte Dependency Injection
-```python
-# coordinator_protocols.py
-from typing import Protocol
-
-class CoordinatorProtocol(Protocol):
-    config_entry: ConfigEntry
-    hass: HomeAssistant
-    data: list[dict[str, Any]]
-    # ...
-
-# coordinator_registry.py
-from .coordinator_protocols import CoordinatorProtocol
-
-class RegistryManager:
-    def __init__(self, coordinator: CoordinatorProtocol): ...
-```
-
----
-
-## 6. Testbarkeit
-
-### 6.1 Neue Test-Dateien
-
-| Modul | Test-Datei | Fokus |
-|-------|------------|-------|
-| `coordinator_geo.py` | `test_coordinator_geo.py` | Unit-Tests für Geo-Funktionen |
-| `coordinator_stats.py` | `test_coordinator_stats.py` | Stats-Persistenz |
-| `coordinator_cache.py` | `test_coordinator_cache.py` | Cache-Operationen |
-| `coordinator_registry.py` | `test_coordinator_registry.py` | Registry-Integration |
-| `coordinator_subentry.py` | `test_coordinator_subentry.py` | Subentry-Logik |
-
-### 6.2 Property-Based Tests (Hypothesis)
+### ✅ BEST PRACTICE: Pure Helpers extrahieren, Orchestrierung behalten
 
 ```python
-# test_coordinator_geo.py
-from hypothesis import given, strategies as st
+# coordinator_subentry.py - NUR pure Helper-Funktionen (Komplexität A-B)
+def extract_subentry_candidates(devices: list[dict]) -> list[SubentryCandidate]:
+    """Pure function: extrahiert Kandidaten ohne Side-Effects."""
+    ...
 
-@given(
-    lat1=st.floats(min_value=-90, max_value=90),
-    lon1=st.floats(min_value=-180, max_value=180),
-    lat2=st.floats(min_value=-90, max_value=90),
-    lon2=st.floats(min_value=-180, max_value=180),
-)
-def test_haversine_symmetric(lat1, lon1, lat2, lon2):
-    d1 = haversine_distance(lat1, lon1, lat2, lon2)
-    d2 = haversine_distance(lat2, lon2, lat1, lon1)
-    assert abs(d1 - d2) < 0.001  # Symmetric within tolerance
+def validate_subentry_candidates(candidates: list, existing_keys: set) -> list:
+    """Pure function: validiert Kandidaten."""
+    ...
+
+def build_subentry_index(validated: list) -> dict[str, SubentryMetadata]:
+    """Pure function: baut Index-Dictionary."""
+    ...
+
+# coordinator.py - Orchestrierung bleibt hier
+def _refresh_subentry_index(self, visible_devices):
+    """Orchestriert die Phasen, delegiert an pure Helpers."""
+    # Phase 1: Collect (delegiert an pure function)
+    candidates = extract_subentry_candidates(visible_devices)
+
+    # Phase 2: Validate (delegiert an pure function)
+    validated = validate_subentry_candidates(candidates, self._existing_keys)
+
+    # Phase 3: Build index (delegiert an pure function)
+    new_index = build_subentry_index(validated)
+
+    # Phase 4: State update (bleibt hier - Side-Effect)
+    self._subentry_index = new_index
+    self._notify_listeners()
+```
+
+**Vorteile:**
+- Helper-Module bleiben low-complexity (A-B Rating)
+- Pure functions sind isoliert testbar
+- Orchestrierung ist klar und übersichtlich
+- Side-Effects sind explizit in coordinator.py
+
+---
+
+## Phase 6: `_refresh_subentry_index` (Komplexität 139 → Ziel: <20)
+
+### 6.1 Vorbedingung: 100% Test-Coverage
+
+**Erforderliche Tests VOR der Extraktion:**
+
+```python
+# tests/test_coordinator_subentry_index.py
+
+class TestRefreshSubentryIndexRisks:
+    """Tests fokussiert auf Risiken und Edge-Cases."""
+
+    # RISIKO: Leere/ungültige Eingaben
+    def test_refresh_empty_device_list(self):
+        """Leere Device-Liste führt zu leerem Index."""
+
+    def test_refresh_none_devices(self):
+        """None-Werte in Device-Liste werden gefiltert."""
+
+    def test_refresh_malformed_device_dict(self):
+        """Fehlende Keys führen nicht zu Crash."""
+
+    # RISIKO: Subentry-ID-Konflikte
+    def test_refresh_duplicate_subentry_ids(self):
+        """Doppelte Subentry-IDs werden dedupliziert."""
+
+    def test_refresh_provisional_ids_not_persisted(self):
+        """Provisorische IDs werden nicht persistiert."""
+
+    # RISIKO: State-Inkonsistenz
+    def test_refresh_preserves_existing_metadata(self):
+        """Bestehende Metadata bleibt erhalten."""
+
+    def test_refresh_removes_stale_entries(self):
+        """Veraltete Einträge werden entfernt."""
+
+    def test_refresh_concurrent_calls(self):
+        """Parallele Aufrufe führen nicht zu Race-Conditions."""
+
+    # RISIKO: Performance bei großen Datenmengen
+    def test_refresh_large_device_list(self):
+        """100+ Geräte werden performant verarbeitet."""
+
+    # RISIKO: Listener-Benachrichtigung
+    def test_refresh_notifies_listeners(self):
+        """Listener werden bei Änderungen benachrichtigt."""
+
+    def test_refresh_no_notification_without_changes(self):
+        """Keine Benachrichtigung wenn keine Änderungen."""
+```
+
+### 6.2 Zu extrahierende Pure Functions
+
+| Funktion | Komplexität | Beschreibung |
+|----------|-------------|--------------|
+| `extract_subentry_candidates` | A (~5) | Extrahiert Kandidaten aus Device-Liste |
+| `validate_subentry_candidates` | B (~8) | Validiert und filtert Kandidaten |
+| `build_subentry_index` | A (~4) | Baut Index-Dictionary |
+| `merge_subentry_metadata` | A (~3) | Merged neue mit bestehenden Metadata |
+| `detect_subentry_changes` | A (~4) | Erkennt Änderungen für Notifications |
+
+### 6.3 Extraktion-Strategie
+
+1. **Tests schreiben** für `_refresh_subentry_index` (100% Coverage)
+2. **Pure Helpers identifizieren** (keine Side-Effects)
+3. **Helpers nach `coordinator_subentry.py` verschieben**
+4. **Orchestrierung in coordinator.py** vereinfachen
+5. **Tests für neue Helpers** schreiben
+6. **Alle Tests ausführen** (Regression-Check)
+
+---
+
+## Phase 7: `get_active_device_identities` (Komplexität 128 → Ziel: <25)
+
+### 7.1 Vorbedingung: 100% Test-Coverage
+
+```python
+# tests/test_coordinator_identity.py
+
+class TestGetActiveDeviceIdentitiesRisks:
+    """Tests fokussiert auf Risiken."""
+
+    # RISIKO: Key-Auswahl und Priorisierung
+    def test_identity_prefers_primary_key(self):
+        """Primary Key wird bevorzugt."""
+
+    def test_identity_fallback_to_secondary_key(self):
+        """Fallback auf Secondary Key funktioniert."""
+
+    def test_identity_no_valid_key(self):
+        """Device ohne gültige Keys wird übersprungen."""
+
+    # RISIKO: Multi-Account-Handling
+    def test_identity_multiple_accounts(self):
+        """Geräte aus verschiedenen Accounts werden korrekt zugeordnet."""
+
+    def test_identity_account_isolation(self):
+        """Account-Grenzen werden respektiert."""
+
+    # RISIKO: Device-Status
+    def test_identity_skips_disabled_devices(self):
+        """Deaktivierte Geräte werden übersprungen."""
+
+    def test_identity_skips_ignored_devices(self):
+        """Ignorierte Geräte werden übersprungen."""
+
+    # RISIKO: EID-Verfügbarkeit
+    def test_identity_with_eid(self):
+        """EID wird korrekt integriert."""
+
+    def test_identity_without_eid(self):
+        """Fehlende EID führt nicht zu Crash."""
+```
+
+### 7.2 Neues Modul: `coordinator_identity.py`
+
+```python
+# coordinator_identity.py - Pure Functions für Identity-Logik
+
+def select_device_key(device: dict, key_priority: list[str]) -> str | None:
+    """Wählt den besten Key basierend auf Priorität."""
+
+def build_device_identity(
+    device: dict,
+    key: str,
+    account_id: str,
+    eid_data: dict | None,
+) -> DeviceIdentity | None:
+    """Baut DeviceIdentity aus Device-Daten."""
+
+def filter_active_devices(
+    devices: list[dict],
+    disabled_ids: set[str],
+    ignored_ids: set[str],
+) -> list[dict]:
+    """Filtert auf aktive, nicht-ignorierte Geräte."""
+
+def group_identities_by_account(
+    identities: list[DeviceIdentity],
+) -> dict[str, list[DeviceIdentity]]:
+    """Gruppiert Identities nach Account."""
 ```
 
 ---
 
-## 7. Metriken-Ziele
+## Phase 8: `_ensure_registry_for_devices` (Komplexität 126 → Ziel: <20)
 
-| Metrik | Vorher | Nachher | Verbesserung |
-|--------|--------|---------|--------------|
-| coordinator.py Zeilen | 8761 | ~2500 | -71% |
-| Max. Komplexität | 139 | <30 | -78% |
-| Durchschnittliche Komplexität | F (43) | C (<20) | -53% |
-| Funktionen mit F-Rating | 7 | 0 | -100% |
-| Testabdeckung | ? | >90% | ↑ |
+### 8.1 Vorbedingung: 100% Test-Coverage
+
+```python
+# tests/test_coordinator_registry_ensure.py
+
+class TestEnsureRegistryForDevicesRisks:
+    """Tests fokussiert auf Risiken."""
+
+    # RISIKO: Device-Erstellung
+    def test_creates_new_tracker_device(self):
+        """Neues Tracker-Device wird erstellt."""
+
+    def test_updates_existing_device(self):
+        """Bestehendes Device wird aktualisiert."""
+
+    def test_skips_ignored_device(self):
+        """Ignorierte Geräte werden übersprungen."""
+
+    # RISIKO: Subentry-Links
+    def test_creates_subentry_link(self):
+        """Subentry-Link wird erstellt."""
+
+    def test_heals_broken_subentry_link(self):
+        """Defekte Links werden repariert."""
+
+    def test_removes_orphaned_hub_link(self):
+        """Verwaiste Hub-Links werden entfernt."""
+
+    # RISIKO: Legacy-Kompatibilität
+    def test_legacy_kwargs_for_old_ha(self):
+        """Legacy-HA-Versionen bekommen korrekte Kwargs."""
+
+    def test_modern_kwargs_for_new_ha(self):
+        """Moderne HA-Versionen bekommen neue Kwargs."""
+
+    # RISIKO: Name-Resolution
+    def test_resolves_hub_name_from_device(self):
+        """Hub-Name aus Device-Registry."""
+
+    def test_resolves_hub_name_fallback(self):
+        """Fallback wenn Device nicht gefunden."""
+```
+
+### 8.2 Erweiterung von `coordinator_registry.py`
+
+Die bestehende `coordinator_registry.py` enthält bereits Helper-Funktionen.
+Diese Phase fügt **weitere pure Helper-Funktionen** hinzu:
+
+```python
+# Neue Helper in coordinator_registry.py
+
+def normalize_tracker_subentry_id(
+    device_id: str,
+    entry_id: str,
+    subentry_map: dict[str, str],
+) -> str | None:
+    """Normalisiert Subentry-ID für Tracker."""
+
+def resolve_tracker_subentry(
+    device: dict,
+    subentry_index: dict,
+    default_key: str,
+) -> str:
+    """Bestimmt die korrekte Subentry für ein Device."""
+
+def build_device_registry_kwargs(
+    device: dict,
+    subentry_id: str,
+    hub_name: str | None,
+    ha_version: tuple[int, ...],
+) -> dict[str, Any]:
+    """Baut kwargs für device_registry.async_get_or_create()."""
+
+def detect_subentry_link_issues(
+    device_entry: DeviceEntry,
+    expected_subentry: str,
+) -> list[str]:
+    """Erkennt Probleme mit Subentry-Links."""
+```
+
+**Komplexitäts-Budget**: Die neuen Funktionen sollten jeweils A-B Rating haben.
+Gesamtkomplexität von `coordinator_registry.py` sollte unter C (Ø <15) bleiben.
 
 ---
 
-## 8. Risiken und Mitigationen
+## Phase 9: `_ensure_service_device_exists` (Komplexität 108 → Ziel: <20)
 
-| Risiko | Wahrscheinlichkeit | Impact | Mitigation |
-|--------|-------------------|--------|------------|
-| Zirkuläre Imports | Mittel | Hoch | Protocol-basierte DI |
-| Regressions | Mittel | Hoch | Extensive Tests vor Refactoring |
-| Performance-Einbußen | Niedrig | Mittel | Profiling nach Extraktion |
-| State-Inkonsistenz | Mittel | Hoch | State in Koordinator zentralisieren |
+### 9.1 Vorbedingung: 100% Test-Coverage
+
+```python
+# tests/test_coordinator_registry_service_device.py
+
+class TestEnsureServiceDeviceExistsRisks:
+    """Tests fokussiert auf Risiken."""
+
+    # RISIKO: Service-Device-Erstellung
+    def test_creates_service_device(self):
+        """Service-Device wird erstellt."""
+
+    def test_updates_service_device_name(self):
+        """Name wird bei Änderung aktualisiert."""
+
+    # RISIKO: Multi-Account-Service-Devices
+    def test_creates_per_account_service_device(self):
+        """Jeder Account bekommt eigenes Service-Device."""
+
+    def test_service_device_identifiers(self):
+        """Identifiers sind korrekt und eindeutig."""
+
+    # RISIKO: Subentry-Zuordnung
+    def test_service_device_subentry_link(self):
+        """Subentry-Link ist korrekt."""
+
+    def test_service_device_config_entry_link(self):
+        """Config-Entry-Link ist korrekt."""
+```
+
+### 9.2 Erweiterung von `coordinator_registry.py`
+
+```python
+# Neue Helper in coordinator_registry.py
+
+def build_service_device_kwargs(
+    entry_id: str,
+    account_email: str,
+    subentry_id: str | None,
+    ha_version: tuple[int, ...],
+) -> dict[str, Any]:
+    """Baut kwargs für Service-Device-Erstellung."""
+
+def detect_service_device_updates_needed(
+    existing: DeviceEntry | None,
+    new_kwargs: dict[str, Any],
+) -> bool:
+    """Prüft ob Update nötig ist."""
+```
 
 ---
 
-## 9. Zeitschätzung
+## Phase 10: `_async_update_data` (Komplexität 100 → Ziel: <20)
 
-| Phase | Aufwand | Abhängigkeiten |
-|-------|---------|----------------|
-| Phase 1: coordinator_geo.py | ~2h | Keine |
-| Phase 2: coordinator_stats.py | ~3h | Keine |
-| Phase 3: coordinator_cache.py | ~4h | Phase 1 |
-| Phase 4: coordinator_registry.py | ~6h | Phase 3 |
-| Phase 5: coordinator_subentry.py | ~8h | Phase 4 |
-| **Gesamt** | **~23h** | |
+### 10.1 Vorbedingung: 100% Test-Coverage
+
+```python
+# tests/test_coordinator_update_data.py
+
+class TestAsyncUpdateDataRisks:
+    """Tests fokussiert auf Risiken."""
+
+    # RISIKO: API-Fehler
+    def test_handles_api_timeout(self):
+        """Timeout wird graceful behandelt."""
+
+    def test_handles_api_auth_error(self):
+        """Auth-Fehler triggert Reauth."""
+
+    def test_handles_api_rate_limit(self):
+        """Rate-Limit führt zu Backoff."""
+
+    # RISIKO: Daten-Verarbeitung
+    def test_processes_new_devices(self):
+        """Neue Geräte werden verarbeitet."""
+
+    def test_updates_existing_devices(self):
+        """Bestehende Geräte werden aktualisiert."""
+
+    def test_handles_empty_response(self):
+        """Leere API-Antwort führt nicht zu Crash."""
+
+    # RISIKO: State-Updates
+    def test_updates_last_successful_poll(self):
+        """Timestamp wird aktualisiert."""
+
+    def test_triggers_entity_updates(self):
+        """Entities werden benachrichtigt."""
+```
+
+### 10.2 Phasen-Extraktion
+
+Die Methode wird in klar definierte Phasen aufgeteilt:
+
+```python
+# coordinator.py
+
+async def _async_update_data(self):
+    """Update data - orchestriert Phasen."""
+    # Phase 1: Pre-flight checks
+    if not self._preflight_check():
+        return self.data
+
+    # Phase 2: Fetch from API
+    raw_data = await self._fetch_api_data()
+    if raw_data is None:
+        return self.data
+
+    # Phase 3: Process and merge
+    processed = self._process_api_response(raw_data)
+
+    # Phase 4: Update state
+    self._apply_data_update(processed)
+
+    # Phase 5: Post-processing
+    await self._post_update_tasks()
+
+    return self.data
+```
 
 ---
 
-## 10. Nächste Schritte
+## Komplexitäts-Budget pro Modul
 
-1. [ ] Plan reviewen und genehmigen
-2. [ ] `coordinator_protocols.py` erstellen (Interfaces)
-3. [ ] Phase 1 starten: `coordinator_geo.py`
-4. [ ] Tests für jedes neue Modul schreiben
-5. [ ] CI-Integration sicherstellen
-6. [ ] Schrittweise Extraktion mit Commits pro Phase
+| Modul | Aktuelle Komplexität | Budget (max) |
+|-------|---------------------|--------------|
+| `coordinator_geo.py` | A (Ø 2.5) | C (Ø <15) |
+| `coordinator_stats.py` | A (Ø 1.8) | B (Ø <10) |
+| `coordinator_cache.py` | A (Ø 5.0) | C (Ø <15) |
+| `coordinator_registry.py` | A (Ø 6.75) | C (Ø <15) |
+| `coordinator_subentry.py` | A (Ø 4.6) | C (Ø <15) |
+| `coordinator_identity.py` (neu) | - | C (Ø <15) |
+
+**Regel**: Keine Funktion mit Komplexität > C (20) in Helper-Modulen.
+
+---
+
+## TDD-Checkliste pro Phase
+
+### Vor der Extraktion
+
+- [ ] Funktion verstanden und dokumentiert
+- [ ] Alle Eingabe-Varianten identifiziert
+- [ ] Alle Risiken und Edge-Cases identifiziert
+- [ ] Tests für jeden Risiko-Fall geschrieben
+- [ ] 100% Branch-Coverage erreicht
+- [ ] Tests bestehen
+
+### Während der Extraktion
+
+- [ ] Pure Helper-Funktionen identifiziert
+- [ ] Helper-Funktionen extrahiert
+- [ ] Unit-Tests für neue Helper geschrieben
+- [ ] Orchestrierung vereinfacht
+- [ ] Alle bestehenden Tests bestehen weiterhin
+
+### Nach der Extraktion
+
+- [ ] Radon-Analyse zeigt Komplexitäts-Reduktion
+- [ ] Modul-Komplexität unter Budget
+- [ ] Full Test-Suite bestanden
+- [ ] ruff check + mypy bestanden
+- [ ] Code-Review durchgeführt
+
+---
+
+## Abhängigkeiten und Import-Struktur
+
+```
+coordinator.py (Orchestrierung)
+├── coordinator_geo.py      (Pure: Geo-Berechnungen)
+├── coordinator_stats.py    (Pure: Metriken, Status-Klassen)
+├── coordinator_cache.py    (Pure: Cache-Logik)
+├── coordinator_registry.py (Pure: Registry-Helper)
+├── coordinator_subentry.py (Pure: Subentry-Helper)
+└── coordinator_identity.py (Pure: Identity-Helper) [NEU]
+```
+
+**Keine zirkulären Imports**: Helper-Module importieren NICHT coordinator.py.
+
+---
+
+## Metriken-Ziele (Aktualisiert)
+
+| Metrik | Vorher | Phase 1-5 | Nach Phase 6-10 |
+|--------|--------|-----------|-----------------|
+| coordinator.py Zeilen | 8761 | 8532 | ~2500 |
+| Max. Komplexität | 139 | 139 | <30 |
+| Funktionen mit F-Rating | 8 | 8 | 0 |
+| Extrahierte Tests | 0 | 289 | ~450 |
+| Helper-Module | 0 | 5 | 6 |
+
+---
+
+## Nächste Schritte
+
+1. [ ] Phase 6 Tests schreiben (`_refresh_subentry_index`)
+2. [ ] 100% Coverage für Phase 6 erreichen
+3. [ ] Pure Helpers extrahieren
+4. [ ] Komplexität validieren
+5. [ ] Weiter mit Phase 7-10
