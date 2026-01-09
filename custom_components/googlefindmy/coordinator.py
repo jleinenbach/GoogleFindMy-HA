@@ -97,6 +97,13 @@ from .coordinator_registry import (
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
     parse_device_identifier as _parse_identifier_impl,
 )
+from .coordinator_subentry import (
+    format_epoch_utc as _format_epoch_utc_impl,
+    group_devices_by_subentry as _group_devices_impl,
+    normalize_epoch_seconds as _normalize_epoch_impl,
+    parse_last_seen_timestamp as _parse_last_seen_impl,
+    sanitize_subentry_identifier as _sanitize_subentry_id_impl,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import Event
@@ -341,61 +348,24 @@ class SubentryMetadata:
 
 def _sanitize_subentry_identifier(candidate: Any) -> str | None:
     """Return a normalized subentry identifier or ``None`` when fabricated."""
-
-    if not isinstance(candidate, str):
-        return None
-
-    normalized = candidate.strip()
-    if not normalized:
-        return None
-
-    return normalized
+    return _sanitize_subentry_id_impl(candidate)
 
 
 # --- Epoch normalization (ms→s tolerant) -----------------------------------
 def normalize_epoch_seconds(value: Any) -> int | None:
     """Return epoch seconds as an ``int`` with millisecond tolerance."""
-
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return None
-
-    try:
-        ts = float(value)
-    except (TypeError, ValueError):
-        return None
-
-    if not math.isfinite(ts):
-        return None
-
-    if abs(ts) >= 1e11:
-        ts /= 1000.0
-
-    try:
-        return int(ts)
-    except (OverflowError, ValueError):
-        return None
+    return _normalize_epoch_impl(value)
 
 
 def _normalize_epoch_seconds(value: Any) -> int | None:
     """Backward-compatible alias for :func:`normalize_epoch_seconds`."""
-
-    return normalize_epoch_seconds(value)
+    return _normalize_epoch_impl(value)
 
 
 # NOTE: keep helper public for reuse in entities/system health snapshots.
 def format_epoch_utc(value: Any) -> str | None:
     """Return an ISO 8601 UTC timestamp for epoch values (seconds or ms)."""
-
-    ts = _normalize_epoch_seconds(value)
-    if ts is None:
-        return None
-    try:
-        dt = datetime.fromtimestamp(ts, tz=UTC)
-    except (OverflowError, OSError, ValueError):
-        return None
-    return dt.isoformat().replace("+00:00", "Z")
+    return _format_epoch_utc_impl(value)
 
 
 # --- Decoder-row Normalization & Attribute Helpers -------------------------
@@ -467,16 +437,7 @@ def _row_source_label(row: dict[str, Any]) -> tuple[int, str]:
 
 def _parse_last_seen_timestamp(value: Any) -> float | None:
     """Parse a last_seen candidate into epoch seconds."""
-
-    ts = _normalize_epoch_seconds(value)
-    if ts is not None:
-        return ts
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-        except ValueError:
-            return None
-    return None
+    return _parse_last_seen_impl(value)
 
 
 def _resolve_last_seen_from_attributes(
@@ -1701,30 +1662,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         self, snapshot: Sequence[Mapping[str, Any]]
     ) -> dict[str, list[dict[str, Any]]]:
         """Return snapshot entries grouped by subentry key."""
-
-        grouped: dict[str, list[dict[str, Any]]] = {
-            key: [] for key in self._subentry_metadata
-        }
-        fallback_key = self._default_subentry_key()
-
+        # Build device-to-subentry mapping from metadata
         device_to_key: dict[str, str] = {}
         for key, meta in self._subentry_metadata.items():
             for dev_id in meta.visible_device_ids:
                 device_to_key.setdefault(dev_id, key)
 
-        for row in snapshot:
-            if not isinstance(row, Mapping):
-                continue
-            dev_id_raw = row.get("device_id") or row.get("id")
-            if not isinstance(dev_id_raw, str):
-                continue
-            target_key = device_to_key.get(dev_id_raw, fallback_key)
-            grouped.setdefault(target_key, []).append(dict(row))
-
-        for key in self._subentry_metadata:
-            grouped.setdefault(key, [])
-
-        return grouped
+        return _group_devices_impl(
+            snapshot,
+            device_to_key,
+            self._default_subentry_key(),
+            set(self._subentry_metadata.keys()),
+        )
 
     def _store_subentry_snapshots(self, snapshot: Sequence[Mapping[str, Any]]) -> None:
         """Persist grouped snapshots for subentry-aware consumers."""
