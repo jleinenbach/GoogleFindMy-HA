@@ -715,3 +715,366 @@ class TestEdgeCases:
             fallback="fallback",
         )
         assert result == "我的设备 🏠"
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: New Helper Function Tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import Mock
+
+from custom_components.googlefindmy.coordinator_registry import (
+    extract_subentry_links,
+    has_hub_link,
+    has_subentry_link,
+    is_hub_device_check,
+    normalize_device_name,
+    resolve_tracker_subentry_candidate,
+)
+
+
+class TestNormalizeDeviceName:
+    """Tests for normalize_device_name function.
+
+    This function normalizes device names to lowercase for comparison.
+    Returns None for invalid/empty inputs.
+    """
+
+    def test_string_normalized_to_lowercase(self) -> None:
+        """String should be normalized to lowercase."""
+        assert normalize_device_name("My Device") == "my device"
+        assert normalize_device_name("UPPERCASE") == "uppercase"
+        assert normalize_device_name("MiXeD CaSe") == "mixed case"
+
+    def test_whitespace_stripped(self) -> None:
+        """Whitespace should be stripped before normalization."""
+        assert normalize_device_name("  Device  ") == "device"
+        assert normalize_device_name("\tDevice\n") == "device"
+
+    def test_empty_string_returns_none(self) -> None:
+        """Empty string should return None."""
+        assert normalize_device_name("") is None
+        assert normalize_device_name("   ") is None
+
+    def test_none_returns_none(self) -> None:
+        """None input should return None."""
+        assert normalize_device_name(None) is None
+
+    def test_non_string_returns_none(self) -> None:
+        """Non-string input should return None."""
+        assert normalize_device_name(123) is None
+        assert normalize_device_name([]) is None
+        assert normalize_device_name({}) is None
+
+    def test_unicode_normalized(self) -> None:
+        """Unicode strings should be normalized."""
+        assert normalize_device_name("Gerät 🏠") == "gerät 🏠"
+
+
+class TestExtractSubentryLinks:
+    """Tests for extract_subentry_links function.
+
+    Extracts subentry links from a device object for a given entry_id.
+    """
+
+    def test_extracts_from_config_entries_subentries_mapping(self) -> None:
+        """Should extract from config_entries_subentries mapping."""
+        device = Mock()
+        device.config_entries_subentries = {
+            "entry1": {"subentry1", "subentry2"},
+            "entry2": {"other"},
+        }
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == {"subentry1", "subentry2"}
+
+    def test_returns_empty_for_none_entry_id(self) -> None:
+        """Should return empty set for None entry_id."""
+        device = Mock()
+        device.config_entries_subentries = {"entry1": {"subentry1"}}
+
+        result = extract_subentry_links(device, None)
+        assert result == set()
+
+    def test_returns_empty_for_missing_entry(self) -> None:
+        """Should return empty set when entry not in mapping."""
+        device = Mock()
+        device.config_entries_subentries = {"entry1": {"subentry1"}}
+
+        result = extract_subentry_links(device, "other_entry")
+        assert result == set()
+
+    def test_handles_none_in_links(self) -> None:
+        """Should handle None values in link sets."""
+        device = Mock()
+        device.config_entries_subentries = {
+            "entry1": {None, "subentry1"},
+        }
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == {None, "subentry1"}
+
+    def test_falls_back_to_config_subentry_id(self) -> None:
+        """Should fall back to config_subentry_id attribute."""
+        device = Mock()
+        device.config_entries_subentries = None
+        device.config_subentry_id = "fallback_subentry"
+        device.config_entries = {"entry1"}
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == {"fallback_subentry"}
+
+    def test_handles_config_entries_present_but_no_subentry(self) -> None:
+        """Should return {None} when device has config_entries but no subentry."""
+        device = Mock()
+        device.config_entries_subentries = None
+        device.config_subentry_id = None
+        device.config_entries = {"entry1"}
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == {None}
+
+    def test_returns_empty_when_no_config_entries(self) -> None:
+        """Should return empty when device has no config_entries."""
+        device = Mock()
+        device.config_entries_subentries = None
+        device.config_subentry_id = None
+        device.config_entries = None
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == set()
+
+    def test_handles_none_device(self) -> None:
+        """Should handle None device."""
+        result = extract_subentry_links(None, "entry1")
+        assert result == set()
+
+    def test_handles_list_instead_of_set(self) -> None:
+        """Should handle list of links instead of set."""
+        device = Mock()
+        device.config_entries_subentries = {
+            "entry1": ["subentry1", "subentry2"],
+        }
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == {"subentry1", "subentry2"}
+
+    def test_filters_non_string_non_none_items(self) -> None:
+        """Should filter out items that are neither string nor None."""
+        device = Mock()
+        device.config_entries_subentries = {
+            "entry1": ["subentry1", 123, None, {"dict": "value"}, "subentry2"],
+        }
+
+        result = extract_subentry_links(device, "entry1")
+        assert result == {"subentry1", "subentry2", None}
+
+    def test_handles_non_collection_raw_links(self) -> None:
+        """Should handle non-collection raw_links (not None, not Collection)."""
+        device = Mock()
+        device.config_entries_subentries = {
+            "entry1": "string_not_collection",  # String is excluded by check
+        }
+        device.config_subentry_id = "fallback"
+        device.config_entries = {"entry1"}
+
+        result = extract_subentry_links(device, "entry1")
+        # Falls through to fallback since string is not valid Collection
+        assert result == {"fallback"}
+
+
+class TestHasSubentryLink:
+    """Tests for has_subentry_link function."""
+
+    def test_returns_true_when_link_present(self) -> None:
+        """Should return True when target is in links."""
+        links: set[str | None] = {"sub1", "sub2", None}
+        assert has_subentry_link(links, "sub1") is True
+
+    def test_returns_false_when_link_absent(self) -> None:
+        """Should return False when target is not in links."""
+        links: set[str | None] = {"sub1", "sub2"}
+        assert has_subentry_link(links, "sub3") is False
+
+    def test_returns_false_for_none_target_id(self) -> None:
+        """Should return False for None target_id."""
+        links: set[str | None] = {"sub1", None}
+        assert has_subentry_link(links, None) is False
+
+    def test_empty_links_returns_false(self) -> None:
+        """Should return False for empty links set."""
+        assert has_subentry_link(set(), "sub1") is False
+
+
+class TestHasHubLink:
+    """Tests for has_hub_link function."""
+
+    def test_returns_true_when_none_in_links(self) -> None:
+        """Should return True when None is in links."""
+        links: set[str | None] = {"sub1", None}
+        assert has_hub_link(links) is True
+
+    def test_returns_false_when_no_none(self) -> None:
+        """Should return False when None not in links."""
+        links: set[str | None] = {"sub1", "sub2"}
+        assert has_hub_link(links) is False
+
+    def test_empty_links_returns_false(self) -> None:
+        """Should return False for empty links set."""
+        assert has_hub_link(set()) is False
+
+    def test_only_none_returns_true(self) -> None:
+        """Should return True when only None in links."""
+        links: set[str | None] = {None}
+        assert has_hub_link(links) is True
+
+
+class TestIsHubDeviceCheck:
+    """Tests for is_hub_device_check function."""
+
+    def test_returns_true_when_device_id_matches_hub(self) -> None:
+        """Should return True when device_id matches hub_device_id."""
+        result = is_hub_device_check(
+            device_id="hub-123",
+            hub_device_id="hub-123",
+            identifiers=set(),
+            parent_identifier=("domain", "service"),
+        )
+        assert result is True
+
+    def test_returns_true_when_identifier_matches_parent(self) -> None:
+        """Should return True when identifiers contain parent_identifier."""
+        parent_id = ("googlefindmy", "service_device")
+        result = is_hub_device_check(
+            device_id="some-id",
+            hub_device_id="other-id",
+            identifiers={parent_id, ("other", "ident")},
+            parent_identifier=parent_id,
+        )
+        assert result is True
+
+    def test_returns_false_when_no_match(self) -> None:
+        """Should return False when no match found."""
+        result = is_hub_device_check(
+            device_id="device-1",
+            hub_device_id="hub-123",
+            identifiers={("other", "ident")},
+            parent_identifier=("googlefindmy", "service"),
+        )
+        assert result is False
+
+    def test_returns_false_for_none_device_id(self) -> None:
+        """Should return False for None device_id."""
+        result = is_hub_device_check(
+            device_id=None,
+            hub_device_id="hub-123",
+            identifiers=set(),
+            parent_identifier=("domain", "service"),
+        )
+        assert result is False
+
+    def test_returns_false_for_none_hub_device_id(self) -> None:
+        """Should return False when hub_device_id is None and no identifier match."""
+        result = is_hub_device_check(
+            device_id="some-id",
+            hub_device_id=None,
+            identifiers=set(),
+            parent_identifier=("domain", "service"),
+        )
+        assert result is False
+
+    def test_handles_none_identifiers(self) -> None:
+        """Should handle None identifiers."""
+        result = is_hub_device_check(
+            device_id="hub-123",
+            hub_device_id="hub-123",
+            identifiers=None,
+            parent_identifier=("domain", "service"),
+        )
+        assert result is True  # Matches by device_id
+
+    def test_rejects_string_identifiers(self) -> None:
+        """Should reject string identifiers (not a collection of tuples)."""
+        result = is_hub_device_check(
+            device_id="some-id",
+            hub_device_id="other-id",
+            identifiers="not_a_set",
+            parent_identifier=("domain", "service"),
+        )
+        assert result is False
+
+
+class TestResolveTrackerSubentryCandidate:
+    """Tests for resolve_tracker_subentry_candidate function."""
+
+    def test_returns_candidate_when_matches_entry_tracker(self) -> None:
+        """Should return candidate when it matches entry_tracker_id."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="tracker-sub-1",
+            entry_tracker_id="tracker-sub-1",
+            tracker_subentry_ids={"tracker-sub-1"},
+        )
+        assert result == "tracker-sub-1"
+
+    def test_returns_none_when_candidate_not_matches_entry_tracker(self) -> None:
+        """Should return None when candidate doesn't match entry_tracker_id."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="tracker-sub-2",
+            entry_tracker_id="tracker-sub-1",
+            tracker_subentry_ids={"tracker-sub-1", "tracker-sub-2"},
+        )
+        assert result is None
+
+    def test_returns_candidate_when_in_tracker_ids_no_entry_tracker(self) -> None:
+        """Should return candidate when in tracker_subentry_ids and no entry_tracker_id."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="tracker-sub-1",
+            entry_tracker_id=None,
+            tracker_subentry_ids={"tracker-sub-1", "tracker-sub-2"},
+        )
+        assert result == "tracker-sub-1"
+
+    def test_returns_none_when_not_in_tracker_ids(self) -> None:
+        """Should return None when candidate not in tracker_subentry_ids."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="other-sub",
+            entry_tracker_id=None,
+            tracker_subentry_ids={"tracker-sub-1"},
+        )
+        assert result is None
+
+    def test_returns_candidate_when_no_tracker_ids(self) -> None:
+        """Should return candidate when tracker_subentry_ids is empty."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="any-sub",
+            entry_tracker_id=None,
+            tracker_subentry_ids=set(),
+        )
+        assert result == "any-sub"
+
+    def test_returns_none_for_none_candidate(self) -> None:
+        """Should return None for None candidate."""
+        result = resolve_tracker_subentry_candidate(
+            candidate=None,
+            entry_tracker_id="tracker-1",
+            tracker_subentry_ids={"tracker-1"},
+        )
+        assert result is None
+
+    def test_returns_none_when_entry_tracker_set_but_not_in_ids(self) -> None:
+        """Should return None when entry_tracker_id set but candidate not in tracker_ids."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="tracker-sub-1",
+            entry_tracker_id="tracker-sub-1",
+            tracker_subentry_ids={"other-tracker"},  # candidate not in this set
+        )
+        assert result is None
+
+    def test_handles_provisional_suffix(self) -> None:
+        """Should handle provisional suffix in candidate."""
+        result = resolve_tracker_subentry_candidate(
+            candidate="tracker-provisional",
+            entry_tracker_id="tracker-provisional",
+            tracker_subentry_ids={"tracker-provisional"},
+        )
+        assert result == "tracker-provisional"

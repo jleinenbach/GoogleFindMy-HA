@@ -12,7 +12,7 @@ Contents:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 # Re-export constants used by this module's functions
@@ -26,8 +26,14 @@ __all__ = [
     "SERVICE_DEVICE_IDENTIFIER_PREFIX",
     "build_legacy_device_registry_kwargs",
     "extract_device_display_name",
+    "extract_subentry_links",
+    "has_hub_link",
+    "has_subentry_link",
+    "is_hub_device_check",
     "needs_legacy_kwarg_retry",
+    "normalize_device_name",
     "parse_device_identifier",
+    "resolve_tracker_subentry_candidate",
 ]
 
 
@@ -198,3 +204,209 @@ def parse_device_identifier(
 
     # Legacy format -> accept as-is
     return ident
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Device Name Normalization
+# ---------------------------------------------------------------------------
+
+
+def normalize_device_name(name: Any) -> str | None:
+    """Normalize device name to lowercase for comparison.
+
+    Strips whitespace and converts to lowercase (casefold).
+
+    Args:
+        name: Device name (any type).
+
+    Returns:
+        Normalized lowercase string, or None if invalid/empty.
+    """
+    if not isinstance(name, str):
+        return None
+    stripped = name.strip()
+    if not stripped:
+        return None
+    return stripped.casefold()
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Subentry Links Extraction
+# ---------------------------------------------------------------------------
+
+
+def extract_subentry_links(device: Any, entry_id: str | None) -> set[str | None]:
+    """Extract subentry links from a device object for a given entry_id.
+
+    Checks config_entries_subentries mapping first, falls back to
+    config_subentry_id attribute.
+
+    Args:
+        device: Device registry entry object.
+        entry_id: The config entry ID to look up.
+
+    Returns:
+        Set of subentry link strings (may include None for hub links).
+    """
+    if device is None or not entry_id:
+        return set()
+
+    # Try config_entries_subentries mapping first
+    mapping_obj = getattr(device, "config_entries_subentries", None)
+    if isinstance(mapping_obj, Mapping):
+        raw_links = mapping_obj.get(entry_id)
+        if isinstance(raw_links, Collection) and not isinstance(
+            raw_links, (str, bytes, Mapping)
+        ):
+            typed_links: set[str | None] = set()
+            for item in raw_links:
+                if item is None:
+                    typed_links.add(None)
+                elif isinstance(item, str):
+                    typed_links.add(item)
+            return typed_links
+        if raw_links is None:
+            return set()
+
+    # Fallback to config_subentry_id attribute
+    fallback = getattr(device, "config_subentry_id", None)
+    if isinstance(fallback, str):
+        return {fallback}
+
+    # If device has config_entries but no subentry, return {None}
+    config_entries = getattr(device, "config_entries", None)
+    if config_entries is not None and fallback is None:
+        return {None}
+
+    return set()
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Subentry Link Checks
+# ---------------------------------------------------------------------------
+
+
+def has_subentry_link(links: set[str | None], target_id: str | None) -> bool:
+    """Check if target subentry ID is in links set.
+
+    Args:
+        links: Set of subentry links (may include None).
+        target_id: Target subentry ID to check.
+
+    Returns:
+        True if target_id is in links and target_id is not None.
+    """
+    if target_id is None:
+        return False
+    return target_id in links
+
+
+def has_hub_link(links: set[str | None]) -> bool:
+    """Check if device has a hub link (None in links set).
+
+    Hub links are represented by None in the subentry links set,
+    indicating the device is linked to the config entry without
+    a specific subentry.
+
+    Args:
+        links: Set of subentry links.
+
+    Returns:
+        True if None is in links.
+    """
+    return None in links
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Hub Device Detection
+# ---------------------------------------------------------------------------
+
+
+def is_hub_device_check(
+    device_id: str | None,
+    hub_device_id: str | None,
+    identifiers: Any,
+    parent_identifier: tuple[str, str],
+) -> bool:
+    """Check if a device is the hub/service anchor device.
+
+    A device is considered the hub if:
+    1. Its ID matches the hub_device_id, OR
+    2. Its identifiers contain the parent_identifier
+
+    Args:
+        device_id: The device's ID.
+        hub_device_id: The known hub device ID.
+        identifiers: The device's identifiers (set of tuples).
+        parent_identifier: The parent/service device identifier tuple.
+
+    Returns:
+        True if the device is the hub/service device.
+    """
+    # Check by device ID match
+    if (
+        hub_device_id is not None
+        and device_id is not None
+        and device_id == hub_device_id
+    ):
+        return True
+
+    # Check by identifier match
+    if isinstance(identifiers, Collection) and not isinstance(
+        identifiers, (str, bytes, Mapping)
+    ):
+        return parent_identifier in identifiers
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Phase 8: Tracker Subentry Resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_tracker_subentry_candidate(
+    candidate: str | None,
+    entry_tracker_id: str | None,
+    tracker_subentry_ids: set[str],
+) -> str | None:
+    """Resolve a tracker subentry candidate to a valid subentry ID.
+
+    Resolution rules:
+    1. If candidate is None, return None
+    2. If entry_tracker_id is set:
+       - candidate must equal entry_tracker_id
+       - if tracker_subentry_ids is non-empty, candidate must be in it
+    3. If entry_tracker_id is None:
+       - if tracker_subentry_ids is non-empty, candidate must be in it
+       - if tracker_subentry_ids is empty, accept candidate as-is
+
+    Args:
+        candidate: The candidate subentry ID to validate.
+        entry_tracker_id: The entry's tracker subentry ID (if set).
+        tracker_subentry_ids: Set of valid tracker subentry IDs.
+
+    Returns:
+        The validated subentry ID, or None if validation fails.
+    """
+    if candidate is None:
+        return None
+
+    if entry_tracker_id is not None:
+        # Must match entry_tracker_id
+        if candidate != entry_tracker_id:
+            return None
+        # If tracker_subentry_ids exists, must be in it
+        if tracker_subentry_ids and candidate not in tracker_subentry_ids:
+            return None
+        return candidate
+
+    # No entry_tracker_id set
+    if tracker_subentry_ids:
+        # Must be in tracker_subentry_ids
+        if candidate in tracker_subentry_ids:
+            return candidate
+        return None
+
+    # No restrictions - accept as-is
+    return candidate
