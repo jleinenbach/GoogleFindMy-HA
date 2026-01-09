@@ -15,9 +15,6 @@ REQUIREMENT: 100% test coverage for all extracted functions.
 from __future__ import annotations
 
 import math
-from typing import Any
-
-import pytest
 
 from custom_components.googlefindmy.coordinator_geo import (
     clamp,
@@ -25,7 +22,6 @@ from custom_components.googlefindmy.coordinator_geo import (
     haversine_distance,
     safe_accuracy,
 )
-
 
 # ---------------------------------------------------------------------------
 # clamp Tests

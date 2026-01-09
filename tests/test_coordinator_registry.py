@@ -20,19 +20,14 @@ KEY RISKS COVERED:
 
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
-
 from custom_components.googlefindmy.coordinator_registry import (
+    LEGACY_SERVICE_IDENTIFIER,
+    SERVICE_DEVICE_IDENTIFIER_PREFIX,
     build_legacy_device_registry_kwargs,
     extract_device_display_name,
     needs_legacy_kwarg_retry,
     parse_device_identifier,
-    SERVICE_DEVICE_IDENTIFIER_PREFIX,
-    LEGACY_SERVICE_IDENTIFIER,
 )
-
 
 # ---------------------------------------------------------------------------
 # extract_device_display_name Tests

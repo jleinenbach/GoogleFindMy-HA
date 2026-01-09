@@ -167,6 +167,10 @@ ignore = ["E501"]
 "tests/helpers/homeassistant.py" = ["PLR0911"]
 "tests/helpers/homeassistant_stub.py" = ["UP047"]
 "custom_components/googlefindmy/button.py" = ["PLR0912", "PLR0915"]
+"custom_components/googlefindmy/coordinator_cache.py" = ["PLR0911"]
+"custom_components/googlefindmy/coordinator_geo.py" = ["PLC0415"]
+"custom_components/googlefindmy/coordinator_registry.py" = ["PLR2004"]
+"custom_components/googlefindmy/coordinator_subentry.py" = ["PLR2004"]
 
 [tool.ruff.format]
 quote-style = "double"

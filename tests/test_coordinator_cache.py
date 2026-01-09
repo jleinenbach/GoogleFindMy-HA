@@ -15,10 +15,7 @@ REQUIREMENT: 100% test coverage for all extracted functions.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timezone
-from typing import Any
-
-import pytest
+from datetime import UTC, datetime
 
 from custom_components.googlefindmy.coordinator_cache import (
     DEFAULT_SNAPSHOT_FIELDS,
@@ -28,7 +25,6 @@ from custom_components.googlefindmy.coordinator_cache import (
     is_presence_expired,
     should_allow_location_update,
 )
-
 
 # ---------------------------------------------------------------------------
 # build_base_snapshot_entry Tests

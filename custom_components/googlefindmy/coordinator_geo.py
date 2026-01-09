@@ -130,9 +130,7 @@ def safe_accuracy(value: float | None) -> float:
 # ---------------------------------------------------------------------------
 
 
-def haversine_distance(
-    lat1: float, lon1: float, lat2: float, lon2: float
-) -> float:
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Return distance in meters between two WGS84 coordinates.
 
     Uses the Haversine formula which gives great-circle distances

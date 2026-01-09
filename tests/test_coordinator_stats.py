@@ -32,7 +32,6 @@ from custom_components.googlefindmy.coordinator_stats import (
     short_error_message,
 )
 
-
 # ---------------------------------------------------------------------------
 # DiagnosticsBuffer Tests
 # ---------------------------------------------------------------------------
@@ -520,7 +519,9 @@ class TestStatsIntegration:
     def test_error_formatting_pipeline(self) -> None:
         """Full error formatting pipeline."""
         # Create an error message
-        exc = Exception("Connection failed:\n  - timeout after 30s\n  - retry exhausted")
+        exc = Exception(
+            "Connection failed:\n  - timeout after 30s\n  - retry exhausted"
+        )
         msg = short_error_message(exc)
 
         # Verify it's normalized

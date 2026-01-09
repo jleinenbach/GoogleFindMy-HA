@@ -21,12 +21,6 @@ KEY RISKS COVERED:
 
 from __future__ import annotations
 
-import math
-from datetime import UTC, datetime
-from typing import Any
-
-import pytest
-
 from custom_components.googlefindmy.coordinator_subentry import (
     format_epoch_utc,
     group_devices_by_subentry,
@@ -34,7 +28,6 @@ from custom_components.googlefindmy.coordinator_subentry import (
     parse_last_seen_timestamp,
     sanitize_subentry_identifier,
 )
-
 
 # ---------------------------------------------------------------------------
 # sanitize_subentry_identifier Tests
@@ -405,9 +398,7 @@ class TestGroupDevicesBySubentry:
 
     def test_empty_devices(self) -> None:
         """Empty device list returns empty groups."""
-        result = group_devices_by_subentry(
-            [], {}, "default", {"subentry-a", "default"}
-        )
+        result = group_devices_by_subentry([], {}, "default", {"subentry-a", "default"})
 
         assert result.get("subentry-a") == []
         assert result.get("default") == []
@@ -453,9 +444,7 @@ class TestGroupDevicesBySubentry:
             {"device_id": 123},  # Non-string
             {"device_id": None},  # None
         ]
-        result = group_devices_by_subentry(
-            devices, {}, "default", {"default"}
-        )
+        result = group_devices_by_subentry(devices, {}, "default", {"default"})
 
         assert result.get("default") == []
 
@@ -564,9 +553,7 @@ class TestEdgeCases:
     def test_group_with_empty_subentry_keys(self) -> None:
         """Grouping with no predefined subentry keys."""
         devices = [{"device_id": "device1"}]
-        result = group_devices_by_subentry(
-            devices, {}, "default", set()
-        )
+        result = group_devices_by_subentry(devices, {}, "default", set())
 
         # Fallback key should be created
         assert "default" in result

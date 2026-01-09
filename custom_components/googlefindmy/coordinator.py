@@ -64,16 +64,42 @@ import warnings
 from collections import deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
+from .coordinator_cache import (
+    build_base_snapshot_entry as _build_base_snapshot_entry_impl,
+)
+from .coordinator_cache import (
+    determine_location_status,
+    epoch_to_datetime_utc,
+    is_presence_expired,
+)
 from .coordinator_geo import (
     clamp as _clamp,
+)
+from .coordinator_geo import (
     coerce_float as _coerce_float_impl,
+)
+from .coordinator_geo import (
     haversine_distance as _haversine_distance_impl,
+)
+from .coordinator_geo import (
     safe_accuracy,
+)
+from .coordinator_registry import (
+    build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
+)
+from .coordinator_registry import (
+    extract_device_display_name as _extract_display_name_impl,
+)
+from .coordinator_registry import (
+    needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
+)
+from .coordinator_registry import (
+    parse_device_identifier as _parse_identifier_impl,
 )
 from .coordinator_stats import (
     ApiStatus,
@@ -81,27 +107,26 @@ from .coordinator_stats import (
     FcmStatus,
     StatusSnapshot,
     format_recent_errors,
+)
+from .coordinator_stats import (
     get_duration as _get_duration_impl,
+)
+from .coordinator_stats import (
     short_error_message as _short_error_message_impl,
-)
-from .coordinator_cache import (
-    build_base_snapshot_entry as _build_base_snapshot_entry_impl,
-    determine_location_status,
-    epoch_to_datetime_utc,
-    is_presence_expired,
-    should_allow_location_update,
-)
-from .coordinator_registry import (
-    build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
-    extract_device_display_name as _extract_display_name_impl,
-    needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
-    parse_device_identifier as _parse_identifier_impl,
 )
 from .coordinator_subentry import (
     format_epoch_utc as _format_epoch_utc_impl,
+)
+from .coordinator_subentry import (
     group_devices_by_subentry as _group_devices_impl,
+)
+from .coordinator_subentry import (
     normalize_epoch_seconds as _normalize_epoch_impl,
+)
+from .coordinator_subentry import (
     parse_last_seen_timestamp as _parse_last_seen_impl,
+)
+from .coordinator_subentry import (
     sanitize_subentry_identifier as _sanitize_subentry_id_impl,
 )
 
