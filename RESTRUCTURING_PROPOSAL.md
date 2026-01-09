@@ -80,15 +80,15 @@ eid/                         # Optionales Umbrella-Package
 ```
 → Dies wäre aber eine größere Umstrukturierung. **Empfehlung: Aktuell nicht umsetzen.**
 
-### 3.2 Coordinator-Methoden als Mixins auslagern
+### 3.2 Coordinator als Package strukturieren
 
 **Problem:** `GoogleFindMyCoordinator` hat 171 Methoden in einer Klasse.
 
-**Vorschlag:** Methoden-Gruppen in Mixin-Klassen auslagern.
+**Vorschlag:** Methoden-Gruppen in Operations-Klassen auslagern (Package-Struktur).
 
-#### Detaillierte Mixin-Zuordnung
+#### Detaillierte Modul-Zuordnung
 
-**RegistryMixin (11 Methoden, ~1.682 Zeilen)**
+**registry.py (11 Methoden, ~1.682 Zeilen)**
 - `_ensure_registry_for_devices` (L3207, ~671 Zeilen) ⚠️ F-Grade
 - `_ensure_service_device_exists` (L2243, ~537 Zeilen) ⚠️ F-Grade
 - `_find_tracker_entity_entry` (L2781, ~275 Zeilen)
@@ -96,53 +96,54 @@ eid/                         # Optionales Umbrella-Package
 - `_call_device_registry_api` (L2114, ~44 Zeilen)
 - ... und 6 weitere
 
-**SubentryMixin (17 Methoden, ~766 Zeilen)**
+**subentry.py (17 Methoden, ~766 Zeilen)**
 - `_refresh_subentry_index` (L1314, ~453 Zeilen) ⚠️ F-Grade
 - `_schedule_core_subentry_repair` (L1228, ~73 Zeilen)
 - `_build_core_subentry_definitions` (L1165, ~62 Zeilen)
 - `attach_subentry_manager` (L1109, ~31 Zeilen)
 - ... und 13 weitere
 
-**PollingMixin (6 Methoden, ~495 Zeilen)**
+**polling.py (6 Methoden, ~495 Zeilen)**
 - `_async_start_poll_cycle` (L5879, ~449 Zeilen) ⚠️ F-Grade
 - `_get_predicted_poll_time` (L6879, ~27 Zeilen)
 - `is_polling`, `force_poll_due`, `last_poll_result`
 
-**IdentityMixin (4 Methoden, ~776 Zeilen)**
+**identity.py (4 Methoden, ~776 Zeilen)**
 - `get_active_device_identities` (L4503, ~725 Zeilen) ⚠️ F-Grade
 - `_register_identity_key` (L7114, ~23 Zeilen)
 - `_normalize_identity_key*` Methoden
 
-**LocateMixin (1+ Methoden, ~274+ Zeilen)**
+**locate.py (1+ Methoden, ~274+ Zeilen)**
 - `async_locate_device` (L7945, ~274 Zeilen)
 - Evtl. weitere `*location*` Methoden
 
-#### Geplante Mixin-Struktur
+#### Geplante Struktur (nach HA Core Best Practice)
+
+Orientiert am [UniFi hub/ Pattern](https://github.com/home-assistant/core/tree/dev/homeassistant/components/unifi/hub):
 
 ```
-coordinator_mixins/               # NEUES Verzeichnis
-├── __init__.py
-├── subentry_mixin.py            # ~18 Methoden, ~800 Zeilen
-├── registry_mixin.py            # ~8 Methoden, ~1.350 Zeilen
-├── polling_mixin.py             # ~6 Methoden, ~500 Zeilen
-├── locate_mixin.py              # ~5 Methoden, ~500 Zeilen
-└── identity_mixin.py            # ~4 Methoden, ~770 Zeilen
+coordinator/                      # NEUES Subdirectory
+├── __init__.py                  # Re-exports für Kompatibilität
+├── registry.py                  # Device-Registry (~1.350 Zeilen)
+├── subentry.py                  # Subentry-Management (~800 Zeilen)
+├── polling.py                   # Polling-Logik (~500 Zeilen)
+├── locate.py                    # Locate-Funktionen (~500 Zeilen)
+└── identity.py                  # Identity-Verwaltung (~770 Zeilen)
 ```
+
+**Keine "mixin" im Namen** - semantische Bezeichnungen wie in HA Core.
 
 **Implementierung:**
 ```python
-# coordinator_mixins/registry_mixin.py
+# coordinator/registry.py
+"""Device registry operations for GoogleFindMyCoordinator."""
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..coordinator import GoogleFindMyCoordinator
+    from . import GoogleFindMyCoordinator
 
-class RegistryMixin:
-    """Device registry operations mixin."""
-
-    # Typ-Hints für self (wird zur Laufzeit GoogleFindMyCoordinator sein)
-    hass: "HomeAssistant"
-    config_entry: "ConfigEntry"
+class RegistryOperations:
+    """Device registry operations."""
 
     async def _ensure_registry_for_devices(self: "GoogleFindMyCoordinator", ...):
         """Ensure all devices have registry entries."""
@@ -152,33 +153,39 @@ class RegistryMixin:
         """Ensure service device exists."""
         ...
 
-# coordinator.py (neu, ~2.500 Zeilen)
-from .coordinator_mixins import (
-    RegistryMixin,
-    SubentryMixin,
-    PollingMixin,
-    LocateMixin,
-    IdentityMixin,
-)
+# coordinator/__init__.py
+"""Google Find My coordinator package."""
+from .registry import RegistryOperations
+from .subentry import SubentryOperations
+from .polling import PollingOperations
+from .locate import LocateOperations
+from .identity import IdentityOperations
 
 class GoogleFindMyCoordinator(
-    RegistryMixin,
-    SubentryMixin,
-    PollingMixin,
-    LocateMixin,
-    IdentityMixin,
+    RegistryOperations,
+    SubentryOperations,
+    PollingOperations,
+    LocateOperations,
+    IdentityOperations,
     DataUpdateCoordinator,
 ):
-    """Google Find My coordinator with mixin-based organization."""
-    # Nur noch Initialisierung + ~50 Kernmethoden
+    """Google Find My coordinator with modular organization."""
+    # Initialisierung + ~50 Kernmethoden
 ```
+
+**Hinweis:** Die bisherige `coordinator.py` im Root wird durch `coordinator/__init__.py` ersetzt.
+Import-Pfade bleiben kompatibel: `from .coordinator import GoogleFindMyCoordinator`
 
 ### 3.3 Bestehende Helper-Module beibehalten
 
 Die bereits extrahierten `coordinator_*.py` Module bleiben unverändert:
 - Sie enthalten **pure functions** (zustandslos)
-- Die **Mixins** enthalten **Methoden** (brauchen `self`)
+- Die **Operations-Klassen** im `coordinator/` Package enthalten **Methoden** (brauchen `self`)
 - Beide ergänzen sich
+
+**Namenskonvention:**
+- `coordinator_*.py` im Root = Pure Helper Functions
+- `coordinator/*.py` im Package = Operations-Klassen (Methoden)
 
 ---
 
@@ -188,40 +195,41 @@ Die bereits extrahierten `coordinator_*.py` Module bleiben unverändert:
 |------------|-------:|--------:|
 | Gesamt-Zeilen | 8.342 | ~2.500 |
 | Methoden in Hauptklasse | 171 | ~50 |
-| Mixin-Dateien | 0 | 5 |
+| Operations-Module | 0 | 5 |
 | Pure-Helper-Module | 8 | 8 |
 
 ---
 
 ## 5. Migrations-Plan
 
-### Phase 1: Mixin-Infrastruktur (Risiko: Niedrig)
-1. `coordinator_mixins/` Verzeichnis erstellen
-2. `__init__.py` mit leeren Mixin-Klassen anlegen
-3. Coordinator erbt von Mixins (noch leer)
-4. Tests verifizieren: Keine Regression
+### Phase 1: Package-Infrastruktur (Risiko: Niedrig)
+1. `coordinator/` Verzeichnis erstellen
+2. `coordinator.py` → `coordinator/__init__.py` verschieben
+3. Leere Operations-Klassen in separaten Modulen anlegen
+4. Coordinator erbt von Operations-Klassen (noch leer)
+5. Tests verifizieren: Keine Regression
 
-### Phase 2: RegistryMixin extrahieren (Risiko: Mittel)
-1. `_ensure_registry_for_devices` → `registry_mixin.py`
-2. `_ensure_service_device_exists` → `registry_mixin.py`
-3. `_find_tracker_entity_entry` → `registry_mixin.py`
+### Phase 2: RegistryOperations extrahieren (Risiko: Mittel)
+1. `_ensure_registry_for_devices` → `coordinator/registry.py`
+2. `_ensure_service_device_exists` → `coordinator/registry.py`
+3. `_find_tracker_entity_entry` → `coordinator/registry.py`
 4. Weitere `*registry*` Methoden
 5. Tests durchführen
 
-### Phase 3: SubentryMixin extrahieren (Risiko: Mittel)
-1. `_refresh_subentry_index` → `subentry_mixin.py`
+### Phase 3: SubentryOperations extrahieren (Risiko: Mittel)
+1. `_refresh_subentry_index` → `coordinator/subentry.py`
 2. Alle `*subentry*` Methoden
 3. Tests durchführen
 
-### Phase 4: Weitere Mixins (Risiko: Mittel)
-1. `PollingMixin` - Polling-bezogene Methoden
-2. `LocateMixin` - Locate-bezogene Methoden
-3. `IdentityMixin` - Identity-bezogene Methoden
+### Phase 4: Weitere Operations (Risiko: Mittel)
+1. `PollingOperations` → `coordinator/polling.py`
+2. `LocateOperations` → `coordinator/locate.py`
+3. `IdentityOperations` → `coordinator/identity.py`
 4. Nach jeder Extraktion: Tests
 
 ### Phase 5: Cleanup (Risiko: Niedrig)
-1. Ungenutzte Imports in coordinator.py entfernen
-2. Docstrings für Mixins hinzufügen
+1. Ungenutzte Imports entfernen
+2. Docstrings für Operations-Klassen hinzufügen
 3. Test-Coverage prüfen
 
 ---
@@ -230,8 +238,8 @@ Die bereits extrahierten `coordinator_*.py` Module bleiben unverändert:
 
 | Änderung | Risiko | Begründung |
 |----------|--------|------------|
-| Mixin-Infrastruktur | Niedrig | Nur Vererbung, keine Code-Änderung |
-| Mixin-Extraktion | Mittel | Methodensignaturen bleiben gleich |
+| Package-Infrastruktur | Niedrig | Import-Pfade bleiben kompatibel |
+| Operations-Extraktion | Mittel | Methodensignaturen bleiben gleich |
 | Helper-Module | Keins | Bereits integriert und getestet |
 
 **Rollback-Strategie:** Git-Revert jederzeit möglich, da schrittweise Commits.
@@ -240,14 +248,15 @@ Die bereits extrahierten `coordinator_*.py` Module bleiben unverändert:
 
 ## 7. Entscheidungsfragen
 
-1. **Mixin-Verzeichnis:** Sollen Mixins in `coordinator_mixins/` oder als `coordinator_*_mixin.py` im Root liegen?
-   - **Empfehlung:** `coordinator_mixins/` (sauberere Trennung)
+1. **Package-Name:** `coordinator/` wie vorgeschlagen?
+   - **Empfehlung:** Ja, entspricht HA Core Pattern (vgl. `unifi/hub/`)
 
-2. **Reihenfolge:** Welches Mixin zuerst?
-   - **Empfehlung:** `RegistryMixin` (größte Komplexität, höchster Nutzen)
+2. **Reihenfolge:** Welche Operations zuerst extrahieren?
+   - **Empfehlung:** `RegistryOperations` (größte Komplexität, höchster Nutzen)
 
-3. **Helper-Module:** Sollen bestehende `coordinator_*.py` Helper in Mixins integriert werden?
-   - **Empfehlung:** Nein - Pure Functions und Methoden ergänzen sich
+3. **Helper-Module:** Sollen bestehende `coordinator_*.py` Helper in das Package integriert werden?
+   - **Empfehlung:** Nein - Pure Functions und Methoden bleiben getrennt
+   - Alternative: Später in `coordinator/helpers/` verschieben (optional)
 
 ---
 
