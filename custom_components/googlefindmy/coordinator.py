@@ -67,7 +67,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .coordinator_cache import (
     build_base_snapshot_entry as _build_base_snapshot_entry_impl,
@@ -88,6 +88,33 @@ from .coordinator_geo import (
 )
 from .coordinator_geo import (
     safe_accuracy,
+)
+from .coordinator_identity import (
+    extract_pair_date as _extract_pair_date_impl,
+)
+from .coordinator_identity import (
+    extract_secrets_creation_date as _extract_secrets_creation_date_impl,
+)
+from .coordinator_identity import (
+    extract_time_anchors_debug as _extract_time_anchors_debug_impl,
+)
+from .coordinator_identity import (
+    lookup_prio as _lookup_prio_impl,
+)
+from .coordinator_identity import (
+    lookup_prio_with_source as _lookup_prio_with_source_impl,
+)
+from .coordinator_identity import (
+    normalize_device_type as _normalize_device_type_impl,
+)
+from .coordinator_identity import (
+    normalize_fast_pair_model_id as _normalize_fast_pair_model_id_impl,
+)
+from .coordinator_identity import (
+    normalize_identity_timestamp as _normalize_identity_timestamp_impl,
+)
+from .coordinator_identity import (
+    store_if_value as _store_if_value_impl,
 )
 from .coordinator_registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
@@ -128,6 +155,24 @@ from .coordinator_subentry import (
 )
 from .coordinator_subentry import (
     sanitize_subentry_identifier as _sanitize_subentry_id_impl,
+)
+from .coordinator_update import (
+    calculate_presence_ttl as _calculate_presence_ttl_impl,
+)
+from .coordinator_update import (
+    filter_and_dedupe_devices as _filter_and_dedupe_impl,
+)
+from .coordinator_update import (
+    is_fatal_fcm_auth_error as _is_fatal_fcm_auth_error_impl,
+)
+from .coordinator_update import (
+    is_poll_cycle_due as _is_poll_cycle_due_impl,
+)
+from .coordinator_update import (
+    normalize_device_list_payload as _normalize_device_list_impl,
+)
+from .coordinator_update import (
+    should_defer_empty_list as _should_defer_empty_list_impl,
 )
 
 if TYPE_CHECKING:
@@ -2740,7 +2785,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 identifiers,
                 DOMAIN,
                 entry_id=entry_id,
-                service_prefix=f"{SERVICE_DEVICE_ID_PREFIX}:",
+                service_prefix=f"{SERVICE_DEVICE_IDENTIFIER_PREFIX}:",
             )
             if registry_identifier:
                 canonical_device_id = registry_identifier
@@ -4486,198 +4531,16 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
         semantics. Any debug time anchor hints present in cached payloads are
         also forwarded best-effort for diagnostics.
         """
-
-        def _normalize_device_type(value: Any) -> int | None:
-            if isinstance(value, bool):
-                return None
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-            return None
-
-        def _normalize_fast_pair_model_id(value: Any) -> str | None:
-            if isinstance(value, str):
-                trimmed = value.strip()
-                return trimmed or None
-            if isinstance(value, (bytes, bytearray)):
-                try:
-                    decoded = value.decode().strip()
-                except UnicodeDecodeError:
-                    decoded = value.hex()
-                return decoded or None
-            return None
-
-        T = TypeVar("T")
-
-        def _lookup_prio(
-            lookup_keys: tuple[str | None, ...], *sources: Mapping[str, T]
-        ) -> T | None:
-            """Return the first matching value across ordered sources."""
-
-            key_candidates: tuple[str, ...] = tuple(
-                key for key in lookup_keys if isinstance(key, str)
-            )
-
-            for source in sources:
-                if not isinstance(source, Mapping):
-                    continue
-                for key in key_candidates:
-                    if key in source:
-                        return source[key]
-            return None
-
-        def _lookup_prio_with_source(
-            lookup_keys: tuple[str | None, ...],
-            *sources: tuple[Mapping[str, T], str],
-        ) -> tuple[T | None, str | None]:
-            """Return the first matching value and its source label."""
-
-            key_candidates: tuple[str, ...] = tuple(
-                key for key in lookup_keys if isinstance(key, str)
-            )
-
-            for source, label in sources:
-                if not isinstance(source, Mapping):
-                    continue
-                for key in key_candidates:
-                    if key in source:
-                        value = source[key]
-                        if value is not None:
-                            return value, label
-            return None, None
-
-        U = TypeVar("U")
-
-        def _store_if_value(target: dict[str, U], key: str, value: U | None) -> None:
-            """Store non-null lookup values to avoid shadowing fallbacks."""
-
-            if value is not None:
-                target[key] = value
-
-        def _normalize_timestamp(value: Any) -> int | None:
-            """Return epoch seconds from ints/strings or Timestamp-like mappings.
-
-            Values <= 0 are treated as invalid to prevent zero timestamps from
-            shadowing valid values in priority lookups.
-            """
-
-            ts = _normalize_epoch_seconds(value)
-            if ts is not None and ts > 0:
-                return ts
-
-            if isinstance(value, Mapping):
-                seconds = _normalize_epoch_seconds(value.get("seconds"))
-                if seconds is not None and seconds > 0:
-                    return seconds
-                if "nanos" in value or "nsec" in value:
-                    return None
-
-            return None
-
-        def _extract_timestamp_from_keys(
-            payload: Mapping[str, Any] | None, *keys: str
-        ) -> int | None:
-            if not isinstance(payload, Mapping):
-                return None
-
-            for key in keys:
-                if key in payload:
-                    ts = _normalize_timestamp(payload.get(key))
-                    if ts is not None:
-                        return ts
-            return None
-
-        def _extract_pair_date(payload: Mapping[str, Any] | None) -> int | None:
-            """Return best-effort pairDate from various payload shapes."""
-
-            if not isinstance(payload, Mapping):
-                return None
-
-            direct = _extract_timestamp_from_keys(
-                payload,
-                "pair_date",
-                "pairDate",
-                "pair_date_unix",
-                "pairingDate",
-                "pairedAt",
-                "paired_at",
-            )
-            if direct is not None:
-                return direct
-
-            registration = payload.get("deviceRegistration") or payload.get(
-                "device_registration"
-            )
-            if isinstance(registration, Mapping):
-                nested = _extract_pair_date(registration)
-                if nested is not None:
-                    return nested
-
-            information = payload.get("information")
-            if isinstance(information, Mapping):
-                nested = _extract_pair_date(information)
-                if nested is not None:
-                    return nested
-
-            return None
-
-        def _extract_secrets_creation_date(
-            payload: Mapping[str, Any] | None,
-        ) -> int | None:
-            """Return best-effort creation time for encrypted secrets bundles."""
-
-            if not isinstance(payload, Mapping):
-                return None
-
-            direct = _extract_timestamp_from_keys(
-                payload,
-                "secrets_creation_date",
-                "secretsCreationDate",
-                "creation_date",
-                "creationDate",
-            )
-            if direct is not None:
-                return direct
-
-            encrypted = payload.get("encrypted_user_secrets") or payload.get(
-                "encryptedUserSecrets"
-            )
-            if isinstance(encrypted, Mapping):
-                encrypted_ts = _extract_timestamp_from_keys(
-                    encrypted, "creation_date", "creationDate"
-                )
-                if encrypted_ts is not None:
-                    return encrypted_ts
-
-            registration = payload.get("deviceRegistration") or payload.get(
-                "device_registration"
-            )
-            if isinstance(registration, Mapping):
-                nested = _extract_secrets_creation_date(registration)
-                if nested is not None:
-                    return nested
-
-            return None
-
-        def _extract_time_anchors_debug(
-            payload: Mapping[str, Any] | None,
-        ) -> Any | None:
-            """Return optional time anchor hints for diagnostics."""
-
-            if not isinstance(payload, Mapping):
-                return None
-
-            for key in (
-                "time_anchors_debug",
-                "timeAnchorsDebug",
-                "time_anchors",
-                "timeAnchors",
-            ):
-                if key in payload:
-                    return payload.get(key)
-
-            return None
+        # Use imported helpers from coordinator_identity.py instead of inline functions
+        _normalize_device_type = _normalize_device_type_impl
+        _normalize_fast_pair_model_id = _normalize_fast_pair_model_id_impl
+        _lookup_prio = _lookup_prio_impl
+        _lookup_prio_with_source = _lookup_prio_with_source_impl
+        _store_if_value = _store_if_value_impl
+        _normalize_timestamp = _normalize_identity_timestamp_impl
+        _extract_pair_date = _extract_pair_date_impl
+        _extract_secrets_creation_date = _extract_secrets_creation_date_impl
+        _extract_time_anchors_debug = _extract_time_anchors_debug_impl
 
         _expected_identity_key_length = 32
 
@@ -5610,13 +5473,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             if isinstance(fatal_error, str) and fatal_error:
                 # Check if this is a fatal auth error that should fail immediately
                 # (e.g., 404/401 with credentials issues - no point retrying)
-                error_lower = fatal_error.lower()
-                is_fatal_auth = (
-                    "401" in fatal_error
-                    or ("404" in fatal_error and "credential" in error_lower)
-                    or "credentials invalid" in error_lower
-                    or "invalid auth" in error_lower
-                )
+                is_fatal_auth = _is_fatal_fcm_auth_error_impl(fatal_error)
 
                 if is_fatal_auth:
                     # Fatal auth errors - fail immediately, no retry
@@ -5737,54 +5594,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 self._set_auth_state(failed=False)
                 self._set_api_status(ApiStatus.OK)
 
-                # Normalize payloads that may arrive as mappings or sequences.
-                devices_source: Any
-                if isinstance(payload, Mapping):
-                    devices_source = payload.get("devices")
-                else:
-                    devices_source = payload
-
-                if devices_source is None:
-                    device_candidates: list[Any] = []
-                elif isinstance(devices_source, Mapping):
-                    device_candidates = [devices_source]
-                elif isinstance(devices_source, Sequence) and not isinstance(
-                    devices_source, (str, bytes, bytearray)
-                ):
-                    device_candidates = list(devices_source)
-                else:
-                    device_candidates = []
-
-                filtered_devices = []
-                seen_ids: set[str] = set()
-                for item in device_candidates:
-                    if not isinstance(item, Mapping):
-                        continue
-                    normalized = dict(item)
-                    dev_id_value = normalized.get("id")
-                    if not isinstance(dev_id_value, str) or not dev_id_value.strip():
-                        _LOGGER.debug(
-                            "Skipping device without valid id (keys=%s)",
-                            list(normalized)[:6],
-                        )
-                        continue
-                    dev_id = dev_id_value.strip()
-                    normalized["id"] = dev_id
-                    if dev_id in seen_ids:
-                        # Duplicate policy: first-wins (skip subsequent duplicates).
-                        _LOGGER.debug(
-                            "Skipping duplicate device entry for id=%s", dev_id
-                        )
-                        continue
-                    seen_ids.add(dev_id)
-                    filtered_devices.append(normalized)
+                # Normalize payloads and filter/dedupe devices using pure helpers
+                device_candidates = _normalize_device_list_impl(payload)
+                filtered_devices, seen_ids = _filter_and_dedupe_impl(device_candidates)
 
                 # Minimal hardening against false empties (keep prior behaviour)
                 if not filtered_devices:
                     self._empty_list_streak += 1
-                    if (
-                        self._empty_list_streak < _EMPTY_LIST_QUORUM
-                        and self._last_device_list
+                    # Use helper to decide if we should defer the empty list
+                    if _should_defer_empty_list_impl(
+                        self._empty_list_streak,
+                        _EMPTY_LIST_QUORUM,
+                        bool(self._last_device_list),
                     ):
                         # Defer clearing once; keep previous view stable.
                         _LOGGER.debug(
@@ -5793,9 +5614,6 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                             _EMPTY_LIST_QUORUM,
                         )
                         filtered_devices = list(self._last_device_list)
-                        _LOGGER.debug(
-                            "Deferring discovery throttle; retrying device list before pacing interval applies.",
-                        )
                     else:
                         _LOGGER.debug(
                             "Accepting empty device list after %d consecutive empties.",
@@ -5814,7 +5632,7 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
             effective_interval = max(
                 self.location_poll_interval, self.min_poll_interval
             )
-            self._presence_ttl_s = max(2 * effective_interval, 120)
+            self._presence_ttl_s = _calculate_presence_ttl_impl(effective_interval, 120)
             now_mono = time.monotonic()
 
             predicted_target = self._get_predicted_poll_time()
@@ -5942,17 +5760,18 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 )
             )
 
-            hard_limit_passed = (
-                now_mono - self._last_poll_mono
-            ) >= self.min_poll_interval
+            elapsed_since_poll = now_mono - self._last_poll_mono
+            hard_limit_passed = elapsed_since_poll >= self.min_poll_interval
 
-            due = (
-                (
-                    (now_mono - self._last_poll_mono) >= effective_interval
-                    and not predictive_block
-                )
-                or (predictive_due and hard_limit_passed)
-            ) or is_cold_start
+            # Use helper to determine if poll cycle is due
+            due = _is_poll_cycle_due_impl(
+                elapsed=elapsed_since_poll,
+                effective_interval=effective_interval,
+                predictive_block=predictive_block,
+                predictive_due=predictive_due,
+                hard_limit_passed=hard_limit_passed,
+                is_cold_start=is_cold_start,
+            )
             if due and not self._is_polling and devices_to_poll:
                 force_poll = False
                 fcm_ready = self._is_fcm_ready_soft()
