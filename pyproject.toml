@@ -171,6 +171,7 @@ ignore = ["E501"]
 "custom_components/googlefindmy/coordinator_geo.py" = ["PLC0415"]
 "custom_components/googlefindmy/coordinator_registry.py" = ["PLR2004"]
 "custom_components/googlefindmy/coordinator_subentry.py" = ["PLR2004"]
+"custom_components/googlefindmy/coordinator_identity.py" = ["UP047"]
 
 [tool.ruff.format]
 quote-style = "double"
