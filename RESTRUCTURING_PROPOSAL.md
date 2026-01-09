@@ -117,21 +117,24 @@ eid/                         # Optionales Umbrella-Package
 - `async_locate_device` (L7945, ~274 Zeilen)
 - Evtl. weitere `*location*` Methoden
 
-#### Geplante Struktur (nach HA Core Best Practice)
-
-Orientiert am [UniFi hub/ Pattern](https://github.com/home-assistant/core/tree/dev/homeassistant/components/unifi/hub):
+#### Geplante Struktur (Option A - Transparent)
 
 ```
-coordinator/                      # NEUES Subdirectory
-├── __init__.py                  # Re-exports für Kompatibilität
-├── registry.py                  # Device-Registry (~1.350 Zeilen)
-├── subentry.py                  # Subentry-Management (~800 Zeilen)
-├── polling.py                   # Polling-Logik (~500 Zeilen)
-├── locate.py                    # Locate-Funktionen (~500 Zeilen)
-└── identity.py                  # Identity-Verwaltung (~770 Zeilen)
+custom_components/googlefindmy/
+├── coordinator.py               # BLEIBT - Hauptklasse + Kernlogik
+└── coordinator/                 # NEU - Nur ausgelagerte Operations
+    ├── __init__.py              # Re-exports
+    ├── registry.py              # Device-Registry (~1.350 Zeilen)
+    ├── subentry.py              # Subentry-Management (~800 Zeilen)
+    ├── polling.py               # Polling-Logik (~500 Zeilen)
+    ├── locate.py                # Locate-Funktionen (~500 Zeilen)
+    └── identity.py              # Identity-Verwaltung (~770 Zeilen)
 ```
 
-**Keine "mixin" im Namen** - semantische Bezeichnungen wie in HA Core.
+**Vorteile von Option A:**
+- `coordinator.py` bleibt sichtbar im Root (keine "Magie")
+- Klare Trennung: Hauptdatei vs. ausgelagerte Module
+- Einfacher Rollback möglich
 
 **Implementierung:**
 ```python
@@ -140,7 +143,7 @@ coordinator/                      # NEUES Subdirectory
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from . import GoogleFindMyCoordinator
+    from ..coordinator import GoogleFindMyCoordinator
 
 class RegistryOperations:
     """Device registry operations."""
@@ -154,12 +157,27 @@ class RegistryOperations:
         ...
 
 # coordinator/__init__.py
-"""Google Find My coordinator package."""
+"""Ausgelagerte Operations-Klassen für GoogleFindMyCoordinator."""
 from .registry import RegistryOperations
 from .subentry import SubentryOperations
 from .polling import PollingOperations
 from .locate import LocateOperations
 from .identity import IdentityOperations
+
+__all__ = [
+    "RegistryOperations",
+    "SubentryOperations",
+    "PollingOperations",
+    "LocateOperations",
+    "IdentityOperations",
+]
+
+# coordinator.py (BLEIBT im Root, importiert aus coordinator/)
+from .coordinator.registry import RegistryOperations
+from .coordinator.subentry import SubentryOperations
+from .coordinator.polling import PollingOperations
+from .coordinator.locate import LocateOperations
+from .coordinator.identity import IdentityOperations
 
 class GoogleFindMyCoordinator(
     RegistryOperations,
@@ -170,11 +188,10 @@ class GoogleFindMyCoordinator(
     DataUpdateCoordinator,
 ):
     """Google Find My coordinator with modular organization."""
-    # Initialisierung + ~50 Kernmethoden
+    # Initialisierung + ~50 Kernmethoden (~2.500 Zeilen)
 ```
 
-**Hinweis:** Die bisherige `coordinator.py` im Root wird durch `coordinator/__init__.py` ersetzt.
-Import-Pfade bleiben kompatibel: `from .coordinator import GoogleFindMyCoordinator`
+**Hinweis:** Import-Pfade bleiben unverändert: `from .coordinator import GoogleFindMyCoordinator`
 
 ### 3.3 Bestehende Helper-Module beibehalten
 
@@ -204,9 +221,9 @@ Die bereits extrahierten `coordinator_*.py` Module bleiben unverändert:
 
 ### Phase 1: Package-Infrastruktur (Risiko: Niedrig)
 1. `coordinator/` Verzeichnis erstellen
-2. `coordinator.py` → `coordinator/__init__.py` verschieben
+2. `coordinator/__init__.py` mit leeren Re-exports anlegen
 3. Leere Operations-Klassen in separaten Modulen anlegen
-4. Coordinator erbt von Operations-Klassen (noch leer)
+4. `coordinator.py` importiert aus `coordinator/` und erbt von Operations-Klassen
 5. Tests verifizieren: Keine Regression
 
 ### Phase 2: RegistryOperations extrahieren (Risiko: Mittel)
@@ -246,17 +263,17 @@ Die bereits extrahierten `coordinator_*.py` Module bleiben unverändert:
 
 ---
 
-## 7. Entscheidungsfragen
+## 7. Entscheidungen
 
-1. **Package-Name:** `coordinator/` wie vorgeschlagen?
-   - **Empfehlung:** Ja, entspricht HA Core Pattern (vgl. `unifi/hub/`)
+1. **Struktur:** Option A gewählt ✅
+   - `coordinator.py` bleibt im Root
+   - `coordinator/` enthält nur ausgelagerte Operations-Klassen
 
 2. **Reihenfolge:** Welche Operations zuerst extrahieren?
    - **Empfehlung:** `RegistryOperations` (größte Komplexität, höchster Nutzen)
 
-3. **Helper-Module:** Sollen bestehende `coordinator_*.py` Helper in das Package integriert werden?
-   - **Empfehlung:** Nein - Pure Functions und Methoden bleiben getrennt
-   - Alternative: Später in `coordinator/helpers/` verschieben (optional)
+3. **Helper-Module:** Bestehende `coordinator_*.py` bleiben im Root
+   - Pure Functions und Operations-Klassen bleiben getrennt
 
 ---
 
