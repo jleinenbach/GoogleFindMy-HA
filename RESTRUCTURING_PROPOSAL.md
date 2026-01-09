@@ -325,13 +325,13 @@ custom_components/googlefindmy/
     git commit -m "refactor: convert coordinator.py to coordinator/ package (Option B)"
     ```
 
-**Erfolgskriterien Phase 0:**
-- [ ] coordinator.py existiert NICHT mehr im Root
-- [ ] coordinator/main.py enthält GoogleFindMyCoordinator
-- [ ] Alle 8 Helper-Dateien in coordinator/helpers/
-- [ ] Keine coordinator_*.py mehr im Root
-- [ ] `from .coordinator import GoogleFindMyCoordinator` funktioniert (via __init__.py)
-- [ ] Alle Tests bestehen
+**Erfolgskriterien Phase 0:** ✓ ABGESCHLOSSEN (Commit 20b1fa6)
+- [x] coordinator.py existiert NICHT mehr im Root
+- [x] coordinator/main.py enthält GoogleFindMyCoordinator
+- [x] Alle 8 Helper-Dateien in coordinator/helpers/
+- [x] Keine coordinator_*.py mehr im Root
+- [x] `from .coordinator import GoogleFindMyCoordinator` funktioniert (via __init__.py)
+- [x] Alle Tests bestehen
 
 ---
 
@@ -388,10 +388,10 @@ custom_components/googlefindmy/
 5. Tests ausführen
 6. Commit
 
-**Erfolgskriterien Phase 1:**
-- [ ] 5 leere Operations-Klassen existieren
-- [ ] GoogleFindMyCoordinator erbt von allen 5
-- [ ] Alle Tests bestehen (keine Regression)
+**Erfolgskriterien Phase 1:** ✓ ABGESCHLOSSEN (Commit 63f0ec0)
+- [x] 5 leere Operations-Klassen existieren
+- [x] GoogleFindMyCoordinator erbt von allen 5
+- [x] Alle Tests bestehen (keine Regression)
 
 ---
 
