@@ -5581,6 +5581,22 @@ class GoogleFindMyCoordinator(DataUpdateCoordinator[list[dict[str, Any]]]):
                 device_candidates = _normalize_device_list_impl(payload)
                 filtered_devices, seen_ids = _filter_and_dedupe_impl(device_candidates)
 
+                # Log skipped devices for debugging (pure helper doesn't log)
+                _logged_ids: set[str] = set()
+                for candidate in device_candidates:
+                    if not isinstance(candidate, Mapping):
+                        continue
+                    dev_id_raw = candidate.get("id")
+                    if not isinstance(dev_id_raw, str) or not dev_id_raw.strip():
+                        _LOGGER.debug("Skipping device without valid id: %r", candidate)
+                        continue
+                    dev_id = dev_id_raw.strip()
+                    if dev_id in _logged_ids:
+                        _LOGGER.debug(
+                            "Skipping duplicate device entry for id=%s", dev_id
+                        )
+                    _logged_ids.add(dev_id)
+
                 # Minimal hardening against false empties (keep prior behaviour)
                 if not filtered_devices:
                     self._empty_list_streak += 1
