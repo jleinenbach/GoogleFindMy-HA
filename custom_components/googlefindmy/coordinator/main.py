@@ -66,6 +66,8 @@ from datetime import datetime, timedelta
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+# Operations classes - currently empty mixins for future method extraction
+from .cache import CacheOperations
 from .helpers.cache import (
     build_base_snapshot_entry as _build_base_snapshot_entry_impl,
 )
@@ -79,12 +81,6 @@ from .helpers.cache import (
 )
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
-)
-from .helpers.geo import (
-    haversine_distance as _haversine_distance_impl,
-)
-from .helpers.geo import (
-    safe_accuracy,
 )
 from .helpers.stats import (
     ApiStatus,
@@ -107,9 +103,6 @@ from .helpers.subentry import (
 from .helpers.subentry import (
     parse_last_seen_timestamp as _parse_last_seen_impl,
 )
-
-# Operations classes - currently empty mixins for future method extraction
-from .cache import CacheOperations
 from .identity import IdentityOperations
 from .locate import LocateOperations
 from .polling import PollingOperations
@@ -141,7 +134,6 @@ from ..const import (
     # Credential meta for Repairs placeholders
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
-    DATA_EID_RESOLVER,
     DEFAULT_CONTRIBUTOR_MODE,
     # Core / options
     DEFAULT_MIN_POLL_INTERVAL,
@@ -150,7 +142,6 @@ from ..const import (
     # Required symbols provided by const.py (5.1-A)
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
-    MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S,
     OPT_IGNORED_DEVICES,
     OPT_SEMANTIC_LOCATIONS,
     UPDATE_INTERVAL,

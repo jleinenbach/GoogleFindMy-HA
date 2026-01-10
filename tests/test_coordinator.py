@@ -10,7 +10,6 @@ import pytest
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator import identity as coordinator_identity
-from custom_components.googlefindmy.coordinator import main as coordinator_main
 
 
 class _Recorder:

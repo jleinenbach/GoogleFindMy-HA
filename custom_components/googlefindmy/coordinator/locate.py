@@ -257,7 +257,9 @@ class LocateOperations:
         """
         # Import helpers lazily to avoid circular imports
         from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
-        from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
+        from .helpers.subentry import (
+            normalize_epoch_seconds as _normalize_epoch_seconds,
+        )
 
         name = self.get_device_display_name(device_id) or device_id
 

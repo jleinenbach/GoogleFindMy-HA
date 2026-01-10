@@ -17,23 +17,30 @@ Methods moved here:
 from __future__ import annotations
 
 import logging
+import math
 import time
+from collections import deque
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from ..const import DATA_EID_RESOLVER, DOMAIN
 from .helpers.cache import (
-    LOCATION_FIELDS,
     merge_cache_row as _merge_cache_row_impl,
+)
+from .helpers.cache import (
     normalize_location_fields as _normalize_location_fields_impl,
-    preserve_metadata_fields as _preserve_metadata_fields_impl,
+)
+from .helpers.cache import (
     sanitize_decoder_row as _sanitize_decoder_row,
-    should_allow_location_update as _should_allow_location_update_impl,
+)
+from .helpers.cache import (
     should_clear_metadata_only_flag as _should_clear_metadata_only_flag_impl,
 )
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
+)
+from .helpers.geo import (
     haversine_distance as _haversine_distance_impl,
-    safe_accuracy,
 )
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 
@@ -80,6 +87,10 @@ _CAMEL_TO_SNAKE: dict[str, str] = {
     "encryptedAccountKey": "encrypted_account_key",
     "encryptedSha256AccountKeyPublicAddress": "public_key_address",
 }
+
+# Epoch timestamp for year 2000 (2000-01-01 00:00:00 UTC)
+# Used to reject timestamps that are clearly invalid (before Y2K)
+_Y2K_EPOCH_SECONDS = 946684800.0
 
 
 def _normalize_metadata_keys(data: dict[str, Any]) -> dict[str, Any]:
@@ -149,8 +160,6 @@ class CacheOperations:
         self: GoogleFindMyCoordinator, device_id: str, last_seen: float | None
     ) -> None:
         """Track last_seen history to predict future poll targets."""
-        from collections import deque
-
         if last_seen is None:
             return
 
@@ -230,8 +239,6 @@ class CacheOperations:
 
         # Trigger EID resolver refresh when identity_key is present
         if "identity_key" in payload or "identityKey" in payload:
-            from ..const import DATA_EID_RESOLVER, DOMAIN
-
             hass_obj = getattr(self, "hass", None)
             if hass_obj is None:
                 return
@@ -597,7 +604,7 @@ class CacheOperations:
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
         if n_seen_norm is not None:
-            if n_seen_norm < 946684800.0:  # < 2000-01-01
+            if n_seen_norm < _Y2K_EPOCH_SECONDS:
                 self.increment_stat("invalid_ts_drop_count")
                 self.increment_stat("drop_reason_invalid_ts")
                 _LOGGER.debug(
@@ -694,8 +701,6 @@ class CacheOperations:
 
         Returns True when the caller should continue processing the payload.
         """
-        import math
-
         existing = self._device_location_data.get(device_id)
         if not existing or existing.get("latitude") is None:
             return True

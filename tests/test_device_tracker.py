@@ -15,7 +15,6 @@ import pytest
 
 from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.coordinator import main as coordinator_main
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 
 

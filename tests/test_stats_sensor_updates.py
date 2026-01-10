@@ -18,7 +18,6 @@ from custom_components.googlefindmy.const import (
     service_device_identifier,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.coordinator import main as coordinator_main
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 from custom_components.googlefindmy.sensor import (
     STATS_DESCRIPTIONS,

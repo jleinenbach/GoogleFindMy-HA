@@ -15,7 +15,6 @@ from custom_components.googlefindmy.coordinator import (
     _as_ha_attributes,
     _sync_get_last_gps_from_history,
 )
-from custom_components.googlefindmy.coordinator import main as coordinator_main
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 
 
