@@ -2096,35 +2096,6 @@ class GoogleFindMyCoordinator(
 
         return True
 
-    def _extract_our_identifier(self, device: dr.DeviceEntry) -> str | None:
-        """Return the first valid (DOMAIN, identifier) from a device, else None.
-
-        Multi-account compatibility:
-        - Since 2025.5+ we use **entry-scoped device identifiers** in the Device Registry
-          to guarantee global uniqueness across multiple accounts:
-              (DOMAIN, f\"{entry_id}:{device_id}\")
-        - For backward compatibility we also recognize legacy identifiers:
-              (DOMAIN, device_id)
-
-        This helper:
-        * Extracts our identifier
-        * If it has the namespaced form, it returns the **raw device_id** part
-          (the coordinator uses canonical device IDs internally).
-        * If malformed tuples are encountered, it logs once and records a diagnostics warning.
-        """
-        entry_id = self._entry_id()
-        for item in device.identifiers:
-            result = _parse_identifier_impl(
-                item,
-                DOMAIN,
-                entry_id,
-                SERVICE_DEVICE_IDENTIFIER_PREFIX,
-                LEGACY_SERVICE_IDENTIFIER,
-            )
-            if result is not None:
-                return result
-        return None
-
     def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 

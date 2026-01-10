@@ -10,6 +10,7 @@ Methods moved here:
 - _device_registry_config_subentry_kwarg_name: Subentry kwarg detection
 - _device_registry_allows_translation_update: Translation support check
 - _reindex_poll_targets_from_device_registry: Rebuild poll target sets
+- _extract_our_identifier: Extract device identifier from registry
 """
 
 from __future__ import annotations
@@ -27,11 +28,12 @@ from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from ..const import DOMAIN
+from ..const import DOMAIN, LEGACY_SERVICE_IDENTIFIER, SERVICE_DEVICE_IDENTIFIER_PREFIX
 
 from .helpers.registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
+    parse_device_identifier as _parse_identifier_impl,
 )
 
 if TYPE_CHECKING:
@@ -249,3 +251,34 @@ class RegistryOperations:
             len(enabled),
         )
         self._schedule_eid_resolver_refresh()
+
+    def _extract_our_identifier(
+        self: "GoogleFindMyCoordinator", device: dr.DeviceEntry
+    ) -> str | None:
+        """Return the first valid (DOMAIN, identifier) from a device, else None.
+
+        Multi-account compatibility:
+        - Since 2025.5+ we use **entry-scoped device identifiers** in the Device Registry
+          to guarantee global uniqueness across multiple accounts:
+              (DOMAIN, f\"{entry_id}:{device_id}\")
+        - For backward compatibility we also recognize legacy identifiers:
+              (DOMAIN, device_id)
+
+        This helper:
+        * Extracts our identifier
+        * If it has the namespaced form, it returns the **raw device_id** part
+          (the coordinator uses canonical device IDs internally).
+        * If malformed tuples are encountered, it logs once and records a diagnostics warning.
+        """
+        entry_id = self._entry_id()
+        for item in device.identifiers:
+            result = _parse_identifier_impl(
+                item,
+                DOMAIN,
+                entry_id,
+                SERVICE_DEVICE_IDENTIFIER_PREFIX,
+                LEGACY_SERVICE_IDENTIFIER,
+            )
+            if result is not None:
+                return result
+        return None
