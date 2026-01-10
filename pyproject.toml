@@ -275,6 +275,19 @@ module = [
 ]
 ignore_missing_imports = true
 
+# Coordinator mixin modules use self: "GoogleFindMyCoordinator" pattern
+# which mypy doesn't handle well with the [misc] error code
+[[tool.mypy.overrides]]
+module = [
+    "custom_components.googlefindmy.coordinator.registry",
+    "custom_components.googlefindmy.coordinator.subentry",
+    "custom_components.googlefindmy.coordinator.locate",
+    "custom_components.googlefindmy.coordinator.identity",
+    "custom_components.googlefindmy.coordinator.polling",
+    "custom_components.googlefindmy.coordinator.cache",
+]
+disable_error_code = ["misc"]
+
 [[tool.mypy.overrides]]
 module = ["tests.test_fcm_receiver_guard"]
 ignore_errors = false

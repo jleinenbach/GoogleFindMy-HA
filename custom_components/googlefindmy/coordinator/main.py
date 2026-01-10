@@ -683,6 +683,8 @@ class GoogleFindMyCoordinator(
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
+        # Per-device interval history for predictive polling
+        self._device_interval_history: dict[str, list[float]] = {}
 
         # DR-driven poll targeting
         self._enabled_poll_device_ids: set[str] = set()

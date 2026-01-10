@@ -345,7 +345,7 @@ class PollingOperations:
         self: GoogleFindMyCoordinator,
     ) -> float | None:
         """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
-        from .helpers.metrics import get_duration as _get_duration_impl
+        from .helpers.stats import get_duration as _get_duration_impl
 
         return _get_duration_impl(
             self.get_metric("setup_start_monotonic"),
