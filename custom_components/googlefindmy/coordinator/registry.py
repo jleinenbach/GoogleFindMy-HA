@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -48,7 +48,9 @@ from ..const import (
     SERVICE_DEVICE_MODEL,
     SERVICE_DEVICE_TRANSLATION_KEY,
     SERVICE_SUBENTRY_KEY,
+    SUBENTRY_TYPE_HUB,
     SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
@@ -62,9 +64,12 @@ from .helpers.registry import (
     extract_service_subentry_ids as _extract_service_subentry_ids_impl,
     has_hub_link as _has_hub_link_impl,
     has_subentry_link as _has_subentry_link_impl,
+    is_hub_device_check as _is_hub_device_check_impl,
     match_entity_by_device_id as _match_entity_by_device_id_impl,
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
+    normalize_device_name as _normalize_device_name_impl,
     parse_device_identifier as _parse_identifier_impl,
+    resolve_tracker_subentry_candidate as _resolve_tracker_subentry_impl,
     should_defer_service_subentry as _should_defer_service_subentry_impl,
 )
 from .helpers.subentry import (
@@ -1254,3 +1259,677 @@ class RegistryOperations:
     ) -> EntityRegistryEntry | None:
         """Public wrapper to expose tracker entity lookup to platforms."""
         return self._find_tracker_entity_entry(device_id)
+
+    def _ensure_registry_for_devices(
+        self: "GoogleFindMyCoordinator",
+        devices: list[dict[str, Any]],
+        ignored: set[str],
+    ) -> int:
+        """Ensure end-device DR entries exist and link via the per-entry service device.
+
+        Multi-account/compatibility rules:
+        - **Primary identifier (namespaced):** (DOMAIN, f"{entry_id}:{device_id}")
+          guarantees global uniqueness across config entries.
+        - **Legacy identifier (non-namespaced):** (DOMAIN, device_id) recognized for
+          existing installs. If a legacy device belongs to *this* entry, we migrate it
+          by adding the new identifier (union) via `async_update_device`.
+        - If a legacy device is associated with a *different* entry, we **do not merge**.
+          We create a fresh device with the namespaced identifier to avoid cross-account
+          collisions.
+        - Prefer linking devices to the service anchor via the identifier-based
+          `via_device` kwarg when supported. Older cores fall back to `via_device_id`
+          once the service device has been created.
+
+        Returns:
+            Count of devices that were created or updated.
+
+        See ``docs/CONFIG_SUBENTRIES_HANDBOOK.md`` for the full subentry lifecycle
+        and registry expectations that keep tracker devices out of the service bucket.
+        """
+        entry = self.config_entry or getattr(self, "entry", None)
+        entry_id = getattr(entry, "entry_id", None) if entry is not None else None
+        if not entry_id:
+            return 0
+
+        entry_type: str | None = None
+        if entry is not None:
+            for container in (
+                getattr(entry, "data", None),
+                getattr(entry, "options", None),
+            ):
+                if isinstance(container, Mapping):
+                    marker = container.get("subentry_type")
+                    if isinstance(marker, str):
+                        entry_type = marker
+                        break
+            if entry_type is None and isinstance(getattr(entry, "data", None), Mapping):
+                fallback_marker = cast(Mapping[str, Any], entry.data).get("type")
+                if not isinstance(fallback_marker, str):
+                    fallback_marker = cast(Mapping[str, Any], entry.data).get(
+                        "entry_type"
+                    )
+                if isinstance(fallback_marker, str):
+                    entry_type = fallback_marker
+
+        if entry_type in {SUBENTRY_TYPE_HUB, "hub"}:
+            _LOGGER.debug(
+                "Skipping Device Registry ensure for hub entry %s; subentries manage device links.",
+                entry_id,
+            )
+            return 0
+
+        try:
+            self._refresh_subentry_index(devices)
+        except Exception:  # pragma: no cover - defensive guard
+            pass
+
+        tracker_meta = self._subentry_metadata.get(TRACKER_SUBENTRY_KEY)
+
+        def _normalize_tracker_subentry_id(value: Any) -> str | None:
+            return _sanitize_subentry_id_impl(value)
+
+        entry_tracker_subentry_id = _normalize_tracker_subentry_id(
+            getattr(entry, "tracker_subentry_id", None)
+        )
+
+        entry_subentries = getattr(entry, "subentries", None)
+        # Reuse extract_service_subentry_ids with tracker type constants
+        tracker_subentry_ids = _extract_service_subentry_ids_impl(
+            entry_subentries,
+            entry_tracker_subentry_id,
+            SUBENTRY_TYPE_TRACKER,
+            TRACKER_SUBENTRY_KEY,
+        )
+
+        tracker_config_subentry_id = None
+        tracker_meta_identifier: Any | None = None
+        if tracker_meta is not None:
+            tracker_meta_identifier = getattr(tracker_meta, "config_subentry_id", None)
+        for candidate in (tracker_meta_identifier, entry_tracker_subentry_id):
+            normalized_candidate = _normalize_tracker_subentry_id(candidate)
+            resolved_tracker = _resolve_tracker_subentry_impl(
+                normalized_candidate,
+                entry_tracker_subentry_id,
+                tracker_subentry_ids,
+            )
+            if resolved_tracker is not None:
+                tracker_config_subentry_id = resolved_tracker
+                break
+
+        if tracker_config_subentry_id is None:
+            _LOGGER.debug(
+                "[%s] Skipping tracker Device Registry ensure; config_subentry_id unresolved",
+                entry_id,
+            )
+            return 0
+
+        parent_identifier = service_device_identifier(entry_id)
+        setattr(self, "_service_device_identifier", parent_identifier)
+
+        dev_reg = dr.async_get(self.hass)
+        async_get_or_create = getattr(dev_reg, "async_get_or_create", None)
+        if not callable(async_get_or_create):
+            _LOGGER.debug(
+                "Skipping Device Registry ensure: registry stub missing async_get_or_create."
+            )
+            return 0
+        update_device = getattr(dev_reg, "async_update_device", None)
+        get_device = getattr(dev_reg, "async_get_device", None)
+        get_device_by_id = getattr(dev_reg, "async_get", None)
+        created_or_updated = 0
+
+        # Use imported helper for name normalization
+        _normalized_name = _normalize_device_name_impl
+
+        hub_device = None
+        hub_device_id: str | None = None
+        hub_device_names: set[str] = set()
+        hub_devices_by_name: dict[str, Any] = {}
+        if callable(get_device):
+            try:
+                hub_device = get_device(identifiers={parent_identifier})
+            except TypeError:
+                hub_device = None
+        if hub_device is not None:
+            hub_device_id = getattr(hub_device, "id", None)
+            _hub_base_name = getattr(hub_device, "name_by_user", None) or getattr(
+                hub_device, "name", None
+            )
+            normalized_base = _normalized_name(_hub_base_name)
+            if normalized_base:
+                hub_device_names.add(normalized_base)
+                hub_devices_by_name[normalized_base] = hub_device
+
+        devices_map = getattr(dev_reg, "devices", None)
+        if isinstance(devices_map, Mapping) and hub_device_id:
+            for device_entry in devices_map.values():
+                if getattr(device_entry, "via_device_id", None) != hub_device_id:
+                    continue
+                candidate_name = getattr(device_entry, "name_by_user", None) or getattr(
+                    device_entry, "name", None
+                )
+                normalized_candidate = _normalized_name(candidate_name)
+                if normalized_candidate:
+                    hub_device_names.add(normalized_candidate)
+                    hub_devices_by_name.setdefault(normalized_candidate, device_entry)
+
+        def _track_hub_name(name: str | None, device: Any | None) -> None:
+            normalized = _normalized_name(name)
+            if not normalized:
+                return
+            hub_device_names.add(normalized)
+            if device is not None:
+                hub_devices_by_name.setdefault(normalized, device)
+
+        def _is_hub_device(device: Any | None) -> bool:
+            """Return True when ``device`` represents the hub/service anchor."""
+            if device is None:
+                return False
+            return _is_hub_device_check_impl(
+                getattr(device, "id", None),
+                hub_device_id,
+                getattr(device, "identifiers", None),
+                parent_identifier,
+            )
+
+        def _resolve_hub_name(
+            use_name: str | None, *, device_label: str, device_id: str | None
+        ) -> tuple[str | None, Any | None]:
+            if not use_name:
+                return None, None
+
+            normalized = _normalized_name(use_name)
+            if normalized is None:
+                return use_name, None
+
+            existing = hub_devices_by_name.get(normalized)
+            if normalized not in hub_device_names or (
+                existing is not None and getattr(existing, "id", None) == device_id
+            ):
+                return use_name, None
+
+            if (
+                existing is not None
+                and entry_id in getattr(existing, "config_entries", set())
+                and not _is_hub_device(existing)
+            ):
+                _LOGGER.debug(
+                    "[%s] Reusing hub device '%s' (id=%s) for label '%s' due to name collision",
+                    entry_id,
+                    use_name,
+                    getattr(existing, "id", ""),
+                    device_label,
+                )
+                return use_name, existing
+
+            suffix_source = tracker_config_subentry_id or device_id or entry_id
+            suffix = str(suffix_source)[-6:]
+            disambiguated = f"{use_name} ({suffix})"
+            _LOGGER.debug(
+                "[%s] Disambiguated device name for '%s' from '%s' to '%s' (hub collision)",
+                entry_id,
+                device_label,
+                use_name,
+                disambiguated,
+            )
+            return disambiguated, None
+
+        def _subentry_links(device: Any) -> set[str | None]:
+            """Return tracker subentry links associated with ``entry_id``."""
+
+            if not entry_id:
+                return set()
+            mapping_obj = getattr(device, "config_entries_subentries", None)
+            if isinstance(mapping_obj, Mapping):
+                raw_links = mapping_obj.get(entry_id)
+                if isinstance(raw_links, Collection) and not isinstance(
+                    raw_links, (str, bytes, Mapping)
+                ):
+                    typed_links: set[str | None] = set()
+                    for item in raw_links:
+                        if item is None:
+                            typed_links.add(None)
+                        elif isinstance(item, str):
+                            typed_links.add(item)
+                    return typed_links
+                if raw_links is None:
+                    return set()
+            fallback = getattr(device, "config_subentry_id", None)
+            if isinstance(fallback, str):
+                return {fallback}
+            if fallback is not None:
+                _LOGGER.debug(
+                    "Skipping unexpected config_subentry_id type for device %s: %r",
+                    getattr(device, "id", "unknown"),
+                    fallback,
+                )
+            if fallback is None and getattr(device, "config_entries", None):
+                return {None}
+            return set()
+
+        def _has_tracker_link(device: Any) -> bool:
+            if tracker_config_subentry_id is None:
+                return False
+            return tracker_config_subentry_id in _subentry_links(device)
+
+        def _has_hub_link(device: Any) -> bool:
+            return None in _subentry_links(device)
+
+        def _remove_hub_link(device: Any) -> Any:
+            if (
+                not callable(update_device)
+                or not entry_id
+                or tracker_config_subentry_id is None
+            ):
+                return device
+            device_id = getattr(device, "id", "")
+            if not device_id:
+                return device
+            self._call_device_registry_api(
+                update_device,
+                base_kwargs={
+                    "device_id": device_id,
+                    "remove_config_entry_id": entry_id,
+                    "remove_config_subentry_id": None,
+                    "add_config_entry_id": entry_id,
+                    "add_config_subentry_id": tracker_config_subentry_id,
+                },
+            )
+            return _refresh_device_entry(device_id, device)
+
+        def _update_device_with_kwargs(kwargs: dict[str, Any]) -> None:
+            if not callable(update_device):
+                return
+            if tracker_config_subentry_id is not None and entry_id:
+                kwargs.setdefault("add_config_entry_id", entry_id)
+                kwargs.setdefault("add_config_subentry_id", tracker_config_subentry_id)
+                kwargs.setdefault("config_subentry_id", tracker_config_subentry_id)
+            self._call_device_registry_api(
+                update_device,
+                base_kwargs=dict(kwargs),
+            )
+
+        def _refresh_device_entry(device_id: str, fallback: Any) -> Any:
+            if not callable(get_device_by_id) or not device_id:
+                return fallback
+            try:
+                refreshed = get_device_by_id(device_id)
+            except TypeError:
+                return fallback
+            return fallback if refreshed is None else refreshed
+
+        def _heal_tracker_device_subentry(
+            device: Any, *, device_label: str, device_id_hint: str | None
+        ) -> tuple[Any, bool]:
+            if (
+                device is None
+                or tracker_config_subentry_id is None
+                or not callable(update_device)
+            ):
+                return device, False
+            device_id = getattr(device, "id", None)
+            if not isinstance(device_id, str) or not device_id:
+                device_id = device_id_hint or None
+            if not isinstance(device_id, str) or not device_id:
+                return device, False
+            subentry_links = _subentry_links(device)
+            needs_tracker_link = tracker_config_subentry_id not in subentry_links
+            has_hub_link = None in subentry_links
+            extraneous_links = {
+                link
+                for link in subentry_links
+                if link is not None and link != tracker_config_subentry_id
+            }
+            changed = False
+
+            if extraneous_links:
+                for link in sorted(extraneous_links):
+                    self._call_device_registry_api(
+                        update_device,
+                        base_kwargs={
+                            "device_id": device_id,
+                            "remove_config_entry_id": entry_id,
+                            "remove_config_subentry_id": link,
+                            "add_config_entry_id": entry_id,
+                            "add_config_subentry_id": tracker_config_subentry_id,
+                            "config_subentry_id": tracker_config_subentry_id,
+                        },
+                    )
+                device = _refresh_device_entry(device_id, device)
+                _LOGGER.debug(
+                    "[%s] Removed extraneous config_subentry_id links for device '%s': %s",
+                    entry_id,
+                    device_label,
+                    ", ".join(sorted(str(link) for link in extraneous_links)),
+                )
+                subentry_links = _subentry_links(device)
+                needs_tracker_link = tracker_config_subentry_id not in subentry_links
+                has_hub_link = None in subentry_links
+                changed = True
+
+            current_subentry_id = getattr(device, "config_subentry_id", None)
+            if needs_tracker_link or has_hub_link:
+                _LOGGER.debug(
+                    "[%s] Healing device '%s': correcting config_subentry_id from %s to %s",
+                    entry_id,
+                    device_label,
+                    current_subentry_id,
+                    tracker_config_subentry_id,
+                )
+                base_kwargs = {
+                    "device_id": device_id,
+                    "config_subentry_id": tracker_config_subentry_id,
+                    "add_config_entry_id": entry_id,
+                }
+                if has_hub_link:
+                    base_kwargs["remove_config_entry_id"] = entry_id
+                    base_kwargs["remove_config_subentry_id"] = None
+                    base_kwargs["add_config_subentry_id"] = tracker_config_subentry_id
+                updated = self._call_device_registry_api(
+                    update_device,
+                    base_kwargs=base_kwargs,
+                )
+                healed_device = _refresh_device_entry(device_id, updated or device)
+                if healed_device is None:
+                    _LOGGER.error(
+                        "[%s] Failed to heal device %s", entry_id, device_label
+                    )
+                    return device, False
+                return healed_device, True
+
+            return device, changed
+
+        for d in devices:
+            dev_id = d.get("id")
+            if not isinstance(dev_id, str) or dev_id in ignored:
+                continue
+
+            raw_label = (d.get("name") or "").strip()
+            device_label = raw_label or dev_id or "<unknown>"
+            raw_manufacturer = d.get("manufacturer")
+            manufacturer = (
+                raw_manufacturer.strip()
+                if isinstance(raw_manufacturer, str) and raw_manufacturer.strip()
+                else "Google"
+            )
+            raw_model = d.get("model")
+            model = (
+                raw_model.strip()
+                if isinstance(raw_model, str) and raw_model.strip()
+                else "Find My Device"
+            )
+            device_updated = False
+
+            # Build identifiers
+            ns_ident = (DOMAIN, f"{entry_id}:{dev_id}")
+            legacy_ident = (DOMAIN, dev_id)
+
+            # Preferred: device already known by namespaced identifier?
+            dev = None
+            if callable(get_device):
+                try:
+                    dev = get_device(identifiers={ns_ident})
+                except TypeError:
+                    dev = None
+            if dev is None:
+                # Legacy present?
+                legacy_dev = None
+                if callable(get_device):
+                    try:
+                        legacy_dev = get_device(identifiers={legacy_ident})
+                    except TypeError:
+                        legacy_dev = None
+                if legacy_dev is not None:
+                    # If legacy device belongs to THIS entry, migrate by adding namespaced ident.
+                    if entry_id in legacy_dev.config_entries:
+                        new_idents = set(legacy_dev.identifiers)
+                        new_idents.add(ns_ident)
+                        needs_identifiers = new_idents != legacy_dev.identifiers
+                        needs_config_subentry = (
+                            tracker_config_subentry_id is not None
+                            and not _has_tracker_link(legacy_dev)
+                        )
+                        needs_manufacturer = (
+                            getattr(legacy_dev, "manufacturer", None) != manufacturer
+                        )
+                        needs_model = getattr(legacy_dev, "model", None) != model
+                        raw_name = (d.get("name") or "").strip()
+                        use_name = (
+                            raw_name
+                            if raw_name and raw_name != "Google Find My Device"
+                            else None
+                        )
+                        use_name, _ = _resolve_hub_name(
+                            use_name,
+                            device_label=device_label,
+                            device_id=getattr(legacy_dev, "id", None),
+                        )
+                        needs_name = (
+                            bool(use_name)
+                            and not getattr(legacy_dev, "name_by_user", None)
+                            and getattr(legacy_dev, "name", None) != use_name
+                        )
+                        needs_parent_clear = (
+                            getattr(legacy_dev, "via_device_id", None) is not None
+                        )
+                        if (
+                            needs_identifiers
+                            or needs_config_subentry
+                            or needs_name
+                            or needs_parent_clear
+                        ):
+                            update_kwargs: dict[str, Any] = {
+                                "device_id": legacy_dev.id,
+                            }
+                            if needs_config_subentry:
+                                update_kwargs["add_config_entry_id"] = entry_id
+                                update_kwargs["add_config_subentry_id"] = (
+                                    tracker_config_subentry_id
+                                )
+                            if needs_identifiers:
+                                update_kwargs["new_identifiers"] = new_idents
+                            if needs_name:
+                                update_kwargs["name"] = use_name
+                            if needs_manufacturer:
+                                update_kwargs["manufacturer"] = manufacturer
+                            if needs_model:
+                                update_kwargs["model"] = model
+                            if needs_parent_clear:
+                                update_kwargs["via_device_id"] = None
+                            if tracker_config_subentry_id is not None:
+                                update_kwargs.setdefault(
+                                    "add_config_entry_id", entry_id
+                                )
+                                update_kwargs.setdefault(
+                                    "add_config_subentry_id", tracker_config_subentry_id
+                                )
+                            legacy_id = getattr(legacy_dev, "id", None)
+                            _update_device_with_kwargs(update_kwargs)
+                            legacy_dev = _refresh_device_entry(
+                                legacy_id or "",
+                                legacy_dev,
+                            )
+                            if (
+                                tracker_config_subentry_id is not None
+                                and _has_tracker_link(legacy_dev)
+                                and _has_hub_link(legacy_dev)
+                            ):
+                                legacy_dev = _remove_hub_link(legacy_dev)
+                        device_updated = True
+                        dev = legacy_dev
+                    else:
+                        # Belongs to another entry → create a new device with namespaced ident (no merge).
+                        dev = None
+
+            # Create if still missing
+            if dev is None:
+                # Only set a real label; never write placeholders on cold boot
+                use_name = (
+                    raw_label
+                    if raw_label and raw_label != "Google Find My Device"
+                    else None
+                )
+
+                use_name, reuse_device = _resolve_hub_name(
+                    use_name,
+                    device_label=device_label,
+                    device_id=dev_id,
+                )
+                if reuse_device is not None:
+                    dev = reuse_device
+                    reuse_device_id = getattr(dev, "id", None)
+                    if reuse_device_id:
+                        reuse_update_kwargs: dict[str, Any] = {
+                            "device_id": reuse_device_id
+                        }
+                        if ns_ident not in getattr(dev, "identifiers", set()):
+                            updated_identifiers = set(
+                                getattr(dev, "identifiers", set())
+                            )
+                            updated_identifiers.add(ns_ident)
+                            reuse_update_kwargs["new_identifiers"] = updated_identifiers
+                        if getattr(dev, "manufacturer", None) != manufacturer:
+                            reuse_update_kwargs["manufacturer"] = manufacturer
+                        if getattr(dev, "model", None) != model:
+                            reuse_update_kwargs["model"] = model
+                        reuse_update_kwargs.setdefault("add_config_entry_id", entry_id)
+                        reuse_update_kwargs.setdefault(
+                            "add_config_subentry_id", tracker_config_subentry_id
+                        )
+
+                        if len(reuse_update_kwargs) > 1:
+                            _update_device_with_kwargs(reuse_update_kwargs)
+                            dev = _refresh_device_entry(reuse_device_id, dev)
+                            device_updated = True
+
+                create_kwargs: dict[str, Any] = {
+                    "config_entry_id": entry_id,
+                    "identifiers": {ns_ident},
+                    "manufacturer": manufacturer,
+                    "model": model,
+                    "name": use_name,
+                }
+
+                if tracker_config_subentry_id is not None:
+                    create_kwargs["config_subentry_id"] = tracker_config_subentry_id
+
+                if dev is None:
+                    dev = self._call_device_registry_api(
+                        async_get_or_create,
+                        base_kwargs=create_kwargs,
+                    )
+                    device_updated = True
+                dev, healed = _heal_tracker_device_subentry(
+                    dev,
+                    device_label=device_label,
+                    device_id_hint=dev_id,
+                )
+                device_updated = device_updated or healed
+                if (
+                    tracker_config_subentry_id is not None
+                    and dev is not None
+                    and _has_tracker_link(dev)
+                    and _has_hub_link(dev)
+                ):
+                    dev = _remove_hub_link(dev)
+                    device_updated = True
+            else:
+                dev, healed = _heal_tracker_device_subentry(
+                    dev,
+                    device_label=device_label,
+                    device_id_hint=dev_id,
+                )
+                device_updated = device_updated or healed
+                # Keep name fresh if not user-overridden and a new upstream label is available
+                use_name = (
+                    raw_label
+                    if raw_label and raw_label != "Google Find My Device"
+                    else None
+                )
+
+                use_name, _ = _resolve_hub_name(
+                    use_name,
+                    device_label=device_label,
+                    device_id=getattr(dev, "id", None),
+                )
+
+                device_id = getattr(dev, "id", "")
+                update_existing_kwargs: dict[str, Any] = {"device_id": device_id}
+                name_needs_update = (
+                    bool(use_name)
+                    and not getattr(dev, "name_by_user", None)
+                    and dev.name != use_name
+                )
+                manufacturer_needs_update = (
+                    getattr(dev, "manufacturer", None) != manufacturer
+                )
+                model_needs_update = getattr(dev, "model", None) != model
+                if manufacturer_needs_update:
+                    update_existing_kwargs["manufacturer"] = manufacturer
+                if model_needs_update:
+                    update_existing_kwargs["model"] = model
+                if name_needs_update:
+                    update_existing_kwargs["name"] = use_name
+
+                needs_config_subentry_update = (
+                    tracker_config_subentry_id is not None
+                    and not _has_tracker_link(dev)
+                )
+
+                needs_parent_clear = getattr(dev, "via_device_id", None) is not None
+
+                if needs_parent_clear:
+                    update_existing_kwargs["via_device_id"] = None
+
+                needs_update = (
+                    name_needs_update
+                    or needs_config_subentry_update
+                    or needs_parent_clear
+                    or manufacturer_needs_update
+                    or model_needs_update
+                )
+
+                if needs_update and callable(update_device) and device_id:
+                    if needs_config_subentry_update:
+                        update_existing_kwargs["add_config_entry_id"] = entry_id
+                        update_existing_kwargs["add_config_subentry_id"] = (
+                            tracker_config_subentry_id
+                        )
+                    elif (
+                        tracker_config_subentry_id is not None
+                        and _has_tracker_link(dev)
+                        and _has_hub_link(dev)
+                    ):
+                        update_existing_kwargs["remove_config_entry_id"] = entry_id
+                        update_existing_kwargs["remove_config_subentry_id"] = None
+                    _update_device_with_kwargs(update_existing_kwargs)
+                    dev = _refresh_device_entry(device_id or "", dev)
+                    if (
+                        tracker_config_subentry_id is not None
+                        and _has_tracker_link(dev)
+                        and _has_hub_link(dev)
+                    ):
+                        dev = _remove_hub_link(dev)
+                    device_updated = True
+
+                elif (
+                    tracker_config_subentry_id is not None
+                    and callable(update_device)
+                    and device_id
+                    and _has_tracker_link(dev)
+                    and _has_hub_link(dev)
+                ):
+                    dev = _remove_hub_link(dev)
+                    device_updated = True
+
+            if dev is not None:
+                _track_hub_name(
+                    getattr(dev, "name_by_user", None) or getattr(dev, "name", None),
+                    dev,
+                )
+
+            if device_updated:
+                created_or_updated += 1
+
+        self._apply_pending_via_updates()
+        return created_or_updated
