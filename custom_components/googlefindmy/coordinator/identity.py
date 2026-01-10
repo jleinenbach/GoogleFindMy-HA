@@ -6,6 +6,9 @@ Methods moved here:
 - _get_account_email: Get configured Google account email
 - _create_auth_issue: Create Repairs issue for auth problems
 - _dismiss_auth_issue: Dismiss auth Repairs issue
+- _schedule_eid_resolver_refresh: Refresh the global EID resolver
+- _register_identity_key: Register device identity key for shared tracker detection
+- _reset_resolver_offset: Clear resolver offsets when identity keys rotate
 """
 
 from __future__ import annotations
@@ -13,9 +16,16 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 
-from ..const import CONF_GOOGLE_EMAIL, DOMAIN, ISSUE_AUTH_EXPIRED_KEY, issue_id_for
+from ..const import (
+    CONF_GOOGLE_EMAIL,
+    DATA_EID_RESOLVER,
+    DOMAIN,
+    ISSUE_AUTH_EXPIRED_KEY,
+    issue_id_for,
+)
 
 if TYPE_CHECKING:
     from .main import GoogleFindMyCoordinator
@@ -96,3 +106,98 @@ class IdentityOperations:
             return False
 
         return issue_present
+
+    def _schedule_eid_resolver_refresh(self: "GoogleFindMyCoordinator") -> None:
+        """Refresh the global EID resolver when active device sets change."""
+
+        hass = getattr(self, "hass", None)
+        hass_data = getattr(hass, "data", None)
+        if not isinstance(hass_data, dict):
+            return
+
+        bucket = hass_data.get(DOMAIN)
+        if not isinstance(bucket, dict):
+            return
+
+        resolver = bucket.get(DATA_EID_RESOLVER)
+        refresh = getattr(resolver, "async_refresh", None)
+        if callable(refresh):
+            create_task = getattr(self.hass, "async_create_task", None)
+            if callable(create_task):
+                create_task(refresh())
+
+    def _register_identity_key(
+        self: "GoogleFindMyCoordinator", device_id: str, identity_key: bytes
+    ) -> None:
+        """Register a device's identity_key for shared tracker detection.
+
+        Maintains a mapping from identity_key to all device_ids that share the
+        same physical tracker. This enables location propagation across accounts.
+
+        Args:
+            device_id: Canonical device identifier.
+            identity_key: Normalized 32-byte identity key.
+        """
+        if not isinstance(identity_key, bytes) or len(identity_key) != 32:
+            return
+
+        device_set = self._identity_key_to_devices.setdefault(identity_key, set())
+        if device_id not in device_set:
+            device_set.add(device_id)
+            if len(device_set) > 1:
+                _LOGGER.info(
+                    "Shared tracker detected: identity_key=%s... shared by %d devices: %s",
+                    identity_key[:8].hex(),
+                    len(device_set),
+                    sorted(device_set),
+                )
+
+    def _reset_resolver_offset(
+        self: "GoogleFindMyCoordinator", device_id: str
+    ) -> None:
+        """Clear resolver offsets using registry IDs when identity keys rotate."""
+
+        hass = getattr(self, "hass", None)
+        if hass is None:
+            return
+
+        registry_id: str | None = None
+        entry_id = self._entry_id()
+
+        dev_reg = dr.async_get(hass)
+        if entry_id and dev_reg:
+            identifiers = {
+                (DOMAIN, f"{entry_id}:{device_id}"),
+                (DOMAIN, device_id),
+            }
+            device = dev_reg.async_get_device(identifiers=identifiers)
+            if device:
+                registry_id = device.id
+
+        if not registry_id:
+            _LOGGER.debug(
+                "Could not resolve Registry ID for canonical %s; skipping offset reset.",
+                device_id,
+            )
+            return
+
+        hass_data = getattr(hass, "data", None)
+        if not isinstance(hass_data, dict):
+            return
+
+        bucket = hass_data.get(DOMAIN)
+        if not isinstance(bucket, dict):
+            return
+
+        resolver = bucket.get(DATA_EID_RESOLVER)
+        if resolver is None:
+            return
+
+        reset = getattr(resolver, "reset_device_offset", None)
+        if callable(reset):
+            _LOGGER.debug(
+                "Triggering resolver offset reset for %s (Registry ID: %s)",
+                device_id,
+                registry_id,
+            )
+            reset(registry_id)

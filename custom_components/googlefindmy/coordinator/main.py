@@ -1451,25 +1451,6 @@ class GoogleFindMyCoordinator(
                 return None
         return None
 
-    def _schedule_eid_resolver_refresh(self) -> None:
-        """Refresh the global EID resolver when active device sets change."""
-
-        hass = getattr(self, "hass", None)
-        hass_data = getattr(hass, "data", None)
-        if not isinstance(hass_data, dict):
-            return
-
-        bucket = hass_data.get(DOMAIN)
-        if not isinstance(bucket, dict):
-            return
-
-        resolver = bucket.get(DATA_EID_RESOLVER)
-        refresh = getattr(resolver, "async_refresh", None)
-        if callable(refresh):
-            create_task = getattr(self.hass, "async_create_task", None)
-            if callable(create_task):
-                create_task(refresh())
-
     def get_active_device_identities(self) -> list[DeviceIdentity]:
         """Return identity keys for enabled, non-ignored devices.
 
@@ -3938,30 +3919,6 @@ class GoogleFindMyCoordinator(
             self._reset_resolver_offset(device_id)
             self._schedule_eid_resolver_refresh()
 
-    def _register_identity_key(self, device_id: str, identity_key: bytes) -> None:
-        """Register a device's identity_key for shared tracker detection.
-
-        Maintains a mapping from identity_key to all device_ids that share the
-        same physical tracker. This enables location propagation across accounts.
-
-        Args:
-            device_id: Canonical device identifier.
-            identity_key: Normalized 32-byte identity key.
-        """
-        if not isinstance(identity_key, bytes) or len(identity_key) != 32:
-            return
-
-        device_set = self._identity_key_to_devices.setdefault(identity_key, set())
-        if device_id not in device_set:
-            device_set.add(device_id)
-            if len(device_set) > 1:
-                _LOGGER.info(
-                    "Shared tracker detected: identity_key=%s... shared by %d devices: %s",
-                    identity_key[:8].hex(),
-                    len(device_set),
-                    sorted(device_set),
-                )
-
     def _propagate_location_to_shared_devices(
         self,
         source_device_id: str,
@@ -4079,54 +4036,6 @@ class GoogleFindMyCoordinator(
                 self._device_location_data[target_device_id] = merged
         finally:
             self._propagating_location = False
-
-    def _reset_resolver_offset(self, device_id: str) -> None:
-        """Clear resolver offsets using registry IDs when identity keys rotate."""
-
-        hass = getattr(self, "hass", None)
-        if hass is None:
-            return
-
-        registry_id: str | None = None
-        entry_id = self._entry_id()
-
-        dev_reg = dr.async_get(hass)
-        if entry_id and dev_reg:
-            identifiers = {
-                (DOMAIN, f"{entry_id}:{device_id}"),
-                (DOMAIN, device_id),
-            }
-            device = dev_reg.async_get_device(identifiers=identifiers)
-            if device:
-                registry_id = device.id
-
-        if not registry_id:
-            _LOGGER.debug(
-                "Could not resolve Registry ID for canonical %s; skipping offset reset.",
-                device_id,
-            )
-            return
-
-        hass_data = getattr(hass, "data", None)
-        if not isinstance(hass_data, dict):
-            return
-
-        bucket = hass_data.get(DOMAIN)
-        if not isinstance(bucket, dict):
-            return
-
-        resolver = bucket.get(DATA_EID_RESOLVER)
-        if resolver is None:
-            return
-
-        reset = getattr(resolver, "reset_device_offset", None)
-        if callable(reset):
-            _LOGGER.debug(
-                "Triggering resolver offset reset for %s (Registry ID: %s)",
-                device_id,
-                registry_id,
-            )
-            reset(registry_id)
 
     def _is_significant_update(self, device_id: str, new_data: dict[str, Any]) -> bool:
         """Validate temporal ordering before committing cache updates.
