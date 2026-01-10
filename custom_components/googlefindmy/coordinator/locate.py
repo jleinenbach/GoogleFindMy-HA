@@ -48,6 +48,9 @@ class LocateOperations:
     including coordinate validation and location management.
     """
 
+    # Attribute declaration for mypy (actual value set in GoogleFindMyCoordinator.__init__)
+    _is_polling: bool
+
     def _normalize_coords(
         self: GoogleFindMyCoordinator,
         payload: dict[str, Any],
@@ -253,7 +256,8 @@ class LocateOperations:
             - Push a fresh snapshot via `push_updated([device_id])`.
         """
         # Import helpers lazily to avoid circular imports
-        from .main import _normalize_epoch_seconds, _sanitize_decoder_row
+        from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
+        from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 
         name = self.get_device_display_name(device_id) or device_id
 

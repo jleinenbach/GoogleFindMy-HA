@@ -111,6 +111,12 @@ class SubentryOperations:
     with tracked devices.
     """
 
+    # Attribute declarations for mypy (actual values set in GoogleFindMyCoordinator.__init__)
+    _subentry_manager: ConfigEntrySubEntryManager | None
+    _pending_subentry_repair: asyncio.Task[None] | None
+    _present_last_seen: dict[str, float]
+    _present_device_ids: set[str]
+
     def attach_subentry_manager(
         self: GoogleFindMyCoordinator,
         manager: ConfigEntrySubEntryManager,

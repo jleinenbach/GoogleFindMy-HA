@@ -214,8 +214,7 @@ class CacheOperations:
         # Clear metadata_only flag when we have real coordinates
         if clear_metadata_only and _should_clear_metadata_only_flag_impl(
             updated,
-            payload.get("latitude"),
-            payload.get("longitude"),
+            payload.get("metadata_only"),
         ):
             updated.pop("metadata_only", None)
 

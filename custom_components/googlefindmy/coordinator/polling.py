@@ -108,6 +108,22 @@ class PollingOperations:
     including status tracking and event loop helpers.
     """
 
+    # Attribute declarations for mypy (actual values set in GoogleFindMyCoordinator.__init__)
+    _push_ready_memo: bool | None
+    _last_poll_result: str | None
+    _api_status_state: str
+    _api_status_reason: str | None
+    _api_status_changed_at: float | None
+    _fcm_status_state: str
+    _fcm_status_reason: str | None
+    _fcm_status_changed_at: float | None
+    _force_device_list_reason: str | None
+    _short_retry_cancel: Callable[[], None] | None
+    _fcm_last_error: str | None
+    _last_transient_auth_error: str | None
+    _is_polling: bool
+    _startup_complete: bool
+
     def _set_api_status(
         self: GoogleFindMyCoordinator, status: str, *, reason: str | None = None
     ) -> None:
@@ -209,7 +225,7 @@ class PollingOperations:
             try:
                 result = fn()
                 if inspect.isawaitable(result):
-                    self.hass.async_create_task(result, name=task_name)
+                    self.hass.async_create_task(result, name=task_name)  # type: ignore[arg-type]
             except Exception as err:
                 _LOGGER.debug(
                     "async_request_refresh dispatch failed (%s): %s", log_context, err
@@ -838,7 +854,7 @@ class PollingOperations:
                 ]
 
             # Cold start detection: force immediate poll on first install when devices have no location data
-            is_cold_start = (
+            is_cold_start = bool(
                 self._last_poll_mono == 0.0
                 and filtered_devices
                 and not any(

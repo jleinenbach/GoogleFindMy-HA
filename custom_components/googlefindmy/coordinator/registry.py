@@ -1145,7 +1145,7 @@ class RegistryOperations:
                         break
 
             if entry is None:
-                entry = SimpleNamespace(
+                entry = SimpleNamespace(  # type: ignore[assignment]
                     entity_id=entity_id,
                     unique_id=unique_id,
                     domain=DEVICE_TRACKER_DOMAIN,
@@ -1253,7 +1253,7 @@ class RegistryOperations:
                             "Entity registry for entry %s lacks async_update_entity; skipping canonical migration",
                             entry_id,
                         )
-                        return entry
+                        return cast("EntityRegistryEntry", entry)
                 except ValueError as err:
                     _LOGGER.error(
                         "Failed to migrate heuristic tracker entity %s to canonical unique_id=%s: %s",
@@ -1261,7 +1261,7 @@ class RegistryOperations:
                         canonical_unique_id,
                         err,
                     )
-                    return entry
+                    return cast("EntityRegistryEntry", entry)
 
             _LOGGER.debug(
                 "Tracker registry fallback matched entity_id=%s (unique_id=%s) for device '%s'",
@@ -1269,7 +1269,7 @@ class RegistryOperations:
                 unique_id,
                 device_label,
             )
-            return entry
+            return cast("EntityRegistryEntry", entry)
 
         _LOGGER.debug(
             "No entity registry entry for device '%s'; checked unique_id formats %s (canonical=%s registry_id=%s registry_identifier=%s)",
