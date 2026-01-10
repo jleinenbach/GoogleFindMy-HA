@@ -9,6 +9,7 @@ Methods moved here:
 - _device_registry_build_legacy_kwargs: Legacy kwarg translation
 - _device_registry_config_subentry_kwarg_name: Subentry kwarg detection
 - _device_registry_allows_translation_update: Translation support check
+- _reindex_poll_targets_from_device_registry: Rebuild poll target sets
 """
 
 from __future__ import annotations
@@ -22,6 +23,11 @@ from homeassistant.config_entries import (
     UnknownEntry,
     UnknownSubEntry,
 )
+from homeassistant.core import callback
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+
+from ..const import DOMAIN
 
 from .helpers.registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
@@ -175,3 +181,71 @@ class RegistryOperations:
             self, "_device_registry_supports_translation_update", supports_translation
         )
         return supports_translation
+
+    @callback
+    def _reindex_poll_targets_from_device_registry(
+        self: "GoogleFindMyCoordinator",
+    ) -> None:
+        """Rebuild internal poll target sets from registries (fast, robust, diagnostics-aware).
+
+        Semantics:
+        - Consider ONLY devices that belong to THIS config entry (no global scan).
+        - A device is "present" if we can extract a valid (DOMAIN, identifier).
+        - A device is "enabled for polling" if there is at least one ENABLED
+          `device_tracker` entity for our domain on that device AND the device
+          itself is not disabled. This preserves the entities-driven polling
+          selection and reduces UI churning.
+
+        Multi-account safety:
+        - Uses entry-scoped identifiers in the Device Registry:
+              (DOMAIN, f"{entry_id}:{device_id}")
+          and gracefully accepts legacy identifiers `(DOMAIN, device_id)`.
+        """
+        dev_reg = dr.async_get(self.hass)
+        ent_reg = er.async_get(self.hass)
+        entry_id = self._entry_id()
+
+        if not entry_id:
+            self._devices_with_entry = set()
+            self._enabled_poll_device_ids = set()
+            _LOGGER.debug("Skipping DR reindex: no config_entry bound yet")
+            return
+
+        # Limit to our integration's devices/entities: avoids interference & improves performance.
+        devices_for_entry = dr.async_entries_for_config_entry(dev_reg, entry_id)
+        entities_for_entry = er.async_entries_for_config_entry(ent_reg, entry_id)
+
+        present: set[str] = set()
+        enabled: set[str] = set()
+
+        # Map device_id -> has_enabled_tracker_entity
+        has_enabled_tracker: dict[str, bool] = {}
+        for ent in entities_for_entry:
+            # We only care about our domain and enabled entities
+            if ent.platform != DOMAIN or ent.disabled_by is not None:
+                continue
+            # Only trackers drive polling
+            if ent.domain == "device_tracker" and ent.device_id:
+                has_enabled_tracker[ent.device_id] = True
+
+        for dev in devices_for_entry:
+            ident = self._extract_our_identifier(dev)
+            if not ident:
+                continue
+            present.add(ident)
+            if dev.id in has_enabled_tracker and dev.disabled_by is None:
+                enabled.add(ident)
+
+        self._devices_with_entry = present
+        self._enabled_poll_device_ids = enabled
+
+        # Update subentry metadata since enabled/present sets may affect visibility
+        self._refresh_subentry_index()
+
+        _LOGGER.debug(
+            "Reindexed targets for entry %s: %d present / %d enabled (entities-driven)",
+            entry_id,
+            len(present),
+            len(enabled),
+        )
+        self._schedule_eid_resolver_refresh()
