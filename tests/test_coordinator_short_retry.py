@@ -118,7 +118,7 @@ def test_short_retry_dispatches_refresh_task(
         return _cancel
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.main.async_call_later",
+        "custom_components.googlefindmy.coordinator.polling.async_call_later",
         _fake_async_call_later,
     )
 
