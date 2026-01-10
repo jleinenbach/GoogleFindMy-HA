@@ -167,7 +167,7 @@ def _get_api_class() -> type[GoogleFindMyAPI]:
     if coordinator_pkg is not None:
         patched = getattr(coordinator_pkg, "GoogleFindMyAPI", None)
         if patched is not None:
-            return patched  # type: ignore[return-value]
+            return patched  # type: ignore[no-any-return]
     return GoogleFindMyAPI
 
 
