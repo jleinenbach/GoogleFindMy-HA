@@ -12,6 +12,8 @@ Methods moved here:
 - _reindex_poll_targets_from_device_registry: Rebuild poll target sets
 - _extract_our_identifier: Extract device identifier from registry
 - _sync_owner_index: Sync hass.data owner index for FCM fallback
+- _ensure_device_name_cache: Lazy device-name cache initialization
+- _apply_pending_via_updates: Deprecated no-op (backward compat)
 """
 
 from __future__ import annotations
@@ -342,3 +344,20 @@ class RegistryOperations:
                     entry_id,
                     len(stale),
                 )
+
+    def _ensure_device_name_cache(
+        self: "GoogleFindMyCoordinator",
+    ) -> dict[str, str]:
+        """Return the lazily initialized device-name cache."""
+        cache = getattr(self, "_device_names", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_device_names", cache)
+        return cache
+
+    def _apply_pending_via_updates(self: "GoogleFindMyCoordinator") -> None:
+        """Deprecated no-op retained for backward compatibility."""
+        # Tracker devices no longer link to the service device via ``via_device``.
+        # Keep the method defined to avoid AttributeError in case third-party
+        # callers relied on the old behavior, but return immediately.
+        return

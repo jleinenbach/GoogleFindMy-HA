@@ -2918,23 +2918,6 @@ class GoogleFindMyCoordinator(
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
 
-    def _ensure_device_name_cache(self) -> dict[str, str]:
-        """Return the lazily initialized device-name cache."""
-
-        cache = getattr(self, "_device_names", None)
-        if cache is None:
-            cache = {}
-            setattr(self, "_device_names", cache)
-        return cache
-
-    def _apply_pending_via_updates(self) -> None:
-        """Deprecated no-op retained for backward compatibility."""
-
-        # Tracker devices no longer link to the service device via ``via_device``.
-        # Keep the method defined to avoid AttributeError in case third-party
-        # callers relied on the old behavior, but return immediately.
-        return
-
     # --- NEW: Create/refresh DR entries for end devices (entry-scoped) -----
     def _ensure_registry_for_devices(
         self, devices: list[dict[str, Any]], ignored: set[str]
