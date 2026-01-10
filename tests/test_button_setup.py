@@ -192,17 +192,19 @@ def _ensure_button_dependencies() -> None:
 def _load_can_request_location_impl() -> Any:
     """Return the coordinator's can_request_location method for isolated testing."""
 
-    coordinator_path = (
+    # Method moved to locate.py (LocateOperations mixin) during refactoring
+    locate_path = (
         Path(__file__)
         .resolve()
         .parent.parent
         / "custom_components"
         / "googlefindmy"
-        / "coordinator.py"
+        / "coordinator"
+        / "locate.py"
     )
     return compile_class_method_from_module(
-        module_path=coordinator_path,
-        class_name="GoogleFindMyCoordinator",
+        module_path=locate_path,
+        class_name="LocateOperations",
         method_name="can_request_location",
         global_overrides={"time": time},
     )

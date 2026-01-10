@@ -185,7 +185,9 @@ def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
     return cast(WebDriver, _get_uc_module().Chrome(options=options, version_main=None))
 
 
-def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> WebDriver:
+def create_driver(
+    chrome_path: str | None = None, *, headless: bool = False
+) -> WebDriver:
     """Backward-compatible wrapper for driver creation with multiple fallbacks.
 
     Attempts driver creation in this order:

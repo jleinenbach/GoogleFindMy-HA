@@ -59,6 +59,7 @@ else:  # pragma: no cover - fallback for environments with stubbed helpers
 
             __slots__ = ()
 
+
 from .const import (
     CONF_GOOGLE_EMAIL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
@@ -335,7 +336,9 @@ class GoogleFindMyEntity(CoordinatorEntity[GoogleFindMyCoordinator]):
         except AttributeError:
             pass
         except Exception as err:  # pragma: no cover - defensive fallback
-            _LOGGER.debug("Coordinator availability probe failed for %s: %s", self.entity_id, err)
+            _LOGGER.debug(
+                "Coordinator availability probe failed for %s: %s", self.entity_id, err
+            )
 
         for attr in ("last_update_success", "_last_update_success"):
             status = getattr(self.coordinator, attr, None)

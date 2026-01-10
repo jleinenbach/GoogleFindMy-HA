@@ -26,12 +26,12 @@ class SystemHealthRegistration(Protocol):
     ) -> None:
         """Register the integration system health info callback."""
 
+
 _CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
 
 
 def _typed_callback(func: _CallbackT) -> _CallbackT:
     """Return a typed wrapper around Home Assistant's callback decorator."""
-
     return cast(_CallbackT, callback(func))
 
 
@@ -60,6 +60,8 @@ def _format_epoch_utc(value: Any) -> str | None:
     except (OverflowError, OSError, ValueError):
         return None
     return dt.isoformat().replace("+00:00", "Z")
+
+
 def _email_hash(entry: ConfigEntry) -> str | None:
     """Return a truncated SHA-256 hash for the account email (or None if absent)."""
     normalized: str | None
@@ -139,9 +141,7 @@ def _get_fcm_info(receiver: Any) -> dict[str, Any]:
                 "entry_id": entry_id,
                 "healthy": bool(snap.get("healthy")),
                 "run_state": snap.get("run_state"),
-                "seconds_since_last_activity": snap.get(
-                    "seconds_since_last_activity"
-                ),
+                "seconds_since_last_activity": snap.get("seconds_since_last_activity"),
                 "activity_stale": bool(snap.get("activity_stale")),
             }
             for entry_id, snap in snapshots.items()

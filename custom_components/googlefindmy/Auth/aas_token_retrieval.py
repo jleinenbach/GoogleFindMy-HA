@@ -66,6 +66,7 @@ def _gpsoauth() -> GpsoauthModule:
 
     return require_gpsoauth()
 
+
 _JWT_SEGMENT_MIN_COUNT = 2
 
 
@@ -271,9 +272,7 @@ async def _exchange_oauth_for_aas(
         error_details_present = False
         if isinstance(resp, dict):
             resp_keys = list(resp.keys())
-            error_details_present = bool(
-                resp.get("ErrorDetails") or resp.get("Error")
-            )
+            error_details_present = bool(resp.get("ErrorDetails") or resp.get("Error"))
         _LOGGER.warning(
             "gpsoauth response missing token; response details recorded in extras.",
             extra={
@@ -343,9 +342,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
         try:
             await cache.set(DATA_AAS_TOKEN, oauth_token)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "Failed to persist cached AAS token shortcut.", exc_info=err
-            )
+            _LOGGER.debug("Failed to persist cached AAS token shortcut.", exc_info=err)
         return oauth_token
 
     if not oauth_token:
@@ -373,7 +370,12 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
             try:
                 all_cached_global = await async_get_all_cached_values()
                 for key, value in all_cached_global.items():
-                    if isinstance(key, str) and key.startswith("adm_token_") and isinstance(value, str) and value:
+                    if (
+                        isinstance(key, str)
+                        and key.startswith("adm_token_")
+                        and isinstance(value, str)
+                        and value
+                    ):
                         oauth_token = value
                         extracted_username = key.replace("adm_token_", "", 1)
                         if extracted_username and "@" in extracted_username:
@@ -491,7 +493,9 @@ async def async_get_aas_token(
 # ----------------------- Legacy sync wrapper (unsupported) -----------------------
 
 
-def get_aas_token() -> str:  # pragma: no cover - legacy path kept for compatibility messaging
+def get_aas_token() -> (
+    str
+):  # pragma: no cover - legacy path kept for compatibility messaging
     """Legacy sync API is intentionally unsupported to prevent event loop deadlocks.
 
     Raises:

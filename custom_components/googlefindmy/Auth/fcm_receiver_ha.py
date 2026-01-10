@@ -64,7 +64,14 @@ import logging
 import math
 import random
 import time
-from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    MutableMapping,
+)
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
@@ -345,7 +352,7 @@ class FcmReceiverHA:
     # -------------------- Loop-safe dispatch (P0 fix) --------------------
 
     def _dispatch_to_hass_loop(
-        self, coro: Awaitable[Any], *, label: str
+        self, coro: Coroutine[Any, Any, Any], *, label: str
     ) -> None:
         """Dispatch a coroutine into the HA event loop from any thread safely.
 
@@ -357,7 +364,8 @@ class FcmReceiverHA:
             loop = asyncio.get_running_loop()
             # Already in an event loop - schedule directly
             new_task: asyncio.Task[Any] = loop.create_task(
-                coro, name=f"{DOMAIN}.{label}"  # type: ignore[arg-type]
+                coro,
+                name=f"{DOMAIN}.{label}",
             )
             self._track_task(new_task, label=label)
             return
@@ -480,9 +488,9 @@ class FcmReceiverHA:
             else:
                 client_ready = do_listen
 
-            fresh_activity = (
-                last_activity is not None
-                and (stale_after == 0.0 or (activity_age is not None and activity_age <= stale_after))
+            fresh_activity = last_activity is not None and (
+                stale_after == 0.0
+                or (activity_age is not None and activity_age <= stale_after)
             )
 
             snapshots[entry_id] = {
@@ -515,9 +523,7 @@ class FcmReceiverHA:
                 continue
 
             try:
-                update_listeners = getattr(
-                    coordinator, "async_update_listeners", None
-                )
+                update_listeners = getattr(coordinator, "async_update_listeners", None)
                 if callable(update_listeners):
                     update_listeners()
             except Exception as err:  # noqa: BLE001
@@ -809,10 +815,7 @@ class FcmReceiverHA:
                             and last_activity is not None
                             and (
                                 stale_after == 0.0
-                                or (
-                                    monotonic_now - last_activity
-                                    <= stale_after
-                                )
+                                or (monotonic_now - last_activity <= stale_after)
                             )
                         )
                         self._update_entry_health(entry_id, healthy)
@@ -843,7 +846,10 @@ class FcmReceiverHA:
                             )
                             break
 
-                        if stale_after > 0.0 and monotonic_now - last_activity > stale_after:
+                        if (
+                            stale_after > 0.0
+                            and monotonic_now - last_activity > stale_after
+                        ):
                             _LOGGER.info(
                                 "[entry=%s] FCM client activity stale (age=%.1fs); scheduling restart",
                                 entry_id,
@@ -1061,9 +1067,7 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
-                self._clear_fatal_error_for_entry(
-                    entry_id, reason="Entry unregistered"
-                )
+                self._clear_fatal_error_for_entry(entry_id, reason="Entry unregistered")
 
     # -------------------- Incoming notifications --------------------
 

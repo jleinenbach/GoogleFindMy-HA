@@ -15,6 +15,7 @@ import pytest
 
 from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 
 
 class _EntityRegistryStub:
@@ -70,10 +71,8 @@ def test_find_tracker_entity_entry_uses_fallback(monkeypatch: pytest.MonkeyPatch
         unique_id="tracker-subentry:tracker-42",
         config_entry_id="entry-42",
     )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
-        lambda hass: registry,
-    )
+    # Use object-based patching (er is imported in registry.py)
+    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: registry)
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coordinator.hass = SimpleNamespace()

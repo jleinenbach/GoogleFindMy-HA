@@ -15,6 +15,7 @@ from custom_components.googlefindmy.coordinator import (
     _as_ha_attributes,
     _sync_get_last_gps_from_history,
 )
+from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 
 
 class _DummyState:
@@ -75,10 +76,8 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
         "entry-1:device-42",
         "device_tracker.googlefindmy_device_42",
     )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
-        lambda hass: entity_registry,
-    )
+    # Use object-based patching (er is imported in registry.py)
+    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: entity_registry)
 
     hass = SimpleNamespace(states=_DummyStates())
     hass.states.set(
@@ -120,10 +119,8 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
         "entry-1:device-42",
         "device_tracker.googlefindmy_device_42",
     )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
-        lambda hass: entity_registry,
-    )
+    # Use object-based patching (er is imported in registry.py)
+    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: entity_registry)
 
     hass = SimpleNamespace(states=_DummyStates())
     iso_seen = "2024-02-03T12:34:56Z"
@@ -162,10 +159,8 @@ def test_snapshot_logs_formats_when_entity_missing(
     """Log should clarify which unique_id formats were considered when none match."""
 
     entity_registry = _DummyEntityRegistry()
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.er.async_get",
-        lambda hass: entity_registry,
-    )
+    # Use object-based patching (er is imported in registry.py)
+    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: entity_registry)
 
     hass = SimpleNamespace(states=_DummyStates())
 
@@ -228,7 +223,7 @@ def test_history_helper_preserves_last_seen(monkeypatch: pytest.MonkeyPatch) -> 
         return {entity_ids[0]: [history_state]}
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.recorder_history.get_last_state_changes",
+        "custom_components.googlefindmy.coordinator.main.recorder_history.get_last_state_changes",
         _fake_get_last_state_changes,
         raising=False,
     )

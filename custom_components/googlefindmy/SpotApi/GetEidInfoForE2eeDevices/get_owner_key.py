@@ -323,7 +323,11 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
         user = username if isinstance(username, str) and username else None
     else:
         cached_username = await cache.get(username_string)
-        user = cached_username if isinstance(cached_username, str) and cached_username else None
+        user = (
+            cached_username
+            if isinstance(cached_username, str) and cached_username
+            else None
+        )
         if user is None:
             resolved_username = await async_get_username(cache=cache)
             user = (

@@ -189,9 +189,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             CredentialsUpdatedCallable[MutableJSONMapping] | None
         ) = credentials_updated_callback
         self.persistent_ids: list[str] = (
-            list(received_persistent_ids)
-            if received_persistent_ids is not None
-            else []
+            list(received_persistent_ids) if received_persistent_ids is not None else []
         )
         self.config = config if config else FcmPushClientConfig()
         self._http_client_session: ClientSession | None = http_client_session

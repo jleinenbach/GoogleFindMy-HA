@@ -121,7 +121,9 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     )
 
     # 1. Resolve scanner location
-    location = await _resolve_scanner_location(hass, area, scanner_address, scanner_device_id)
+    location = await _resolve_scanner_location(
+        hass, area, scanner_address, scanner_device_id
+    )
 
     if not location:
         _LOGGER.debug(
@@ -143,10 +145,16 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     should_upload, reason = await _should_upload_location(hass, eid_hex, location, area)
 
     if not should_upload:
-        _LOGGER.debug("Upload throttled for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason)
+        _LOGGER.debug(
+            "Upload throttled for EID %s...: %s",
+            eid_hex[:EID_LOG_PREFIX_LENGTH],
+            reason,
+        )
         return False
 
-    _LOGGER.info("Upload allowed for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason)
+    _LOGGER.info(
+        "Upload allowed for EID %s...: %s", eid_hex[:EID_LOG_PREFIX_LENGTH], reason
+    )
 
     _LOGGER.info(
         "Uploading FMDN location report: EID=%s..., zone=%s, accuracy=%dm",
@@ -332,12 +340,21 @@ async def _should_upload_location(  # noqa: PLR0911
         # If area changed, use shorter throttle interval
         if last_upload.semantic_area != semantic_area:
             if elapsed >= MIN_UPLOAD_INTERVAL_SEMANTIC:
-                return True, f"semantic_area_changed ({last_upload.semantic_area} -> {semantic_area})"
-            return False, f"semantic_area_changed_too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SEMANTIC}s)"
+                return (
+                    True,
+                    f"semantic_area_changed ({last_upload.semantic_area} -> {semantic_area})",
+                )
+            return (
+                False,
+                f"semantic_area_changed_too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SEMANTIC}s)",
+            )
 
         # Same area - use longer interval and require significant change
         if elapsed < MIN_UPLOAD_INTERVAL_SECONDS:
-            return False, f"same_area_too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SECONDS}s)"
+            return (
+                False,
+                f"same_area_too_soon ({elapsed:.0f}s < {MIN_UPLOAD_INTERVAL_SECONDS}s)",
+            )
 
     # GPS-only upload - standard throttling
     elif elapsed < MIN_UPLOAD_INTERVAL_SECONDS:
@@ -355,20 +372,29 @@ async def _should_upload_location(  # noqa: PLR0911
     )
 
     if distance >= MIN_UPLOAD_DISTANCE_METERS:
-        return True, f"distance_threshold_met ({distance:.0f}m >= {MIN_UPLOAD_DISTANCE_METERS}m)"
+        return (
+            True,
+            f"distance_threshold_met ({distance:.0f}m >= {MIN_UPLOAD_DISTANCE_METERS}m)",
+        )
 
     # Check accuracy improvement
     accuracy_improved = new_location.accuracy < last_upload.location.accuracy * 0.8
 
     if accuracy_improved:
-        return True, f"accuracy_improved ({new_location.accuracy}m < {last_upload.location.accuracy}m)"
+        return (
+            True,
+            f"accuracy_improved ({new_location.accuracy}m < {last_upload.location.accuracy}m)",
+        )
 
     # For semantic uploads, allow periodic refresh even without GPS change
     if semantic_area and elapsed >= MIN_UPLOAD_INTERVAL_SECONDS:
         return True, f"semantic_periodic_refresh (elapsed={elapsed:.0f}s)"
 
     # No significant change
-    return False, f"too_close ({distance:.0f}m < {MIN_UPLOAD_DISTANCE_METERS}m, accuracy not improved)"
+    return (
+        False,
+        f"too_close ({distance:.0f}m < {MIN_UPLOAD_DISTANCE_METERS}m, accuracy not improved)",
+    )
 
 
 def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -628,6 +654,8 @@ def _update_upload_cache(
 
     # Cleanup old entries (keep last UPLOAD_CACHE_MAX_ENTRIES)
     if len(upload_cache) > UPLOAD_CACHE_MAX_ENTRIES:
-        oldest_keys = sorted(upload_cache.keys(), key=lambda k: upload_cache[k].timestamp)[:UPLOAD_CACHE_CLEANUP_COUNT]
+        oldest_keys = sorted(
+            upload_cache.keys(), key=lambda k: upload_cache[k].timestamp
+        )[:UPLOAD_CACHE_CLEANUP_COUNT]
         for key in oldest_keys:
             upload_cache.pop(key, None)

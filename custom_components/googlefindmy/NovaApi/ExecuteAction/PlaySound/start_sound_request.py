@@ -53,7 +53,9 @@ def start_sound_request(
     """
     request_uuid = generate_random_uuid()
     return (
-        create_sound_request(True, canonic_device_id, gcm_registration_id, request_uuid),
+        create_sound_request(
+            True, canonic_device_id, gcm_registration_id, request_uuid
+        ),
         request_uuid,
     )
 

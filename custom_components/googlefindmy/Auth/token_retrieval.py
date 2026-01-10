@@ -108,7 +108,9 @@ def _coerce_android_id(value: object, source: str) -> int | None:
             return None
     if value is not None:
         _LOGGER.debug(
-            "Unsupported android_id type from %s", source, extra={"android_id_type": type(value).__name__}
+            "Unsupported android_id type from %s",
+            source,
+            extra={"android_id_type": type(value).__name__},
         )
     return None
 
@@ -221,7 +223,9 @@ def _perform_oauth_sync(
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
             ) from err
-        raise RuntimeError(f"Failed to get auth token for scope '{scope}': {err}") from err
+        raise RuntimeError(
+            f"Failed to get auth token for scope '{scope}': {err}"
+        ) from err
 
 
 def request_token(

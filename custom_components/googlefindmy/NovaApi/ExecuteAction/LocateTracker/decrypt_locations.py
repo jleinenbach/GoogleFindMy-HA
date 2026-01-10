@@ -198,7 +198,9 @@ async def _unwrap_encrypted_identity_key(
         )
         return None
 
-    _LOGGER.debug("[DECRYPT] Successfully unwrapped 60-byte EIK to 32 bytes (early path).")
+    _LOGGER.debug(
+        "[DECRYPT] Successfully unwrapped 60-byte EIK to 32 bytes (early path)."
+    )
     return bytes(decrypted_eik)
 
 
@@ -291,9 +293,7 @@ async def async_retrieve_identity_key(
         flipped_blob = flip_bits(raw_encrypted_identity_key, do_flip)
 
         # --- EIK Cache Lookup (Performance Optimization) ---
-        eik_cache_key = _get_eik_cache_key(
-            flipped_blob, owner_key_version, do_flip
-        )
+        eik_cache_key = _get_eik_cache_key(flipped_blob, owner_key_version, do_flip)
         cached_eik = _eik_cache.get(eik_cache_key)
         if cached_eik is not None:
             _eik_cache_stats["hits"] += 1
@@ -685,7 +685,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 serialize_exc,
             )
 
-        if raw_encrypted_identity_key and len(raw_encrypted_identity_key) == EIK_GCM_TOTAL_LEN:
+        if (
+            raw_encrypted_identity_key
+            and len(raw_encrypted_identity_key) == EIK_GCM_TOTAL_LEN
+        ):
             early_unwrapped_identity_key = await _unwrap_encrypted_identity_key(
                 raw_encrypted_identity_key, cache=cache
             )
@@ -851,7 +854,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 metadata_update.setdefault("creationDate", creation_seconds)
                 metadata_update.setdefault("creation_date", creation_seconds)
 
-    device_type_information = getattr(device_update_protobuf, "deviceTypeInformation", None)
+    device_type_information = getattr(
+        device_update_protobuf, "deviceTypeInformation", None
+    )
 
     pair_date_sources = [
         getattr(device_registration, "pairDate", None),
@@ -874,7 +879,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     creation_date_sources = [
         getattr(encrypted_user_secrets, "creationDate", None),
-        getattr(getattr(device_update_protobuf, "encryptedUserSecrets", None), "creationDate", None),
+        getattr(
+            getattr(device_update_protobuf, "encryptedUserSecrets", None),
+            "creationDate",
+            None,
+        ),
         getattr(
             getattr(device_type_information, "encryptedUserSecrets", None),
             "creationDate",
@@ -1072,7 +1081,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
                     "identity_key": identity_key_bytes,
-                    "identity_key_candidates": identity_key_candidate_bytes if identity_key_candidate_bytes else None,
+                    "identity_key_candidates": identity_key_candidate_bytes
+                    if identity_key_candidate_bytes
+                    else None,
                 }
                 # Internal hint helps the coordinator schedule throttling-aware cooldowns.
                 if report_hint:

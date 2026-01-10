@@ -136,7 +136,7 @@ def dummy_api(monkeypatch: pytest.MonkeyPatch) -> _DummyAPI:
         return api
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.GoogleFindMyAPI",
+        "custom_components.googlefindmy.coordinator.main.GoogleFindMyAPI",
         _factory,
     )
     return api

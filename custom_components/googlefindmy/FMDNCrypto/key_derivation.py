@@ -54,15 +54,9 @@ class FMDNOwnerOperations:
         identity_key_bytes = bytes(identity_key)
 
         try:
-            self.recovery_key = calculate_truncated_sha256(
-                identity_key_bytes, 0x01
-            )
-            self.ringing_key = calculate_truncated_sha256(
-                identity_key_bytes, 0x02
-            )
-            self.tracking_key = calculate_truncated_sha256(
-                identity_key_bytes, 0x03
-            )
+            self.recovery_key = calculate_truncated_sha256(identity_key_bytes, 0x01)
+            self.ringing_key = calculate_truncated_sha256(identity_key_bytes, 0x02)
+            self.tracking_key = calculate_truncated_sha256(identity_key_bytes, 0x03)
 
         except Exception:  # noqa: BLE001 - log and propagate default state
             self.recovery_key = None

@@ -5,6 +5,7 @@ import ssl
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 if TYPE_CHECKING:
+
     class Channel:
         """Stub channel for type checking."""
 
@@ -158,7 +159,9 @@ class SpotGrpcTransport:
                 return self._channel
 
             ssl_ctx = await self._get_ssl_context() if self._use_ssl else None
-            self._channel = Channel(self._host, self._port, ssl=ssl_ctx, codec=self._codec)
+            self._channel = Channel(
+                self._host, self._port, ssl=ssl_ctx, codec=self._codec
+            )
             return self._channel
 
     async def reset(self) -> None:

@@ -18,8 +18,8 @@ rules:
     - id: appropriate-polling
       status: done
       evidence:
-        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator.__init__"
-        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator._async_update_data"
+        - "custom_components/googlefindmy/coordinator/main.py:GoogleFindMyCoordinator.__init__"
+        - "custom_components/googlefindmy/coordinator/polling.py:PollingOperations._async_update_data"
     - id: brands
       status: done
       evidence:
@@ -123,7 +123,7 @@ rules:
     - id: log-when-unavailable
       status: done
       evidence:
-        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator._note_fcm_deferral"
+        - "custom_components/googlefindmy/coordinator/polling.py:PollingOperations._note_fcm_deferral"
     - id: parallel-updates
       status: done
       evidence:
@@ -238,7 +238,7 @@ rules:
     - id: async-dependency
       status: done
       evidence:
-        - "custom_components/googlefindmy/coordinator.py:GoogleFindMyCoordinator.__init__"
+        - "custom_components/googlefindmy/coordinator/main.py:GoogleFindMyCoordinator.__init__"
     - id: inject-websession
       status: done
       evidence:

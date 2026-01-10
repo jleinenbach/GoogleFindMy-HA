@@ -96,9 +96,7 @@ def calculate_truncated_sha256(identity_key: bytes, operation: int) -> bytes:
     return truncated_hash
 
 
-def calculate_hmac_sha256(
-    key: bytes | bytearray, message: bytes | bytearray
-) -> str:
+def calculate_hmac_sha256(key: bytes | bytearray, message: bytes | bytearray) -> str:
     """Compute HMAC-SHA-256 and return the hexadecimal digest.
 
     HMAC Construction (RFC 2104)

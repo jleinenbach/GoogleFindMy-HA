@@ -316,9 +316,7 @@ async def _resolve_android_id_for_isolated_flow(
     cached_android_id: int | None = None
     if cache_get is not None:
         try:
-            cached_android_id = _coerce_android_id(
-                await cache_get(cache_key), "cache"
-            )
+            cached_android_id = _coerce_android_id(await cache_get(cache_key), "cache")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug(
                 "Isolated exchange: failed to read cached android_id for account.",

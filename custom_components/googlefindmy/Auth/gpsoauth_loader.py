@@ -69,4 +69,5 @@ class _GpsoauthProxy:
     def __setattr__(self, name: str, value: Any) -> None:
         setattr(require_gpsoauth(), name, value)
 
+
 gpsoauth: GpsoauthModule = _GpsoauthProxy()

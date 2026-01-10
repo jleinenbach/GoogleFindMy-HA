@@ -327,9 +327,7 @@ def derive_shared_secret(private_key_jwt: bytes, public_key: bytes) -> bytes:
         ValueError: If input lengths are invalid or key decoding fails.
     """
     if len(private_key_jwt) < PRIVATE_KEY_MIN_LEN:
-        raise ValueError(
-            "Private key buffer too short (need at least 32 bytes)"
-        )
+        raise ValueError("Private key buffer too short (need at least 32 bytes)")
     if len(public_key) != PUBLIC_KEY_UNCOMPRESSED_LEN:
         raise ValueError("Public key must be 65 bytes (uncompressed SEC1)")
 
@@ -407,7 +405,9 @@ def decrypt_account_key(owner_key: bytes, encrypted_account_key: bytes) -> bytes
     """
     if len(encrypted_account_key) == ACCOUNT_KEY_CBC_TOTAL_LEN:  # 16 IV + 16 CT (CBC)
         return decrypt_aes_cbc_no_padding(owner_key, encrypted_account_key, CBC_IV_LEN)
-    if len(encrypted_account_key) == ACCOUNT_KEY_GCM_TOTAL_LEN:  # 12 IV + 32 CT||TAG (GCM)
+    if (
+        len(encrypted_account_key) == ACCOUNT_KEY_GCM_TOTAL_LEN
+    ):  # 12 IV + 32 CT||TAG (GCM)
         return decrypt_aes_gcm(
             owner_key, encrypted_account_key, iv_length=GCM_IV_LEN_DEFAULT
         )

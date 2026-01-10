@@ -88,7 +88,9 @@ DATA_LAST_AREA_CACHE = "fmdn_finder_last_area"
 DATA_AREA_DEBOUNCE = "fmdn_finder_area_debounce"
 
 # Debouncing - area must be stable for this duration before triggering upload
-AREA_STABILIZATION_SECONDS = 30  # Wait 30 seconds after area change to confirm it's stable
+AREA_STABILIZATION_SECONDS = (
+    30  # Wait 30 seconds after area change to confirm it's stable
+)
 MIN_UPLOAD_INTERVAL_SECONDS = 60  # Minimum time between uploads for same device
 
 # Log formatting
@@ -138,7 +140,10 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
 
         # Filter for Bermuda tracker entities
         # Pattern: device_tracker.*_bermuda_tracker* (e.g., device_tracker.moto_tag_koffer_grun_bermuda_tracker_2)
-        if not entity_id.startswith("device_tracker.") or BERMUDA_TRACKER_SUFFIX not in entity_id:
+        if (
+            not entity_id.startswith("device_tracker.")
+            or BERMUDA_TRACKER_SUFFIX not in entity_id
+        ):
             return
 
         # Extract area from attributes
@@ -263,7 +268,9 @@ async def _async_debounced_area_upload(
 
     # Check if already uploaded (prevent duplicate uploads)
     if debounce_state.upload_scheduled:
-        _LOGGER.debug("Upload already scheduled for %s in area '%s'", entity_id, expected_area)
+        _LOGGER.debug(
+            "Upload already scheduled for %s in area '%s'", entity_id, expected_area
+        )
         return
 
     # Mark as scheduled to prevent duplicates
@@ -356,7 +363,9 @@ async def _async_handle_area_change(
         "Triggering FMDN upload: device=%s, area=%s, EID=%s...",
         google_device_id,
         area,
-        eid[:EID_LOG_PREFIX_LENGTH].hex() if len(eid) >= EID_LOG_PREFIX_LENGTH else eid.hex(),
+        eid[:EID_LOG_PREFIX_LENGTH].hex()
+        if len(eid) >= EID_LOG_PREFIX_LENGTH
+        else eid.hex(),
     )
 
     # Trigger the location upload
@@ -442,12 +451,14 @@ async def _async_find_googlefindmy_device(  # noqa: PLR0911
         for e in ent_reg.entities.values():
             if e.platform == DOMAIN and e.domain == "device_tracker":
                 device = dev_reg.async_get(e.device_id) if e.device_id else None
-                gfm_devices_info.append({
-                    "entity_id": e.entity_id,
-                    "device_id": e.device_id,
-                    "device_name": device.name if device else None,
-                    "identifiers": list(device.identifiers) if device else None,
-                })
+                gfm_devices_info.append(
+                    {
+                        "entity_id": e.entity_id,
+                        "device_id": e.device_id,
+                        "device_name": device.name if device else None,
+                        "identifiers": list(device.identifiers) if device else None,
+                    }
+                )
         _LOGGER.debug(
             "No GoogleFindMy device_tracker found for HA device %s "
             "(found %d entities on device, none with platform=%s). "
@@ -575,7 +586,9 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
             "No identity found for device %s in %d identities. Available canonical_ids: %s",
             device_id,
             len(identities),
-            [getattr(i, "canonical_id", "?") for i in identities[:10]],  # Limit for logging
+            [
+                getattr(i, "canonical_id", "?") for i in identities[:10]
+            ],  # Limit for logging
         )
         return None
 
@@ -633,7 +646,9 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
                                     lock_variant_str,
                                 )
                         except ValueError:
-                            _LOGGER.debug("Unknown variant in lock: %s", lock_variant_str)
+                            _LOGGER.debug(
+                                "Unknown variant in lock: %s", lock_variant_str
+                            )
 
         _LOGGER.debug(
             "Generating EID for device %s: pair_date=%s, current=%s, counter=%s, variant=%s",
@@ -655,7 +670,9 @@ async def _async_get_device_eid(  # noqa: PLR0911, PLR0912, PLR0915
         _LOGGER.debug(
             "Generated EID for device %s: %s...",
             device_id,
-            eid[:EID_LOG_PREFIX_LENGTH].hex() if len(eid) >= EID_LOG_PREFIX_LENGTH else eid.hex(),
+            eid[:EID_LOG_PREFIX_LENGTH].hex()
+            if len(eid) >= EID_LOG_PREFIX_LENGTH
+            else eid.hex(),
         )
 
         return eid
@@ -689,7 +706,9 @@ async def _async_upload_semantic_location(  # noqa: PLR0913
 
     _LOGGER.debug(
         "Uploading semantic location: EID=%s..., area=%s, scanner=%s",
-        eid[:EID_LOG_PREFIX_LENGTH].hex() if len(eid) >= EID_LOG_PREFIX_LENGTH else eid.hex(),
+        eid[:EID_LOG_PREFIX_LENGTH].hex()
+        if len(eid) >= EID_LOG_PREFIX_LENGTH
+        else eid.hex(),
         area,
         scanner,
     )

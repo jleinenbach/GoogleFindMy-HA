@@ -18,6 +18,7 @@ from custom_components.googlefindmy.const import (
     service_device_identifier,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 from custom_components.googlefindmy.sensor import (
     STATS_DESCRIPTIONS,
     GoogleFindMySemanticLabelSensor,
@@ -328,10 +329,8 @@ def test_history_fallback_increments_history_stat(
             f"{entry_id}:device-1",
             "device_tracker.googlefindmy_device_1",
         )
-        monkeypatch.setattr(
-            "custom_components.googlefindmy.coordinator.er.async_get",
-            lambda _hass: registry,
-        )
+        # Use object-based patching (er is imported in registry.py)
+        monkeypatch.setattr(coordinator_registry.er, "async_get", lambda _hass: registry)
 
         # No live state available -> force history fallback.
         hass.states = SimpleNamespace(get=lambda _eid: None)
@@ -350,7 +349,7 @@ def test_history_fallback_increments_history_stat(
             return {entity_ids[0]: [history_state]}
 
         monkeypatch.setattr(
-            "custom_components.googlefindmy.coordinator.recorder_history.get_last_state_changes",
+            "custom_components.googlefindmy.coordinator.main.recorder_history.get_last_state_changes",
             _fake_get_last_state_changes,
             raising=False,
         )
@@ -360,7 +359,7 @@ def test_history_fallback_increments_history_stat(
                 return func(*args)
 
         monkeypatch.setattr(
-            "custom_components.googlefindmy.coordinator.get_recorder",
+            "custom_components.googlefindmy.coordinator.main.get_recorder",
             lambda _hass: _RecorderStub(),
             raising=False,
         )
