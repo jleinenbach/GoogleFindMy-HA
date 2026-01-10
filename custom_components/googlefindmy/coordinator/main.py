@@ -3617,101 +3617,12 @@ class GoogleFindMyCoordinator(
         """Expose the current "auth failed" condition for diagnostic entities (binary_sensor)."""
         return self._auth_error_active
 
-    def _set_api_status(self, status: str, *, reason: str | None = None) -> None:
-        """Update the API polling status and notify listeners if it changed."""
-
-        if status == self._api_status_state and reason == self._api_status_reason:
-            return
-
-        self._api_status_state = status
-        self._api_status_reason = reason
-        self._api_status_changed_at = time.time()
-
-        try:
-            self.async_set_updated_data(self.data)
-        except Exception:
-            # Fallback for very early startup when listeners are not ready yet.
-            pass
-
-    def _set_fcm_status(self, status: str, *, reason: str | None = None) -> None:
-        """Update the push transport status while avoiding noisy churn."""
-
-        if status == self._fcm_status_state and reason == self._fcm_status_reason:
-            return
-
-        self._fcm_status_state = status
-        self._fcm_status_reason = reason
-        self._fcm_status_changed_at = time.time()
-
-        try:
-            self.async_set_updated_data(self.data)
-        except Exception:
-            pass
-
     # Former `_async_start_reauth_flow` helper removed: rely on HA's automatic
     # reauth trigger when `ConfigEntryAuthFailed` bubbles up.
-
-    @property
-    def api_status(self) -> StatusSnapshot:
-        """Return a snapshot describing the current API polling health."""
-
-        return StatusSnapshot(
-            state=self._api_status_state,
-            reason=self._api_status_reason,
-            changed_at=self._api_status_changed_at,
-        )
-
-    @property
-    def fcm_status(self) -> StatusSnapshot:
-        """Return a snapshot describing the current push transport health."""
-
-        return StatusSnapshot(
-            state=self._fcm_status_state,
-            reason=self._fcm_status_reason,
-            changed_at=self._fcm_status_changed_at,
-        )
-
-    @property
-    def is_fcm_connected(self) -> bool:
-        """Convenience boolean for entities relying on push transport availability."""
-
-        return self._fcm_status_state == FcmStatus.CONNECTED
-
-    @property
-    def consecutive_timeouts(self) -> int:
-        """Return the number of consecutive poll timeouts."""
-
-        return self._consecutive_timeouts
-
-    @property
-    def last_poll_result(self) -> str | None:
-        """Return the last recorded poll result ("success"/"failed")."""
-
-        return self._last_poll_result
 
     # --- END: Add/Replace inside Coordinator class --------------------------------
 
     # ---------------------------- Event loop helpers ------------------------
-    def _is_on_hass_loop(self) -> bool:
-        """Return True if currently executing on the HA event loop thread."""
-        loop = self.hass.loop
-        try:
-            return asyncio.get_running_loop() is loop
-        except RuntimeError:
-            return False
-
-    def _run_on_hass_loop(
-        self, func: Callable[..., None], *args: Any, **kwargs: Any
-    ) -> None:
-        """Schedule a plain callable to run on the HA loop thread ASAP.
-
-        Note:
-        - This is intentionally **fire-and-forget**; `call_soon_threadsafe` does not
-          return the callable's result to the caller. Only use with functions that
-          **return None** and are safe to run on the HA loop.
-        """
-        self.hass.loop.call_soon_threadsafe(func, *args, **kwargs)
-
     def _dispatch_async_request_refresh(
         self, *, task_name: str, log_context: str
     ) -> None:
