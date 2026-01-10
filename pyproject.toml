@@ -104,6 +104,58 @@ ignore = ["E501"]
     "PLR2004",
     "PLR0911",
 ]
+# Coordinator package files (refactored from coordinator.py)
+"custom_components/googlefindmy/coordinator/main.py" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+    "PLR0911",
+]
+"custom_components/googlefindmy/coordinator/identity.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/locate.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/polling.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/registry.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/subentry.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+# Coordinator helper files
+"custom_components/googlefindmy/coordinator/helpers/*.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+    "UP047",
+]
 "custom_components/googlefindmy/__init__.py" = [
     "PLR0911",
     "PLR0912",

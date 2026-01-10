@@ -49,7 +49,7 @@ class LocateOperations:
     """
 
     def _normalize_coords(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         payload: dict[str, Any],
         *,
         device_label: str | None = None,
@@ -122,7 +122,7 @@ class LocateOperations:
 
         return True
 
-    def can_play_sound(self: "GoogleFindMyCoordinator", device_id: str) -> bool:
+    def can_play_sound(self: GoogleFindMyCoordinator, device_id: str) -> bool:
         """Return True if 'Play Sound' should be enabled for the device.
 
         **No network in availability path.**
@@ -180,7 +180,7 @@ class LocateOperations:
 
     # ---------------------------- Public control / Locate gating ------------
     def _get_device_lock(
-        self: "GoogleFindMyCoordinator", device_id: str
+        self: GoogleFindMyCoordinator, device_id: str
     ) -> asyncio.Lock:
         """Get or create a lock for a specific device.
 
@@ -191,7 +191,7 @@ class LocateOperations:
             self._device_action_locks[device_id] = asyncio.Lock()
         return self._device_action_locks[device_id]
 
-    def can_request_location(self: "GoogleFindMyCoordinator", device_id: str) -> bool:
+    def can_request_location(self: GoogleFindMyCoordinator, device_id: str) -> bool:
         """Return True if a manual 'Locate now' request is currently allowed.
 
         Gate conditions:
@@ -221,7 +221,7 @@ class LocateOperations:
 
     # ---------------------------- Passthrough API ---------------------------
     async def async_locate_device(
-        self: "GoogleFindMyCoordinator", device_id: str
+        self: GoogleFindMyCoordinator, device_id: str
     ) -> dict[str, Any]:
         """Locate a device using the native async API (no executor).
 
@@ -501,7 +501,7 @@ class LocateOperations:
                 self.async_set_updated_data(self.data)
 
     async def async_play_sound(
-        self: "GoogleFindMyCoordinator", device_id: str
+        self: GoogleFindMyCoordinator, device_id: str
     ) -> bool:
         """Play sound on a device using the native async API (no executor).
 
@@ -558,7 +558,7 @@ class LocateOperations:
             return False
 
     async def async_stop_sound(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         device_id: str,
         request_uuid: str | None = None,
     ) -> bool:

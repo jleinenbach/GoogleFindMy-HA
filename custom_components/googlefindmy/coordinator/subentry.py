@@ -112,8 +112,8 @@ class SubentryOperations:
     """
 
     def attach_subentry_manager(
-        self: "GoogleFindMyCoordinator",
-        manager: "ConfigEntrySubEntryManager",
+        self: GoogleFindMyCoordinator,
+        manager: ConfigEntrySubEntryManager,
         *,
         is_reload: bool = False,
     ) -> None:
@@ -146,13 +146,13 @@ class SubentryOperations:
                     err,
                 )
 
-    def _default_subentry_key(self: "GoogleFindMyCoordinator") -> str:
+    def _default_subentry_key(self: GoogleFindMyCoordinator) -> str:
         """Return the default subentry key used when no explicit mapping exists."""
 
         return self._default_subentry_key_value or "core_tracking"
 
     async def async_wait_subentry_visibility_updates(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
     ) -> None:
         """Await pending visibility updates scheduled by the subentry manager."""
 
@@ -173,8 +173,8 @@ class SubentryOperations:
             )
 
     def _build_core_subentry_definitions(
-        self: "GoogleFindMyCoordinator",
-    ) -> list["ConfigEntrySubentryDefinition"]:
+        self: GoogleFindMyCoordinator,
+    ) -> list[ConfigEntrySubentryDefinition]:
         """Return definitions for the core tracker/service subentries."""
 
         entry = self.config_entry or getattr(self, "entry", None)
@@ -236,7 +236,7 @@ class SubentryOperations:
         return [tracker_definition, service_definition]
 
     def _schedule_core_subentry_repair(
-        self: "GoogleFindMyCoordinator", missing_keys: set[str]
+        self: GoogleFindMyCoordinator, missing_keys: set[str]
     ) -> None:
         """Schedule a repair task to recreate missing core subentries."""
 
@@ -311,7 +311,7 @@ class SubentryOperations:
             task = asyncio.create_task(_repair(), name=task_name)
         self._pending_subentry_repair = task
 
-    def _cancel_pending_subentry_repair(self: "GoogleFindMyCoordinator") -> None:
+    def _cancel_pending_subentry_repair(self: GoogleFindMyCoordinator) -> None:
         """Cancel any pending core subentry repair task."""
 
         pending = self._pending_subentry_repair
@@ -324,7 +324,7 @@ class SubentryOperations:
         self._pending_subentry_repair = None
 
     def _refresh_subentry_index(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         visible_devices: Sequence[Mapping[str, Any]] | None = None,
         *,
         skip_manager_update: bool = False,
@@ -778,7 +778,7 @@ class SubentryOperations:
             self._subentry_snapshots.setdefault(key, ())
 
     def _group_snapshot_by_subentry(
-        self: "GoogleFindMyCoordinator", snapshot: Sequence[Mapping[str, Any]]
+        self: GoogleFindMyCoordinator, snapshot: Sequence[Mapping[str, Any]]
     ) -> dict[str, list[dict[str, Any]]]:
         """Return snapshot entries grouped by subentry key."""
         # Build device-to-subentry mapping from metadata
@@ -795,7 +795,7 @@ class SubentryOperations:
         )
 
     def _store_subentry_snapshots(
-        self: "GoogleFindMyCoordinator", snapshot: Sequence[Mapping[str, Any]]
+        self: GoogleFindMyCoordinator, snapshot: Sequence[Mapping[str, Any]]
     ) -> None:
         """Persist grouped snapshots for subentry-aware consumers."""
 
@@ -805,14 +805,14 @@ class SubentryOperations:
         }
 
     def _resolve_subentry_key_for_feature(
-        self: "GoogleFindMyCoordinator", feature: str
+        self: GoogleFindMyCoordinator, feature: str
     ) -> str:
         """Return the subentry key for a platform feature without warnings."""
 
         return self._feature_to_subentry.get(feature, self._default_subentry_key())
 
     def get_subentry_key_for_feature(
-        self: "GoogleFindMyCoordinator", feature: str
+        self: GoogleFindMyCoordinator, feature: str
     ) -> str:
         """Return the subentry key responsible for a platform feature."""
 
@@ -825,7 +825,7 @@ class SubentryOperations:
         return self._resolve_subentry_key_for_feature(feature)
 
     def get_subentry_metadata(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         *,
         key: str | None = None,
         feature: str | None = None,
@@ -840,7 +840,7 @@ class SubentryOperations:
         return self._subentry_metadata.get(lookup_key)
 
     def stable_subentry_identifier(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         *,
         key: str | None = None,
         feature: str | None = None,
@@ -857,7 +857,7 @@ class SubentryOperations:
         return self._default_subentry_key()
 
     def get_subentry_snapshot(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         key: str | None = None,
         *,
         feature: str | None = None,
@@ -875,7 +875,7 @@ class SubentryOperations:
         return [dict(row) for row in entries]
 
     def is_device_visible_in_subentry(
-        self: "GoogleFindMyCoordinator", subentry_key: str, device_id: str
+        self: GoogleFindMyCoordinator, subentry_key: str, device_id: str
     ) -> bool:
         """Return True if a device is visible within the subentry scope.
 
@@ -901,7 +901,7 @@ class SubentryOperations:
         return False
 
     def get_device_location_data_for_subentry(
-        self: "GoogleFindMyCoordinator", subentry_key: str, device_id: str
+        self: GoogleFindMyCoordinator, subentry_key: str, device_id: str
     ) -> dict[str, Any] | None:
         """Return location data for a device if it belongs to the subentry."""
 
@@ -910,8 +910,8 @@ class SubentryOperations:
         return self.get_device_location_data(device_id)
 
     def get_device_last_seen_for_subentry(
-        self: "GoogleFindMyCoordinator", subentry_key: str, device_id: str
-    ) -> "datetime | None":
+        self: GoogleFindMyCoordinator, subentry_key: str, device_id: str
+    ) -> datetime | None:
         """Return last_seen for a device within the given subentry."""
 
         if not self.is_device_visible_in_subentry(subentry_key, device_id):

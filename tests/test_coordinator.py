@@ -9,6 +9,7 @@ import pytest
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import identity as coordinator_identity
 from custom_components.googlefindmy.coordinator import main as coordinator_main
 
 
@@ -312,9 +313,10 @@ def test_coordinator_propagates_timestamps_to_identity(
 
     registry = _StubRegistry(registry_device)
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )
@@ -381,9 +383,10 @@ def test_coordinator_persists_camelCase_identity_keys(
 
     registry = _StubRegistry(registry_device)
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )
@@ -440,9 +443,10 @@ def test_coordinator_yields_encrypted_only_identities(
 
     registry = _StubRegistry(registry_device)
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )
@@ -497,8 +501,14 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
         unwrap_calls["ciphertext"] = ciphertext
         return decrypted_eik
 
+    # decrypt_eik is imported at module level in identity.py, patch both locations
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.main.decrypt_eik", fake_decrypt
+        "custom_components.googlefindmy.KeyBackup.cloud_key_decryptor.decrypt_eik",
+        fake_decrypt,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator.identity.decrypt_eik",
+        fake_decrypt,
     )
 
     class _StubRegistry:
@@ -516,9 +526,10 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
 
     registry = _StubRegistry(registry_device)
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )
@@ -573,9 +584,10 @@ def test_coordinator_yields_identities_without_pair_date(
         custom_fields={"canonical_id": "device-1"},
     )
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )
@@ -625,9 +637,10 @@ def test_active_device_identities_assigns_correct_timestamps_per_device(
         ),
     ]
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: registry_devices,
     )
@@ -668,9 +681,10 @@ def test_active_device_identities_handles_missing_custom_fields(
         canonical_id="device-1",
     )
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )
@@ -718,9 +732,10 @@ def test_active_device_identities_uses_cache_when_not_in_poll_list(
         },
     )
 
-    monkeypatch.setattr(coordinator_main.dr, "async_get", lambda hass: registry)
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
     monkeypatch.setattr(
-        coordinator_main.dr,
+        coordinator_identity.dr,
         "async_entries_for_config_entry",
         lambda _registry, _entry_id: [registry_device],
     )

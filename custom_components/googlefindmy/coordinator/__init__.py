@@ -22,13 +22,6 @@ from ..KeyBackup.cloud_key_decryptor import decrypt_eik
 # Re-export helpers subpackage
 from . import helpers
 
-# Operations classes - currently empty, will be filled in Phases 2-6
-from .identity import IdentityOperations
-from .locate import LocateOperations
-from .polling import PollingOperations
-from .registry import RegistryOperations
-from .subentry import SubentryOperations
-
 # Re-export stats classes from helpers (commonly needed)
 from .helpers.stats import (
     ApiStatus,
@@ -37,8 +30,9 @@ from .helpers.stats import (
     StatusSnapshot,
 )
 
-# Re-export SubentryMetadata from subentry module
-from .subentry import SubentryMetadata
+# Operations classes - currently empty, will be filled in Phases 2-6
+from .identity import IdentityOperations
+from .locate import LocateOperations
 
 # Re-export main coordinator class and related types
 from .main import (
@@ -59,6 +53,11 @@ from .main import (
     get_recorder,
     normalize_epoch_seconds,
 )
+from .polling import PollingOperations
+from .registry import RegistryOperations
+
+# Re-export SubentryMetadata from subentry module
+from .subentry import SubentryMetadata, SubentryOperations
 
 __all__ = [
     # Main class

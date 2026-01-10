@@ -54,22 +54,49 @@ from ..const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
-
 from .helpers.registry import (
     build_canonical_unique_id as _build_canonical_unique_id_impl,
+)
+from .helpers.registry import (
     build_entity_unique_id_candidates as _build_entity_unique_id_candidates_impl,
+)
+from .helpers.registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
+)
+from .helpers.registry import (
     extract_canonical_device_id as _extract_canonical_device_id_impl,
+)
+from .helpers.registry import (
     extract_device_display_name as _extract_display_name_impl,
+)
+from .helpers.registry import (
     extract_service_subentry_ids as _extract_service_subentry_ids_impl,
+)
+from .helpers.registry import (
     has_hub_link as _has_hub_link_impl,
+)
+from .helpers.registry import (
     has_subentry_link as _has_subentry_link_impl,
+)
+from .helpers.registry import (
     is_hub_device_check as _is_hub_device_check_impl,
+)
+from .helpers.registry import (
     match_entity_by_device_id as _match_entity_by_device_id_impl,
+)
+from .helpers.registry import (
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
+)
+from .helpers.registry import (
     normalize_device_name as _normalize_device_name_impl,
+)
+from .helpers.registry import (
     parse_device_identifier as _parse_identifier_impl,
+)
+from .helpers.registry import (
     resolve_tracker_subentry_candidate as _resolve_tracker_subentry_impl,
+)
+from .helpers.registry import (
     should_defer_service_subentry as _should_defer_service_subentry_impl,
 )
 from .helpers.subentry import (
@@ -91,7 +118,7 @@ class RegistryOperations:
     """
 
     def _call_device_registry_api(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         call: Callable[..., Any],
         *,
         base_kwargs: Mapping[str, Any] | None = None,
@@ -136,7 +163,7 @@ class RegistryOperations:
             return call(**fallback_kwargs)
 
     def _device_registry_kwargs_need_legacy_retry(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         call: Callable[..., Any],
         err: TypeError,
         kwargs: Mapping[str, Any],
@@ -153,7 +180,7 @@ class RegistryOperations:
         return _build_legacy_kwargs_impl(kwargs)
 
     def _device_registry_config_subentry_kwarg_name(
-        self: "GoogleFindMyCoordinator", call: Callable[..., Any]
+        self: GoogleFindMyCoordinator, call: Callable[..., Any]
     ) -> str | None:
         """Return the config-subentry kwarg name accepted by ``call``.
 
@@ -198,7 +225,7 @@ class RegistryOperations:
         return kwarg_name
 
     def _device_registry_allows_translation_update(
-        self: "GoogleFindMyCoordinator", dev_reg: Any
+        self: GoogleFindMyCoordinator, dev_reg: Any
     ) -> bool:
         """Return True if the registry accepts translation metadata during updates."""
 
@@ -226,7 +253,7 @@ class RegistryOperations:
 
     @callback
     def _reindex_poll_targets_from_device_registry(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
     ) -> None:
         """Rebuild internal poll target sets from registries (fast, robust, diagnostics-aware).
 
@@ -293,7 +320,7 @@ class RegistryOperations:
         self._schedule_eid_resolver_refresh()
 
     def _extract_our_identifier(
-        self: "GoogleFindMyCoordinator", device: dr.DeviceEntry
+        self: GoogleFindMyCoordinator, device: dr.DeviceEntry
     ) -> str | None:
         """Return the first valid (DOMAIN, identifier) from a device, else None.
 
@@ -324,7 +351,7 @@ class RegistryOperations:
         return None
 
     def _sync_owner_index(
-        self: "GoogleFindMyCoordinator", devices: list[dict[str, Any]] | None
+        self: GoogleFindMyCoordinator, devices: list[dict[str, Any]] | None
     ) -> None:
         """Sync hass.data owner index for this entry (FCM fallback support)."""
         hass = getattr(self, "hass", None)
@@ -383,7 +410,7 @@ class RegistryOperations:
                 )
 
     def _ensure_device_name_cache(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
     ) -> dict[str, str]:
         """Return the lazily initialized device-name cache."""
         cache = getattr(self, "_device_names", None)
@@ -392,7 +419,7 @@ class RegistryOperations:
             setattr(self, "_device_names", cache)
         return cache
 
-    def _apply_pending_via_updates(self: "GoogleFindMyCoordinator") -> None:
+    def _apply_pending_via_updates(self: GoogleFindMyCoordinator) -> None:
         """Deprecated no-op retained for backward compatibility."""
         # Tracker devices no longer link to the service device via ``via_device``.
         # Keep the method defined to avoid AttributeError in case third-party
@@ -400,18 +427,18 @@ class RegistryOperations:
         return
 
     def _device_display_name(
-        self: "GoogleFindMyCoordinator", dev: dr.DeviceEntry, fallback: str
+        self: GoogleFindMyCoordinator, dev: dr.DeviceEntry, fallback: str
     ) -> str:
         """Return the best human-friendly device name without sensitive data."""
         return _extract_display_name_impl(dev.name_by_user, dev.name, fallback)
 
-    def _entry_id(self: "GoogleFindMyCoordinator") -> str | None:
+    def _entry_id(self: GoogleFindMyCoordinator) -> str | None:
         """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
         entry = getattr(self, "config_entry", None)
         return getattr(entry, "entry_id", None)
 
     def _config_entry_exists(
-        self: "GoogleFindMyCoordinator", entry_id: str | None = None
+        self: GoogleFindMyCoordinator, entry_id: str | None = None
     ) -> bool:
         """Return True when the coordinator's entry is still registered."""
         hass = getattr(self, "hass", None)
@@ -432,7 +459,7 @@ class RegistryOperations:
         return True
 
     def _redact_text(
-        self: "GoogleFindMyCoordinator", value: str | None, max_len: int = 120
+        self: GoogleFindMyCoordinator, value: str | None, max_len: int = 120
     ) -> str:
         """Return a short, redacted string variant suitable for logs/diagnostics."""
         if not value:
@@ -441,7 +468,7 @@ class RegistryOperations:
         return s if len(s) <= max_len else (s[:max_len] + "…")
 
     def _ensure_service_device_exists(
-        self: "GoogleFindMyCoordinator", entry: ConfigEntry | None = None
+        self: GoogleFindMyCoordinator, entry: ConfigEntry | None = None
     ) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 
@@ -984,7 +1011,7 @@ class RegistryOperations:
     ensure_service_device_exists = _ensure_service_device_exists
 
     def _find_tracker_entity_entry(
-        self: "GoogleFindMyCoordinator", device_id: str
+        self: GoogleFindMyCoordinator, device_id: str
     ) -> EntityRegistryEntry | None:
         """Return the registry entry for a tracker and migrate legacy unique IDs.
 
@@ -1255,13 +1282,13 @@ class RegistryOperations:
         return None
 
     def find_tracker_entity_entry(
-        self: "GoogleFindMyCoordinator", device_id: str
+        self: GoogleFindMyCoordinator, device_id: str
     ) -> EntityRegistryEntry | None:
         """Public wrapper to expose tracker entity lookup to platforms."""
         return self._find_tracker_entity_entry(device_id)
 
     def _ensure_registry_for_devices(
-        self: "GoogleFindMyCoordinator",
+        self: GoogleFindMyCoordinator,
         devices: list[dict[str, Any]],
         ignored: set[str],
     ) -> int:
