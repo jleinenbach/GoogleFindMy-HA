@@ -134,6 +134,7 @@ else:
     from homeassistant.components.binary_sensor import BinarySensorEntity  # noqa: F401
     from homeassistant.components.button import ButtonEntity  # noqa: F401
     from homeassistant.components.device_tracker import TrackerEntity  # noqa: F401
+
     try:
         from homeassistant.helpers.http import HomeAssistantView  # noqa: F401
     except ImportError:  # pragma: no cover - fallback for older/stub environments
@@ -145,6 +146,7 @@ else:
                 _http_module, "HomeAssistantView"
             )
         else:
+
             class _StubHomeAssistantView:  # pragma: no cover - minimal fallback
                 """Stand-in base class for environments without HTTP helpers."""
 

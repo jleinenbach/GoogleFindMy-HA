@@ -46,7 +46,10 @@ def get_fmdn_shared_key(vault_keys: str) -> bytes:
         if not isinstance(key_data, dict):
             continue
 
-        if not all(isinstance(key, str) and isinstance(value, int) for key, value in key_data.items()):
+        if not all(
+            isinstance(key, str) and isinstance(value, int)
+            for key, value in key_data.items()
+        ):
             continue
 
         key_dict = cast(dict[str, int], key_data)

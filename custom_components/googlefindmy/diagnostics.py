@@ -353,9 +353,7 @@ def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
                 "run_state": snap.get("run_state"),
                 "do_listen": bool(snap.get("do_listen")),
                 "last_activity_monotonic": snap.get("last_activity_monotonic"),
-                "seconds_since_last_activity": snap.get(
-                    "seconds_since_last_activity"
-                ),
+                "seconds_since_last_activity": snap.get("seconds_since_last_activity"),
                 "activity_stale": bool(snap.get("activity_stale")),
             }
         )
@@ -537,7 +535,9 @@ async def async_get_config_entry_diagnostics(
             )
         ),
         "enable_stats_entities": bool(
-            effective_config.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+            effective_config.get(
+                OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES
+            )
         ),
         # Token lifetime: store boolean value
         "map_view_token_expiration": bool(
@@ -691,6 +691,8 @@ async def async_get_config_entry_diagnostics(
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
     return async_redact_data(payload, TO_REDACT)
+
+
 # Consistent placeholder used when redacting fields.
 REDACTED = "**REDACTED**"
 

@@ -182,9 +182,7 @@ class LocateOperations:
         return True
 
     # ---------------------------- Public control / Locate gating ------------
-    def _get_device_lock(
-        self: GoogleFindMyCoordinator, device_id: str
-    ) -> asyncio.Lock:
+    def _get_device_lock(self: GoogleFindMyCoordinator, device_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific device.
 
         This prevents race conditions when multiple concurrent locate requests
@@ -290,7 +288,9 @@ class LocateOperations:
             google_home_filter = self._get_google_home_filter()
 
             try:
-                location_data = await self.api.async_get_device_location(device_id, name)
+                location_data = await self.api.async_get_device_location(
+                    device_id, name
+                )
 
                 # Success path: clear any auth error state
                 self._set_auth_state(failed=False)
@@ -327,7 +327,9 @@ class LocateOperations:
                             )
                         )
                     except Exception as gf_err:
-                        _LOGGER.debug("Google Home filter error for %s: %s", name, gf_err)
+                        _LOGGER.debug(
+                            "Google Home filter error for %s: %s", name, gf_err
+                        )
                     else:
                         if should_filter:
                             _LOGGER.debug(
@@ -506,9 +508,7 @@ class LocateOperations:
                 # Push an update so buttons/entities can refresh availability
                 self.async_set_updated_data(self.data)
 
-    async def async_play_sound(
-        self: GoogleFindMyCoordinator, device_id: str
-    ) -> bool:
+    async def async_play_sound(self: GoogleFindMyCoordinator, device_id: str) -> bool:
         """Play sound on a device using the native async API (no executor).
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.

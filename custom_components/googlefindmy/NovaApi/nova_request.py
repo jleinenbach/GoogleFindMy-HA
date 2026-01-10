@@ -64,7 +64,9 @@ else:
 _beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
 try:
     from bs4 import BeautifulSoup as _bs_factory
-except ImportError:  # pragma: no cover - optional dependency, covered via fallback branch
+except (
+    ImportError
+):  # pragma: no cover - optional dependency, covered via fallback branch
     _beautiful_soup_factory = None
     _BS4_AVAILABLE = False
 else:
@@ -100,27 +102,29 @@ NOVA_MAX_RETRY_AFTER_S = 60.0
 HTTP_OK = 200
 
 # 4xx Client Errors
-HTTP_BAD_REQUEST = 400          # Malformed request syntax - DO NOT RETRY
-HTTP_UNAUTHORIZED = 401         # Auth failed - RETRY after token refresh
-HTTP_FORBIDDEN = 403            # Permission denied - DO NOT RETRY
-HTTP_NOT_FOUND = 404            # Resource not found - DO NOT RETRY
-HTTP_METHOD_NOT_ALLOWED = 405   # HTTP method not supported - DO NOT RETRY
-HTTP_REQUEST_TIMEOUT = 408      # Server timeout waiting for request - RETRY OK
-HTTP_CONFLICT = 409             # Request conflicts with server state - DO NOT RETRY
-HTTP_GONE = 410                 # Resource permanently removed - DO NOT RETRY
+HTTP_BAD_REQUEST = 400  # Malformed request syntax - DO NOT RETRY
+HTTP_UNAUTHORIZED = 401  # Auth failed - RETRY after token refresh
+HTTP_FORBIDDEN = 403  # Permission denied - DO NOT RETRY
+HTTP_NOT_FOUND = 404  # Resource not found - DO NOT RETRY
+HTTP_METHOD_NOT_ALLOWED = 405  # HTTP method not supported - DO NOT RETRY
+HTTP_REQUEST_TIMEOUT = 408  # Server timeout waiting for request - RETRY OK
+HTTP_CONFLICT = 409  # Request conflicts with server state - DO NOT RETRY
+HTTP_GONE = 410  # Resource permanently removed - DO NOT RETRY
 HTTP_PRECONDITION_FAILED = 412  # Precondition in headers not met - DO NOT RETRY
-HTTP_PAYLOAD_TOO_LARGE = 413    # Request body too large - DO NOT RETRY
-HTTP_UNPROCESSABLE_ENTITY = 422 # Semantic errors in request - DO NOT RETRY
-HTTP_TOO_MANY_REQUESTS = 429    # Rate limited - RETRY with backoff
+HTTP_PAYLOAD_TOO_LARGE = 413  # Request body too large - DO NOT RETRY
+HTTP_UNPROCESSABLE_ENTITY = 422  # Semantic errors in request - DO NOT RETRY
+HTTP_TOO_MANY_REQUESTS = 429  # Rate limited - RETRY with backoff
 
 # 5xx Server Errors
 HTTP_INTERNAL_SERVER_ERROR = 500  # Generic server error - RETRY OK
-HTTP_NOT_IMPLEMENTED = 501        # Server doesn't support functionality - DO NOT RETRY
-HTTP_BAD_GATEWAY = 502            # Invalid response from upstream - RETRY OK
-HTTP_SERVICE_UNAVAILABLE = 503    # Server overloaded/maintenance - RETRY OK (check Retry-After)
-HTTP_GATEWAY_TIMEOUT = 504        # Upstream timeout - RETRY OK
+HTTP_NOT_IMPLEMENTED = 501  # Server doesn't support functionality - DO NOT RETRY
+HTTP_BAD_GATEWAY = 502  # Invalid response from upstream - RETRY OK
+HTTP_SERVICE_UNAVAILABLE = (
+    503  # Server overloaded/maintenance - RETRY OK (check Retry-After)
+)
+HTTP_GATEWAY_TIMEOUT = 504  # Upstream timeout - RETRY OK
 HTTP_VERSION_NOT_SUPPORTED = 505  # HTTP version not supported - DO NOT RETRY
-HTTP_LOOP_DETECTED = 508          # Infinite loop in request processing - DO NOT RETRY
+HTTP_LOOP_DETECTED = 508  # Infinite loop in request processing - DO NOT RETRY
 
 # ---------------------------------------------------------------------------
 # Retry-eligible status codes for Nova API
@@ -141,14 +145,16 @@ HTTP_LOOP_DETECTED = 508          # Infinite loop in request processing - DO NOT
 # - 505: HTTP Version Not Supported (config issue)
 # - 508: Loop Detected (server config issue)
 # ---------------------------------------------------------------------------
-HTTP_RETRY_ELIGIBLE = frozenset({
-    HTTP_REQUEST_TIMEOUT,
-    HTTP_TOO_MANY_REQUESTS,
-    HTTP_INTERNAL_SERVER_ERROR,
-    HTTP_BAD_GATEWAY,
-    HTTP_SERVICE_UNAVAILABLE,
-    HTTP_GATEWAY_TIMEOUT,
-})
+HTTP_RETRY_ELIGIBLE = frozenset(
+    {
+        HTTP_REQUEST_TIMEOUT,
+        HTTP_TOO_MANY_REQUESTS,
+        HTTP_INTERNAL_SERVER_ERROR,
+        HTTP_BAD_GATEWAY,
+        HTTP_SERVICE_UNAVAILABLE,
+        HTTP_GATEWAY_TIMEOUT,
+    }
+)
 
 RECENT_REFRESH_WINDOW_S = 2.0
 
@@ -309,9 +315,10 @@ def unregister_hass() -> None:
 
 
 # Cache provider hook for multi-entry support using contextvars for async safety
-_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], Any] | None] = contextvars.ContextVar(
-    "_cache_provider", default=None
+_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], Any] | None] = (
+    contextvars.ContextVar("_cache_provider", default=None)
 )
+
 
 def register_cache_provider(provider: Callable[[], Any]) -> None:
     """Register a callable that returns the entry-specific cache (context-local).
@@ -326,6 +333,7 @@ def register_cache_provider(provider: Callable[[], Any]) -> None:
     _STATE["cache_provider"] = provider
     _CACHE_PROVIDER.set(provider)
 
+
 def unregister_cache_provider() -> None:
     """Unregister the cache provider for the current context."""
     _STATE["cache_provider"] = None
@@ -337,7 +345,9 @@ def resolve_cache_from_provider() -> TokenCache | None:
 
     provider: Callable[[], TokenCache | None] | None = _CACHE_PROVIDER.get()
     if provider is None:
-        provider = cast(Callable[[], TokenCache | None] | None, _STATE.get("cache_provider"))
+        provider = cast(
+            Callable[[], TokenCache | None] | None, _STATE.get("cache_provider")
+        )
     if provider is None:
         return None
     try:
@@ -349,12 +359,14 @@ def resolve_cache_from_provider() -> TokenCache | None:
         _LOGGER.warning("Cache provider callable failed: %s", exc)
         return None
 
+
 def _get_cache_provider() -> TokenCache | None:
     """Get the registered cache provider for the current context or None.
 
     Returns None if no provider is registered or if the provider's cache is closed.
     """
     return resolve_cache_from_provider()
+
 
 # --- Refresh Locks ---
 
@@ -372,7 +384,10 @@ def _get_async_refresh_lock() -> asyncio.Lock:
         # No running loop - create lock anyway, will be used when loop starts
         current_loop_id = None
 
-    if _STATE["async_refresh_lock"] is None or _STATE["async_refresh_lock_loop_id"] != current_loop_id:
+    if (
+        _STATE["async_refresh_lock"] is None
+        or _STATE["async_refresh_lock_loop_id"] != current_loop_id
+    ):
         _STATE["async_refresh_lock"] = asyncio.Lock()
         _STATE["async_refresh_lock_loop_id"] = current_loop_id
     return cast(asyncio.Lock, _STATE["async_refresh_lock"])
@@ -665,9 +680,7 @@ class TTLPolicy:
         # Always refresh after a 401 to resume normal operation.
         return self._do_refresh(now)
 
-    async def async_on_401(
-        self, adaptive_downshift: bool = True
-    ) -> str | None:  # noqa: PLR0915
+    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:  # noqa: PLR0915
         """Async wrapper delegating to the synchronous policy."""
 
         return self.on_401(adaptive_downshift=adaptive_downshift)
@@ -749,7 +762,9 @@ class AsyncTTLPolicy(TTLPolicy):
                     await self._aset(key, None)
                 except Exception:
                     pass
-            raise NovaAuthPermanentError(401, "AAS token invalid during ADM refresh") from err
+            raise NovaAuthPermanentError(
+                401, "AAS token invalid during ADM refresh"
+            ) from err
         if tok:
             token_base = f"adm_token_{self.username}"
             for key in self._key_variants(token_base):
@@ -978,9 +993,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             if ns_prefix:
                 await resolved_cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
         except Exception as err:  # noqa: BLE001 - defensive caching
-            _LOGGER.debug(
-                "Failed to seed provided flow token into cache", exc_info=err
-            )
+            _LOGGER.debug("Failed to seed provided flow token into cache", exc_info=err)
 
     initial_token = await _get_initial_token_async(
         user, _LOGGER, ns_prefix=(namespace or ""), cache=resolved_cache

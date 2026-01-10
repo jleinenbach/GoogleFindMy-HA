@@ -9,6 +9,7 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 if TYPE_CHECKING:
+
     class _UnaryStreamContext(Protocol):
         async def __aenter__(self) -> _UnaryStreamContext: ...
         async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> Any: ...
@@ -33,8 +34,7 @@ if TYPE_CHECKING:
     class _GrpcError(Exception):
         status: Status
 
-    class _ProtocolError(Exception):
-        ...
+    class _ProtocolError(Exception): ...
 
     class _GrpclibExceptions(Protocol):
         GRPCError: type[_GrpcError]
@@ -75,7 +75,9 @@ _SPOT_INITIAL_BACKOFF_S: Final[float] = 1.0
 _SPOT_BACKOFF_FACTOR: Final[float] = 2.0
 _SPOT_MAX_BACKOFF_S: Final[float] = 60.0
 _SPOT_REQUEST_TIMEOUT_S: Final[float] = 30.0
-_USER_AGENT: Final[str] = "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT"
+_USER_AGENT: Final[str] = (
+    "com.google.android.gms/244433022 grpc-java-cronet/1.69.0-SNAPSHOT"
+)
 
 # WARNING: This mutates global grpclib state and affects all users in the process.
 # Ideally this should be set per-channel, but grpclib doesn't support that cleanly.
@@ -232,7 +234,9 @@ async def async_spot_request(
         method = UnaryUnaryMethod(channel, method_path, bytes, bytes)
 
         try:
-            async with method.open(metadata=metadata, timeout=_SPOT_REQUEST_TIMEOUT_S) as stream:
+            async with method.open(
+                metadata=metadata, timeout=_SPOT_REQUEST_TIMEOUT_S
+            ) as stream:
                 await stream.send_message(payload, end=True)
                 reply_bytes = await stream.recv_message()
         except grpclib_exceptions.GRPCError as err:
@@ -243,7 +247,9 @@ async def async_spot_request(
                     refreshed_once = True
                     await _invalidate_token_async(token_kind, token_user, cache=cache)
                     continue
-                raise SpotAuthPermanentError("Authentication failed after refresh.") from err
+                raise SpotAuthPermanentError(
+                    "Authentication failed after refresh."
+                ) from err
 
             if status == Status.RESOURCE_EXHAUSTED:
                 if retries_used < _SPOT_MAX_RETRIES:
@@ -310,4 +316,6 @@ async def async_spot_request(
 def spot_request(*_args: object, **_kwargs: object) -> bytes:
     """Deprecated sync shim preserved for legacy call sites."""
 
-    raise RuntimeError("spot_request is no longer synchronous; use async_spot_request with cache=")
+    raise RuntimeError(
+        "spot_request is no longer synchronous; use async_spot_request with cache="
+    )

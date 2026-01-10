@@ -81,7 +81,9 @@ def _async_track_state_change_event(*args: Any, **kwargs: Any) -> _CallbackType:
 
     from homeassistant.helpers import event as ha_event
 
-    helper = cast("_AsyncTrackStateChangeEvent", ha_event.async_track_state_change_event)
+    helper = cast(
+        "_AsyncTrackStateChangeEvent", ha_event.async_track_state_change_event
+    )
     return cast("_CallbackType", helper(*args, **kwargs))
 
 

@@ -190,7 +190,9 @@ def build_table10_prf_input(
             caller has already validated the counter.
     """
     if k != FHNA_K:
-        raise ValueError(f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}")
+        raise ValueError(
+            f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}"
+        )
 
     counter_u32: int = (
         time_counter_u32
@@ -199,7 +201,9 @@ def build_table10_prf_input(
     )
     masked_counter, was_modified = _align_to_rotation(counter_u32)
     if was_modified:
-        _LOGGER.debug("Counter %s masked to rotation-aligned %s", counter_u32, masked_counter)
+        _LOGGER.debug(
+            "Counter %s masked to rotation-aligned %s", counter_u32, masked_counter
+        )
 
     counter_bytes = masked_counter.to_bytes(4, byteorder="big", signed=False)
 
@@ -380,7 +384,9 @@ def generate_eid_variant(
 def get_masked_counter(time_counter_u32: int, k: int, *, strict: bool = True) -> bytes:
     """Return the rotation-aligned counter bytes for diagnostics."""
     if k != FHNA_K:
-        raise ValueError(f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}")
+        raise ValueError(
+            f"Unsupported rotation exponent {k}; FHNA requires FHNA_K={FHNA_K}"
+        )
 
     counter_u32 = _normalize_time_counter(time_counter_u32, strict=strict)
     rotation_mask: int = ((1 << k) - 1) & FHNA_COUNTER_MASK
@@ -424,9 +430,7 @@ def generate_eid(
 # =============================================================================
 
 
-def _align_to_rotation_flexible(
-    timestamp: int, *, rotation_period: int
-) -> int:
+def _align_to_rotation_flexible(timestamp: int, *, rotation_period: int) -> int:
     """Align a timestamp to the start of its rotation window using integer division.
 
     Unlike ``_align_to_rotation`` which uses bitwise masking (power-of-2 only),
@@ -565,7 +569,9 @@ def _generate_heuristic_eid_single(
             return _serialize_p256_x(scalar)
 
         case EidVariant.MODERN_P256_X20_TRUNC_BE:
-            full = _generate_heuristic_eid_single(eik, counter, EidVariant.MODERN_P256_X32_BE)
+            full = _generate_heuristic_eid_single(
+                eik, counter, EidVariant.MODERN_P256_X32_BE
+            )
             return full[:LEGACY_EID_LENGTH]
 
         case EidVariant.MODERN_P256_X32_LE_SCALAR:

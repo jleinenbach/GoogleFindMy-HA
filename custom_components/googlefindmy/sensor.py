@@ -84,6 +84,7 @@ def _subentry_type(subentry: Any | None) -> str | None:
             return fallback_type
     return None
 
+
 # ----------------------------- Entity Descriptions -----------------------------
 
 LAST_SEEN_DESCRIPTION = SensorEntityDescription(
@@ -217,7 +218,9 @@ async def async_setup_entry(
 
                 stable_identifier = getattr(meta, "stable_identifier", None)
                 identifier = (
-                    stable_identifier() if callable(stable_identifier) else None
+                    stable_identifier()
+                    if callable(stable_identifier)
+                    else None
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
@@ -252,9 +255,8 @@ async def async_setup_entry(
                 if feature not in subentry_features:
                     continue
 
-                config_id = (
-                    getattr(subentry, "subentry_id", None)
-                    or getattr(subentry, "entry_id", None)
+                config_id = getattr(subentry, "subentry_id", None) or getattr(
+                    subentry, "entry_id", None
                 )
                 identifier = (
                     config_id
@@ -296,7 +298,9 @@ async def async_setup_entry(
     primary_tracker_scope: _Scope | None = None
     tracker_scheduler: Callable[[Iterable[SensorEntity], bool], None] | None = None
 
-    def _scope_matches_forwarded(scope: _Scope, forwarded_config_id: str | None) -> bool:
+    def _scope_matches_forwarded(
+        scope: _Scope, forwarded_config_id: str | None
+    ) -> bool:
         if forwarded_config_id is None:
             return True
         return forwarded_config_id in (
@@ -310,9 +314,7 @@ async def async_setup_entry(
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_service",
-            scope.config_subentry_id
-            or forwarded_config_id
-            or scope.identifier,
+            scope.config_subentry_id or forwarded_config_id or scope.identifier,
             known_ids=service_ids,
         )
         if sanitized_config_id is None:
@@ -331,7 +333,9 @@ async def async_setup_entry(
                 return
 
         identifier = scope.identifier or sanitized_config_id or scope.subentry_key
-        service_scopes[identifier] = _Scope(scope.subentry_key, sanitized_config_id, identifier)
+        service_scopes[identifier] = _Scope(
+            scope.subentry_key, sanitized_config_id, identifier
+        )
 
         def _schedule_service_entities(
             new_entities: Iterable[SensorEntity],
@@ -433,11 +437,15 @@ async def async_setup_entry(
                 scope.subentry_key,
             )
 
-        tracker_identifier = scope.identifier or sanitized_config_id or scope.subentry_key
+        tracker_identifier = (
+            scope.identifier or sanitized_config_id or scope.subentry_key
+        )
         if tracker_identifier in processed_tracker_identifiers:
             return
         processed_tracker_identifiers.add(tracker_identifier)
-        tracker_scope = _Scope(scope.subentry_key, sanitized_config_id, tracker_identifier)
+        tracker_scope = _Scope(
+            scope.subentry_key, sanitized_config_id, tracker_identifier
+        )
         tracker_scopes.append(tracker_scope)
 
         if primary_tracker_scope is None:
@@ -482,9 +490,7 @@ async def async_setup_entry(
                 is_visible = getattr(coordinator, "is_device_visible_in_subentry", None)
                 if callable(is_visible):
                     try:
-                        visible = bool(
-                            is_visible(tracker_scope.subentry_key, dev_id)
-                        )
+                        visible = bool(is_visible(tracker_scope.subentry_key, dev_id))
                     except Exception:  # pragma: no cover - defensive fallback for stubs
                         visible = True
 
@@ -577,7 +583,8 @@ async def async_setup_entry(
                 if getattr(candidate, "subentry_type", None) == "service"
                 or (
                     isinstance(getattr(candidate, "data", None), Mapping)
-                    and candidate.data.get("group_key") in (SERVICE_SUBENTRY_KEY, "service")
+                    and candidate.data.get("group_key")
+                    in (SERVICE_SUBENTRY_KEY, "service")
                 )
             ),
             None,
@@ -662,7 +669,9 @@ async def async_setup_entry(
     if isinstance(recovery_manager, EntityRecoveryManager):
         entry_id = getattr(entry, "entry_id", None)
         service_identifier = next(iter(created_stats.keys()), None)
-        service_scope = service_scopes.get(service_identifier) if service_identifier else None
+        service_scope = (
+            service_scopes.get(service_identifier) if service_identifier else None
+        )
         tracker_scope = primary_tracker_scope
 
         def _recovery_add_entities(
@@ -711,16 +720,19 @@ async def async_setup_entry(
                 and service_identifier
             ):
                 for stat_key in created_stats.get(service_identifier, []):
-                    expected.add(
-                        f"{DOMAIN}_{entry_id}_{service_identifier}_{stat_key}"
-                    )
+                    expected.add(f"{DOMAIN}_{entry_id}_{service_identifier}_{stat_key}")
             if tracker_scope and isinstance(tracker_scope.identifier, str):
-                for device in coordinator.get_subentry_snapshot(tracker_scope.subentry_key):
+                for device in coordinator.get_subentry_snapshot(
+                    tracker_scope.subentry_key
+                ):
                     dev_id = device.get("id")
                     dev_name = device.get("name")
-                    if not isinstance(dev_id, str) or not dev_id or not isinstance(
-                        dev_name, str
-                    ) or not dev_name:
+                    if (
+                        not isinstance(dev_id, str)
+                        or not dev_id
+                        or not isinstance(dev_name, str)
+                        or not dev_name
+                    ):
                         continue
                     if not _is_visible_device(dev_id):
                         continue
@@ -757,18 +769,21 @@ async def async_setup_entry(
                         )
                     )
             if tracker_scope and isinstance(tracker_scope.identifier, str):
-                for device in coordinator.get_subentry_snapshot(tracker_scope.subentry_key):
+                for device in coordinator.get_subentry_snapshot(
+                    tracker_scope.subentry_key
+                ):
                     dev_id = device.get("id")
                     dev_name = device.get("name")
-                    if not isinstance(dev_id, str) or not dev_id or not isinstance(
-                        dev_name, str
-                    ) or not dev_name:
+                    if (
+                        not isinstance(dev_id, str)
+                        or not dev_id
+                        or not isinstance(dev_name, str)
+                        or not dev_name
+                    ):
                         continue
                     if not _is_visible_device(dev_id):
                         continue
-                    unique_id = (
-                        f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
-                    )
+                    unique_id = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
                     if unique_id not in missing:
                         continue
                     built.append(
@@ -786,6 +801,8 @@ async def async_setup_entry(
             entity_factory=_build_entities,
             add_entities=_recovery_add_entities,
         )
+
+
 # ------------------------------- Stats Sensor ---------------------------------
 
 

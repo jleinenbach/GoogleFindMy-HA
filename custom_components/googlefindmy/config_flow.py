@@ -144,11 +144,10 @@ class _SubentryManagerProto(Protocol):
 
     managed_subentries: Mapping[str, Any]
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        ...
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None: ...
+
 
 _LOGGER = logging.getLogger(__name__)
-
 
 
 try:
@@ -181,6 +180,7 @@ except AttributeError:
         DiscoveryKey = cast(type[Any], _FallbackDiscoveryKey)
     else:  # pragma: no cover - simple aliasing
         DiscoveryKey = cast(type[Any], _DiscoveryKey)
+
 
 class _DiscoveryFlowHelper(Protocol):
     """Callable contract for discovery flow helpers."""
@@ -237,9 +237,9 @@ if _discovery_flow_helper is None:  # pragma: no cover - legacy fallback
     ) -> FlowResult:
         """Fallback helper mirroring modern discovery flow creation."""
 
-        create_flow_helper: (
-            Callable[..., Awaitable[FlowResult] | FlowResult] | None
-        ) = None
+        create_flow_helper: Callable[..., Awaitable[FlowResult] | FlowResult] | None = (
+            None
+        )
 
         module = sys.modules.get(__name__)
         if module is not None:
@@ -554,6 +554,7 @@ except ImportError:
     try:
         from homeassistant.helpers.typing import UNDEFINED, UndefinedType
     except ImportError:
+
         class _UndefinedType:
             """Fallback sentinel for legacy Home Assistant builds."""
 
@@ -582,9 +583,7 @@ except ImportError:
         ) -> FlowResult:
             raise NotImplementedError
 
-        def async_create_entry(
-            self, *, title: str, data: dict[str, Any]
-        ) -> FlowResult:
+        def async_create_entry(self, *, title: str, data: dict[str, Any]) -> FlowResult:
             return {
                 "type": "create_entry",
                 "title": title,
@@ -673,9 +672,7 @@ def _import_api() -> type[GoogleFindMyAPI]:
 
     api_cls = getattr(module, "GoogleFindMyAPI", None)
     if api_cls is None:
-        raise DependencyNotReady(
-            "GoogleFindMyAPI is unavailable in googlefindmy.api."
-        )
+        raise DependencyNotReady("GoogleFindMyAPI is unavailable in googlefindmy.api.")
 
     return cast(type["GoogleFindMyAPI"], api_cls)
 
@@ -687,6 +684,7 @@ async def _async_import_api(hass: HomeAssistant) -> type[GoogleFindMyAPI]:
     if not callable(executor):
         return _import_api()
     return cast(type["GoogleFindMyAPI"], await executor(_import_api))
+
 
 # Optional network exception typing (robust mapping without hard dependency)
 aiohttp: ModuleType | None
@@ -779,8 +777,7 @@ class _ConfigFlowMixin:
 
     async def async_set_unique_id(
         self, unique_id: str | None, *, raise_on_progress: bool = False
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def async_show_form(
         self,
@@ -789,8 +786,7 @@ class _ConfigFlowMixin:
         data_schema: vol.Schema | None = None,
         errors: Mapping[str, str] | None = None,
         description_placeholders: Mapping[str, Any] | None = None,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
     def async_show_menu(
         self,
@@ -798,8 +794,7 @@ class _ConfigFlowMixin:
         step_id: str,
         menu_options: list[str],
         description_placeholders: Mapping[str, Any] | None = None,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
     def async_create_entry(
         self,
@@ -807,49 +802,40 @@ class _ConfigFlowMixin:
         title: str,
         data: Mapping[str, Any],
         **kwargs: Any,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
     def async_abort(
         self,
         *,
         reason: str,
         description_placeholders: Mapping[str, Any] | None = None,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
-    def async_update_reload_and_abort(self, **kwargs: Any) -> FlowResult:
-        ...
+    def async_update_reload_and_abort(self, **kwargs: Any) -> FlowResult: ...
 
     def _abort_if_unique_id_configured(
         self, *, updates: Mapping[str, Any] | None = None
-    ) -> None:
-        ...
+    ) -> None: ...
 
-    def _set_confirm_only(self) -> None:
-        ...
+    def _set_confirm_only(self) -> None: ...
 
     def add_suggested_values_to_schema(
         self, schema: vol.Schema, suggested_values: Mapping[str, Any]
     ) -> vol.Schema:
         return schema
 
-    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
-        ...
+    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None: ...
 
-    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
-        ...
+    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None: ...
 
 
 class _ConfigSubentryFlowMixin:
     config_entry: ConfigEntry
     subentry: ConfigSubentry | None
 
-    def async_create_entry(self, *, title: str, data: dict[str, Any]) -> FlowResult:
-        ...
+    def async_create_entry(self, *, title: str, data: dict[str, Any]) -> FlowResult: ...
 
-    def async_update_and_abort(self, *args: Any, **kwargs: Any) -> FlowResult:
-        ...
+    def async_update_and_abort(self, *args: Any, **kwargs: Any) -> FlowResult: ...
 
 
 class _OptionsFlowMixin:
@@ -863,16 +849,14 @@ class _OptionsFlowMixin:
         data_schema: vol.Schema | None = None,
         errors: Mapping[str, str] | None = None,
         description_placeholders: Mapping[str, Any] | None = None,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
     def async_show_menu(
         self,
         *,
         step_id: str,
         menu_options: list[str],
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
     def async_create_entry(
         self,
@@ -880,30 +864,25 @@ class _OptionsFlowMixin:
         title: str,
         data: Mapping[str, Any],
         **kwargs: Any,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
     def async_abort(
         self,
         *,
         reason: str,
         description_placeholders: Mapping[str, Any] | None = None,
-    ) -> FlowResult:
-        ...
+    ) -> FlowResult: ...
 
-    def async_update_and_abort(self, *args: Any, **kwargs: Any) -> FlowResult:
-        ...
+    def async_update_and_abort(self, *args: Any, **kwargs: Any) -> FlowResult: ...
 
     def add_suggested_values_to_schema(
         self, schema: vol.Schema, suggested_values: Mapping[str, Any]
     ) -> vol.Schema:
         return schema
 
-    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None:
-        ...
+    def _get_entry_cache(self, entry: ConfigEntry) -> Any | None: ...
 
-    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None:
-        ...
+    async def _async_clear_cached_aas_token(self, entry: ConfigEntry) -> None: ...
 
 
 if hasattr(config_entries, "OptionsFlowWithReload"):
@@ -912,9 +891,7 @@ if hasattr(config_entries, "OptionsFlowWithReload"):
         getattr(config_entries, "OptionsFlowWithReload"),
     )
 else:
-    OptionsFlowBase = cast(
-        type[config_entries.OptionsFlow], config_entries.OptionsFlow
-    )
+    OptionsFlowBase = cast(type[config_entries.OptionsFlow], config_entries.OptionsFlow)
 
 
 @dataclass(slots=True)
@@ -1249,7 +1226,7 @@ def _extract_oauth_candidates_from_secrets(
 
 
 def _extract_fcm_credentials_from_secrets(
-    data: dict[str, Any]
+    data: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Extract fcm_credentials from secrets.json if present."""
 
@@ -1260,6 +1237,8 @@ def _extract_fcm_credentials_from_secrets(
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -1485,7 +1464,11 @@ def _interpret_reauth_choice(
     #     return None, None, "invalid_token"
 
     return None, None, "choose_one"
-def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str | None]:
+
+
+def _resolve_entry_email_for_lookup(
+    entry: ConfigEntry,
+) -> tuple[str | None, str | None]:
     """Return the raw and normalized email associated with ``entry``."""
 
     global _RESOLVE_ENTRY_EMAIL
@@ -1501,7 +1484,10 @@ def _resolve_entry_email_for_lookup(entry: ConfigEntry) -> tuple[str | None, str
 
             def _fallback(entry: ConfigEntry) -> tuple[str | None, str | None]:
                 raw_email: str | None = None
-                for container in (getattr(entry, "data", {}), getattr(entry, "options", {})):
+                for container in (
+                    getattr(entry, "data", {}),
+                    getattr(entry, "options", {}),
+                ):
                     if not isinstance(container, CollMapping):
                         continue
                     candidate_email = container.get(CONF_GOOGLE_EMAIL)
@@ -1560,7 +1546,10 @@ async def _async_coalesce_account_entries(
             return None
 
         if callable(candidate):
-            async def _wrapped(hass_obj: HomeAssistant, entry_obj: ConfigEntry) -> ConfigEntry | None:
+
+            async def _wrapped(
+                hass_obj: HomeAssistant, entry_obj: ConfigEntry
+            ) -> ConfigEntry | None:
                 return await cast(
                     Callable[..., Awaitable[ConfigEntry | None]],
                     candidate,
@@ -1968,9 +1957,8 @@ class ConfigFlow(
         if isinstance(bound_entry, ConfigEntry):
             bound_entry_id = bound_entry.entry_id
 
-        if (
-            (context_entry_id and existing_entry.entry_id == context_entry_id)
-            or (bound_entry_id and existing_entry.entry_id == bound_entry_id)
+        if (context_entry_id and existing_entry.entry_id == context_entry_id) or (
+            bound_entry_id and existing_entry.entry_id == bound_entry_id
         ):
             if coalesce:
                 await _async_coalesce_account_entries(hass, existing_entry)
@@ -2155,7 +2143,11 @@ class ConfigFlow(
         if normalized_email:
             unique_id = unique_account_id(normalized_email)
         applied_unique_id = None
-        if unique_id and getattr(entry, "unique_id", None) != unique_id and conflict is None:
+        if (
+            unique_id
+            and getattr(entry, "unique_id", None) != unique_id
+            and conflict is None
+        ):
             update_kwargs["unique_id"] = unique_id
             applied_unique_id = unique_id
 
@@ -2191,7 +2183,9 @@ class ConfigFlow(
                 fallback_kwargs = dict(update_kwargs)
                 fallback_kwargs.pop("version", None)
                 if fallback_kwargs:
-                    self.hass.config_entries.async_update_entry(entry, **fallback_kwargs)
+                    self.hass.config_entries.async_update_entry(
+                        entry, **fallback_kwargs
+                    )
                 setattr(entry, "version", self.VERSION)
             except ValueError:
                 if normalized_email:
@@ -2270,7 +2264,9 @@ class ConfigFlow(
                 )
                 if not email_placeholder:
                     email_placeholder = normalize_email_or_default(
-                        candidate_entry.title if isinstance(candidate_entry.title, str) else None
+                        candidate_entry.title
+                        if isinstance(candidate_entry.title, str)
+                        else None
                     )
                 if not email_placeholder:
                     email_placeholder = candidate_entry.entry_id
@@ -2622,9 +2618,7 @@ class ConfigFlow(
                         _normalize_tracking_lists()
 
                 create_task = getattr(hass, "async_create_task", None)
-                task_name = (
-                    f"{getattr(existing_entry, 'domain', DOMAIN)}.reload_after_discovery_update"
-                )
+                task_name = f"{getattr(existing_entry, 'domain', DOMAIN)}.reload_after_discovery_update"
                 if callable(create_task):
                     try:
                         create_task(_reload_and_normalize(), name=task_name)
@@ -2670,12 +2664,16 @@ class ConfigFlow(
 
         hass_obj = getattr(self, "hass", None)
         if hass_obj is None or not hasattr(hass_obj, "config_entries"):
-            _LOGGER.error("Add Hub flow invoked without Home Assistant context; aborting")
+            _LOGGER.error(
+                "Add Hub flow invoked without Home Assistant context; aborting"
+            )
             return self.async_abort(reason="unknown")
         hass = cast(HomeAssistant, hass_obj)
 
         config_entry_obj = getattr(self, "config_entry", None)
-        if (config_entry_obj is None or not hasattr(config_entry_obj, "entry_id")) and entry_id:
+        if (
+            config_entry_obj is None or not hasattr(config_entry_obj, "entry_id")
+        ) and entry_id:
             config_entry_obj = hass.config_entries.async_get_entry(entry_id)
 
         if config_entry_obj is None or not hasattr(config_entry_obj, "entry_id"):
@@ -2726,7 +2724,9 @@ class ConfigFlow(
         _LOGGER.info("Flow start: async_step_user (context=%s)", context_snapshot)
 
         bound_entry = getattr(self, "config_entry", None)
-        bound_entry_id = bound_entry.entry_id if isinstance(bound_entry, ConfigEntry) else None
+        bound_entry_id = (
+            bound_entry.entry_id if isinstance(bound_entry, ConfigEntry) else None
+        )
 
         config_entries = getattr(self.hass, "config_entries", None)
         async_entries = getattr(config_entries, "async_entries", None)
@@ -2734,7 +2734,11 @@ class ConfigFlow(
         existing_entries = async_entries(DOMAIN) if callable(async_entries) else []
         matching_entry = (
             next(
-                (entry for entry in existing_entries if entry.entry_id == context_entry_id),
+                (
+                    entry
+                    for entry in existing_entries
+                    if entry.entry_id == context_entry_id
+                ),
                 None,
             )
             if context_entry_id
@@ -3194,16 +3198,16 @@ class ConfigFlow(
             markers[entry_for_update.entry_id] = reconfigure_ts
 
         runtime_entries = domain_bucket.get("entries")
-        runtime = runtime_entries.get(entry_for_update.entry_id) if isinstance(
-            runtime_entries, dict
-        ) else None
+        runtime = (
+            runtime_entries.get(entry_for_update.entry_id)
+            if isinstance(runtime_entries, dict)
+            else None
+        )
         coordinator = getattr(runtime, "coordinator", None)
         mark_reconfigure = getattr(coordinator, "mark_recent_reconfigure", None)
         if callable(mark_reconfigure):
             mark_reconfigure(reconfigure_ts)
-        request_list_refresh = getattr(
-            coordinator, "request_device_list_refresh", None
-        )
+        request_list_refresh = getattr(coordinator, "request_device_list_refresh", None)
         if callable(request_list_refresh):
             request_list_refresh(reason="reconfigure")
 
@@ -3490,7 +3494,9 @@ class ConfigFlow(
                                     DATA_AUTH_METHOD: _AUTH_METHOD_INDIVIDUAL,
                                     CONF_OAUTH_TOKEN: chosen,
                                 }
-                                if isinstance(chosen, str) and chosen.startswith("aas_et/"):
+                                if isinstance(chosen, str) and chosen.startswith(
+                                    "aas_et/"
+                                ):
                                     updated_data[DATA_AAS_TOKEN] = chosen
                                 else:
                                     updated_data.pop(DATA_AAS_TOKEN, None)
@@ -3550,7 +3556,9 @@ class ConfigFlow(
                                                 (
                                                     v
                                                     for (_src, v) in cands
-                                                    if not _disqualifies_for_persistence(v)
+                                                    if not _disqualifies_for_persistence(
+                                                        v
+                                                    )
                                                 ),
                                                 None,
                                             )
@@ -3571,10 +3579,9 @@ class ConfigFlow(
                                             updated_data["fcm_credentials"] = (
                                                 fcm_credentials
                                             )
-                                        if (
-                                            isinstance(to_persist, str)
-                                            and to_persist.startswith("aas_et/")
-                                        ):
+                                        if isinstance(
+                                            to_persist, str
+                                        ) and to_persist.startswith("aas_et/"):
                                             updated_data[DATA_AAS_TOKEN] = to_persist
                                         elif DATA_AAS_TOKEN in updated_data:
                                             updated_data.pop(DATA_AAS_TOKEN, None)
@@ -3622,15 +3629,14 @@ class ConfigFlow(
                                     CONF_OAUTH_TOKEN: token_first,
                                     DATA_SECRET_BUNDLE: parsed,
                                 }
-                                fcm_credentials = (
-                                    _extract_fcm_credentials_from_secrets(parsed)
+                                fcm_credentials = _extract_fcm_credentials_from_secrets(
+                                    parsed
                                 )
                                 if fcm_credentials is not None:
                                     updated_data["fcm_credentials"] = fcm_credentials
-                                if (
-                                    isinstance(token_first, str)
-                                    and token_first.startswith("aas_et/")
-                                ):
+                                if isinstance(
+                                    token_first, str
+                                ) and token_first.startswith("aas_et/"):
                                     updated_data[DATA_AAS_TOKEN] = token_first
                                 else:
                                     updated_data.pop(DATA_AAS_TOKEN, None)
@@ -3749,16 +3755,19 @@ class ConfigFlow(
                     runtime_candidate = entries_bucket.get(entry.entry_id)
                     if runtime_candidate is not None:
                         if coordinator is None:
-                            coordinator = getattr(runtime_candidate, "coordinator", None)
-                            if coordinator is None and isinstance(runtime_candidate, Mapping):
+                            coordinator = getattr(
+                                runtime_candidate, "coordinator", None
+                            )
+                            if coordinator is None and isinstance(
+                                runtime_candidate, Mapping
+                            ):
                                 coordinator = runtime_candidate.get("coordinator")
                         if subentry_manager is None:
                             subentry_manager = getattr(
                                 runtime_candidate, "subentry_manager", None
                             )
-                            if (
-                                subentry_manager is None
-                                and isinstance(runtime_candidate, Mapping)
+                            if subentry_manager is None and isinstance(
+                                runtime_candidate, Mapping
                             ):
                                 subentry_manager = runtime_candidate.get(
                                     "subentry_manager"
@@ -4044,7 +4053,9 @@ class ConfigFlow(
         tracker_visible = _existing_visible(tracker_subentry)
         if not tracker_visible and self._available_devices:
             tracker_visible = tuple(
-                _normalize_visible_ids(device_id for _, device_id in self._available_devices)
+                _normalize_visible_ids(
+                    device_id for _, device_id in self._available_devices
+                )
             )
 
         service_payload = _build_subentry_payload(
@@ -4066,8 +4077,12 @@ class ConfigFlow(
 
         service_subentry = _resolve_existing(service_key)
 
-        context_map.setdefault(service_key, getattr(service_subentry, "subentry_id", None))
-        context_map.setdefault(tracker_key, getattr(tracker_subentry, "subentry_id", None))
+        context_map.setdefault(
+            service_key, getattr(service_subentry, "subentry_id", None)
+        )
+        context_map.setdefault(
+            tracker_key, getattr(tracker_subentry, "subentry_id", None)
+        )
 
         if service_subentry is None:
             created_service = await type(self)._async_create_subentry(
@@ -4381,11 +4396,7 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
             OPT_ENABLE_STATS_ENTITIES,
             OPT_CONTRIBUTOR_MODE,
         ):
-            if (
-                key is not None
-                and key not in payload
-                and key in self.config_entry.data
-            ):
+            if key is not None and key not in payload and key in self.config_entry.data:
                 payload[key] = self.config_entry.data[key]
         return payload
 
@@ -4529,6 +4540,7 @@ class TrackerSubentryFlowHandler(_BaseSubentryFlow):
 
     def _entry_title(self) -> str:
         return "Google Find My devices"
+
 
 # ---------------------------
 # Options Flow
@@ -5030,12 +5042,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             return self.async_abort(reason="no_semantic_locations")
 
         choices = {name: name for name in sorted(semantic_locations)}
-        schema = vol.Schema(
-            {vol.Required("semantic_location"): vol.In(choices)}
-        )
+        schema = vol.Schema({vol.Required("semantic_location"): vol.In(choices)})
 
         if user_input is None:
-            return self.async_show_form(step_id="semantic_locations_edit", data_schema=schema)
+            return self.async_show_form(
+                step_id="semantic_locations_edit", data_schema=schema
+            )
 
         selected = str(user_input.get("semantic_location", ""))
         if selected not in semantic_locations:
@@ -5057,7 +5069,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
         semantic_locations = self._semantic_locations()
         existing_name = self._semantic_location_editing
-        existing = semantic_locations.get(existing_name or "") if existing_name else None
+        existing = (
+            semantic_locations.get(existing_name or "") if existing_name else None
+        )
         return await self._async_semantic_location_form(
             user_input, existing_name, existing
         )
@@ -5073,15 +5087,13 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
         choices = {name: name for name in sorted(semantic_locations)}
         schema = vol.Schema(
-            {
-                vol.Required("semantic_locations", default=[]): cv.multi_select(
-                    choices
-                )
-            }
+            {vol.Required("semantic_locations", default=[]): cv.multi_select(choices)}
         )
 
         if user_input is None:
-            return self.async_show_form(step_id="semantic_locations_delete", data_schema=schema)
+            return self.async_show_form(
+                step_id="semantic_locations_delete", data_schema=schema
+            )
 
         to_delete_raw = user_input.get("semantic_locations") or []
         if not isinstance(to_delete_raw, list):
@@ -5095,7 +5107,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             )
 
         new_locations = {
-            name: data for name, data in semantic_locations.items() if name not in to_delete
+            name: data
+            for name, data in semantic_locations.items()
+            if name not in to_delete
         }
         new_options = dict(self.config_entry.options)
         new_options[OPT_SEMANTIC_LOCATIONS] = new_locations
@@ -5120,11 +5134,15 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             self._semantic_location_editing = None
 
         semantic_default = existing_name or ""
-        latitude_default = self._coerce_float(existing.get("latitude")) if existing else None
+        latitude_default = (
+            self._coerce_float(existing.get("latitude")) if existing else None
+        )
         longitude_default = (
             self._coerce_float(existing.get("longitude")) if existing else None
         )
-        accuracy_default = self._coerce_float(existing.get("accuracy")) if existing else None
+        accuracy_default = (
+            self._coerce_float(existing.get("accuracy")) if existing else None
+        )
 
         if latitude_default is None or longitude_default is None:
             lat, lon, acc = self._home_zone_defaults()
@@ -5729,7 +5747,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                             errors["base"] = "cannot_connect"
                                         else:
                                             to_persist = chosen
-                                            if _disqualifies_for_persistence(to_persist):
+                                            if _disqualifies_for_persistence(
+                                                to_persist
+                                            ):
                                                 alt = next(
                                                     (
                                                         v
@@ -5760,7 +5780,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                             if isinstance(
                                                 to_persist, str
                                             ) and to_persist.startswith("aas_et/"):
-                                                updated_data[DATA_AAS_TOKEN] = to_persist
+                                                updated_data[DATA_AAS_TOKEN] = (
+                                                    to_persist
+                                                )
                                             else:
                                                 updated_data.pop(DATA_AAS_TOKEN, None)
                                             return await _finalize_success(updated_data)
@@ -5793,6 +5815,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         return self.async_show_form(
             step_id="credentials", data_schema=schema, errors=errors
         )
+
 
 # ---------- Custom exceptions ----------
 class CannotConnect(HomeAssistantErrorBase):

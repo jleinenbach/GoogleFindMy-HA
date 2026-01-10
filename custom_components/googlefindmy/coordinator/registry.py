@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -71,6 +71,9 @@ from .helpers.registry import (
 )
 from .helpers.registry import (
     extract_service_subentry_ids as _extract_service_subentry_ids_impl,
+)
+from .helpers.registry import (
+    extract_subentry_links as _extract_subentry_links_impl,
 )
 from .helpers.registry import (
     has_hub_link as _has_hub_link_impl,
@@ -1172,7 +1175,9 @@ class RegistryOperations:
             entry_id,
             tracker_subentry_identifier,
             DOMAIN,
-            subentry_key=tracker_subentry_key if tracker_subentry_key != tracker_subentry_identifier else None,
+            subentry_key=tracker_subentry_key
+            if tracker_subentry_key != tracker_subentry_identifier
+            else None,
         )
 
         for unique_id in candidate_unique_ids:
@@ -1501,46 +1506,15 @@ class RegistryOperations:
             )
             return disambiguated, None
 
-        def _subentry_links(device: Any) -> set[str | None]:
-            """Return tracker subentry links associated with ``entry_id``."""
-
-            if not entry_id:
-                return set()
-            mapping_obj = getattr(device, "config_entries_subentries", None)
-            if isinstance(mapping_obj, Mapping):
-                raw_links = mapping_obj.get(entry_id)
-                if isinstance(raw_links, Collection) and not isinstance(
-                    raw_links, (str, bytes, Mapping)
-                ):
-                    typed_links: set[str | None] = set()
-                    for item in raw_links:
-                        if item is None:
-                            typed_links.add(None)
-                        elif isinstance(item, str):
-                            typed_links.add(item)
-                    return typed_links
-                if raw_links is None:
-                    return set()
-            fallback = getattr(device, "config_subentry_id", None)
-            if isinstance(fallback, str):
-                return {fallback}
-            if fallback is not None:
-                _LOGGER.debug(
-                    "Skipping unexpected config_subentry_id type for device %s: %r",
-                    getattr(device, "id", "unknown"),
-                    fallback,
-                )
-            if fallback is None and getattr(device, "config_entries", None):
-                return {None}
-            return set()
-
         def _has_tracker_link(device: Any) -> bool:
             if tracker_config_subentry_id is None:
                 return False
-            return tracker_config_subentry_id in _subentry_links(device)
+            return tracker_config_subentry_id in _extract_subentry_links_impl(
+                device, entry_id
+            )
 
         def _has_hub_link(device: Any) -> bool:
-            return None in _subentry_links(device)
+            return None in _extract_subentry_links_impl(device, entry_id)
 
         def _remove_hub_link(device: Any) -> Any:
             if (
@@ -1599,7 +1573,7 @@ class RegistryOperations:
                 device_id = device_id_hint or None
             if not isinstance(device_id, str) or not device_id:
                 return device, False
-            subentry_links = _subentry_links(device)
+            subentry_links = _extract_subentry_links_impl(device, entry_id)
             needs_tracker_link = tracker_config_subentry_id not in subentry_links
             has_hub_link = None in subentry_links
             extraneous_links = {
@@ -1629,7 +1603,7 @@ class RegistryOperations:
                     device_label,
                     ", ".join(sorted(str(link) for link in extraneous_links)),
                 )
-                subentry_links = _subentry_links(device)
+                subentry_links = _extract_subentry_links_impl(device, entry_id)
                 needs_tracker_link = tracker_config_subentry_id not in subentry_links
                 has_hub_link = None in subentry_links
                 changed = True

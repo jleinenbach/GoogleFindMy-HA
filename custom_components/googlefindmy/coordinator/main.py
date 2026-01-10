@@ -670,7 +670,9 @@ class GoogleFindMyCoordinator(
 
         # Play Sound UUID tracking (needed to properly cancel sound requests)
         self._sound_request_uuids: dict[str, str] = {}  # device_id -> request_uuid
-        self._sound_request_timestamps: dict[str, float] = {}  # device_id -> creation timestamp
+        self._sound_request_timestamps: dict[
+            str, float
+        ] = {}  # device_id -> creation timestamp
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
@@ -1346,7 +1348,9 @@ class GoogleFindMyCoordinator(
             entry.setdefault("status", "Anchor metadata cached")
             return True
 
-        last_updated_ts = cached.get("last_updated", 0) if isinstance(cached, Mapping) else 0
+        last_updated_ts = (
+            cached.get("last_updated", 0) if isinstance(cached, Mapping) else 0
+        )
         age = max(0.0, wall_now - float(last_updated_ts))
         entry["status"] = determine_location_status(age, self.location_poll_interval)
         return True
@@ -1702,10 +1706,15 @@ class GoogleFindMyCoordinator(
         ttl = self._presence_ttl_s
         name_cache = self._ensure_device_name_cache()
         known = set(name_cache) | set(self._device_location_data)
-        return sorted([
-            d for d in known
-            if is_presence_expired(self._present_last_seen.get(d, 0.0), now_mono, ttl)
-        ])
+        return sorted(
+            [
+                d
+                for d in known
+                if is_presence_expired(
+                    self._present_last_seen.get(d, 0.0), now_mono, ttl
+                )
+            ]
+        )
 
     def purge_device(self, device_id: str) -> None:
         """Remove all cached data and cooldown state for a device (thread-safe publish).

@@ -113,6 +113,7 @@ def _normalize_metadata_keys(data: dict[str, Any]) -> dict[str, Any]:
             result[normalized_key] = value
     return result
 
+
 if TYPE_CHECKING:
     from .main import GoogleFindMyCoordinator
 
@@ -242,7 +243,9 @@ class CacheOperations:
             hass_obj = getattr(self, "hass", None)
             if hass_obj is None:
                 return
-            domain_bucket = hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
+            domain_bucket = (
+                hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
+            )
             if not isinstance(domain_bucket, dict):
                 return
             eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
@@ -317,10 +320,16 @@ class CacheOperations:
         )
         if slot.get("metadata_only") and incoming_metadata_only is False:
             slot.pop("metadata_only", None)
-        elif slot.get("metadata_only") and has_location_payload and incoming_metadata_only is not True:
+        elif (
+            slot.get("metadata_only")
+            and has_location_payload
+            and incoming_metadata_only is not True
+        ):
             slot.pop("metadata_only", None)
 
-        clear_metadata_only = has_location_payload and incoming_metadata_only is not True
+        clear_metadata_only = (
+            has_location_payload and incoming_metadata_only is not True
+        )
         self._persist_anchor_metadata(
             device_id, slot, clear_metadata_only=clear_metadata_only
         )
@@ -365,8 +374,7 @@ class CacheOperations:
 
         status = slot.get("status")
         is_stationary_logic = (
-            status in ("Fused (Weighted)", "Stationary (at Anchor)")
-            or is_replay
+            status in ("Fused (Weighted)", "Stationary (at Anchor)") or is_replay
         )
 
         # Track fused update statistics
@@ -484,9 +492,7 @@ class CacheOperations:
             register_fn = getattr(self, "_register_identity_key", None)
             if callable(register_fn):
                 register_fn(device_id, effective_identity_key)
-            self._propagate_location_to_shared_devices(
-                device_id, slot
-            )
+            self._propagate_location_to_shared_devices(device_id, slot)
 
         # Trigger resolver refresh if identity changed
         if resolver_refresh_needed:

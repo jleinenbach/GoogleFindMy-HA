@@ -597,7 +597,9 @@ class PollingOperations:
                     )
             # No error - reset counter on successful check
             elif self._fcm_error_count > 0:
-                _LOGGER.debug("FCM error cleared after %d attempts", self._fcm_error_count)
+                _LOGGER.debug(
+                    "FCM error cleared after %d attempts", self._fcm_error_count
+                )
                 self._fcm_error_count = 0
                 self._fcm_last_error = None
 
@@ -981,7 +983,10 @@ class PollingOperations:
 
     # ---------------------------- Polling Cycle -----------------------------
     async def _async_start_poll_cycle(
-        self: GoogleFindMyCoordinator, devices: list[dict[str, Any]], *, force: bool = False
+        self: GoogleFindMyCoordinator,
+        devices: list[dict[str, Any]],
+        *,
+        force: bool = False,
     ) -> None:
         """Run a full sequential polling cycle in a background task.
 
@@ -1196,10 +1201,9 @@ class PollingOperations:
 
                         # Validate/normalize coordinates (and accuracy if present).
                         clear_metadata_only = (
-                            (location.get("latitude") is not None
-                            or location.get("longitude") is not None)
-                            and location.get("metadata_only") is not True
-                        )
+                            location.get("latitude") is not None
+                            or location.get("longitude") is not None
+                        ) and location.get("metadata_only") is not True
                         self._persist_anchor_metadata(
                             dev_id, location, clear_metadata_only=clear_metadata_only
                         )
@@ -1246,6 +1250,7 @@ class PollingOperations:
                         # test doubles may stub this method, so fall back to a
                         # minimal cache write in that case.
                         from .main import GoogleFindMyCoordinator as _CoordinatorClass
+
                         helper = getattr(self.update_device_cache, "__func__", None)
                         if helper is _CoordinatorClass.update_device_cache:
                             self.update_device_cache(dev_id, location)
@@ -1346,7 +1351,10 @@ class PollingOperations:
                         self._consecutive_transient_auth_failures += 1
                         self._last_transient_auth_error = str(transient_err)
 
-                        if self._consecutive_transient_auth_failures >= _MAX_TRANSIENT_AUTH_FAILURES:
+                        if (
+                            self._consecutive_transient_auth_failures
+                            >= _MAX_TRANSIENT_AUTH_FAILURES
+                        ):
                             _LOGGER.error(
                                 "Transient auth failure for %s persisted across %d poll cycles: %s. "
                                 "Triggering re-authentication.",

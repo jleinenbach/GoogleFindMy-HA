@@ -50,6 +50,7 @@ Security Considerations
 - The salt prevents rainbow table attacks
 - Parameters should be tuned for target hardware (higher N = more secure but slower)
 """
+
 from __future__ import annotations
 
 import hashlib

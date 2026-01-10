@@ -234,11 +234,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
         if isinstance(ignored, set):
             return ignored
         if isinstance(ignored, Iterable) and not isinstance(ignored, (str, bytes)):
-            return {
-                item
-                for item in ignored
-                if isinstance(item, str) and item
-            }
+            return {item for item in ignored if isinstance(item, str) and item}
         return set()
 
     def _entry_links_for_device(device: Any, target_entry_id: str) -> set[str | None]:
@@ -349,15 +345,11 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
             continue
 
         entry_id = entry.entry_id
-        _LOGGER.info(
-            "[%s] Hub Cleanup: Processing entry '%s'", entry_id, entry.title
-        )
+        _LOGGER.info("[%s] Hub Cleanup: Processing entry '%s'", entry_id, entry.title)
 
         # 1. Find the correct Service Device ID
         service_device_ident = service_device_identifier(entry_id)
-        service_device = dev_reg.async_get_device(
-            identifiers={service_device_ident}
-        )
+        service_device = dev_reg.async_get_device(identifiers={service_device_ident})
         service_device_id = getattr(service_device, "id", None)
         service_meta = None
         get_metadata = getattr(coordinator, "get_subentry_metadata", None)
@@ -511,11 +503,12 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
 
             # Check if the device is correctly linked to the tracker subentry
             tracker_linked_entry_ids: set[str] = set()
-            device_subentry_mapping = getattr(
-                device, "config_entries_subentries", None
-            )
+            device_subentry_mapping = getattr(device, "config_entries_subentries", None)
             if isinstance(device_subentry_mapping, Mapping):
-                for mapped_entry_id, mapped_subentries in device_subentry_mapping.items():
+                for (
+                    mapped_entry_id,
+                    mapped_subentries,
+                ) in device_subentry_mapping.items():
                     normalized_entry_id = str(mapped_entry_id)
                     if not normalized_entry_id:
                         continue
@@ -870,9 +863,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "error": str(err),
             }
             raise _service_validation_error(
-                "Failed to locate device '{device_id}': {error}".format(
-                    **placeholders
-                ),
+                "Failed to locate device '{device_id}': {error}".format(**placeholders),
                 translation_key="locate_failed",
                 translation_placeholders=placeholders,
             ) from err
@@ -944,9 +935,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             request_uuid = request_uuid_raw
         try:
             runtime, canonical_id = await _resolve_runtime_for_device_id(raw_device_id)
-            ok = await runtime.coordinator.async_stop_sound(
-                canonical_id, request_uuid
-            )
+            ok = await runtime.coordinator.async_stop_sound(canonical_id, request_uuid)
             if not ok:
                 placeholders = {"device_id": str(raw_device_id)}
                 raise _service_validation_error(
@@ -993,9 +982,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 "error": str(err),
             }
             raise _service_validation_error(
-                "Failed to locate device '{device_id}': {error}".format(
-                    **placeholders
-                ),
+                "Failed to locate device '{device_id}': {error}".format(**placeholders),
                 translation_key="locate_failed",
                 translation_placeholders=placeholders,
             ) from err
@@ -1183,7 +1170,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         mode = str(call.data.get("mode") or "rebuild").lower()
         if mode not in {"rebuild", "migrate"}:
-            _LOGGER.warning("Unsupported rebuild_registry mode '%s'; defaulting to rebuild", mode)
+            _LOGGER.warning(
+                "Unsupported rebuild_registry mode '%s'; defaulting to rebuild", mode
+            )
             mode = "rebuild"
 
         entry_ids_from_service = call.data.get(ATTR_ENTRY_ID)
@@ -1209,9 +1198,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         elif device_ids_raw is None:
             requested_device_ids = []
         else:
-            _LOGGER.warning(
-                "Invalid device_ids payload type: %s", type(device_ids_raw)
-            )
+            _LOGGER.warning("Invalid device_ids payload type: %s", type(device_ids_raw))
             return
 
         entries = hass.config_entries.async_entries(DOMAIN)
@@ -1246,7 +1233,8 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
             if missing_devices:
                 _LOGGER.warning(
-                    "No device registry entries found for device_ids: %s", missing_devices
+                    "No device registry entries found for device_ids: %s",
+                    missing_devices,
                 )
 
             if requested_device_ids and not target_entry_ids:
@@ -1280,7 +1268,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             for entry_id in target_entry_ids:
                 entry = entry_map.get(entry_id)
                 if entry is None:
-                    _LOGGER.warning("Config entry %s no longer available; skipping", entry_id)
+                    _LOGGER.warning(
+                        "Config entry %s no longer available; skipping", entry_id
+                    )
                     continue
 
                 for step in migration_steps:

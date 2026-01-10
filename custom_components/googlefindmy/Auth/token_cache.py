@@ -358,7 +358,9 @@ class TokenCache:
         coerced: CacheState = {}
         for key, value in raw.items():
             if not isinstance(key, str):
-                _LOGGER.debug("Skipping non-string cache key from persisted data: %r", key)
+                _LOGGER.debug(
+                    "Skipping non-string cache key from persisted data: %r", key
+                )
                 continue
             coerced[key] = value
 
@@ -368,7 +370,6 @@ class TokenCache:
             )
 
         return coerced
-
 
 
 # -------------------------- Global registry & facade --------------------------

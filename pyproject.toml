@@ -356,10 +356,12 @@ max-line-length = 120
 # Disable warnings that are intentional design decisions
 disable = [
     # Intentional patterns for this codebase:
+    "access-member-before-definition",  # E0203 - Mixin pattern uses attrs from main class
     "broad-exception-caught",       # W0718 - Defensive error handling
     "protected-access",             # W0212 - Internal API access
     "import-outside-toplevel",      # C0415 - Lazy loading pattern
     "wrong-import-position",        # C0413 - Conditional imports
+    "wrong-import-order",           # C0411 - Handled by ruff isort
     "global-statement",             # W0603 - Module-level state
     "cyclic-import",                # R0401 - Lazy imports handle this
     "unused-argument",              # W0613 - Interface compatibility

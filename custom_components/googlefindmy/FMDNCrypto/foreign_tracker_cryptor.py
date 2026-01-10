@@ -76,6 +76,7 @@ def _get_point() -> type:
     """Get the Point class, loading lazily on first access."""
     return load_point_class()
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

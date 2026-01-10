@@ -685,12 +685,16 @@ class GoogleFindMyAPI:
                     seconds = last_seen.get("seconds")
                     nanos = last_seen.get("nanos", 0)
                     if isinstance(seconds, (int, float)):
-                        normalized["last_seen"] = float(seconds) + float(nanos or 0) / 1e9
+                        normalized["last_seen"] = (
+                            float(seconds) + float(nanos or 0) / 1e9
+                        )
                 elif hasattr(last_seen, "seconds"):
                     seconds = getattr(last_seen, "seconds", None)
                     nanos = getattr(last_seen, "nanos", 0)
                     if isinstance(seconds, (int, float)):
-                        normalized["last_seen"] = float(seconds) + float(nanos or 0) / 1e9
+                        normalized["last_seen"] = (
+                            float(seconds) + float(nanos or 0) / 1e9
+                        )
 
                 accuracy = normalized.get("accuracy")
                 if accuracy is None:
@@ -814,7 +818,9 @@ class GoogleFindMyAPI:
                 "FCM receiver provider does not accept entry context; retrying without entry_id."
             )
             try:
-                receiver = cast(Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter)()
+                receiver = cast(
+                    Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter
+                )()
             except Exception as err:
                 _LOGGER.error(
                     "Cannot obtain FCM token: provider callable failed (legacy path)",
@@ -848,9 +854,7 @@ class GoogleFindMyAPI:
                 )
                 return None
         except Exception as err:
-            _LOGGER.error(
-                "Cannot obtain FCM token from shared receiver", exc_info=err
-            )
+            _LOGGER.error("Cannot obtain FCM token from shared receiver", exc_info=err)
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
             _LOGGER.error("FCM token not available or invalid (via shared receiver).")
@@ -885,7 +889,9 @@ class GoogleFindMyAPI:
                 "FCM readiness probe: provider does not accept entry context; retrying without entry_id."
             )
             try:
-                receiver = cast(Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter)()
+                receiver = cast(
+                    Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter
+                )()
             except Exception as err:
                 _LOGGER.debug(
                     "FCM readiness probe: provider callable failed (legacy path)",
@@ -1143,6 +1149,7 @@ class GoogleFindMyAPI:
             A dictionary containing the best available location data for the device.
             Returns an empty dictionary on failure.
         """
+
         # Register cache provider for multi-entry support
         def _cache_provider() -> CacheProtocol | None:
             return self._cache
@@ -1362,7 +1369,9 @@ class GoogleFindMyAPI:
             )(entry_id)
         except TypeError:
             try:
-                receiver = cast(Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter)()
+                receiver = cast(
+                    Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter
+                )()
             except Exception:
                 return False
         except Exception:
@@ -1559,9 +1568,16 @@ class GoogleFindMyAPI:
             return False
         try:
             if request_uuid:
-                _LOGGER.info("Submitting Stop Sound (async) for %s (UUID: %s)", device_id, request_uuid[:8])
+                _LOGGER.info(
+                    "Submitting Stop Sound (async) for %s (UUID: %s)",
+                    device_id,
+                    request_uuid[:8],
+                )
             else:
-                _LOGGER.warning("Submitting Stop Sound (async) for %s without UUID (may not cancel properly)", device_id)
+                _LOGGER.warning(
+                    "Submitting Stop Sound (async) for %s without UUID (may not cancel properly)",
+                    device_id,
+                )
             result_hex = await async_submit_stop_sound_request(
                 device_id,
                 token,

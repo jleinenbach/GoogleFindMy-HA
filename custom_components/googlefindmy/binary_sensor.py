@@ -91,6 +91,7 @@ def _subentry_type(subentry: Any | None) -> str | None:
             return fallback_type
     return None
 
+
 # --------------------------------------------------------------------------------------
 # Entity descriptions
 # --------------------------------------------------------------------------------------
@@ -178,7 +179,9 @@ async def async_setup_entry(  # noqa: PLR0915
 
                 stable_identifier = getattr(meta, "stable_identifier", None)
                 identifier = (
-                    stable_identifier() if callable(stable_identifier) else None
+                    stable_identifier()
+                    if callable(stable_identifier)
+                    else None
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
@@ -201,9 +204,8 @@ async def async_setup_entry(  # noqa: PLR0915
                 if "binary_sensor" not in subentry_features:
                     continue
 
-                config_id = (
-                    getattr(subentry, "subentry_id", None)
-                    or getattr(subentry, "entry_id", None)
+                config_id = getattr(subentry, "subentry_id", None) or getattr(
+                    subentry, "entry_id", None
                 )
                 identifier = (
                     config_id
@@ -212,7 +214,9 @@ async def async_setup_entry(  # noqa: PLR0915
                 )
                 scopes.setdefault(
                     identifier,
-                    _ServiceScope(group_key or SERVICE_SUBENTRY_KEY, config_id, identifier),
+                    _ServiceScope(
+                        group_key or SERVICE_SUBENTRY_KEY, config_id, identifier
+                    ),
                 )
 
         if hint_subentry_id:
@@ -242,7 +246,9 @@ async def async_setup_entry(  # noqa: PLR0915
 
     added_unique_ids: set[str] = set()
     primary_scope: _ServiceScope | None = None
-    primary_scheduler: Callable[[Iterable[BinarySensorEntity], bool], None] | None = None
+    primary_scheduler: Callable[[Iterable[BinarySensorEntity], bool], None] | None = (
+        None
+    )
 
     def _add_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
@@ -257,7 +263,9 @@ async def async_setup_entry(  # noqa: PLR0915
             if service_ids:
                 _LOGGER.debug(
                     "Binary sensor setup: skipping subentry '%s' because the config_subentry_id is unknown",
-                    forwarded_config_id or scope.config_subentry_id or scope.subentry_key,
+                    forwarded_config_id
+                    or scope.config_subentry_id
+                    or scope.subentry_key,
                 )
                 return
             sanitized_config_id = scope.identifier or scope.subentry_key
@@ -389,7 +397,9 @@ async def async_setup_entry(  # noqa: PLR0915
             primary_scope.identifier if primary_scope is not None else None
         )
         service_subentry_key = (
-            primary_scope.subentry_key if primary_scope is not None else SERVICE_SUBENTRY_KEY
+            primary_scope.subentry_key
+            if primary_scope is not None
+            else SERVICE_SUBENTRY_KEY
         )
 
         def _recovery_add_entities(
@@ -403,7 +413,10 @@ async def async_setup_entry(  # noqa: PLR0915
         def _expected_unique_ids() -> set[str]:
             if not isinstance(entry_id, str) or not entry_id:
                 return set()
-            if not isinstance(service_subentry_identifier, str) or not service_subentry_identifier:
+            if (
+                not isinstance(service_subentry_identifier, str)
+                or not service_subentry_identifier
+            ):
                 return set()
             return {
                 f"{entry_id}:{service_subentry_identifier}:polling",
@@ -417,7 +430,10 @@ async def async_setup_entry(  # noqa: PLR0915
             built: list[BinarySensorEntity] = []
             if not isinstance(entry_id, str) or not entry_id:
                 return built
-            if not isinstance(service_subentry_identifier, str) or not service_subentry_identifier:
+            if (
+                not isinstance(service_subentry_identifier, str)
+                or not service_subentry_identifier
+            ):
                 return built
             mapping: dict[str, Callable[[], BinarySensorEntity]] = {
                 f"{entry_id}:{service_subentry_identifier}:polling": lambda: GoogleFindMyPollingSensor(

@@ -53,7 +53,9 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class _DecryptLocationsCallable(Protocol):
-    async def __call__(self, device_update: Any, *, cache: TokenCache) -> list[dict[str, Any]]:
+    async def __call__(
+        self, device_update: Any, *, cache: TokenCache
+    ) -> list[dict[str, Any]]:
         """Decrypt and normalize location updates."""
 
 
@@ -84,7 +86,9 @@ class FcmReceiverProtocol(Protocol):
 
 
 def _import_deviceupdate_pb2() -> ModuleType:
-    return import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2")
+    return import_module(
+        "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"
+    )
 
 
 def _import_decoder_module() -> ModuleType:
@@ -104,10 +108,11 @@ def _import_eid_info_module() -> ModuleType:
 
 
 _fcm_receiver_state: dict[
-    str, Callable[[str | None], FcmReceiverProtocol] | Callable[[], FcmReceiverProtocol] | None
-] = {
-    "getter": None
-}
+    str,
+    Callable[[str | None], FcmReceiverProtocol]
+    | Callable[[], FcmReceiverProtocol]
+    | None,
+] = {"getter": None}
 _FCM_ReceiverGetter: (
     Callable[[str | None], FcmReceiverProtocol]
     | Callable[[], FcmReceiverProtocol]
@@ -117,7 +122,7 @@ _FCM_ReceiverGetter: (
 
 def register_fcm_receiver_provider(
     getter: Callable[[str | None], FcmReceiverProtocol]
-    | Callable[[], FcmReceiverProtocol]
+    | Callable[[], FcmReceiverProtocol],
 ) -> None:
     """Register a callable returning the long-lived FCM receiver instance.
 
@@ -351,7 +356,9 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                             "Failed to register cache provider for %s: %s", name, err
                         )
                 try:
-                    location_data: list[dict[str, Any]] = await async_decrypt_location_response_locations(
+                    location_data: list[
+                        dict[str, Any]
+                    ] = await async_decrypt_location_response_locations(
                         device_update, cache=cache
                     )
                 except (
@@ -591,9 +598,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         resolved_last_mode_switch = int(time.time())
 
     try:
-        await ns_set(
-            CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch
-        )
+        await ns_set(CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch)
     except Exception as err:  # pragma: no cover - defensive logging
         _LOGGER.debug("Failed to persist contributor mode timestamp: %s", err)
 

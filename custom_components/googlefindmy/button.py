@@ -156,7 +156,6 @@ RESET_STATISTICS_DESCRIPTION = ButtonEntityDescription(
 )
 
 
-
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -227,7 +226,9 @@ async def async_setup_entry(
 
                 stable_identifier = getattr(meta, "stable_identifier", None)
                 identifier = (
-                    stable_identifier() if callable(stable_identifier) else None
+                    stable_identifier()
+                    if callable(stable_identifier)
+                    else None
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
@@ -250,9 +251,8 @@ async def async_setup_entry(
                 if "button" not in subentry_features:
                     continue
 
-                config_id = (
-                    getattr(subentry, "subentry_id", None)
-                    or getattr(subentry, "entry_id", None)
+                config_id = getattr(subentry, "subentry_id", None) or getattr(
+                    subentry, "entry_id", None
                 )
                 identifier = (
                     config_id
@@ -261,7 +261,9 @@ async def async_setup_entry(
                 )
                 scopes.setdefault(
                     identifier,
-                    _TrackerScope(group_key or TRACKER_SUBENTRY_KEY, config_id, identifier),
+                    _TrackerScope(
+                        group_key or TRACKER_SUBENTRY_KEY, config_id, identifier
+                    ),
                 )
 
         if hint_subentry_id:
@@ -277,7 +279,9 @@ async def async_setup_entry(
         if scopes:
             return list(scopes.values())
 
-        fallback_identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
+        fallback_identifier = coordinator.stable_subentry_identifier(
+            key=TRACKER_SUBENTRY_KEY
+        )
         return [
             _TrackerScope(
                 TRACKER_SUBENTRY_KEY,
@@ -303,7 +307,9 @@ async def async_setup_entry(
 
                 stable_identifier = getattr(meta, "stable_identifier", None)
                 identifier = (
-                    stable_identifier() if callable(stable_identifier) else None
+                    stable_identifier()
+                    if callable(stable_identifier)
+                    else None
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
@@ -328,9 +334,8 @@ async def async_setup_entry(
                 if "button" not in subentry_features:
                     continue
 
-                config_id = (
-                    getattr(subentry, "subentry_id", None)
-                    or getattr(subentry, "entry_id", None)
+                config_id = getattr(subentry, "subentry_id", None) or getattr(
+                    subentry, "entry_id", None
                 )
                 identifier = (
                     config_id
@@ -339,7 +344,9 @@ async def async_setup_entry(
                 )
                 scopes.setdefault(
                     identifier,
-                    _ServiceScope(group_key or SERVICE_SUBENTRY_KEY, config_id, identifier),
+                    _ServiceScope(
+                        group_key or SERVICE_SUBENTRY_KEY, config_id, identifier
+                    ),
                 )
 
         return list(scopes.values())
@@ -349,7 +356,9 @@ async def async_setup_entry(
     primary_scope: _TrackerScope | None = None
     primary_scheduler: Callable[[Iterable[ButtonEntity], bool], None] | None = None
 
-    def _add_service_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
+    def _add_service_scope(
+        scope: _ServiceScope, forwarded_config_id: str | None
+    ) -> None:
         service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
             config_entry,
@@ -431,7 +440,9 @@ async def async_setup_entry(
             if tracker_ids:
                 _LOGGER.debug(
                     "Button setup: skipping subentry '%s' because the config_subentry_id is unknown",
-                    forwarded_config_id or scope.config_subentry_id or scope.subentry_key,
+                    forwarded_config_id
+                    or scope.config_subentry_id
+                    or scope.subentry_key,
                 )
                 return
             sanitized_config_id = (
@@ -443,7 +454,9 @@ async def async_setup_entry(
                 scope.subentry_key,
             )
 
-        tracker_identifier = scope.identifier or sanitized_config_id or scope.subentry_key
+        tracker_identifier = (
+            scope.identifier or sanitized_config_id or scope.subentry_key
+        )
 
         def _schedule_button_entities(
             new_entities: Iterable[ButtonEntity],
@@ -513,7 +526,9 @@ async def async_setup_entry(
 
             return entities
 
-        initial_entities = _build_entities(coordinator.get_subentry_snapshot(scope.subentry_key))
+        initial_entities = _build_entities(
+            coordinator.get_subentry_snapshot(scope.subentry_key)
+        )
         if initial_entities:
             _LOGGER.debug(
                 "Button setup: subentry_key=%s, config_subentry_id=%s (initial=%d)",
@@ -532,7 +547,9 @@ async def async_setup_entry(
 
         @callback
         def _add_new_devices() -> None:
-            new_entities = _build_entities(coordinator.get_subentry_snapshot(scope.subentry_key))
+            new_entities = _build_entities(
+                coordinator.get_subentry_snapshot(scope.subentry_key)
+            )
             if new_entities:
                 _LOGGER.debug(
                     "Button setup: dynamically adding %d entity(ies) for subentry %s",
@@ -623,7 +640,10 @@ async def async_setup_entry(
     known_subentries: Iterable[Any] = ()
     if isinstance(managed_subentries, Mapping) and managed_subentries:
         known_subentries = managed_subentries.values()
-    elif isinstance(getattr(config_entry, "subentries", None), Mapping) and config_entry.subentries:
+    elif (
+        isinstance(getattr(config_entry, "subentries", None), Mapping)
+        and config_entry.subentries
+    ):
         known_subentries = config_entry.subentries.values()
 
     if config_subentry_id is None and known_subentries and subentry_manager is not None:
@@ -669,9 +689,13 @@ async def async_setup_entry(
 
     if isinstance(recovery_manager, EntityRecoveryManager):
         entry_id = getattr(config_entry, "entry_id", None)
-        tracker_identifier = primary_scope.identifier if primary_scope is not None else None
+        tracker_identifier = (
+            primary_scope.identifier if primary_scope is not None else None
+        )
         tracker_subentry_key = (
-            primary_scope.subentry_key if primary_scope is not None else TRACKER_SUBENTRY_KEY
+            primary_scope.subentry_key
+            if primary_scope is not None
+            else TRACKER_SUBENTRY_KEY
         )
 
         def _recovery_add_entities(
@@ -728,7 +752,9 @@ async def async_setup_entry(
                     "locate_device": GoogleFindMyLocateButton,
                 }
                 for action, entity_cls in mapping.items():
-                    unique_id = f"{DOMAIN}_{entry_id}_{tracker_identifier}_{dev_id}_{action}"
+                    unique_id = (
+                        f"{DOMAIN}_{entry_id}_{tracker_identifier}_{dev_id}_{action}"
+                    )
                     if unique_id not in missing:
                         continue
                     built.append(
@@ -785,7 +811,9 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
         if (state := await self.async_get_last_state()) is None:
             return
 
-        restored_value = state.attributes.get("last_press") if hasattr(state, "attributes") else None
+        restored_value = (
+            state.attributes.get("last_press") if hasattr(state, "attributes") else None
+        )
         if restored_value is None:
             restored_value = state.state
 
@@ -845,7 +873,11 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
             issues_iterable = list(issues_attr.items())
         else:
             private_issues = getattr(registry, "_issues", None)
-            issues_iterable = list(private_issues.items()) if isinstance(private_issues, Mapping) else []
+            issues_iterable = (
+                list(private_issues.items())
+                if isinstance(private_issues, Mapping)
+                else []
+            )
 
         self._update_last_pressed()
 
@@ -868,14 +900,18 @@ class GoogleFindMyStatsResetButton(GoogleFindMyEntity, ButtonEntity, RestoreEnti
             try:
                 ir.async_delete_issue(hass, DOMAIN, issue_id)
             except Exception as err:  # pragma: no cover - defensive cleanup
-                _LOGGER.debug("Stats reset: failed to delete issue %s: %s", issue_id, err)
+                _LOGGER.debug(
+                    "Stats reset: failed to delete issue %s: %s", issue_id, err
+                )
 
         schedule_persist = getattr(self.coordinator, "_schedule_stats_persist", None)
         if callable(schedule_persist):
             try:
                 schedule_persist()
             except Exception as err:  # pragma: no cover - defensive logging
-                _LOGGER.debug("Stats persistence scheduling failed after reset: %s", err)
+                _LOGGER.debug(
+                    "Stats persistence scheduling failed after reset: %s", err
+                )
 
         try:
             self.coordinator.async_update_listeners()
@@ -925,7 +961,9 @@ class GoogleFindMyButtonEntity(
         if (state := await self.async_get_last_state()) is None:
             return
 
-        restored_value = state.attributes.get("last_press") if hasattr(state, "attributes") else None
+        restored_value = (
+            state.attributes.get("last_press") if hasattr(state, "attributes") else None
+        )
         if restored_value is None:
             restored_value = state.state
 
@@ -1042,7 +1080,9 @@ class GoogleFindMyPlaySoundButton(GoogleFindMyButtonEntity):
                 blocking=True,
             )
             self._update_last_pressed()
-            _LOGGER.info("Successfully submitted Play Sound request for %s", device_name)
+            _LOGGER.info(
+                "Successfully submitted Play Sound request for %s", device_name
+            )
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error playing sound on %s: %s", device_name, err)
 
@@ -1137,7 +1177,9 @@ class GoogleFindMyStopSoundButton(GoogleFindMyButtonEntity):
                 blocking=True,
             )
             self._update_last_pressed()
-            _LOGGER.info("Successfully submitted Stop Sound request for %s", device_name)
+            _LOGGER.info(
+                "Successfully submitted Stop Sound request for %s", device_name
+            )
         except Exception as err:
             _LOGGER.error("Error stopping sound on %s: %s", device_name, err)
 

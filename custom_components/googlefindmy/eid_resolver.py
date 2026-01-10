@@ -108,10 +108,10 @@ ENABLE_HEURISTIC_PHONE_DISCOVERY: bool = True
 # HEURISTIC_HYPOTHESES: Ordered list of (rotation_period, basis) tuples to test.
 # Ordered by likelihood based on Android phone behavior analysis.
 HEURISTIC_HYPOTHESES: tuple[tuple[int, HeuristicBasis], ...] = (
-    (ROTATION_PERIOD_900, HeuristicBasis.ABSOLUTE),   # Most likely for phones
+    (ROTATION_PERIOD_900, HeuristicBasis.ABSOLUTE),  # Most likely for phones
     (ROTATION_PERIOD_3600, HeuristicBasis.ABSOLUTE),  # 1-hour rotation
-    (ROTATION_PERIOD_900, HeuristicBasis.RELATIVE),   # 15-min with anchor
-    (ROTATION_PERIOD, HeuristicBasis.ABSOLUTE),       # 1024s with absolute time
+    (ROTATION_PERIOD_900, HeuristicBasis.RELATIVE),  # 15-min with anchor
+    (ROTATION_PERIOD, HeuristicBasis.ABSOLUTE),  # 1024s with absolute time
 )
 
 # HEURISTIC_VARIANTS_TO_TEST: EID variants to test during heuristic resolution.
@@ -378,9 +378,9 @@ class CacheBuilder:
                 break
 
         # If this device already has a match with better or equal offset, skip
-        if existing_device_match is not None and abs(existing_device_match.time_offset) <= abs(
-            match.time_offset
-        ):
+        if existing_device_match is not None and abs(
+            existing_device_match.time_offset
+        ) <= abs(match.time_offset):
             if existing_metadata is not None and existing_bases is not None:
                 existing_metadata["timestamp_bases"] = existing_bases
             return
@@ -413,11 +413,13 @@ class CacheBuilder:
             existing_metadata["timestamp_bases"] = existing_bases
 
         if __debug__:
-            assert set(self.lookup.keys()).issuperset(
-                self.metadata.keys()
-            ), "metadata keys diverged after registration"
+            assert set(self.lookup.keys()).issuperset(self.metadata.keys()), (
+                "metadata keys diverged after registration"
+            )
 
-    def finalize(self) -> tuple[dict[bytes, list[EIDMatch]], dict[bytes, dict[str, Any]]]:
+    def finalize(
+        self,
+    ) -> tuple[dict[bytes, list[EIDMatch]], dict[bytes, dict[str, Any]]]:
         """Return the finalized lookup tables after invariant validation."""
 
         lookup_keys = set(self.lookup.keys())
@@ -510,7 +512,9 @@ class EIDGenerationLock:
     frame_type: int | None = None
     time_basis: str | None = None
     created_at: int = field(default_factory=lambda: int(time.time()))
-    drift_offset: int = 0  # Tracked drift in seconds (positive = ahead, negative = behind)
+    drift_offset: int = (
+        0  # Tracked drift in seconds (positive = ahead, negative = behind)
+    )
     last_seen_at: int | None = None  # Last successful EID match timestamp
 
     def to_dict(self) -> dict[str, Any]:
@@ -539,7 +543,8 @@ class EIDGenerationLock:
         rotation_timestamp = payload.get("rotation_timestamp")
         rotation_ts = (
             int(rotation_timestamp)
-            if isinstance(rotation_timestamp, int) and not isinstance(rotation_timestamp, bool)
+            if isinstance(rotation_timestamp, int)
+            and not isinstance(rotation_timestamp, bool)
             else None
         )
         if not variant:
@@ -588,7 +593,11 @@ def _normalize_counter_candidate(candidate_value: object, *, basis: str) -> int 
 
     max_millis = FHNA_COUNTER_MASK
     candidate_seconds = candidate_value // 1000
-    if candidate_value > max_millis and candidate_value % 1000 == 0 and candidate_seconds > 0:
+    if (
+        candidate_value > max_millis
+        and candidate_value % 1000 == 0
+        and candidate_seconds > 0
+    ):
         _LOGGER.debug(
             "Converted %s basis %s from milliseconds to seconds: %s",
             candidate_value,
@@ -779,9 +788,9 @@ class GoogleFindMyEIDResolver:
 
         try:
             task_name = "googlefindmy_eid_resolver_save"
-            create_task = getattr(self.hass, "async_create_background_task", None) or getattr(
-                self.hass, "async_create_task"
-            )
+            create_task = getattr(
+                self.hass, "async_create_background_task", None
+            ) or getattr(self.hass, "async_create_task")
             if create_task is None:
                 raise AttributeError("hass is missing async_create_task helper")
             lock_save = self._async_save_locks()
@@ -791,7 +800,9 @@ class GoogleFindMyEIDResolver:
                 scheduled = create_task(lock_save)
             if scheduled is None:
                 asyncio.create_task(lock_save)
-                _LOGGER.warning("EID lock save was not scheduled (task helper returned None)")
+                _LOGGER.warning(
+                    "EID lock save was not scheduled (task helper returned None)"
+                )
             elif asyncio.iscoroutine(scheduled):
                 asyncio.create_task(scheduled)
             elif not isinstance(scheduled, asyncio.Task):
@@ -813,7 +824,9 @@ class GoogleFindMyEIDResolver:
         expired_by_created: list[str] = []
         for device_id, lock in list(self._locks.items()):
             last_confirmation = self._last_lock_confirmation.get(device_id)
-            if isinstance(last_confirmation, int) and not isinstance(last_confirmation, bool):
+            if isinstance(last_confirmation, int) and not isinstance(
+                last_confirmation, bool
+            ):
                 confirmation_age: int | None = now - last_confirmation
                 last_activity = last_confirmation
             else:
@@ -874,12 +887,9 @@ class GoogleFindMyEIDResolver:
             self._known_advertisement_reversed.pop(registry_id, None) is not None
             or removed
         )
+        removed = self._known_timebases.pop(registry_id, None) is not None or removed
         removed = (
-            self._known_timebases.pop(registry_id, None) is not None or removed
-        )
-        removed = (
-            self._last_lock_confirmation.pop(registry_id, None) is not None
-            or removed
+            self._last_lock_confirmation.pop(registry_id, None) is not None or removed
         )
 
         if removed:
@@ -1047,7 +1057,9 @@ class GoogleFindMyEIDResolver:
     ) -> tuple[list[WindowSpec], bool]:
         """Compute time windows for a work item and report hint validity."""
 
-        lock_windows = self._compute_lock_windows(work_item, now_unix=now_unix, params=params)
+        lock_windows = self._compute_lock_windows(
+            work_item, now_unix=now_unix, params=params
+        )
         fallback_discovery = bool(lock_windows)
         min_relative_window = (
             LOCK_FALLBACK_RELATIVE_WINDOW_SIZE
@@ -1087,7 +1099,9 @@ class GoogleFindMyEIDResolver:
         )
         for step in range(-LOCK_TRACKING_WINDOW_STEPS, LOCK_TRACKING_WINDOW_STEPS + 1):
             offset_periods = periods_elapsed + step
-            window_ts = work_item.rotation_ts + (offset_periods * params.rotation_period)
+            window_ts = work_item.rotation_ts + (
+                offset_periods * params.rotation_period
+            )
             if window_ts < 0:
                 continue
             semantic_offset = window_ts - expected_counter
@@ -1137,7 +1151,10 @@ class GoogleFindMyEIDResolver:
                 (basis, label) for basis, label in counter_bases if basis != "unix"
             )
         anchor_candidates: list[int] = []
-        if isinstance(work_item.identity.pair_date, int) and work_item.identity.pair_date > 0:
+        if (
+            isinstance(work_item.identity.pair_date, int)
+            and work_item.identity.pair_date > 0
+        ):
             anchor_candidates.append(work_item.identity.pair_date)
         if (
             isinstance(work_item.identity.secrets_creation_date, int)
@@ -1155,7 +1172,9 @@ class GoogleFindMyEIDResolver:
         )
         invalid_hint = bool(work_item.basis_hint and known_basis is None)
         filtered_bases = (
-            tuple((basis, label) for basis, label in counter_bases if basis == known_basis)
+            tuple(
+                (basis, label) for basis, label in counter_bases if basis == known_basis
+            )
             if known_basis
             else counter_bases
         )
@@ -1173,13 +1192,19 @@ class GoogleFindMyEIDResolver:
                 try:
                     tz_offset = dt_util.now().utcoffset()
                     tz_windows = (
-                        int(math.ceil(abs(tz_offset.total_seconds()) / params.rotation_period))
+                        int(
+                            math.ceil(
+                                abs(tz_offset.total_seconds()) / params.rotation_period
+                            )
+                        )
                         if tz_offset
                         else 0
                     )
                 except Exception:
                     tz_windows = 0
-                total_window = max(params.min_unix_window, 3 + drift_windows + tz_windows)
+                total_window = max(
+                    params.min_unix_window, 3 + drift_windows + tz_windows
+                )
             else:
                 raw_anchor = getattr(work_item.identity, basis, None)
                 anchor_value = _normalize_counter_candidate(raw_anchor, basis=basis)
@@ -1274,7 +1299,9 @@ class GoogleFindMyEIDResolver:
                 if key not in key_index:
                     key_index[key] = len(basis_windows[spec.time_basis])
                     basis_windows[spec.time_basis].append(window)
-                    basis_candidate_value.setdefault(spec.time_basis, window.candidate_value)
+                    basis_candidate_value.setdefault(
+                        spec.time_basis, window.candidate_value
+                    )
                     continue
 
                 idx = key_index[key]
@@ -1393,7 +1420,9 @@ class GoogleFindMyEIDResolver:
             if invalid_hint:
                 self._known_timebases.pop(work_item.registry_id, None)
             _LOGGER.debug(
-                "Refresh stage: %s produced %d window groups", work_item.registry_id, len(windows)
+                "Refresh stage: %s produced %d window groups",
+                work_item.registry_id,
+                len(windows),
             )
             for window in windows:
                 variants = self._compute_variants(work_item, window)
@@ -1929,15 +1958,17 @@ class GoogleFindMyEIDResolver:
                 for result in results:
                     if result.eid_bytes in candidate_set:
                         # Found a match! Store the learned parameters
-                        self._learned_heuristic_params[device_id] = LearnedHeuristicParams(
-                            device_id=device_id,
-                            canonical_id=identity.canonical_id,
-                            rotation_period=rotation_period,
-                            basis=basis,
-                            variant=variant,
-                            discovered_at=now_unix,
-                            last_confirmed_at=now_unix,
-                            confirmation_count=1,
+                        self._learned_heuristic_params[device_id] = (
+                            LearnedHeuristicParams(
+                                device_id=device_id,
+                                canonical_id=identity.canonical_id,
+                                rotation_period=rotation_period,
+                                basis=basis,
+                                variant=variant,
+                                discovered_at=now_unix,
+                                last_confirmed_at=now_unix,
+                                confirmation_count=1,
+                            )
                         )
 
                         _LOGGER.info(
@@ -1977,7 +2008,10 @@ class GoogleFindMyEIDResolver:
         anchors: list[int] = []
         if isinstance(identity.pair_date, int) and identity.pair_date > 0:
             anchors.append(identity.pair_date)
-        if isinstance(identity.secrets_creation_date, int) and identity.secrets_creation_date > 0:
+        if (
+            isinstance(identity.secrets_creation_date, int)
+            and identity.secrets_creation_date > 0
+        ):
             anchors.append(identity.secrets_creation_date)
         return max(anchors) if anchors else None
 
@@ -2003,7 +2037,9 @@ class GoogleFindMyEIDResolver:
     ) -> None:
         """Update internal state (locks, offsets, etc.) for a single match."""
         self._last_lock_confirmation[match.device_id] = now
-        previous_basis = _normalize_anchor_basis(self._known_timebases.get(match.device_id))
+        previous_basis = _normalize_anchor_basis(
+            self._known_timebases.get(match.device_id)
+        )
         raw_time_basis = metadata.get("timestamp_basis")
         anchor_basis = _normalize_anchor_basis(raw_time_basis)
         basis_explicitly_invalid = raw_time_basis is not None and anchor_basis is None
@@ -2281,11 +2317,16 @@ class GoogleFindMyEIDResolver:
                 elif frame_type == MODERN_FRAME_TYPE:
                     if length >= modern_required_length:
                         candidates.append(
-                            payload[RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
+                            payload[
+                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                                + MODERN_EID_LENGTH
+                            ]
                         )
                         return candidates, observed_frame
-                    elif RAW_HEADER_LENGTH + LEGACY_EID_LENGTH <= length <= (
-                        RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+                    elif (
+                        RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
+                        <= length
+                        <= (RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1)
                     ):
                         payload_start = _legacy_payload_start()
                         candidates.append(
@@ -2311,7 +2352,9 @@ class GoogleFindMyEIDResolver:
 
         return candidates, observed_frame
 
-    def _log_truncated_frame(self, *, frame_type: int, payload_len: int, raw_len: int) -> None:
+    def _log_truncated_frame(
+        self, *, frame_type: int, payload_len: int, raw_len: int
+    ) -> None:
         """Rate-limit warnings for truncated framed payloads."""
 
         now = time.time()

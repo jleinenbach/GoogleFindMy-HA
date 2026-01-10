@@ -105,6 +105,7 @@ def _normalize_identifier_set(candidate: Iterable[Any] | None) -> list[str]:
             normalized.add(item)
     return sorted(normalized)
 
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -170,7 +171,9 @@ async def async_setup_entry(
 
                 stable_identifier = getattr(meta, "stable_identifier", None)
                 identifier = (
-                    stable_identifier() if callable(stable_identifier) else None
+                    stable_identifier()
+                    if callable(stable_identifier)
+                    else None
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
@@ -194,9 +197,8 @@ async def async_setup_entry(
                 if "device_tracker" not in subentry_features:
                     continue
 
-                config_id = (
-                    getattr(subentry, "subentry_id", None)
-                    or getattr(subentry, "entry_id", None)
+                config_id = getattr(subentry, "subentry_id", None) or getattr(
+                    subentry, "entry_id", None
                 )
                 identifier = (
                     config_id
@@ -206,7 +208,9 @@ async def async_setup_entry(
                 scope_key = (group_key, identifier)
                 scopes.setdefault(
                     scope_key,
-                    _TrackerScope(group_key or TRACKER_SUBENTRY_KEY, config_id, identifier),
+                    _TrackerScope(
+                        group_key or TRACKER_SUBENTRY_KEY, config_id, identifier
+                    ),
                 )
 
         if hint_subentry_id:
@@ -223,7 +227,9 @@ async def async_setup_entry(
         if scopes:
             return list(scopes.values())
 
-        fallback_identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
+        fallback_identifier = coordinator.stable_subentry_identifier(
+            key=TRACKER_SUBENTRY_KEY
+        )
         return [
             _TrackerScope(
                 TRACKER_SUBENTRY_KEY,
@@ -246,7 +252,9 @@ async def async_setup_entry(
         the scope (when available).
         """
 
-        scope_identifier = scope.identifier or scope.config_subentry_id or scope.subentry_key
+        scope_identifier = (
+            scope.identifier or scope.config_subentry_id or scope.subentry_key
+        )
         if scope_identifier in scope_states:
             scope_states[scope_identifier]["scan"]()
             return
@@ -286,7 +294,9 @@ async def async_setup_entry(
             tracker_config_subentry_id or tracker_identifier
         )
 
-        expected_config_subentry_id = scope.config_subentry_id or tracker_config_subentry_id
+        expected_config_subentry_id = (
+            scope.config_subentry_id or tracker_config_subentry_id
+        )
 
         _LOGGER.debug(
             "Device tracker setup: subentry_key=%s, config_subentry_id=%s",
@@ -355,7 +365,7 @@ async def async_setup_entry(
             )
 
         def _build_entities(
-            snapshot: Sequence[Mapping[str, Any]]
+            snapshot: Sequence[Mapping[str, Any]],
         ) -> list[GoogleFindMyDeviceTracker]:
             to_add: list[GoogleFindMyDeviceTracker] = []
             for device in snapshot:
@@ -393,9 +403,7 @@ async def async_setup_entry(
                 )
                 snapshot_map = getattr(coordinator, "_subentry_snapshots", {})
                 snapshot_keys = _normalize_identifier_set(snapshot_map.keys())
-                reconfigure_marker = getattr(
-                    coordinator, "recent_reconfigure_at", None
-                )
+                reconfigure_marker = getattr(coordinator, "recent_reconfigure_at", None)
                 _LOGGER.debug(
                     (
                         "Device tracker setup: no coordinator snapshot for subentry %s "
@@ -417,10 +425,14 @@ async def async_setup_entry(
 
             to_add = _build_entities(snapshot)
             if to_add:
-                _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
+                _LOGGER.info(
+                    "Adding %d newly discovered Find My tracker(s)", len(to_add)
+                )
                 _schedule_tracker_entities(to_add, True)
 
-                registry_lookup = getattr(coordinator, "find_tracker_entity_entry", None)
+                registry_lookup = getattr(
+                    coordinator, "find_tracker_entity_entry", None
+                )
                 if callable(registry_lookup):
                     all_registered = True
 
@@ -431,7 +443,9 @@ async def async_setup_entry(
                             if not dev_id or registry_lookup(dev_id) is None:
                                 all_registered = False
                                 break
-                        except Exception:  # pragma: no cover - best effort registry probe
+                        except (
+                            Exception
+                        ):  # pragma: no cover - best effort registry probe
                             _LOGGER.debug(
                                 "Registry lookup failed for tracker %s", dev_id
                             )
@@ -459,7 +473,11 @@ async def async_setup_entry(
                 else:
                     secrets_bundle = None
 
-                discovery_ns = f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}" if config_entry.entry_id else CLOUD_DISCOVERY_NAMESPACE
+                discovery_ns = (
+                    f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}"
+                    if config_entry.entry_id
+                    else CLOUD_DISCOVERY_NAMESPACE
+                )
                 stable_key = _cloud_discovery_stable_key(
                     email,
                     token_value,
@@ -486,7 +504,8 @@ async def async_setup_entry(
                         )
                     else:
                         _LOGGER.debug(
-                            "Cloud tracker scanner deduplicated discovery for %s", account_ref
+                            "Cloud tracker scanner deduplicated discovery for %s",
+                            account_ref,
                         )
 
                 hass_async_create_task = getattr(hass, "async_create_task", None)
@@ -522,10 +541,11 @@ async def async_setup_entry(
                     return bool(
                         device_id
                         and tracker_meta
-                        and device_id
-                        in getattr(tracker_meta, "visible_device_ids", [])
+                        and device_id in getattr(tracker_meta, "visible_device_ids", [])
                     )
-                except TypeError:  # pragma: no cover - fallback for misconfigured metadata
+                except (
+                    TypeError
+                ):  # pragma: no cover - fallback for misconfigured metadata
                     return False
 
             def _is_enabled(device_id: str) -> bool:
@@ -533,10 +553,11 @@ async def async_setup_entry(
                     return bool(
                         device_id
                         and tracker_meta
-                        and device_id
-                        in getattr(tracker_meta, "enabled_device_ids", [])
+                        and device_id in getattr(tracker_meta, "enabled_device_ids", [])
                     )
-                except TypeError:  # pragma: no cover - fallback for misconfigured metadata
+                except (
+                    TypeError
+                ):  # pragma: no cover - fallback for misconfigured metadata
                     return False
 
             def _expected_unique_ids() -> set[str]:
@@ -568,9 +589,7 @@ async def async_setup_entry(
                 built: list[GoogleFindMyDeviceTracker] = []
                 if not isinstance(entry_id, str) or not entry_id:
                     return built
-                for device in coordinator.get_subentry_snapshot(
-                    tracker_subentry_key
-                ):
+                for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
                     if not isinstance(device, Mapping):
                         continue
                     dev_id = device.get("id")
@@ -607,7 +626,9 @@ async def async_setup_entry(
                 add_entities=_schedule_tracker_entities,
             )
 
-        scope_states[scope_identifier] = {"scan": _scan_available_trackers_from_coordinator}
+        scope_states[scope_identifier] = {
+            "scan": _scan_available_trackers_from_coordinator
+        }
 
     seen_subentries: set[str | None] = set()
     seen_subentry_keys: set[str] = set()
@@ -669,9 +690,7 @@ async def async_setup_entry(
             )
             return
 
-        has_full_context = hasattr(subentry, "subentry_id") or hasattr(
-            subentry, "data"
-        )
+        has_full_context = hasattr(subentry, "subentry_id") or hasattr(subentry, "data")
         if subentry_identifier in seen_subentries or subentry_key in seen_subentry_keys:
             if has_full_context and (
                 subentry_identifier in placeholder_subentries
@@ -745,7 +764,6 @@ async def async_setup_entry(
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Entity
 # ---------------------------------------------------------------------------
@@ -758,7 +776,9 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     # should not have a suffix and will track the device name.
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
-    _attr_entity_category: EntityCategory | None = None  # ensure tracker is not diagnostic
+    _attr_entity_category: EntityCategory | None = (
+        None  # ensure tracker is not diagnostic
+    )
     # Default to enabled in the registry for per-device trackers
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
@@ -900,9 +920,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             self.subentry_key, self.device_id
         ):
             if not self._logged_visibility_block:
-                meta = self.coordinator.get_subentry_metadata(
-                    key=self.subentry_key
-                )
+                meta = self.coordinator.get_subentry_metadata(key=self.subentry_key)
                 visible_ids = _normalize_identifier_set(
                     getattr(meta, "visible_device_ids", None)
                 )

@@ -13,7 +13,7 @@ from custom_components.googlefindmy.Auth import aas_token_retrieval
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN
 
-pytestmark = pytest.mark.asyncio
+# asyncio_mode = "auto" in pyproject.toml handles async detection automatically
 
 
 class _DummyCache:

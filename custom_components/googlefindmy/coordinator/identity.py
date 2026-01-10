@@ -180,9 +180,7 @@ class IdentityOperations:
                     sorted(device_set),
                 )
 
-    def _reset_resolver_offset(
-        self: GoogleFindMyCoordinator, device_id: str
-    ) -> None:
+    def _reset_resolver_offset(self: GoogleFindMyCoordinator, device_id: str) -> None:
         """Clear resolver offsets using registry IDs when identity keys rotate."""
 
         hass = getattr(self, "hass", None)
@@ -288,9 +286,9 @@ class IdentityOperations:
             if not isinstance(username, str) or not username:
                 return None, None
 
-            owner_entry = cache_snapshot.get(f"owner_key_{username}") or cache_snapshot.get(
-                "owner_key"
-            )
+            owner_entry = cache_snapshot.get(
+                f"owner_key_{username}"
+            ) or cache_snapshot.get("owner_key")
 
             raw_key: Any | None
             version: int | None = None
@@ -711,7 +709,9 @@ class IdentityOperations:
                         _update_preserve_metadata(merged_device_data, payload)
 
             _LOGGER.debug(
-                "Building Identity for %s: cached_data=%s", canonical_id, merged_device_data
+                "Building Identity for %s: cached_data=%s",
+                canonical_id,
+                merged_device_data,
             )
 
             direct_pair_date = _extract_pair_date(merged_device_data)
@@ -782,8 +782,10 @@ class IdentityOperations:
                 (last_secrets_creation_dates, "last"),
             )
             if secrets_creation_raw is None:
-                registry_secrets_date, registry_secrets_source = _lookup_prio_with_source(
-                    lookup_keys, (registry_secrets_creation_dates, "registry")
+                registry_secrets_date, registry_secrets_source = (
+                    _lookup_prio_with_source(
+                        lookup_keys, (registry_secrets_creation_dates, "registry")
+                    )
                 )
                 if registry_secrets_date is not None:
                     secrets_creation_raw = registry_secrets_date
@@ -868,9 +870,8 @@ class IdentityOperations:
                     identity_key = normalized_identity_key
 
             decrypted_owner_version: int | None = None
-            if (
-                identity_key is None
-                and isinstance(encrypted_identity_key, (bytes, bytearray))
+            if identity_key is None and isinstance(
+                encrypted_identity_key, (bytes, bytearray)
             ):
                 decrypted_identity_key, decrypted_owner_version = _decrypt_identity_key(
                     encrypted_identity_key, canonical_id
