@@ -225,7 +225,7 @@ class PollingOperations:
             try:
                 result = fn()
                 if inspect.isawaitable(result):
-                    self.hass.async_create_task(result, name=task_name)  # type: ignore[arg-type]
+                    self.hass.async_create_task(result, name=task_name)
             except Exception as err:
                 _LOGGER.debug(
                     "async_request_refresh dispatch failed (%s): %s", log_context, err

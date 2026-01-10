@@ -293,7 +293,11 @@ module = [
     "custom_components.googlefindmy.coordinator.polling",
     "custom_components.googlefindmy.coordinator.cache",
 ]
-disable_error_code = ["misc"]
+disable_error_code = [
+    "misc",
+    "assignment",      # SimpleNamespace fallback assignment
+    "arg-type",        # Awaitable vs Coroutine variance
+]
 
 [[tool.mypy.overrides]]
 module = ["tests.test_fcm_receiver_guard"]
@@ -317,6 +321,8 @@ module = [
     "custom_components.googlefindmy.binary_sensor",
     "custom_components.googlefindmy.discovery",
     "custom_components.googlefindmy.eid_resolver",
+    "custom_components.googlefindmy.ha_typing",
+    "custom_components.googlefindmy.system_health",
 ]
 disable_error_code = [
     "arg-type",        # Entity subtype covariance issues

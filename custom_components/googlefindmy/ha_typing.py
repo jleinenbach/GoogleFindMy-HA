@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from homeassistant.core import callback as ha_callback
 
@@ -17,7 +17,7 @@ _CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
 
 def callback(func: _CallbackT) -> _CallbackT:
     """Return a typed wrapper around Home Assistant's ``callback`` decorator."""
-    return ha_callback(func)
+    return cast(_CallbackT, ha_callback(func))
 
 
 @dataclass(slots=True)

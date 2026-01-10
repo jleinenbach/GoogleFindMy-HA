@@ -1149,7 +1149,7 @@ class RegistryOperations:
                         break
 
             if entry is None:
-                entry = SimpleNamespace(  # type: ignore[assignment]
+                entry = SimpleNamespace(
                     entity_id=entity_id,
                     unique_id=unique_id,
                     domain=DEVICE_TRACKER_DOMAIN,
