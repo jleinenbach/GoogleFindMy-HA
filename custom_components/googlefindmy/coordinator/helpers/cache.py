@@ -19,6 +19,11 @@ Phase 15 additions:
 - preserve_monotonic_timestamp(): Preserve monotonic timestamps
 - fill_missing_coordinates(): Fill missing coordinate fields
 - merge_cache_row(): Orchestrating function for cache row merging
+
+Refactoring additions:
+- get_common_pb2(): Lazy protobuf loader
+- row_source_label(): Determine source rank and label
+- sanitize_decoder_row(): Normalize decoder row for HA attributes
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .geo import haversine_distance
+from .subentry import format_epoch_utc, normalize_epoch_seconds
 
 __all__ = [
     "DEFAULT_SNAPSHOT_FIELDS",
@@ -42,11 +48,14 @@ __all__ = [
     "determine_location_status",
     "epoch_to_datetime_utc",
     "fill_missing_coordinates",
+    "get_common_pb2",
     "is_presence_expired",
     "merge_cache_row",
     "normalize_location_fields",
     "preserve_metadata_fields",
     "preserve_monotonic_timestamp",
+    "row_source_label",
+    "sanitize_decoder_row",
     "select_best_location_source",
     "should_allow_location_update",
     "should_clear_metadata_only_flag",
@@ -618,3 +627,114 @@ def merge_cache_row(
     merged = fill_missing_coordinates(existing, merged)
 
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Row Sanitization Helpers (moved from main.py during refactoring)
+# ---------------------------------------------------------------------------
+
+# Sentinel for missing protobuf attributes
+_MISSING = object()
+
+
+def get_common_pb2() -> Any:
+    """Import Common_pb2 lazily to defer protobuf initialization.
+
+    Returns:
+        The Common_pb2 module for protobuf status constants.
+    """
+    from ... import get_proto_decoder
+
+    return get_proto_decoder("Common_pb2")
+
+
+def row_source_label(row: dict[str, Any]) -> tuple[int, str]:
+    """Determine (rank, label) for the source of a report.
+
+    Rank: 3=owner, 2=crowdsourced, 1=aggregated, 0=semantic/unknown
+    Label: 'owner' | 'crowdsourced' | 'aggregated' | 'semantic/unknown'
+
+    Internal label mapping aligns with the protobuf Status enum and Google
+    Contribution Settings:
+    - 'crowdsourced' comes from Status.CROWDSOURCED (finder opted into
+      "with network in all areas").
+    - 'aggregated' comes from Status.AGGREGATED (finder opted into "with
+      network in high-traffic areas only").
+
+    Args:
+        row: Dictionary containing report data.
+
+    Returns:
+        Tuple of (rank, label) indicating source type.
+    """
+    is_own = bool(row.get("is_own_report"))
+    status_code = row.get("status_code")
+    try:
+        status_code_int = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        status_code_int = None
+
+    raw_status = row.get("status")
+    if isinstance(raw_status, str):
+        status_name = raw_status.strip().lower()
+    elif isinstance(raw_status, (int, float)):
+        try:
+            status_name = get_common_pb2().Status.Name(int(raw_status)).lower()
+        except Exception:
+            status_name = str(int(raw_status))
+    else:
+        status_name = ""
+
+    hint = str(row.get("_report_hint") or "").strip().lower()
+    common_pb2 = get_common_pb2()
+    cs = getattr(common_pb2, "CROWDSOURCED", _MISSING)
+    ag = getattr(common_pb2, "AGGREGATED", _MISSING)
+
+    if is_own:
+        return 3, "owner"
+    if (
+        (cs is not _MISSING and status_code_int == cs)
+        or "crowdsourced" in status_name
+        or "in_all_areas" in status_name
+        or hint == "in_all_areas"
+    ):
+        return 2, "crowdsourced"
+    if (
+        (ag is not _MISSING and status_code_int == ag)
+        or "aggregated" in status_name
+        or "high_traffic" in status_name
+        or hint == "high_traffic"
+    ):
+        return 1, "aggregated"
+    return 0, "semantic/unknown"
+
+
+def sanitize_decoder_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Enforce protocol invariants and prepare HA attributes.
+
+    Notes:
+        - Ensures timestamps are normalized and provides an ISO UTC mirror.
+        - Derives a stable `source_label`/`source_rank` used for stats and UX.
+        - Zero-accuracy semantic entries are coerced to None to avoid noise.
+
+    Args:
+        row: Raw decoder row dictionary.
+
+    Returns:
+        Sanitized dictionary with normalized fields.
+    """
+    r = dict(row)
+    rank, label = row_source_label(r)
+
+    if label == "semantic/unknown" and r.get("is_own_report"):
+        r["is_own_report"] = False
+    if label == "semantic/unknown" and r.get("accuracy") in (0, 0.0):
+        r["accuracy"] = None
+
+    ts = normalize_epoch_seconds(r.get("last_seen"))
+    r["last_seen"] = ts  # Store normalized float
+    r["last_seen_utc"] = format_epoch_utc(ts)
+
+    r["source_label"] = label
+    r["source_rank"] = rank
+    return r
