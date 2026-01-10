@@ -64,7 +64,6 @@ from collections import deque
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from statistics import mean, stdev
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -2226,16 +2225,6 @@ class GoogleFindMyCoordinator(
         """Return True if the device is currently ignored by user choice."""
         return device_id in self._get_ignored_set()
 
-    # Public read-only state for diagnostics/UI
-    @property
-    def is_polling(self) -> bool:
-        """Expose current polling state (public read-only API).
-
-        Returns:
-            True if a polling cycle is currently in progress.
-        """
-        return self._is_polling
-
     # ---------------------------- Metrics & errors helpers ------------------
     def safe_update_metric(self, key: str, value: float) -> None:
         """Safely set a numeric performance metric (float-coerced)."""
@@ -2281,116 +2270,11 @@ class GoogleFindMyCoordinator(
         """Duration between 'setup_start_monotonic' and 'setup_end_monotonic'."""
         return self._get_duration("setup_start_monotonic", "setup_end_monotonic")
 
-    def get_fcm_acquire_duration_seconds(self) -> float | None:
-        """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
-        return _get_duration_impl(
-            self.get_metric("setup_start_monotonic"),
-            self.get_metric("fcm_acquired_monotonic"),
-        )
-
-    def get_last_poll_duration_seconds(self) -> float | None:
-        """Duration of the most recent sequential polling cycle (if recorded)."""
-        return self._get_duration("last_poll_start_mono", "last_poll_end_mono")
-
     def get_recent_errors(self) -> list[dict[str, Any]]:
         """Return a JSON-friendly copy of recent error triples."""
         return format_recent_errors(self.recent_errors)
 
     # ---------------------------- HA Coordinator ----------------------------
-    def _is_fcm_ready_soft(self) -> bool:
-        """Return True if push transport appears ready (no awaits, no I/O).
-
-        Priority order:
-          1) Ask API (single source of truth if available).
-          2) Receiver-level booleans.
-          3) Push-client heuristic (run_state + do_listen).
-        """
-        try:
-            # 1) API knowledge (preferred)
-            try:
-                fn = getattr(self.api, "is_push_ready", None)
-                if callable(fn):
-                    return bool(fn())
-            except Exception:
-                pass
-
-            # 2) Receiver-level flags
-            fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
-            if not fcm:
-                return False
-            fatal_error: str | None = getattr(fcm, "_fatal_error", None)
-            entry_id = self._entry_id()
-            fatal_by_entry = getattr(fcm, "_fatal_errors", None)
-            if isinstance(fatal_by_entry, Mapping) and entry_id:
-                fatal_error = fatal_by_entry.get(entry_id) or fatal_error
-            if isinstance(fatal_error, str) and fatal_error:
-                return False
-            for attr in ("is_ready", "ready"):
-                val = getattr(fcm, attr, None)
-                if isinstance(val, bool):
-                    return val
-
-            # 3) Heuristic: push client state (no enum import)
-            pc = getattr(fcm, "pc", None)
-            if pc is not None:
-                state = getattr(pc, "run_state", None)
-                state_name = getattr(state, "name", state)
-                if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
-                    return True
-
-            return False
-        except Exception:
-            return False
-
-    def _note_fcm_deferral(self, now_mono: float) -> None:
-        """Advance a quiet escalation timeline while FCM is not ready.
-
-        FIX: Use less aggressive log levels to reduce log spam (#124).
-        Emits at most:
-            - one INFO after ~2 minutes (was WARNING after 60s)
-            - one WARNING after ~5 minutes (was ERROR after 300s)
-        Resets when readiness returns.
-        """
-        if self._fcm_defer_started_mono == 0.0:
-            self._fcm_defer_started_mono = now_mono
-            self._fcm_last_stage = 0
-            self._set_fcm_status(
-                FcmStatus.DEGRADED,
-                reason="Push transport not ready; awaiting connection",
-            )
-            return
-        elapsed = now_mono - self._fcm_defer_started_mono
-        # Stage 1: After 2 minutes, log at INFO level (not WARNING)
-        if elapsed >= 120 and self._fcm_last_stage < 1:
-            self._fcm_last_stage = 1
-            _LOGGER.info(
-                "Push transport connection taking longer than expected (2 min). "
-                "Push updates may be delayed, but polling continues."
-            )
-            self._set_fcm_status(
-                FcmStatus.DEGRADED,
-                reason="Push transport waiting for connection (2 min elapsed)",
-            )
-        # Stage 2: After 5 minutes, log at WARNING level (not ERROR)
-        if elapsed >= 300 and self._fcm_last_stage < 2:
-            self._fcm_last_stage = 2
-            _LOGGER.warning(
-                "Push transport not connected after 5 minutes. "
-                "Check network connectivity and credentials if this persists."
-            )
-            self._set_fcm_status(
-                FcmStatus.DISCONNECTED,
-                reason="Push transport not connected after prolonged wait",
-            )
-
-    def _clear_fcm_deferral(self) -> None:
-        """Clear the escalation timeline once FCM becomes ready (log once)."""
-        if self._fcm_defer_started_mono:
-            _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
-        self._fcm_defer_started_mono = 0.0
-        self._fcm_last_stage = 0
-        self._set_fcm_status(FcmStatus.CONNECTED)
-
     async def _async_update_data(self) -> list[dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
 
@@ -3847,34 +3731,6 @@ class GoogleFindMyCoordinator(
         # collects device identities.
         _persist_registry_anchor_metadata(anchor_payload)
 
-    def _get_predicted_poll_time(self) -> float | None:
-        """Predict the earliest next update time based on device histories."""
-
-        history_store = getattr(self, "_device_update_history", None)
-        if not history_store:
-            return None
-
-        predictions: list[float] = []
-
-        for history in history_store.values():
-            if len(history) < 2:
-                continue
-
-            intervals = [
-                history[idx + 1] - history[idx] for idx in range(len(history) - 1)
-            ]
-            avg_interval = mean(intervals)
-
-            if len(intervals) >= 2 and stdev(intervals) > 300:
-                continue
-
-            predictions.append(history[-1] + avg_interval)
-
-        if not predictions:
-            return None
-
-        return min(predictions)
-
     def update_device_cache(
         self, device_id: str, location_data: dict[str, Any]
     ) -> None:
@@ -4716,22 +4572,6 @@ class GoogleFindMyCoordinator(
 
         return ready
 
-    def _note_push_transport_problem(self, cooldown_s: int = 90) -> None:
-        """Enter a temporary cooldown after a push transport failure to avoid spamming.
-
-        Args:
-            cooldown_s: The duration of the cooldown in seconds.
-        """
-        self._push_cooldown_until = time.monotonic() + cooldown_s
-        self._push_ready_memo = False
-        _LOGGER.debug(
-            "Entering push cooldown for %ss after transport failure", cooldown_s
-        )
-        self._set_fcm_status(
-            FcmStatus.DEGRADED,
-            reason=f"Push transport recovering from error (cooldown {cooldown_s}s)",
-        )
-
     def can_play_sound(self, device_id: str) -> bool:
         """Return True if 'Play Sound' should be enabled for the device.
 
@@ -4905,12 +4745,6 @@ class GoogleFindMyCoordinator(
         # Settings adjustments may change per-subentry views
         self._refresh_subentry_index()
         self._schedule_eid_resolver_refresh()
-
-    def force_poll_due(self) -> None:
-        """Force the next poll to be due immediately (no private access required externally)."""
-        effective_interval = max(self.location_poll_interval, self.min_poll_interval)
-        # Move the baseline back so that (now - _last_poll_mono) >= effective_interval
-        self._last_poll_mono = time.monotonic() - float(effective_interval)
 
     # ---------------------------- Passthrough API ---------------------------
     async def async_locate_device(self, device_id: str) -> dict[str, Any]:

@@ -5,11 +5,27 @@ This module contains polling-related methods extracted from main.py.
 Methods moved here:
 - _set_api_status: Update API polling status
 - _set_fcm_status: Update FCM push transport status
+- api_status: StatusSnapshot property for API health
+- fcm_status: StatusSnapshot property for push transport health
+- is_fcm_connected: Convenience boolean for push availability
+- consecutive_timeouts: Number of consecutive poll timeouts
+- last_poll_result: Last recorded poll result
 - _is_on_hass_loop: Check if on HA event loop
 - _run_on_hass_loop: Schedule callable on HA loop
 - _dispatch_async_request_refresh: Safe refresh dispatch
 - _schedule_short_retry: Coalesced short retry scheduling
 - _handle_dr_event: Handle device registry changes
+- _compute_type_cooldown_seconds: Server-aware cooldown duration
+- _apply_report_type_cooldown: Apply per-device poll cooldown
+- is_polling: Property for current polling state
+- get_fcm_acquire_duration_seconds: Duration to acquire FCM
+- get_last_poll_duration_seconds: Duration of last poll cycle
+- _is_fcm_ready_soft: Check if push transport appears ready
+- _note_fcm_deferral: Escalation timeline for FCM not ready
+- _clear_fcm_deferral: Clear escalation on FCM ready
+- _get_predicted_poll_time: Predict next update time
+- _note_push_transport_problem: Enter cooldown after push failure
+- force_poll_due: Force next poll immediately
 """
 
 from __future__ import annotations
@@ -18,7 +34,9 @@ import asyncio
 import inspect
 import logging
 import time
+from collections.abc import Mapping
 from datetime import datetime
+from statistics import mean, stdev
 from typing import TYPE_CHECKING, Any, Callable
 
 from homeassistant.core import Event
@@ -266,3 +284,179 @@ class PollingOperations:
                 report_hint,
                 self.location_poll_interval,
             )
+
+    # -------------------- Public read-only state for diagnostics/UI --------------------
+    @property
+    def is_polling(self: "GoogleFindMyCoordinator") -> bool:
+        """Expose current polling state (public read-only API).
+
+        Returns:
+            True if a polling cycle is currently in progress.
+        """
+        return self._is_polling
+
+    def get_fcm_acquire_duration_seconds(
+        self: "GoogleFindMyCoordinator",
+    ) -> float | None:
+        """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
+        from .helpers.metrics import get_duration as _get_duration_impl
+
+        return _get_duration_impl(
+            self.get_metric("setup_start_monotonic"),
+            self.get_metric("fcm_acquired_monotonic"),
+        )
+
+    def get_last_poll_duration_seconds(
+        self: "GoogleFindMyCoordinator",
+    ) -> float | None:
+        """Duration of the most recent sequential polling cycle (if recorded)."""
+        return self._get_duration("last_poll_start_mono", "last_poll_end_mono")
+
+    # -------------------- FCM readiness checks --------------------
+    def _is_fcm_ready_soft(self: "GoogleFindMyCoordinator") -> bool:
+        """Return True if push transport appears ready (no awaits, no I/O).
+
+        Priority order:
+          1) Ask API (single source of truth if available).
+          2) Receiver-level booleans.
+          3) Push-client heuristic (run_state + do_listen).
+        """
+        try:
+            # 1) API knowledge (preferred)
+            try:
+                fn = getattr(self.api, "is_push_ready", None)
+                if callable(fn):
+                    return bool(fn())
+            except Exception:
+                pass
+
+            # 2) Receiver-level flags
+            fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
+            if not fcm:
+                return False
+            fatal_error: str | None = getattr(fcm, "_fatal_error", None)
+            entry_id = self._entry_id()
+            fatal_by_entry = getattr(fcm, "_fatal_errors", None)
+            if isinstance(fatal_by_entry, Mapping) and entry_id:
+                fatal_error = fatal_by_entry.get(entry_id) or fatal_error
+            if isinstance(fatal_error, str) and fatal_error:
+                return False
+            for attr in ("is_ready", "ready"):
+                val = getattr(fcm, attr, None)
+                if isinstance(val, bool):
+                    return val
+
+            # 3) Heuristic: push client state (no enum import)
+            pc = getattr(fcm, "pc", None)
+            if pc is not None:
+                state = getattr(pc, "run_state", None)
+                state_name = getattr(state, "name", state)
+                if state_name == "STARTED" and bool(getattr(pc, "do_listen", False)):
+                    return True
+
+            return False
+        except Exception:
+            return False
+
+    def _note_fcm_deferral(self: "GoogleFindMyCoordinator", now_mono: float) -> None:
+        """Advance a quiet escalation timeline while FCM is not ready.
+
+        FIX: Use less aggressive log levels to reduce log spam (#124).
+        Emits at most:
+            - one INFO after ~2 minutes (was WARNING after 60s)
+            - one WARNING after ~5 minutes (was ERROR after 300s)
+        Resets when readiness returns.
+        """
+        if self._fcm_defer_started_mono == 0.0:
+            self._fcm_defer_started_mono = now_mono
+            self._fcm_last_stage = 0
+            self._set_fcm_status(
+                FcmStatus.DEGRADED,
+                reason="Push transport not ready; awaiting connection",
+            )
+            return
+        elapsed = now_mono - self._fcm_defer_started_mono
+        # Stage 1: After 2 minutes, log at INFO level (not WARNING)
+        if elapsed >= 120 and self._fcm_last_stage < 1:
+            self._fcm_last_stage = 1
+            _LOGGER.info(
+                "Push transport connection taking longer than expected (2 min). "
+                "Push updates may be delayed, but polling continues."
+            )
+            self._set_fcm_status(
+                FcmStatus.DEGRADED,
+                reason="Push transport waiting for connection (2 min elapsed)",
+            )
+        # Stage 2: After 5 minutes, log at WARNING level (not ERROR)
+        if elapsed >= 300 and self._fcm_last_stage < 2:
+            self._fcm_last_stage = 2
+            _LOGGER.warning(
+                "Push transport not connected after 5 minutes. "
+                "Check network connectivity and credentials if this persists."
+            )
+            self._set_fcm_status(
+                FcmStatus.DISCONNECTED,
+                reason="Push transport not connected after prolonged wait",
+            )
+
+    def _clear_fcm_deferral(self: "GoogleFindMyCoordinator") -> None:
+        """Clear the escalation timeline once FCM becomes ready (log once)."""
+        if self._fcm_defer_started_mono:
+            _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
+        self._fcm_defer_started_mono = 0.0
+        self._fcm_last_stage = 0
+        self._set_fcm_status(FcmStatus.CONNECTED)
+
+    # -------------------- Poll timing prediction --------------------
+    def _get_predicted_poll_time(self: "GoogleFindMyCoordinator") -> float | None:
+        """Predict the earliest next update time based on device histories."""
+
+        history_store = getattr(self, "_device_update_history", None)
+        if not history_store:
+            return None
+
+        predictions: list[float] = []
+
+        for history in history_store.values():
+            if len(history) < 2:
+                continue
+
+            intervals = [
+                history[idx + 1] - history[idx] for idx in range(len(history) - 1)
+            ]
+            avg_interval = mean(intervals)
+
+            if len(intervals) >= 2 and stdev(intervals) > 300:
+                continue
+
+            predictions.append(history[-1] + avg_interval)
+
+        if not predictions:
+            return None
+
+        return min(predictions)
+
+    # -------------------- Push transport error handling --------------------
+    def _note_push_transport_problem(
+        self: "GoogleFindMyCoordinator", cooldown_s: int = 90
+    ) -> None:
+        """Enter a temporary cooldown after a push transport failure to avoid spamming.
+
+        Args:
+            cooldown_s: The duration of the cooldown in seconds.
+        """
+        self._push_cooldown_until = time.monotonic() + cooldown_s
+        self._push_ready_memo = False
+        _LOGGER.debug(
+            "Entering push cooldown for %ss after transport failure", cooldown_s
+        )
+        self._set_fcm_status(
+            FcmStatus.DEGRADED,
+            reason=f"Push transport recovering from error (cooldown {cooldown_s}s)",
+        )
+
+    def force_poll_due(self: "GoogleFindMyCoordinator") -> None:
+        """Force the next poll to be due immediately (no private access required externally)."""
+        effective_interval = max(self.location_poll_interval, self.min_poll_interval)
+        # Move the baseline back so that (now - _last_poll_mono) >= effective_interval
+        self._last_poll_mono = time.monotonic() - float(effective_interval)
