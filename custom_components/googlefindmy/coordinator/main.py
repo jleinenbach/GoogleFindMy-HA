@@ -2067,35 +2067,6 @@ class GoogleFindMyCoordinator(
         s = str(value)
         return s if len(s) <= max_len else (s[:max_len] + "…")
 
-    def _device_display_name(self, dev: dr.DeviceEntry, fallback: str) -> str:
-        """Return the best human-friendly device name without sensitive data."""
-        return _extract_display_name_impl(dev.name_by_user, dev.name, fallback)
-
-    def _entry_id(self) -> str | None:
-        """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
-        entry = getattr(self, "config_entry", None)
-        return getattr(entry, "entry_id", None)
-
-    def _config_entry_exists(self, entry_id: str | None = None) -> bool:
-        """Return True when the coordinator's entry is still registered."""
-
-        hass = getattr(self, "hass", None)
-        config_entries = getattr(hass, "config_entries", None)
-        if entry_id is None:
-            entry_id = self._entry_id()
-
-        if entry_id is None:
-            return False
-
-        getter = getattr(config_entries, "async_get_entry", None)
-        if callable(getter):
-            try:
-                return getter(entry_id) is not None
-            except Exception:  # pragma: no cover - defensive guard
-                return True
-
-        return True
-
     def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 

@@ -14,6 +14,9 @@ Methods moved here:
 - _sync_owner_index: Sync hass.data owner index for FCM fallback
 - _ensure_device_name_cache: Lazy device-name cache initialization
 - _apply_pending_via_updates: Deprecated no-op (backward compat)
+- _device_display_name: Get device name without sensitive data
+- _entry_id: Get bound ConfigEntry ID
+- _config_entry_exists: Check if config entry is registered
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from ..const import DOMAIN, LEGACY_SERVICE_IDENTIFIER, SERVICE_DEVICE_IDENTIFIER
 
 from .helpers.registry import (
     build_legacy_device_registry_kwargs as _build_legacy_kwargs_impl,
+    extract_device_display_name as _extract_display_name_impl,
     needs_legacy_kwarg_retry as _needs_legacy_retry_impl,
     parse_device_identifier as _parse_identifier_impl,
 )
@@ -361,3 +365,35 @@ class RegistryOperations:
         # Keep the method defined to avoid AttributeError in case third-party
         # callers relied on the old behavior, but return immediately.
         return
+
+    def _device_display_name(
+        self: "GoogleFindMyCoordinator", dev: dr.DeviceEntry, fallback: str
+    ) -> str:
+        """Return the best human-friendly device name without sensitive data."""
+        return _extract_display_name_impl(dev.name_by_user, dev.name, fallback)
+
+    def _entry_id(self: "GoogleFindMyCoordinator") -> str | None:
+        """Small helper to read the bound ConfigEntry ID (None at very early startup)."""
+        entry = getattr(self, "config_entry", None)
+        return getattr(entry, "entry_id", None)
+
+    def _config_entry_exists(
+        self: "GoogleFindMyCoordinator", entry_id: str | None = None
+    ) -> bool:
+        """Return True when the coordinator's entry is still registered."""
+        hass = getattr(self, "hass", None)
+        config_entries = getattr(hass, "config_entries", None)
+        if entry_id is None:
+            entry_id = self._entry_id()
+
+        if entry_id is None:
+            return False
+
+        getter = getattr(config_entries, "async_get_entry", None)
+        if callable(getter):
+            try:
+                return getter(entry_id) is not None
+            except Exception:  # pragma: no cover - defensive guard
+                return True
+
+        return True
