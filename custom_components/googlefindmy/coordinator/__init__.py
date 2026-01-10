@@ -37,6 +37,9 @@ from .helpers.stats import (
     StatusSnapshot,
 )
 
+# Re-export SubentryMetadata from subentry module
+from .subentry import SubentryMetadata
+
 # Re-export main coordinator class and related types
 from .main import (
     # Constants used by tests
@@ -48,7 +51,6 @@ from .main import (
     # Main class
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
-    SubentryMetadata,
     # Semi-public functions (used by other modules)
     _as_ha_attributes,
     _sync_get_last_gps_from_history,
