@@ -685,6 +685,15 @@ class GoogleFindMyCoordinator(
         self._dr_unsub: Callable[[], None] | None = None
         self._unsub_scheduler: Callable[[], None] | None = None
         self.eid_resolver: Any | None = None
+
+        # Service device tracking (registry operations)
+        self._service_device_ready: bool = False
+        self._service_device_id: str | None = None
+        self._service_device_identifier: tuple[str, str] | None = None
+
+        # User-configured ignored devices (updated via update_settings)
+        self.ignored_devices: list[str] = []
+
         # Subentry awareness (feature groups / platform scoping)
         self._subentry_metadata: dict[str, SubentryMetadata] = {}
         self._subentry_snapshots: dict[str, tuple[dict[str, Any], ...]] = {}

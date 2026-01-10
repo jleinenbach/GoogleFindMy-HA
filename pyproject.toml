@@ -299,8 +299,9 @@ disable_error_code = ["misc"]
 module = ["tests.test_fcm_receiver_guard"]
 ignore_errors = false
 
-# Pre-existing HomeAssistant API compatibility issues
-# These files have type errors related to HA type stubs and FlowResult generics
+# HomeAssistant API compatibility: FlowResult generics, Entity covariance,
+# and TypedDict issues that require HA upstream type improvements to fix.
+# These are checked manually and don't affect runtime behavior.
 [[tool.mypy.overrides]]
 module = [
     "custom_components.googlefindmy",
@@ -315,11 +316,27 @@ module = [
     "custom_components.googlefindmy.device_tracker",
     "custom_components.googlefindmy.binary_sensor",
     "custom_components.googlefindmy.discovery",
-    "custom_components.googlefindmy.system_health",
-    "custom_components.googlefindmy.ha_typing",
     "custom_components.googlefindmy.eid_resolver",
 ]
-ignore_errors = true
+disable_error_code = [
+    "arg-type",        # Entity subtype covariance issues
+    "assignment",      # FlowResult generic assignment
+    "empty-body",      # Protocol stubs without implementation
+    "func-returns-value",  # Void function return expectations
+    "misc",            # Complex HA type inference issues
+    "no-any-return",   # Dynamic return types in HA APIs
+    "override",        # ConfigFlow return type covariance
+    "redundant-cast",  # Casts needed for older HA versions
+    "return-value",    # FlowResult return type variance
+    "type-var",        # Store type variance
+    "typeddict-item",  # FlowResult TypedDict fields
+    "typeddict-unknown-key",  # HA TypedDict extensions
+    "union-attr",      # State | dict union access
+    "attr-defined",    # Optional HA const imports
+    "var-annotated",   # Store type inference
+    "unused-ignore",   # Cross-version compatibility ignores
+    "truthy-function", # Recorder get_instance pattern
+]
 
 [tool.coverage.run]
 branch = true

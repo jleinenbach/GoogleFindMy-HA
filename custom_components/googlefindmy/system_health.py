@@ -7,7 +7,7 @@ import hashlib
 import math
 from collections.abc import Callable, Collection
 from datetime import UTC, datetime
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Protocol, TypeVar
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -33,7 +33,7 @@ _CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
 def _typed_callback(func: _CallbackT) -> _CallbackT:
     """Return a typed wrapper around Home Assistant's callback decorator."""
 
-    return cast(_CallbackT, callback(func))
+    return callback(func)
 
 
 def _normalize_epoch_seconds(value: Any) -> float | None:
