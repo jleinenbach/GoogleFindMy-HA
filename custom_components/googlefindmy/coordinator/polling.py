@@ -29,6 +29,10 @@ from .helpers.stats import FcmStatus, StatusSnapshot
 
 _LOGGER = logging.getLogger(__name__)
 
+# Cooldown constants for crowdsourced reports
+_COOLDOWN_MIN_IN_ALL_AREAS_S = 10 * 60  # 10 minutes
+_COOLDOWN_MIN_HIGH_TRAFFIC_S = 5 * 60  # 5 minutes
+
 if TYPE_CHECKING:
     from .main import GoogleFindMyCoordinator
 
@@ -205,3 +209,60 @@ class PollingOperations:
             task_name=f"{DOMAIN}.dr_event_refresh",
             log_context="device registry event",
         )
+
+    def _compute_type_cooldown_seconds(
+        self: "GoogleFindMyCoordinator", report_hint: str | None
+    ) -> int:
+        """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
+
+        Derived from POPETS'25 observations:
+        - "in_all_areas": ~10 min throttle window (minimum).
+        - "high_traffic": ~5 min throttle window (minimum).
+
+        IMPORTANT:
+        - To guarantee effect, the applied cooldown is **never shorter than** the
+          configured `location_poll_interval`. This ensures at least one scheduled
+          poll cycle is skipped in practice.
+        """
+        if not report_hint:
+            return 0
+
+        # Guarantee the cooldown always spans at least one poll interval
+        effective_poll = max(1, int(self.location_poll_interval))
+        if report_hint == "in_all_areas":
+            base_cooldown = _COOLDOWN_MIN_IN_ALL_AREAS_S
+        elif report_hint == "high_traffic":
+            base_cooldown = _COOLDOWN_MIN_HIGH_TRAFFIC_S
+        else:
+            return 0
+
+        return max(base_cooldown, effective_poll)
+
+    def _apply_report_type_cooldown(
+        self: "GoogleFindMyCoordinator", device_id: str, report_hint: str | None
+    ) -> None:
+        """Apply a per-device **poll** cooldown based on the crowdsourced report type.
+
+        - Does nothing for None/unknown hints.
+        - Uses monotonic time, and **extends** any existing cooldown (takes the max).
+        - Internal only; does not touch public APIs or entity attributes.
+        """
+        try:
+            seconds = int(self._compute_type_cooldown_seconds(report_hint))
+        except Exception:  # defensive
+            seconds = 0
+        if seconds <= 0:
+            return
+
+        now_mono = time.monotonic()
+        new_deadline = now_mono + float(seconds)
+        prev_deadline = self._device_poll_cooldown_until.get(device_id, 0.0)
+        if new_deadline > prev_deadline:
+            self._device_poll_cooldown_until[device_id] = new_deadline
+            _LOGGER.debug(
+                "Applied %ss poll cooldown for %s (hint='%s', poll_interval=%ss)",
+                seconds,
+                device_id,
+                report_hint,
+                self.location_poll_interval,
+            )
