@@ -2935,64 +2935,6 @@ class GoogleFindMyCoordinator(
         # callers relied on the old behavior, but return immediately.
         return
 
-    def _sync_owner_index(self, devices: list[dict[str, Any]] | None) -> None:
-        """Sync hass.data owner index for this entry (FCM fallback support)."""
-
-        hass = getattr(self, "hass", None)
-        entry_id = self._entry_id()
-        if hass is None or not entry_id:
-            return
-
-        try:
-            bucket = hass.data.setdefault(DOMAIN, {})
-            owner_index: dict[str, str] = bucket.setdefault("device_owner_index", {})
-        except Exception as err:  # noqa: BLE001 - defensive guard
-            _LOGGER.debug(
-                "[entry=%s] Owner-index sync skipped: %s",
-                entry_id,
-                err,
-            )
-            return
-
-        seen: set[str] = set()
-        for device in devices or []:
-            canonical = (
-                device.get("canonicalId")
-                or device.get("canonical_id")
-                or device.get("id")
-                or device.get("device_id")
-            )
-            if canonical is None:
-                continue
-            if not isinstance(canonical, str):
-                canonical = str(canonical)
-            canonical = canonical.strip()
-            if not canonical:
-                continue
-
-            # Do not overwrite an existing routing entry from another account.
-            # Shared devices may appear under multiple entries; keep the first
-            # registration so FCM messages route to the primary owner instead
-            # of the most recently loaded account.
-            if canonical not in owner_index or owner_index[canonical] == entry_id:
-                owner_index[canonical] = entry_id
-                seen.add(canonical)
-
-        if owner_index:
-            stale = [
-                cid
-                for cid, eid in list(owner_index.items())
-                if eid == entry_id and cid not in seen
-            ]
-            for cid in stale:
-                owner_index.pop(cid, None)
-            if stale:
-                _LOGGER.debug(
-                    "[entry=%s] Pruned %d stale owner-index entries",
-                    entry_id,
-                    len(stale),
-                )
-
     # --- NEW: Create/refresh DR entries for end devices (entry-scoped) -----
     def _ensure_registry_for_devices(
         self, devices: list[dict[str, Any]], ignored: set[str]
