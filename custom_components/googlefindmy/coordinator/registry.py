@@ -1037,7 +1037,8 @@ class RegistryOperations:
                 identifiers,
                 DOMAIN,
                 entry_id=entry_id,
-                service_prefix=f"{SERVICE_DEVICE_IDENTIFIER_PREFIX}:",
+                service_prefix=SERVICE_DEVICE_IDENTIFIER_PREFIX,
+                legacy_service_id=LEGACY_SERVICE_IDENTIFIER,
             )
             if registry_identifier:
                 canonical_device_id = registry_identifier

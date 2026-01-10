@@ -17,7 +17,6 @@ _CallbackT = TypeVar("_CallbackT", bound=Callable[..., Any])
 
 def callback(func: _CallbackT) -> _CallbackT:
     """Return a typed wrapper around Home Assistant's ``callback`` decorator."""
-
     return ha_callback(func)
 
 
