@@ -153,22 +153,40 @@ from ..ha_typing import DataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+# Store original class at import time for monkeypatch detection in _get_api_class()
+_OriginalGoogleFindMyAPI: type[GoogleFindMyAPI] = GoogleFindMyAPI
+
 
 def _get_api_class() -> type[GoogleFindMyAPI]:
-    """Return the GoogleFindMyAPI class, respecting package-level monkeypatches.
+    """Return the GoogleFindMyAPI class, respecting monkeypatches.
 
-    Tests and add-ons may monkeypatch `coordinator.GoogleFindMyAPI` to inject mocks.
-    This function resolves the class from the package namespace at call-time so those
-    patches propagate correctly.
+    Tests and add-ons may monkeypatch `coordinator.main.GoogleFindMyAPI` (module level)
+    or `coordinator.GoogleFindMyAPI` (package level) to inject mocks. This function
+    checks both namespaces at call-time so those patches propagate correctly.
+
+    Priority order:
+    1. Module-level patch (coordinator.main.GoogleFindMyAPI) - used by existing tests
+    2. Package-level patch (coordinator.GoogleFindMyAPI) - for downstream compatibility
+    3. Direct import fallback
     """
     import sys
 
+    # Check module-level patch first (existing tests use this)
+    main_module = sys.modules.get("custom_components.googlefindmy.coordinator.main")
+    if main_module is not None:
+        patched = getattr(main_module, "GoogleFindMyAPI", None)
+        # Only use if it differs from the original import (i.e., was actually patched)
+        if patched is not None and patched is not _OriginalGoogleFindMyAPI:
+            return patched  # type: ignore[no-any-return]
+
+    # Check package-level patch (for downstream add-ons)
     coordinator_pkg = sys.modules.get("custom_components.googlefindmy.coordinator")
     if coordinator_pkg is not None:
         patched = getattr(coordinator_pkg, "GoogleFindMyAPI", None)
-        if patched is not None:
+        if patched is not None and patched is not _OriginalGoogleFindMyAPI:
             return patched  # type: ignore[no-any-return]
-    return GoogleFindMyAPI
+
+    return _OriginalGoogleFindMyAPI
 
 
 # --- Lightweight cache protocol for entry-scoped persistence -----------------
