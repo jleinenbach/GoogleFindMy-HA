@@ -127,6 +127,8 @@ from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
 
 # IMPORTANT: make Common_pb2 import **mandatory** (integration packaging must include it).
 # This avoids silent type/name drift and keeps source labels stable.
+# NOTE: Import GoogleFindMyAPI directly for type hints; use _get_api_class() at
+# call-time to respect package-level monkeypatches from tests.
 from ..api import GoogleFindMyAPI
 from ..const import (
     CACHE_KEY_CONTRIBUTOR_MODE,
@@ -150,6 +152,23 @@ from ..const import (
 from ..ha_typing import DataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _get_api_class() -> type[GoogleFindMyAPI]:
+    """Return the GoogleFindMyAPI class, respecting package-level monkeypatches.
+
+    Tests and add-ons may monkeypatch `coordinator.GoogleFindMyAPI` to inject mocks.
+    This function resolves the class from the package namespace at call-time so those
+    patches propagate correctly.
+    """
+    import sys
+
+    coordinator_pkg = sys.modules.get("custom_components.googlefindmy.coordinator")
+    if coordinator_pkg is not None:
+        patched = getattr(coordinator_pkg, "GoogleFindMyAPI", None)
+        if patched is not None:
+            return patched  # type: ignore[return-value]
+    return GoogleFindMyAPI
 
 
 # --- Lightweight cache protocol for entry-scoped persistence -----------------
@@ -595,7 +614,9 @@ class GoogleFindMyCoordinator(
         self._contributor_mode = normalized_mode
         self._contributor_mode_switch_epoch = int(contributor_mode_switch_epoch)
 
-        self.api = GoogleFindMyAPI(
+        # Use _get_api_class() to respect package-level monkeypatches from tests
+        APIClass = _get_api_class()
+        self.api = APIClass(
             cache=self._cache,
             session=self._session,
             contributor_mode=self._contributor_mode,
