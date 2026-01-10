@@ -146,18 +146,23 @@ class CacheOperations:
         self._present_last_seen[device_id] = timestamp
 
     def _track_device_interval(
-        self: GoogleFindMyCoordinator, device_id: str, interval_s: float
+        self: GoogleFindMyCoordinator, device_id: str, last_seen: float | None
     ) -> None:
-        """Record an observed polling interval for a device.
+        """Track last_seen history to predict future poll targets."""
+        from collections import deque
 
-        Intervals are appended to a rolling window and used to compute
-        predictive polling targets in _get_predicted_poll_time.
-        """
-        window = self._device_interval_history.setdefault(device_id, [])
-        window.append(interval_s)
-        max_samples = 10
-        if len(window) > max_samples:
-            window[:] = window[-max_samples:]
+        if last_seen is None:
+            return
+
+        history_store = getattr(self, "_device_update_history", None)
+        if history_store is None:
+            history_store = {}
+            self._device_update_history = history_store
+
+        history = history_store.setdefault(device_id, deque(maxlen=4))
+
+        if not history or last_seen > history[-1]:
+            history.append(last_seen)
 
     def _persist_anchor_metadata(
         self: GoogleFindMyCoordinator,
@@ -223,144 +228,267 @@ class CacheOperations:
         if has_metadata or updated != existing:
             self._device_location_data[device_id] = updated
 
+        # Trigger EID resolver refresh when identity_key is present
+        if "identity_key" in payload or "identityKey" in payload:
+            from ..const import DATA_EID_RESOLVER, DOMAIN
+
+            hass_obj = getattr(self, "hass", None)
+            if hass_obj is None:
+                return
+            domain_bucket = hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
+            if not isinstance(domain_bucket, dict):
+                return
+            eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
+            if eid_resolver is not None:
+                _LOGGER.debug(
+                    "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
+                    device_id,
+                )
+                refresh_coro = getattr(eid_resolver, "async_refresh", None)
+                if callable(refresh_coro):
+                    hass_obj.async_create_task(refresh_coro())
+
     def update_device_cache(
         self: GoogleFindMyCoordinator,
         device_id: str,
-        location: dict[str, Any],
+        location_data: dict[str, Any],
         *,
         source: str | None = None,
     ) -> None:
-        """Update the internal location cache for a device.
+        """Public, encapsulated update of the internal location cache for one device.
 
-        This method applies the cache update logic, including:
-        - Timestamp validation (reject stale updates)
-        - Location fusion (weighted merging)
-        - Shared device propagation
+        Used by the FCM receiver (push path) and by internal manual-commit call sites.
+        Expects validated fields (decrypt layer performs fail-fast checks).
 
-        Args:
-            device_id: Canonical device identifier.
-            location: New location data to merge.
-            source: Optional source identifier for logging.
+        Internal rules:
+        - Applies type-aware **poll** cooldowns based on an internal `_report_hint` (if present).
+        - Strips `_report_hint` from the cached payload to avoid exposing internal fields.
+        - Applies weighted fusion and semantic-anchor protection to stabilize coordinates
+          while still updating timestamps and metadata.
         """
-        if not location:
+        # Thread safety: marshal to HA loop if needed
+        if not self._is_on_hass_loop():
+            self._run_on_hass_loop(self.update_device_cache, device_id, location_data)
             return
 
-        wall_now = time.time()
+        if not isinstance(location_data, dict):
+            _LOGGER.debug(
+                "Ignored cache update for %s: payload is not a dict", device_id
+            )
+            return
 
-        # Normalize incoming location
-        location = dict(location)
-        location = _normalize_location_fields_impl(location)
+        # Shallow copy to avoid caller-side mutation
+        slot = dict(location_data)
 
-        # Normalize camelCase metadata keys to snake_case
-        location = _normalize_metadata_keys(location)
+        # Normalize fields
+        slot = _normalize_location_fields_impl(slot)
+        slot = _normalize_metadata_keys(slot)
 
-        # Apply semantic location mapping if coordinates are missing
+        previous_cached = self._device_location_data.get(device_id)
+        if not isinstance(previous_cached, Mapping):
+            previous_cached = None
+        comparison_cached = previous_cached
+
+        # Preserve metadata from existing cache
+        if isinstance(previous_cached, Mapping):
+            for metadata_key in _METADATA_KEYS:
+                cached_value = previous_cached.get(metadata_key)
+                incoming_value = slot.get(metadata_key)
+                if cached_value is None or incoming_value is not None:
+                    continue
+                if isinstance(cached_value, dict):
+                    slot[metadata_key] = dict(cached_value)
+                elif isinstance(cached_value, list):
+                    slot[metadata_key] = list(cached_value)
+                else:
+                    slot[metadata_key] = cached_value
+
+        # Handle metadata_only flag
+        incoming_metadata_only = location_data.get("metadata_only")
+        has_location_payload = (
+            slot.get("latitude") is not None or slot.get("longitude") is not None
+        )
+        if slot.get("metadata_only") and incoming_metadata_only is False:
+            slot.pop("metadata_only", None)
+        elif slot.get("metadata_only") and has_location_payload and incoming_metadata_only is not True:
+            slot.pop("metadata_only", None)
+
+        clear_metadata_only = has_location_payload and incoming_metadata_only is not True
+        self._persist_anchor_metadata(
+            device_id, slot, clear_metadata_only=clear_metadata_only
+        )
+
+        # Record semantic label if available
+        record_semantic = getattr(self, "_record_semantic_label", None)
+        if callable(record_semantic):
+            record_semantic(slot, device_id=device_id)
+
+        # Check for replay (same timestamp)
+        cached_loc = comparison_cached
+        is_replay = False
+        if isinstance(cached_loc, Mapping):
+            new_ts = _normalize_epoch_seconds(slot.get("last_seen"))
+            old_ts = _normalize_epoch_seconds(cached_loc.get("last_seen"))
+            if new_ts is not None and old_ts is not None and new_ts == old_ts:
+                is_replay = True
+
+        slot["is_replayed"] = is_replay
+
+        # Apply semantic location mapping
         apply_mapping = getattr(self, "_apply_semantic_mapping", None)
         if callable(apply_mapping):
-            apply_mapping(location)
+            apply_mapping(slot)
 
-        # Get existing cache entry
-        existing = self._device_location_data.get(device_id)
-        if not isinstance(existing, dict):
-            existing = {}
+        slot.pop("is_replayed", None)
 
-        # Check if fusion was already applied (from _async_start_poll_cycle)
-        fusion_preapplied = location.pop("_fusion_preapplied", False)
-
-        # Strip internal hints before caching
-        location.pop("_report_hint", None)
-
-        # Validate timestamps
-        incoming_ts = _normalize_epoch_seconds(location.get("last_seen"))
-        existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
-
-        # Get source ranks
-        incoming_rank = location.get("source_rank")
-        existing_rank = existing.get("source_rank")
-
-        # Determine if we should allow the location update
-        allow_update = _should_allow_location_update_impl(
-            existing_ts, incoming_ts, existing_rank, incoming_rank
-        )
-
-        # If allow_update is None, we need to check distance for significance
-        if allow_update is None and not fusion_preapplied:
-            allow_update = self._is_significant_update(device_id, location)
-
-        if allow_update is False and not fusion_preapplied:
-            # Reject stale location but preserve metadata
-            _LOGGER.debug(
-                "Rejecting stale location for %s: existing=%s, incoming=%s",
-                device_id,
-                existing_ts,
-                incoming_ts,
-            )
-            # Track rejection statistics
-            self.increment_stat("invalid_ts_drop_count")
-            self.increment_stat("drop_reason_invalid_ts")
-            # Still merge metadata fields
-            for key, value in location.items():
-                if key not in LOCATION_FIELDS and value is not None:
-                    existing[key] = value
-            self._device_location_data[device_id] = existing
-            return
+        report_hint = slot.get("_report_hint")
+        fusion_preapplied = bool(slot.pop("_fusion_preapplied", False))
 
         # Apply weighted fusion if not already done
-        if not fusion_preapplied:
-            if not self._apply_weighted_location_fusion(device_id, location):
-                # Fusion rejected the update
-                return
-
-        # Merge with existing cache
-        merged = self._merge_with_existing_cache_row(device_id, location)
-
-        # Set last_updated timestamp
-        merged["last_updated"] = wall_now
-
-        # Preserve metadata from existing entry
-        merged = _preserve_metadata_fields_impl(existing, merged, _METADATA_KEYS)
-
-        # Store the merged result
-        self._device_location_data[device_id] = merged
-
-        # Check for identity key rotation and trigger resolver reset
-        old_identity = self._normalize_identity_key(
-            existing.get("identity_key")
-            or existing.get("identityKey")
-            or existing.get("eik")
-        )
-        new_identity = self._normalize_identity_key(
-            merged.get("identity_key")
-            or merged.get("identityKey")
-            or merged.get("eik")
-        )
-        if old_identity and new_identity and old_identity != new_identity:
-            _LOGGER.info(
-                "Identity key update detected for %s; triggering resolver reset",
+        if not fusion_preapplied and not self._apply_weighted_location_fusion(
+            device_id, slot
+        ):
+            _LOGGER.debug(
+                "Dropping cache update for %s: weighted fusion rejected payload",
                 device_id,
             )
+            return
+
+        fused_applied = slot.pop("_fused_applied", False)
+
+        status = slot.get("status")
+        is_stationary_logic = (
+            status in ("Fused (Weighted)", "Stationary (at Anchor)")
+            or is_replay
+        )
+
+        # Track fused update statistics
+        if fused_applied and status == "Fused (Weighted)":
+            self.increment_stat("fused_updates")
+
+        # Apply report type cooldown for stationary updates
+        if is_stationary_logic:
+            apply_cooldown = getattr(self, "_apply_report_type_cooldown", None)
+            if callable(apply_cooldown):
+                apply_cooldown(device_id, report_hint)
+        else:
+            _LOGGER.debug(
+                "Skipping throttle cooldown for %s despite '%s' hint (movement detected)",
+                device_id,
+                report_hint,
+            )
+
+        # Track crowd-sourced updates when hint is present
+        if report_hint:
+            self.increment_stat("crowd_sourced_updates")
+
+        slot.pop("_report_hint", None)
+        slot.pop("is_replayed", None)
+
+        # Sanitize decoder row
+        slot = _sanitize_decoder_row(slot)
+
+        # Track device interval
+        raw_last_seen = _normalize_epoch_seconds(slot.get("last_seen"))
+        self._track_device_interval(device_id, raw_last_seen)
+
+        # Increment crowdsourced stats for push/manual commits
+        if slot.get("source_label") == "crowdsourced":
+            self.increment_stat("crowd_sourced_updates")
+
+        # Significance check
+        if not self._is_significant_update(device_id, slot):
+            _LOGGER.debug(
+                "Dropping cache update for %s: update failed significance checks",
+                device_id,
+            )
+            return
+
+        resolver_refresh_needed = False
+
+        # Handle identity key changes
+        cached_identity_key = None
+        if isinstance(cached_loc, Mapping):
+            cached_identity_key = self._normalize_identity_key(
+                cached_loc.get("identity_key")
+            )
+
+        incoming_identity_key = self._normalize_identity_key(slot.get("identity_key"))
+        if incoming_identity_key is not None:
+            slot["identity_key"] = incoming_identity_key
+
+        incoming_eik = self._normalize_identity_key(slot.get("encrypted_identity_key"))
+        if incoming_eik is not None:
+            slot["encrypted_identity_key"] = incoming_eik
+
+        incoming_owner_key_version = slot.get("owner_key_version")
+
+        identity_changed = (
+            incoming_identity_key is not None
+            and incoming_identity_key != cached_identity_key
+        )
+
+        cached_eik = None
+        cached_owner_key_version = None
+        if isinstance(cached_loc, Mapping):
+            cached_eik = self._normalize_identity_key(
+                cached_loc.get("encrypted_identity_key")
+            )
+            cached_owner_key_version = cached_loc.get("owner_key_version")
+
+        encrypted_changed = False
+        if incoming_eik is not None or incoming_owner_key_version is not None:
+            encrypted_changed = (
+                incoming_eik != cached_eik
+                or incoming_owner_key_version != cached_owner_key_version
+            )
+
+        if identity_changed or encrypted_changed:
+            resolver_refresh_needed = True
+            _LOGGER.info(
+                "Identity key update detected for %s (ownerKeyVersion=%s); "
+                "scheduling EID resolver refresh.",
+                device_id,
+                incoming_owner_key_version,
+            )
+
+        # Ensure last_updated is present
+        slot.setdefault("last_updated", time.time())
+
+        # Merge with existing cache
+        slot = self._merge_with_existing_cache_row(device_id, slot)
+
+        # Keep name cache up-to-date
+        name_cache_fn = getattr(self, "_ensure_device_name_cache", None)
+        if callable(name_cache_fn):
+            name_cache = name_cache_fn()
+            name = slot.get("name")
+            if isinstance(name, str) and name:
+                name_cache[device_id] = name
+
+        self._device_location_data[device_id] = slot
+
+        # Increment background updates
+        self.increment_stat("background_updates")
+
+        # Register identity key and propagate to shared devices
+        effective_identity_key = incoming_identity_key or cached_identity_key
+        if effective_identity_key is not None:
+            register_fn = getattr(self, "_register_identity_key", None)
+            if callable(register_fn):
+                register_fn(device_id, effective_identity_key)
+            self._propagate_location_to_shared_devices(
+                device_id, slot
+            )
+
+        # Trigger resolver refresh if identity changed
+        if resolver_refresh_needed:
             reset_fn = getattr(self, "_reset_resolver_offset", None)
             if callable(reset_fn):
                 reset_fn(device_id)
             schedule_fn = getattr(self, "_schedule_eid_resolver_refresh", None)
             if callable(schedule_fn):
                 schedule_fn()
-
-        # Track interval for predictive polling
-        if incoming_ts is not None and existing_ts is not None:
-            interval = incoming_ts - existing_ts
-            if 0 < interval < 86400:  # Sanity check: less than 24h
-                self._track_device_interval(device_id, interval)
-
-        # Propagate to shared devices
-        self._propagate_location_to_shared_devices(device_id, merged)
-
-        _LOGGER.debug(
-            "Cache updated for %s (source=%s): ts=%s",
-            device_id,
-            source or "unknown",
-            incoming_ts,
-        )
 
     def _propagate_location_to_shared_devices(
         self: GoogleFindMyCoordinator,
@@ -444,64 +572,70 @@ class CacheOperations:
     def _is_significant_update(
         self: GoogleFindMyCoordinator,
         device_id: str,
-        location: dict[str, Any],
+        new_data: dict[str, Any],
     ) -> bool:
-        """Check if a location update represents a significant change.
+        """Validate temporal ordering before committing cache updates.
 
-        Significant changes include:
-        - Distance moved > threshold (default 50m)
-        - First location for the device
-        - Accuracy improvement > 50%
-        - Fusion-modified update (status indicates anchor preservation)
+        Weighted fusion now stabilizes coordinates earlier in the pipeline, so
+        this gate focuses on rejecting malformed or stale timestamps that would
+        regress cached locations. Callers run fusion before invoking this shim;
+        no additional coordinate logic belongs here.
 
         Args:
-            device_id: Device identifier.
-            location: New location data.
+            device_id: Canonical device identifier.
+            new_data: The latest location payload to evaluate.
 
         Returns:
-            True if the update is significant and should be applied.
+            ``True`` when the caller should accept the payload.
         """
+        # Maximum accepted future drift in seconds (2 hours)
+        MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
+
+        if not isinstance(new_data, dict):
+            _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
+            return False
+
+        n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
+        if n_seen_norm is not None:
+            if n_seen_norm < 946684800.0:  # < 2000-01-01
+                self.increment_stat("invalid_ts_drop_count")
+                self.increment_stat("drop_reason_invalid_ts")
+                _LOGGER.debug(
+                    "Rejecting update for %s: timestamp too old (%s)",
+                    device_id,
+                    n_seen_norm,
+                )
+                return False
+            if n_seen_norm > time.time() + MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S:
+                self.increment_stat("future_ts_drop_count")
+                _LOGGER.debug(
+                    "Rejecting update for %s: timestamp too far in future (%s)",
+                    device_id,
+                    n_seen_norm,
+                )
+                return False
+
         existing = self._device_location_data.get(device_id)
-        if not isinstance(existing, dict):
-            return True  # First location is always significant
-
-        # Fusion-modified updates are always significant (anchor was preserved)
-        if location.get("status") == "Stationary (at Anchor)":
+        if not existing:
             return True
 
-        # Get coordinates
-        new_lat = _coerce_float_impl(location.get("latitude"))
-        new_lon = _coerce_float_impl(location.get("longitude"))
-        old_lat = _coerce_float_impl(existing.get("latitude"))
-        old_lon = _coerce_float_impl(existing.get("longitude"))
+        e_seen_norm = _normalize_epoch_seconds(existing.get("last_seen"))
+        if (
+            n_seen_norm is not None
+            and e_seen_norm is not None
+            and n_seen_norm < e_seen_norm
+        ):
+            self.increment_stat("invalid_ts_drop_count")
+            self.increment_stat("drop_reason_invalid_ts")
+            _LOGGER.debug(
+                "Rejecting update for %s: timestamp regressed (%s < %s)",
+                device_id,
+                n_seen_norm,
+                e_seen_norm,
+            )
+            return False
 
-        # If we don't have valid coordinates, allow the update
-        if new_lat is None or new_lon is None:
-            return True
-        if old_lat is None or old_lon is None:
-            return True
-
-        # Calculate distance
-        try:
-            distance = _haversine_distance_impl(old_lat, old_lon, new_lat, new_lon)
-        except Exception:
-            return True  # On error, allow update
-
-        # Check distance threshold (50m default)
-        threshold = 50.0
-        if distance > threshold:
-            return True
-
-        # Check accuracy improvement
-        new_acc = safe_accuracy(location.get("accuracy"))
-        old_acc = safe_accuracy(existing.get("accuracy"))
-
-        if new_acc is not None and old_acc is not None:
-            # Significant if accuracy improved by > 50%
-            if new_acc < old_acc * 0.5:
-                return True
-
-        return False
+        return True
 
     def _merge_with_existing_cache_row(
         self: GoogleFindMyCoordinator,
@@ -545,111 +679,102 @@ class CacheOperations:
     def _apply_weighted_location_fusion(
         self: GoogleFindMyCoordinator,
         device_id: str,
-        location: dict[str, Any],
+        new_data: dict[str, Any],
     ) -> bool:
-        """Apply weighted location fusion based on source authority.
+        """Fuse overlapping locations while honoring semantic anchors.
 
-        This method compares the incoming location with cached data and
-        decides whether to accept, reject, or blend the update based on:
-        - Source rank (owner > crowdsourced > aggregated > semantic)
-        - Timestamp freshness
-        - Accuracy values
-        - Trusted anchor preservation (shields trusted locations from jitter)
+        The fusion pipeline keeps semantic locations authoritative and blends
+        overlapping sensor fixes to minimize jitter:
+        1. Cold starts accept any payload because there is no baseline.
+        2. Trusted (semantic) updates always win immediately.
+        3. When the cached location is trusted, overlapping sensor fixes snap
+           back to the anchor instead of drifting.
+        4. Standard sensor fixes are fused with inverse-square weighting when
+           their accuracy circles overlap; clear jumps simply pass through.
 
-        When a low-accuracy update overlaps with a trusted anchor, the anchor
-        coordinates are preserved in the incoming location dict.
-
-        Args:
-            device_id: Device identifier.
-            location: Location data to evaluate (may be modified in place).
-
-        Returns:
-            True if the location should be applied, False to reject.
+        Returns True when the caller should continue processing the payload.
         """
+        import math
+
         existing = self._device_location_data.get(device_id)
-        if not isinstance(existing, dict):
-            return True  # No existing data, accept
-
-        # Check for trusted anchor preservation
-        # If existing has trusted location and incoming is low-accuracy jitter,
-        # preserve the trusted anchor coordinates
-        existing_location_type = existing.get("location_type")
-        if existing_location_type == "trusted":
-            existing_acc = safe_accuracy(existing.get("accuracy"))
-            incoming_acc = safe_accuracy(location.get("accuracy"))
-
-            # Low accuracy threshold for jitter detection
-            if incoming_acc is not None and incoming_acc > 100.0:
-                # Get coordinates
-                existing_lat = _coerce_float_impl(existing.get("latitude"))
-                existing_lon = _coerce_float_impl(existing.get("longitude"))
-                incoming_lat = _coerce_float_impl(location.get("latitude"))
-                incoming_lon = _coerce_float_impl(location.get("longitude"))
-
-                if all(
-                    v is not None
-                    for v in [existing_lat, existing_lon, incoming_lat, incoming_lon]
-                ):
-                    # Calculate distance
-                    try:
-                        distance = _haversine_distance_impl(
-                            existing_lat, existing_lon, incoming_lat, incoming_lon  # type: ignore[arg-type]
-                        )
-                        # Jitter threshold: within combined accuracy radius
-                        jitter_threshold = (existing_acc or 50.0) + incoming_acc
-                        if distance < jitter_threshold:
-                            # Preserve trusted anchor - modify location in place
-                            location["latitude"] = existing_lat
-                            location["longitude"] = existing_lon
-                            location["accuracy"] = existing_acc or existing.get("accuracy")
-                            location["location_type"] = "trusted"
-                            location["status"] = "Stationary (at Anchor)"
-                            _LOGGER.debug(
-                                "Preserving trusted anchor for %s: distance %.1fm < threshold %.1fm",
-                                device_id,
-                                distance,
-                                jitter_threshold,
-                            )
-                    except Exception:
-                        pass  # On error, continue with normal processing
-
-        # Get timestamps
-        incoming_ts = _normalize_epoch_seconds(location.get("last_seen"))
-        existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
-
-        # Get source ranks (higher = more authoritative)
-        incoming_rank = location.get("source_rank", 0)
-        existing_rank = existing.get("source_rank", 0)
-
-        # If incoming has higher rank, accept
-        if incoming_rank > existing_rank:
+        if not existing or existing.get("latitude") is None:
             return True
 
-        # If existing has higher rank, only accept if incoming is significantly fresher
-        if existing_rank > incoming_rank:
-            if incoming_ts is None or existing_ts is None:
-                return False
-            # Require at least 5 minutes fresher to override higher-rank source
-            if incoming_ts - existing_ts < 300:
-                _LOGGER.debug(
-                    "Rejecting %s update for %s: lower rank (%s vs %s) and not fresh enough",
-                    location.get("source_label", "unknown"),
-                    device_id,
-                    incoming_rank,
-                    existing_rank,
-                )
-                return False
+        new_lat = _coerce_float_impl(new_data.get("latitude"))
+        new_lon = _coerce_float_impl(new_data.get("longitude"))
+        if new_lat is None or new_lon is None:
+            return True
 
-        # Same rank: prefer fresher data
-        if incoming_ts is not None and existing_ts is not None:
-            if incoming_ts < existing_ts:
-                _LOGGER.debug(
-                    "Rejecting stale %s update for %s: %s < %s",
-                    location.get("source_label", "unknown"),
-                    device_id,
-                    incoming_ts,
-                    existing_ts,
-                )
-                return False
+        existing_lat = _coerce_float_impl(existing.get("latitude"))
+        existing_lon = _coerce_float_impl(existing.get("longitude"))
+        if existing_lat is None or existing_lon is None:
+            return True
 
+        existing_acc_raw = _coerce_float_impl(existing.get("accuracy"))
+        new_acc_raw = _coerce_float_impl(new_data.get("accuracy"))
+
+        def _safe_accuracy(value: float | None) -> float:
+            if value is None or not math.isfinite(value):
+                return 10000.0
+            if value < 0:
+                return 10000.0
+            return value
+
+        existing_acc = _safe_accuracy(existing_acc_raw)
+        new_acc = _safe_accuracy(new_acc_raw)
+
+        try:
+            dist = _haversine_distance_impl(
+                existing_lat, existing_lon, new_lat, new_lon
+            )
+        except Exception:
+            return True
+
+        radius_sum = existing_acc + new_acc
+
+        # Incoming trusted update always wins
+        if new_data.get("location_type") == "trusted":
+            return True
+
+        # Existing trusted anchor: snap back if overlapping
+        if existing.get("location_type") == "trusted":
+            if dist <= radius_sum:
+                new_data["latitude"] = existing_lat
+                new_data["longitude"] = existing_lon
+                if existing_acc_raw is not None:
+                    new_data["accuracy"] = existing_acc_raw
+                if existing.get("altitude") is not None:
+                    new_data["altitude"] = existing["altitude"]
+                new_data["location_type"] = "trusted"
+                new_data["status"] = "Stationary (at Anchor)"
+            return True
+
+        # Clear jump - no overlap, accept as-is
+        if dist > radius_sum:
+            return True
+
+        # Overlapping accuracy circles: fuse with inverse-square weighting
+        w_old = 1 / (max(1.0, existing_acc) ** 2)
+        w_new = 1 / (max(1.0, new_acc) ** 2)
+        total_w = w_old + w_new
+        if total_w == 0:
+            return True
+
+        lat_fused = (existing_lat * w_old + new_lat * w_new) / total_w
+        lon_fused = (existing_lon * w_old + new_lon * w_new) / total_w
+
+        new_data["latitude"] = lat_fused
+        new_data["longitude"] = lon_fused
+
+        best_accuracy: float | None
+        if existing_acc_raw is not None and new_acc_raw is not None:
+            best_accuracy = min(existing_acc_raw, new_acc_raw)
+        else:
+            best_accuracy = existing_acc_raw or new_acc_raw
+
+        if best_accuracy is not None:
+            new_data["accuracy"] = best_accuracy
+
+        new_data["status"] = "Fused (Weighted)"
+        new_data["_fused_applied"] = True
         return True
