@@ -254,6 +254,11 @@ class CacheOperations:
         # Normalize camelCase metadata keys to snake_case
         location = _normalize_metadata_keys(location)
 
+        # Apply semantic location mapping if coordinates are missing
+        apply_mapping = getattr(self, "_apply_semantic_mapping", None)
+        if callable(apply_mapping):
+            apply_mapping(location)
+
         # Get existing cache entry
         existing = self._device_location_data.get(device_id)
         if not isinstance(existing, dict):
@@ -290,6 +295,9 @@ class CacheOperations:
                 existing_ts,
                 incoming_ts,
             )
+            # Track rejection statistics
+            self.increment_stat("invalid_ts_drop_count")
+            self.increment_stat("drop_reason_invalid_ts")
             # Still merge metadata fields
             for key, value in location.items():
                 if key not in LOCATION_FIELDS and value is not None:
@@ -314,6 +322,29 @@ class CacheOperations:
 
         # Store the merged result
         self._device_location_data[device_id] = merged
+
+        # Check for identity key rotation and trigger resolver reset
+        old_identity = self._normalize_identity_key(
+            existing.get("identity_key")
+            or existing.get("identityKey")
+            or existing.get("eik")
+        )
+        new_identity = self._normalize_identity_key(
+            merged.get("identity_key")
+            or merged.get("identityKey")
+            or merged.get("eik")
+        )
+        if old_identity and new_identity and old_identity != new_identity:
+            _LOGGER.info(
+                "Identity key update detected for %s; triggering resolver reset",
+                device_id,
+            )
+            reset_fn = getattr(self, "_reset_resolver_offset", None)
+            if callable(reset_fn):
+                reset_fn(device_id)
+            schedule_fn = getattr(self, "_schedule_eid_resolver_refresh", None)
+            if callable(schedule_fn):
+                schedule_fn()
 
         # Track interval for predictive polling
         if incoming_ts is not None and existing_ts is not None:
@@ -421,6 +452,7 @@ class CacheOperations:
         - Distance moved > threshold (default 50m)
         - First location for the device
         - Accuracy improvement > 50%
+        - Fusion-modified update (status indicates anchor preservation)
 
         Args:
             device_id: Device identifier.
@@ -432,6 +464,10 @@ class CacheOperations:
         existing = self._device_location_data.get(device_id)
         if not isinstance(existing, dict):
             return True  # First location is always significant
+
+        # Fusion-modified updates are always significant (anchor was preserved)
+        if location.get("status") == "Stationary (at Anchor)":
+            return True
 
         # Get coordinates
         new_lat = _coerce_float_impl(location.get("latitude"))
@@ -518,10 +554,14 @@ class CacheOperations:
         - Source rank (owner > crowdsourced > aggregated > semantic)
         - Timestamp freshness
         - Accuracy values
+        - Trusted anchor preservation (shields trusted locations from jitter)
+
+        When a low-accuracy update overlaps with a trusted anchor, the anchor
+        coordinates are preserved in the incoming location dict.
 
         Args:
             device_id: Device identifier.
-            location: Location data to evaluate.
+            location: Location data to evaluate (may be modified in place).
 
         Returns:
             True if the location should be applied, False to reject.
@@ -529,6 +569,49 @@ class CacheOperations:
         existing = self._device_location_data.get(device_id)
         if not isinstance(existing, dict):
             return True  # No existing data, accept
+
+        # Check for trusted anchor preservation
+        # If existing has trusted location and incoming is low-accuracy jitter,
+        # preserve the trusted anchor coordinates
+        existing_location_type = existing.get("location_type")
+        if existing_location_type == "trusted":
+            existing_acc = safe_accuracy(existing.get("accuracy"))
+            incoming_acc = safe_accuracy(location.get("accuracy"))
+
+            # Low accuracy threshold for jitter detection
+            if incoming_acc is not None and incoming_acc > 100.0:
+                # Get coordinates
+                existing_lat = _coerce_float_impl(existing.get("latitude"))
+                existing_lon = _coerce_float_impl(existing.get("longitude"))
+                incoming_lat = _coerce_float_impl(location.get("latitude"))
+                incoming_lon = _coerce_float_impl(location.get("longitude"))
+
+                if all(
+                    v is not None
+                    for v in [existing_lat, existing_lon, incoming_lat, incoming_lon]
+                ):
+                    # Calculate distance
+                    try:
+                        distance = _haversine_distance_impl(
+                            existing_lat, existing_lon, incoming_lat, incoming_lon  # type: ignore[arg-type]
+                        )
+                        # Jitter threshold: within combined accuracy radius
+                        jitter_threshold = (existing_acc or 50.0) + incoming_acc
+                        if distance < jitter_threshold:
+                            # Preserve trusted anchor - modify location in place
+                            location["latitude"] = existing_lat
+                            location["longitude"] = existing_lon
+                            location["accuracy"] = existing_acc or existing.get("accuracy")
+                            location["location_type"] = "trusted"
+                            location["status"] = "Stationary (at Anchor)"
+                            _LOGGER.debug(
+                                "Preserving trusted anchor for %s: distance %.1fm < threshold %.1fm",
+                                device_id,
+                                distance,
+                                jitter_threshold,
+                            )
+                    except Exception:
+                        pass  # On error, continue with normal processing
 
         # Get timestamps
         incoming_ts = _normalize_epoch_seconds(location.get("last_seen"))
