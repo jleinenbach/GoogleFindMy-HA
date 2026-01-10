@@ -397,3 +397,12 @@ class RegistryOperations:
                 return True
 
         return True
+
+    def _redact_text(
+        self: "GoogleFindMyCoordinator", value: str | None, max_len: int = 120
+    ) -> str:
+        """Return a short, redacted string variant suitable for logs/diagnostics."""
+        if not value:
+            return ""
+        s = str(value)
+        return s if len(s) <= max_len else (s[:max_len] + "…")

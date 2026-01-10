@@ -2059,14 +2059,6 @@ class GoogleFindMyCoordinator(
             # without killing the connection.
             await api.close()
 
-    # --- BEGIN: Add/Replace inside Coordinator class ------------------------------
-    def _redact_text(self, value: str | None, max_len: int = 120) -> str:
-        """Return a short, redacted string variant suitable for logs/diagnostics."""
-        if not value:
-            return ""
-        s = str(value)
-        return s if len(s) <= max_len else (s[:max_len] + "…")
-
     def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 
