@@ -1,4 +1,4 @@
-.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse test-deps translation-check test-cov
+.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse test-deps translation-check test-cov check-ha-compat
 
 VENV ?= .venv
 PYTHON ?= python3
@@ -127,3 +127,7 @@ test-unload: $(VENV)/bin/activate
 test-cov:
 	@echo "[make test-cov] Running pytest -q --cov with PYTHONPATH=. to load sitecustomize"
 	@bash -o pipefail -c "PYTHONPATH=. $(PYTHON) -m pytest -q --cov $(PYTEST_COV_FLAGS) $(PYTEST_ARGS) 2>&1 | tee pytest_output.log"
+
+check-ha-compat:
+	@echo "[make check-ha-compat] Checking dependency compatibility with Home Assistant"
+	@$(PYTHON) script/check_ha_compatibility.py --verbose
