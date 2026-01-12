@@ -44,6 +44,7 @@ from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
+    DEFAULT_MIN_POLL_INTERVAL,
     DOMAIN,
     OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
@@ -53,6 +54,7 @@ from .const import (
     # user-facing options (non-secret)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
+    OPT_MIN_POLL_INTERVAL,
 )
 from .ha_typing import callback
 
@@ -523,6 +525,10 @@ async def async_get_config_entry_diagnostics(
                 OPT_LOCATION_POLL_INTERVAL, DEFAULT_LOCATION_POLL_INTERVAL
             ),
             DEFAULT_LOCATION_POLL_INTERVAL,
+        ),
+        "min_poll_interval": _coerce_pos_int(
+            effective_config.get(OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
+            DEFAULT_MIN_POLL_INTERVAL,
         ),
         "device_poll_delay": _coerce_pos_int(
             effective_config.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
