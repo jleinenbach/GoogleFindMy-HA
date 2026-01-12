@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import time
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
@@ -433,6 +434,7 @@ async def async_get_aas_token(
 
     Persistence:
         - Stored under key `DATA_AAS_TOKEN` in the selected cache.
+        - Issuance timestamp stored under `aas_token_issued_at_<username>` for TTL learning.
 
     Retry policy:
         - Non-retryable auth failures (e.g., "BadAuthentication", "invalid_grant",
@@ -449,6 +451,10 @@ async def async_get_aas_token(
     """
     if cache is None:
         raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    # Check if AAS token already exists (for TTL tracking)
+    existing_token = await cache.get(DATA_AAS_TOKEN)
+    was_cached = existing_token is not None and isinstance(existing_token, str)
 
     async def _gen_with_retries() -> str:
         last_exc: Exception | None = None
@@ -487,6 +493,22 @@ async def async_get_aas_token(
         raise last_exc
 
     token: str = await cache.get_or_set(DATA_AAS_TOKEN, _gen_with_retries)
+
+    # Record AAS token issuance timestamp if a fresh token was generated
+    # This enables TTL learning for proactive AAS refresh
+    if not was_cached:
+        username_val = await cache.get(username_string)
+        if isinstance(username_val, str) and username_val:
+            issued_key = f"aas_token_issued_at_{username_val.strip().lower()}"
+            try:
+                await cache.set(issued_key, time.time())
+                _LOGGER.debug(
+                    "Recorded AAS token issuance timestamp for TTL learning.",
+                    extra={"user": _mask_email_for_logs(username_val)},
+                )
+            except Exception as err:  # noqa: BLE001 - defensive cache write
+                _LOGGER.debug("Failed to record AAS issuance timestamp: %s", err)
+
     return token
 
 

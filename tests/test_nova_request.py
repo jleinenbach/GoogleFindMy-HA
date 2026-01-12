@@ -926,16 +926,18 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
 ) -> None:
     """Persistent 401 errors after token refresh must invalidate the AAS token.
 
-    When all auth_retries (3 attempts with backoff) are exhausted and 401
-    still persists, the AAS token should be cleared so subsequent poll cycles
-    can generate a fresh token chain (OAuth -> AAS -> ADM).
+    With the new retry sequence:
+    - Step 1: First 401 → refresh ADM → 6s → retry
+    - Step 2: Second 401 → 61s → invalidate AAS, refresh AAS+ADM → 6s → retry
+    - Step 3: Third 401 → 501s → retry
+    - Step 4: Fourth 401 → permanent error
 
-    This regression test covers the bug where an invalid AAS token would remain
-    cached indefinitely, causing a loop of failed token refreshes.
+    The AAS token is invalidated in step 2, enabling fresh token generation
+    in subsequent poll cycles.
     """
 
     cache = _StubCache()
-    # Need 4 responses: 1 initial 401 + 3 retries all returning 401
+    # Need 4 responses: 4 consecutive 401s to exhaust all retry steps
     session = _DummySession(
         [
             _DummyResponse(401, b"Unauthorized"),
@@ -963,7 +965,7 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
         async def _refresh() -> str:
             return "refreshed-adm"
 
-        # Mock asyncio.sleep to skip the 6s+12s+24s backoff delays
+        # Mock asyncio.sleep to skip delays
         async def _instant_sleep(_: float) -> None:
             pass
 
@@ -998,11 +1000,11 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
     with pytest.raises(NovaAuthError) as err:
         asyncio.run(_exercise())
 
-    # Verify the error is transient (not permanent)
+    # After all retries exhausted, error is permanent (requires re-auth)
     assert err.value.status == 401
-    assert not err.value.is_permanent
+    assert err.value.is_permanent is True
 
-    # Verify async_invalidate_aas_token was called
+    # AAS invalidation happens in step 2 (after second 401)
     assert len(aas_invalidation_calls) == 1
     assert aas_invalidation_calls[0] == "user@example.com"
 
@@ -1374,3 +1376,519 @@ def test_async_nova_request_loop_prevention_across_multiple_cycles(
     assert aas_states_at_cycle_start[1][1] is None  # Cycle 2 sees None
     assert aas_states_at_cycle_start[2][1] is None  # Cycle 3 sees None
     assert aas_states_at_cycle_start[3][1] is None  # Cycle 4 sees None
+
+
+def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADM refresh alone should fix most 401 errors without invalidating AAS.
+
+    This test verifies the new retry sequence:
+    - Step 1: First 401 → refresh ADM only → 6s propagation → retry
+    - Success on second request proves ADM-only refresh was sufficient
+
+    The AAS token should NOT be invalidated in this scenario.
+    """
+
+    cache = _StubCache()
+    # First request: 401, second request after ADM refresh: success
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(200, b"\xca\xfe\xba\xbe"),
+        ]
+    )
+
+    aas_invalidation_calls: list[str] = []
+    adm_refresh_calls: list[str] = []
+    sleep_delays: list[float] = []
+
+    async def _exercise() -> tuple[str, str | None]:
+        await cache.set(DATA_AAS_TOKEN, "valid-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            adm_refresh_calls.append("refresh")
+            return "refreshed-adm"
+
+        async def _tracking_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _spy_invalidate(self: AsyncTTLPolicy) -> None:
+            aas_invalidation_calls.append(self.username)
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _tracking_sleep)
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _spy_invalidate,
+        )
+
+        result = await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+        final_aas = await cache.get(DATA_AAS_TOKEN)
+        return result, final_aas
+
+    result, final_aas = asyncio.run(_exercise())
+
+    # Request should succeed
+    assert result == "cafebabe"
+
+    # ADM refresh should have been called once
+    assert len(adm_refresh_calls) == 1
+
+    # AAS token should NOT be invalidated (ADM refresh was sufficient)
+    assert len(aas_invalidation_calls) == 0
+    assert final_aas == "valid-aas"
+
+    # Should have waited 6s for propagation delay
+    assert 6.0 in sleep_delays
+
+
+def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ADM-only refresh fails, the entire AAS+ADM chain must be refreshed.
+
+    This test verifies the new retry sequence:
+    - Step 1: First 401 → refresh ADM only → 6s → retry
+    - Step 2: Second 401 → 61s cooldown → invalidate AAS → refresh AAS+ADM → 6s → retry
+    - Success on third request proves full chain refresh was needed
+
+    The AAS token should be invalidated after the second 401.
+    """
+
+    cache = _StubCache()
+    # Two 401s (ADM-only fails), then success after full chain refresh
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(200, b"\xde\xad\xbe\xef"),
+        ]
+    )
+
+    aas_invalidation_calls: list[str] = []
+    adm_refresh_calls: list[str] = []
+    sleep_delays: list[float] = []
+
+    async def _exercise() -> tuple[str, str | None]:
+        await cache.set(DATA_AAS_TOKEN, "stale-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            adm_refresh_calls.append("refresh")
+            # After AAS invalidation, this simulates generating fresh tokens
+            return "refreshed-adm"
+
+        async def _tracking_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _spy_invalidate(self: AsyncTTLPolicy) -> None:
+            aas_invalidation_calls.append(self.username)
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _tracking_sleep)
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _spy_invalidate,
+        )
+
+        result = await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+        final_aas = await cache.get(DATA_AAS_TOKEN)
+        return result, final_aas
+
+    result, final_aas = asyncio.run(_exercise())
+
+    # Request should succeed
+    assert result == "deadbeef"
+
+    # ADM refresh should have been called twice (once for step 1, once for step 2)
+    assert len(adm_refresh_calls) == 2
+
+    # AAS token should be invalidated exactly once (in step 2)
+    assert len(aas_invalidation_calls) == 1
+    assert aas_invalidation_calls[0] == "user@example.com"
+
+    # AAS should be None after invalidation
+    assert final_aas is None
+
+    # Verify the delay sequence: 6s (step 1) + 61s (step 2 cooldown) + 6s (step 2 propagation)
+    assert sleep_delays == [6.0, 61.0, 6.0]
+
+
+def test_async_nova_request_full_retry_sequence_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When all 4 retry steps fail, a permanent auth error must be raised.
+
+    This test verifies the complete retry sequence:
+    - Step 1: First 401 → refresh ADM → 6s → retry
+    - Step 2: Second 401 → 61s → invalidate AAS, refresh AAS+ADM → 6s → retry
+    - Step 3: Third 401 → 501s long cooldown → retry
+    - Step 4: Fourth 401 → permanent error (re-auth required)
+
+    Total wait: 6s + 61s + 6s + 501s = 574s (~9.5 min)
+    """
+
+    cache = _StubCache()
+    # Four consecutive 401s to exhaust all retries
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+        ]
+    )
+
+    aas_invalidation_calls: list[str] = []
+    adm_refresh_calls: list[str] = []
+    sleep_delays: list[float] = []
+
+    async def _exercise() -> None:
+        await cache.set(DATA_AAS_TOKEN, "stale-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            adm_refresh_calls.append("refresh")
+            return "refreshed-adm"
+
+        async def _tracking_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _spy_invalidate(self: AsyncTTLPolicy) -> None:
+            aas_invalidation_calls.append(self.username)
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _tracking_sleep)
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _spy_invalidate,
+        )
+
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+    with pytest.raises(NovaAuthError) as err:
+        asyncio.run(_exercise())
+
+    # Should be a permanent error requiring re-authentication
+    assert err.value.status == 401
+    assert err.value.is_permanent is True
+    assert "re-authentication required" in str(err.value).lower()
+
+    # ADM refresh should have been called twice (step 1 and step 2)
+    assert len(adm_refresh_calls) == 2
+
+    # AAS invalidation should have been called once (step 2)
+    assert len(aas_invalidation_calls) == 1
+
+    # Verify the complete delay sequence: 6s + 61s + 6s + 501s
+    assert sleep_delays == [6.0, 61.0, 6.0, 501.0]
+
+
+def test_async_nova_request_recovers_on_long_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery on step 3 (after 501s long cooldown) should succeed.
+
+    This test verifies that even if ADM-only and AAS+ADM refresh both fail,
+    success after the long cooldown period should work.
+
+    Sequence: 401 → ADM → 401 → AAS+ADM → 401 → 501s → success
+    """
+
+    cache = _StubCache()
+    # Three 401s, then success after long cooldown
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(200, b"\xfe\xed\xfa\xce"),
+        ]
+    )
+
+    sleep_delays: list[float] = []
+
+    async def _exercise() -> str:
+        await cache.set(DATA_AAS_TOKEN, "stale-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            return "refreshed-adm"
+
+        async def _tracking_sleep(delay: float) -> None:
+            sleep_delays.append(delay)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _tracking_sleep)
+
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+    result = asyncio.run(_exercise())
+
+    # Should succeed after long cooldown
+    assert result == "feedface"
+
+    # Verify delays: 6s + 61s + 6s + 501s
+    assert sleep_delays == [6.0, 61.0, 6.0, 501.0]
+
+
+def test_async_ttl_policy_aas_ttl_learning_records_observed_lifetime() -> None:
+    """AAS TTL learning should record the observed token lifetime when invalidated.
+
+    This test verifies that when an AAS token is invalidated:
+    1. The observed lifetime is calculated from the issued timestamp
+    2. The best TTL is updated with a 5% safety margin
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-aas-ttl")
+        try:
+            namespace = "entry-aas-ttl"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_aas_ttl_learning"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Simulate AAS token issued 24 hours ago
+            issued_time = time.time() - (24 * 3600)  # 24 hours ago
+            await cache.set(policy.k_aas_issued, issued_time)
+            await cache.set(DATA_AAS_TOKEN, "old-aas")
+
+            # Invalidate the AAS token
+            await policy.async_invalidate_aas_token()
+
+            # Verify AAS token is cleared
+            assert await cache.get(DATA_AAS_TOKEN) is None
+
+            # Verify best TTL was learned (24 hours * 0.95 = ~82080 seconds)
+            best_ttl = await cache.get(policy.k_aas_bestttl)
+            assert best_ttl is not None
+            expected_ttl = 24 * 3600 * 0.95
+            assert abs(float(best_ttl) - expected_ttl) < 60  # Allow 1 min tolerance
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_ttl_policy_aas_proactive_refresh_triggers_near_expiry() -> None:
+    """AAS proactive refresh should trigger when approaching learned TTL.
+
+    When the AAS token age approaches the learned TTL minus margin,
+    async_check_aas_proactive_refresh should return True and invalidate the token.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-aas-proactive")
+        try:
+            namespace = "entry-aas-proactive"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_aas_proactive"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Set best TTL to 1 hour (3600 seconds)
+            await cache.set(policy.k_aas_bestttl, 3600.0)
+
+            # AAS token issued 57 minutes ago (past the threshold + max jitter)
+            # Threshold = 3600 - 300 = 3300s, jitter = ±90s, so max threshold = 3390s
+            # 57 min = 3420s > 3390s, so it will always trigger
+            issued_time = time.time() - (57 * 60)  # 57 minutes ago
+            await cache.set(policy.k_aas_issued, issued_time)
+            await cache.set(DATA_AAS_TOKEN, "old-aas")
+
+            # Check proactive refresh - should trigger
+            result = await policy.async_check_aas_proactive_refresh()
+
+            # Should have triggered proactive refresh
+            assert result is True
+
+            # AAS token should be invalidated
+            assert await cache.get(DATA_AAS_TOKEN) is None
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_ttl_policy_aas_proactive_refresh_skips_when_fresh() -> None:
+    """AAS proactive refresh should NOT trigger when token is still fresh.
+
+    When the AAS token is well within its TTL, proactive refresh should skip.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-aas-fresh")
+        try:
+            namespace = "entry-aas-fresh"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_aas_fresh"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Set best TTL to 24 hours
+            await cache.set(policy.k_aas_bestttl, 24 * 3600.0)
+
+            # AAS token issued 1 hour ago (well within 24 hour TTL)
+            issued_time = time.time() - 3600  # 1 hour ago
+            await cache.set(policy.k_aas_issued, issued_time)
+            await cache.set(DATA_AAS_TOKEN, "fresh-aas")
+
+            # Check proactive refresh - should NOT trigger
+            result = await policy.async_check_aas_proactive_refresh()
+
+            # Should NOT have triggered proactive refresh
+            assert result is False
+
+            # AAS token should still exist
+            assert await cache.get(DATA_AAS_TOKEN) == "fresh-aas"
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
