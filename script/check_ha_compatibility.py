@@ -196,9 +196,33 @@ def load_manifest_requirements(manifest_path: Path) -> list[str]:
 
 
 def get_declared_ha_minimum(manifest_path: Path) -> str | None:
-    """Get the declared minimum HA version from manifest.json."""
+    """Get the declared minimum HA version from manifest.json.
+
+    Note: The 'homeassistant' field is only valid for core integrations,
+    not custom components. For custom components, we check pyproject.toml
+    or requirements files instead.
+    """
     manifest = load_manifest(manifest_path)
-    return manifest.get("homeassistant")
+    ha_version = manifest.get("homeassistant")
+
+    # If not in manifest (custom components can't use this field),
+    # try to find it in pyproject.toml
+    if ha_version is None:
+        pyproject_path = manifest_path.parent.parent.parent / "pyproject.toml"
+        if pyproject_path.exists():
+            try:
+                content = pyproject_path.read_text()
+                # Look for homeassistant>=X.Y.Z in dev dependencies
+                match = re.search(
+                    r'homeassistant["\s]*>=\s*([0-9]+\.[0-9]+\.[0-9]+)',
+                    content,
+                )
+                if match:
+                    ha_version = match.group(1)
+            except Exception:
+                pass
+
+    return ha_version
 
 
 def check_requirements_against_constraints(
@@ -399,8 +423,8 @@ def check_declared_minimum(
     requirements = load_manifest_requirements(manifest_path)
 
     if not declared_min:
-        print(f"{Colors.YELLOW}Warning: No 'homeassistant' field in manifest.json{Colors.RESET}")
-        print("Consider adding a minimum HA version requirement.")
+        print(f"{Colors.YELLOW}Warning: No minimum HA version declared{Colors.RESET}")
+        print("(Note: Custom integrations cannot use 'homeassistant' in manifest.json)")
         print()
 
         # Find what it should be
@@ -411,7 +435,7 @@ def check_declared_minimum(
                 print("\nBlocking requirements:")
                 for pkg, reason in blocking.items():
                     print(f"  - {pkg}: {reason}")
-            print(f'\nAdd to manifest.json: "homeassistant": "{min_version}"')
+            print(f'\nUpdate pyproject.toml dev deps: "homeassistant>={min_version}"')
         return 1
 
     print(f"Declared minimum: {Colors.BLUE}{declared_min}{Colors.RESET}")
@@ -438,7 +462,7 @@ def check_declared_minimum(
         min_version, blocking = find_minimum_ha_version(requirements, verbose=False)
         if min_version:
             print(f"\n{Colors.GREEN}Correct minimum should be: {min_version}{Colors.RESET}")
-            print(f'\nUpdate manifest.json: "homeassistant": "{min_version}"')
+            print(f'\nUpdate pyproject.toml dev deps: "homeassistant>={min_version}"')
         return 1
 
     print(f"\n{Colors.GREEN}{Colors.BOLD}OK: Declared minimum {declared_min} is valid{Colors.RESET}")
@@ -549,14 +573,14 @@ Examples:
                     min_v = Version(min_version)
                     if declared_v < min_v:
                         print(f"\n{Colors.RED}Warning: Declared minimum ({declared}) is too old!{Colors.RESET}")
-                        print(f'Update manifest.json: "homeassistant": "{min_version}"')
+                        print(f'Update pyproject.toml dev deps: "homeassistant>={min_version}"')
                         return 1
                     elif declared_v > min_v:
                         print(f"\n{Colors.CYAN}Note: Declared minimum ({declared}) could be lowered to {min_version}{Colors.RESET}")
                 except InvalidVersion:
                     pass
             else:
-                print(f'\n{Colors.CYAN}Suggestion: Add to manifest.json: "homeassistant": "{min_version}"{Colors.RESET}')
+                print(f'\n{Colors.CYAN}Suggestion: Update pyproject.toml dev deps: "homeassistant>={min_version}"{Colors.RESET}')
         else:
             print(f"{Colors.RED}Could not determine minimum HA version{Colors.RESET}")
             return 1
