@@ -1,12 +1,9 @@
 name: Home Assistant Dependency Compatibility Check
 
 on:
-  # Run on PRs to catch issues before merge
   pull_request:
-  # Run weekly to catch new HA releases
   schedule:
     - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
-  # Allow manual trigger
   workflow_dispatch:
     inputs:
       ha_version:
@@ -23,12 +20,12 @@ env:
   PYTHON_VERSION: "3.13"
 
 jobs:
-  # Job 1: Check against latest/specified HA version (forward compatibility)
   check-latest-ha:
     name: Check Latest HA Compatibility
     runs-on: ubuntu-latest
     outputs:
       compatible: ${{ steps.check.outputs.compatible }}
+      ha_version: ${{ steps.check.outputs.ha_version }}
 
     steps:
       - name: Check out repository
@@ -46,43 +43,46 @@ jobs:
         id: check
         run: |
           set +e
-
           if [ -n "${{ github.event.inputs.ha_version }}" ]; then
-            python script/check_ha_compatibility.py \
-              --ha-version "${{ github.event.inputs.ha_version }}" \
-              --verbose
+            HA_VERSION="${{ github.event.inputs.ha_version }}"
+            python script/check_ha_compatibility.py --ha-version "$HA_VERSION" --verbose 2>&1 | tee output.txt
           else
-            python script/check_ha_compatibility.py --verbose
+            HA_VERSION="latest (dev)"
+            python script/check_ha_compatibility.py --verbose 2>&1 | tee output.txt
           fi
-
-          EXIT_CODE=$?
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "compatible=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "compatible=false" >> "$GITHUB_OUTPUT"
-          fi
-
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "ha_version=$HA_VERSION" >> "$GITHUB_OUTPUT"
+          echo "compatible=$( [ $EXIT_CODE -eq 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
           exit $EXIT_CODE
 
-      - name: Write summary
+      - name: Write job summary
         if: always()
         run: |
-          echo "## Latest HA Compatibility Check" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ steps.check.outputs.compatible }}" = "true" ]; then
-            echo ":white_check_mark: All dependencies compatible with latest Home Assistant" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo ":x: Compatibility issues found - see job output for details" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            echo "## 🔍 Latest HA Compatibility"
+            echo ""
+            echo "**Target:** Home Assistant ${{ steps.check.outputs.ha_version }}"
+            echo ""
+            if [ "${{ steps.check.outputs.compatible }}" = "true" ]; then
+              echo "✅ All dependencies are compatible"
+            else
+              echo "❌ Compatibility issues found"
+              echo ""
+              echo "<details><summary>Details</summary>"
+              echo ""
+              echo '```'
+              cat output.txt
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  # Job 2: Verify declared minimum HA version is correct (backward compatibility)
   check-declared-minimum:
     name: Verify Declared Minimum HA Version
     runs-on: ubuntu-latest
     outputs:
       valid: ${{ steps.check.outputs.valid }}
       declared_version: ${{ steps.check.outputs.declared_version }}
-      suggested_version: ${{ steps.check.outputs.suggested_version }}
 
     steps:
       - name: Check out repository
@@ -100,65 +100,48 @@ jobs:
         id: check
         run: |
           set +e
-
-          # Get declared version from manifest
-          DECLARED=$(python -c "
-          import json
-          with open('custom_components/googlefindmy/manifest.json') as f:
-              m = json.load(f)
-          print(m.get('homeassistant', ''))
-          ")
+          # Get declared version from pyproject.toml (custom integrations can't use manifest.json)
+          DECLARED=$(grep -oP 'homeassistant["\s]*>=\s*\K[0-9]+\.[0-9]+\.[0-9]+' pyproject.toml | head -1 || echo "")
           echo "declared_version=$DECLARED" >> "$GITHUB_OUTPUT"
 
-          # Run the check
-          python script/check_ha_compatibility.py --check-declared-minimum --verbose 2>&1 | tee check_output.txt
+          python script/check_ha_compatibility.py --check-declared-minimum --verbose 2>&1 | tee output.txt
           EXIT_CODE=${PIPESTATUS[0]}
-
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "valid=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "valid=false" >> "$GITHUB_OUTPUT"
-
-            # Try to extract suggested version
-            SUGGESTED=$(grep -oP 'Correct minimum should be: \K[0-9.]+' check_output.txt || \
-                        grep -oP 'Suggested minimum: \K[0-9.]+' check_output.txt || \
-                        echo "")
-            echo "suggested_version=$SUGGESTED" >> "$GITHUB_OUTPUT"
-          fi
-
+          echo "valid=$( [ $EXIT_CODE -eq 0 ] && echo true || echo false )" >> "$GITHUB_OUTPUT"
           exit $EXIT_CODE
 
-      - name: Write summary
+      - name: Write job summary
         if: always()
         run: |
-          echo "## Declared Minimum HA Version Check" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          DECLARED="${{ steps.check.outputs.declared_version }}"
-          if [ -z "$DECLARED" ]; then
-            echo ":warning: No \`homeassistant\` field declared in manifest.json" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Declared minimum: \`$DECLARED\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "${{ steps.check.outputs.valid }}" = "true" ]; then
-            echo ":white_check_mark: Declared minimum version is valid" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo ":x: Declared minimum version is incorrect or missing" >> "$GITHUB_STEP_SUMMARY"
-            SUGGESTED="${{ steps.check.outputs.suggested_version }}"
-            if [ -n "$SUGGESTED" ]; then
-              echo "" >> "$GITHUB_STEP_SUMMARY"
-              echo "**Suggested minimum:** \`$SUGGESTED\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## 📋 Declared Minimum Validation"
+            echo ""
+            DECLARED="${{ steps.check.outputs.declared_version }}"
+            if [ -n "$DECLARED" ]; then
+              echo "**Declared minimum:** \`$DECLARED\` (from pyproject.toml)"
+            else
+              echo "**Declared minimum:** ⚠️ Not specified"
             fi
-          fi
+            echo ""
+            if [ "${{ steps.check.outputs.valid }}" = "true" ]; then
+              echo "✅ Declared minimum version satisfies all requirements"
+            else
+              echo "❌ Declared minimum is invalid or missing"
+              echo ""
+              echo "<details><summary>Details</summary>"
+              echo ""
+              echo '```'
+              cat output.txt
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-  # Job 3: Find minimum compatible HA version (optional, on manual trigger)
   find-minimum-version:
     name: Find Minimum Compatible HA Version
     runs-on: ubuntu-latest
     if: github.event.inputs.find_minimum == 'true'
+    outputs:
+      minimum_version: ${{ steps.find.outputs.minimum_version }}
 
     steps:
       - name: Check out repository
@@ -175,38 +158,36 @@ jobs:
       - name: Find minimum HA version
         id: find
         run: |
-          python script/check_ha_compatibility.py --find-minimum --verbose 2>&1 | tee find_output.txt
-
-          # Extract minimum version
-          MIN_VERSION=$(grep -oP 'Minimum compatible HA version: \K[0-9.]+' find_output.txt || echo "")
+          python script/check_ha_compatibility.py --find-minimum --verbose 2>&1 | tee output.txt
+          MIN_VERSION=$(grep -oP 'Minimum compatible HA version: \K[0-9.]+' output.txt || echo "")
           echo "minimum_version=$MIN_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Write summary
+      - name: Write job summary
         run: |
-          echo "## Minimum Compatible HA Version Search" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## 🔎 Minimum Version Search"
+            echo ""
+            MIN="${{ steps.find.outputs.minimum_version }}"
+            if [ -n "$MIN" ]; then
+              echo "**Minimum compatible version:** \`$MIN\`"
+            else
+              echo "❌ Could not determine minimum version"
+            fi
+            echo ""
+            echo "<details><summary>Full search output</summary>"
+            echo ""
+            echo '```'
+            cat output.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          MIN="${{ steps.find.outputs.minimum_version }}"
-          if [ -n "$MIN" ]; then
-            echo "**Minimum compatible version:** \`$MIN\`" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo ":x: Could not determine minimum version" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "<details><summary>Full output</summary>" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          cat find_output.txt >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "</details>" >> "$GITHUB_STEP_SUMMARY"
-
-  # Job 4: Installation test - actually install HA + integration deps
   installation-test:
     name: Installation Test
     runs-on: ubuntu-latest
     outputs:
       success: ${{ steps.install.outputs.success }}
+      ha_version: ${{ steps.ha_version.outputs.version }}
 
     steps:
       - name: Check out repository
@@ -223,96 +204,74 @@ jobs:
           if [ -n "${{ github.event.inputs.ha_version }}" ]; then
             echo "version=${{ github.event.inputs.ha_version }}" >> "$GITHUB_OUTPUT"
           else
-            # Get latest stable version from PyPI
             pip install --upgrade pip
-            VERSION=$(pip index versions homeassistant 2>/dev/null | grep -oP 'homeassistant \(\K[^)]+' | head -1 || echo "")
-            if [ -z "$VERSION" ]; then
-              # Fallback to dev
-              VERSION="dev"
-            fi
+            VERSION=$(pip index versions homeassistant 2>/dev/null | grep -oP 'homeassistant \(\K[^)]+' | head -1 || echo "dev")
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download HA constraints
-        id: constraints
         run: |
           HA_VERSION="${{ steps.ha_version.outputs.version }}"
-
-          # Try release tag first
           URL="https://raw.githubusercontent.com/home-assistant/core/${HA_VERSION}/homeassistant/package_constraints.txt"
           if ! curl -fsSL "$URL" -o ha_constraints.txt 2>/dev/null; then
-            # Fallback to dev
-            URL="https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt"
-            curl -fsSL "$URL" -o ha_constraints.txt
+            curl -fsSL "https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt" -o ha_constraints.txt
           fi
-
-          echo "Downloaded constraints from: $URL"
 
       - name: Create test environment and install
         id: install
         run: |
           set +e
-
           python -m venv test_env
           source test_env/bin/activate
-
           pip install --upgrade pip
 
-          echo "=== Installing Home Assistant ==="
           HA_VERSION="${{ steps.ha_version.outputs.version }}"
           if [ "$HA_VERSION" = "dev" ]; then
-            pip install homeassistant --constraint ha_constraints.txt
+            pip install homeassistant --constraint ha_constraints.txt 2>&1 | tee install.log
           else
-            pip install "homeassistant==$HA_VERSION" --constraint ha_constraints.txt
+            pip install "homeassistant==$HA_VERSION" --constraint ha_constraints.txt 2>&1 | tee install.log
           fi
 
-          echo ""
-          echo "=== Installing integration requirements ==="
-          REQUIREMENTS=$(python -c "
-          import json
-          with open('custom_components/googlefindmy/manifest.json') as f:
-              m = json.load(f)
-          print(' '.join(m.get('requirements', [])))
-          ")
-
+          REQUIREMENTS=$(python -c "import json; print(' '.join(json.load(open('custom_components/googlefindmy/manifest.json')).get('requirements', [])))")
           FAILED=0
           for req in $REQUIREMENTS; do
-            echo "Installing: $req"
-            if ! pip install "$req" --constraint ha_constraints.txt 2>&1; then
-              echo "::error::Failed to install $req"
+            if ! pip install "$req" --constraint ha_constraints.txt 2>&1 | tee -a install.log; then
               FAILED=1
             fi
           done
 
-          echo ""
-          echo "=== Running pip check ==="
-          pip check
+          pip check 2>&1 | tee -a install.log
           PIP_CHECK=$?
 
           if [ $FAILED -eq 0 ] && [ $PIP_CHECK -eq 0 ]; then
             echo "success=true" >> "$GITHUB_OUTPUT"
-            echo ":white_check_mark: Installation successful"
           else
             echo "success=false" >> "$GITHUB_OUTPUT"
-            echo ":x: Installation failed"
             exit 1
           fi
 
-      - name: Write summary
+      - name: Write job summary
         if: always()
         run: |
-          echo "## Installation Test" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**HA Version:** ${{ steps.ha_version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## 📦 Installation Test"
+            echo ""
+            echo "**Target:** Home Assistant ${{ steps.ha_version.outputs.version }}"
+            echo ""
+            if [ "${{ steps.install.outputs.success }}" = "true" ]; then
+              echo "✅ All packages installed successfully with HA constraints"
+            else
+              echo "❌ Installation failed"
+              echo ""
+              echo "<details><summary>Install log</summary>"
+              echo ""
+              echo '```'
+              cat install.log 2>/dev/null || echo "No log available"
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "${{ steps.install.outputs.success }}" = "true" ]; then
-            echo ":white_check_mark: All packages installed successfully with HA constraints" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo ":x: Installation failed - see job output for details" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-  # Summary job
   summary:
     name: Compatibility Summary
     runs-on: ubuntu-latest
@@ -322,35 +281,43 @@ jobs:
     steps:
       - name: Generate summary
         run: |
-          echo "# Home Assistant Dependency Compatibility Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "# 📊 Home Assistant Dependency Compatibility"
+            echo ""
+            echo "| Check | Status |"
+            echo "|-------|--------|"
 
-          # Latest HA check
-          if [ "${{ needs.check-latest-ha.outputs.compatible }}" = "true" ]; then
-            echo "| Latest HA Compatibility | :white_check_mark: Pass |" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "| Latest HA Compatibility | :x: Fail |" >> "$GITHUB_STEP_SUMMARY"
-          fi
+            if [ "${{ needs.check-latest-ha.outputs.compatible }}" = "true" ]; then
+              echo "| Latest HA Compatibility | ✅ Pass |"
+            else
+              echo "| Latest HA Compatibility | ❌ Fail |"
+            fi
 
-          # Declared minimum check
-          if [ "${{ needs.check-declared-minimum.outputs.valid }}" = "true" ]; then
-            echo "| Declared Minimum Valid | :white_check_mark: Pass |" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "| Declared Minimum Valid | :x: Fail |" >> "$GITHUB_STEP_SUMMARY"
-          fi
+            if [ "${{ needs.check-declared-minimum.outputs.valid }}" = "true" ]; then
+              echo "| Declared Minimum Valid | ✅ Pass |"
+            else
+              echo "| Declared Minimum Valid | ❌ Fail |"
+            fi
 
-          # Installation test
-          if [ "${{ needs.installation-test.outputs.success }}" = "true" ]; then
-            echo "| Installation Test | :white_check_mark: Pass |" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "| Installation Test | :x: Fail |" >> "$GITHUB_STEP_SUMMARY"
-          fi
+            if [ "${{ needs.installation-test.outputs.success }}" = "true" ]; then
+              echo "| Installation Test | ✅ Pass |"
+            else
+              echo "| Installation Test | ❌ Fail |"
+            fi
+
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Tested against:** Home Assistant ${{ needs.check-latest-ha.outputs.ha_version }}"
+            DECLARED="${{ needs.check-declared-minimum.outputs.declared_version }}"
+            if [ -n "$DECLARED" ]; then
+              echo "**Declared minimum:** $DECLARED"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail if any check failed
         if: |
           needs.check-latest-ha.outputs.compatible != 'true' ||
           needs.check-declared-minimum.outputs.valid != 'true' ||
           needs.installation-test.outputs.success != 'true'
-        run: |
-          echo "One or more compatibility checks failed"
-          exit 1
+        run: exit 1
