@@ -1092,9 +1092,11 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     )
 
                     if status == HTTP_UNAUTHORIZED:
-                        # Exponential backoff delays for 401 retries after token refresh.
-                        # Google backends may take time to propagate refreshed tokens.
-                        _AUTH_RETRY_DELAYS = (6.0, 12.0, 24.0)
+                        # Progressive backoff delays for 401 retries after token refresh:
+                        # - 6s: Backend propagation delay (token sync across servers)
+                        # - 61s: Short cooldown (~1 min, odd to avoid boundary hits)
+                        # - 301s: Long cooldown (~5 min, Google's typical rate-limit window)
+                        _AUTH_RETRY_DELAYS = (6.0, 61.0, 301.0)
                         max_auth_retries = len(_AUTH_RETRY_DELAYS)
 
                         lvl = logging.INFO if not refreshed_once else logging.WARNING
@@ -1118,7 +1120,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             delay = _AUTH_RETRY_DELAYS[auth_retries_used]
                             _LOGGER.info(
                                 "Nova API async request to %s: 401 after refresh. "
-                                "Waiting %.1fs before retry %d/%d (backend propagation delay).",
+                                "Waiting %.0fs before retry %d/%d.",
                                 api_scope,
                                 delay,
                                 auth_retries_used + 1,
@@ -1128,25 +1130,23 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             await asyncio.sleep(delay)
                             continue
 
-                        # Exhausted all retries - this is a transient auth error.
-                        # The coordinator should NOT immediately trigger reauth;
-                        # subsequent poll cycles may succeed once backends sync.
-                        _LOGGER.warning(
+                        # Exhausted all retries - 401 is a client error indicating
+                        # invalid credentials. After ~6 min of retries, this is NOT
+                        # a transient issue; the token chain is genuinely broken.
+                        _LOGGER.error(
                             "Nova API async request to %s: 401 persists after %d retries "
-                            "(total wait: %.0fs). Treating as transient auth failure.",
+                            "(total wait: %.0fs). Authentication is invalid; re-auth required.",
                             api_scope,
                             max_auth_retries,
                             sum(_AUTH_RETRY_DELAYS),
                         )
-                        # Invalidate the AAS token so the next poll cycle can attempt
-                        # a fresh token chain (OAuth -> AAS -> ADM). This is critical
-                        # when the underlying AAS token is invalid but gpsoauth didn't
-                        # explicitly reject it with a recognizable error.
+                        # Invalidate the AAS token so re-auth can generate a fresh
+                        # token chain (OAuth -> AAS -> ADM).
                         await policy.async_invalidate_aas_token()
                         raise NovaAuthError(
                             status,
-                            "Unauthorized after token refresh (transient; may self-heal)",
-                            is_permanent=False,
+                            "Unauthorized after token refresh; re-authentication required",
+                            is_permanent=True,
                         )
 
                     if status in HTTP_RETRY_ELIGIBLE:
