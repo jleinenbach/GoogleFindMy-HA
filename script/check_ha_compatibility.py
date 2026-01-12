@@ -5,8 +5,15 @@ This script verifies that the integration's requirements are compatible
 with Home Assistant's package constraints. It helps prevent dependency
 conflicts when users install this integration alongside Home Assistant.
 
+Features:
+- Forward check: Verify requirements work with latest/specific HA version
+- Backward check: Verify declared minimum HA version satisfies all requirements
+- Find minimum: Discover the oldest HA version that satisfies all requirements
+
 Usage:
     python script/check_ha_compatibility.py [--ha-version VERSION] [--verbose]
+    python script/check_ha_compatibility.py --find-minimum
+    python script/check_ha_compatibility.py --check-declared-minimum
 
 Examples:
     # Check against latest HA version
@@ -15,8 +22,11 @@ Examples:
     # Check against specific HA version
     python script/check_ha_compatibility.py --ha-version 2025.1.0
 
-    # Verbose output with all package comparisons
-    python script/check_ha_compatibility.py --verbose
+    # Find the minimum HA version that satisfies all requirements
+    python script/check_ha_compatibility.py --find-minimum
+
+    # Verify the declared minimum in manifest.json is correct
+    python script/check_ha_compatibility.py --check-declared-minimum
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -48,8 +59,57 @@ class Colors:
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
+    CYAN = "\033[96m"
     RESET = "\033[0m"
     BOLD = "\033[1m"
+
+
+# Known Home Assistant release versions (updated periodically)
+# These are used for --find-minimum to search backwards through versions
+# Format: YYYY.M.P - only stable releases, sorted newest to oldest
+KNOWN_HA_VERSIONS = [
+    # 2026
+    "2026.1.0",
+    # 2025
+    "2025.12.0",
+    "2025.11.0",
+    "2025.10.0",
+    "2025.9.0",
+    "2025.8.0",
+    "2025.7.0",
+    "2025.6.0",
+    "2025.5.0",
+    "2025.4.0",
+    "2025.3.0",
+    "2025.2.0",
+    "2025.1.0",
+    # 2024
+    "2024.12.0",
+    "2024.11.0",
+    "2024.10.0",
+    "2024.9.0",
+    "2024.8.0",
+    "2024.7.0",
+    "2024.6.0",
+    "2024.5.0",
+    "2024.4.0",
+    "2024.3.0",
+    "2024.2.0",
+    "2024.1.0",
+    # 2023
+    "2023.12.0",
+    "2023.11.0",
+    "2023.10.0",
+    "2023.9.0",
+    "2023.8.0",
+    "2023.7.0",
+    "2023.6.0",
+    "2023.5.0",
+    "2023.4.0",
+    "2023.3.0",
+    "2023.2.0",
+    "2023.1.0",
+]
 
 
 def parse_requirement(req_str: str) -> tuple[str | None, str]:
@@ -88,13 +148,17 @@ def get_min_version(specifier_str: str) -> Version | None:
     return None
 
 
-def fetch_ha_constraints(ha_version: str | None = None) -> dict[str, str]:
-    """Fetch Home Assistant package constraints from GitHub."""
+def fetch_ha_constraints(
+    ha_version: str | None = None,
+    silent: bool = False,
+) -> dict[str, str] | None:
+    """Fetch Home Assistant package constraints from GitHub.
+
+    Returns None if the version doesn't exist or constraints can't be fetched.
+    """
     if ha_version:
-        # Try tag first, then dev branch
         urls = [
             f"https://raw.githubusercontent.com/home-assistant/core/{ha_version}/homeassistant/package_constraints.txt",
-            "https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt",
         ]
     else:
         urls = [
@@ -106,11 +170,21 @@ def fetch_ha_constraints(ha_version: str | None = None) -> dict[str, str]:
             with urllib.request.urlopen(url, timeout=30) as response:
                 content = response.read().decode("utf-8")
                 break
-        except urllib.error.HTTPError:
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and ha_version:
+                # Version tag doesn't exist
+                return None
+            if not silent:
+                print(f"{Colors.YELLOW}Warning: Could not fetch {url}: {e}{Colors.RESET}")
+            continue
+        except urllib.error.URLError as e:
+            if not silent:
+                print(f"{Colors.YELLOW}Warning: Network error fetching {url}: {e}{Colors.RESET}")
             continue
     else:
-        print(f"{Colors.RED}Error: Could not fetch HA constraints{Colors.RESET}")
-        sys.exit(1)
+        if not silent:
+            print(f"{Colors.RED}Error: Could not fetch HA constraints{Colors.RESET}")
+        return None
 
     constraints: dict[str, str] = {}
     for line in content.splitlines():
@@ -124,11 +198,65 @@ def fetch_ha_constraints(ha_version: str | None = None) -> dict[str, str]:
     return constraints
 
 
+def load_manifest(manifest_path: Path) -> dict:
+    """Load manifest.json."""
+    with open(manifest_path) as f:
+        return json.load(f)
+
+
 def load_manifest_requirements(manifest_path: Path) -> list[str]:
     """Load requirements from manifest.json."""
-    with open(manifest_path) as f:
-        manifest = json.load(f)
+    manifest = load_manifest(manifest_path)
     return manifest.get("requirements", [])
+
+
+def get_declared_ha_minimum(manifest_path: Path) -> str | None:
+    """Get the declared minimum HA version from manifest.json."""
+    manifest = load_manifest(manifest_path)
+    return manifest.get("homeassistant")
+
+
+def check_requirements_against_constraints(
+    requirements: Sequence[str],
+    ha_constraints: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """Check if requirements are compatible with HA constraints.
+
+    Returns:
+        Tuple of (errors, warnings) - empty lists mean compatible
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for req in requirements:
+        name, our_spec = parse_requirement(req)
+        if not name:
+            continue
+
+        # Try both underscore and hyphen versions
+        ha_spec = ha_constraints.get(name, ha_constraints.get(name.replace("_", "-"), ""))
+
+        if ha_spec:
+            ha_pinned = get_pinned_version(ha_spec)
+            our_min = get_min_version(our_spec)
+
+            if ha_pinned and our_min:
+                if ha_pinned < our_min:
+                    errors.append(
+                        f"{name}: HA pins {ha_pinned}, we require >={our_min}"
+                    )
+            elif ha_pinned and our_spec:
+                # Check if HA's pinned version satisfies our specifier
+                try:
+                    spec_set = SpecifierSet(our_spec)
+                    if not spec_set.contains(ha_pinned):
+                        errors.append(
+                            f"{name}: HA pins {ha_pinned}, incompatible with {our_spec}"
+                        )
+                except Exception:
+                    warnings.append(f"{name}: Could not parse specifier {our_spec}")
+
+    return errors, warnings
 
 
 def check_compatibility(
@@ -136,7 +264,7 @@ def check_compatibility(
     ha_constraints: dict[str, str],
     verbose: bool = False,
 ) -> tuple[list[str], list[str]]:
-    """Check compatibility of requirements against HA constraints.
+    """Check compatibility of requirements against HA constraints with output.
 
     Returns:
         Tuple of (errors, warnings)
@@ -207,26 +335,190 @@ def check_compatibility(
     return errors, warnings
 
 
+def find_minimum_ha_version(
+    requirements: Sequence[str],
+    verbose: bool = False,
+) -> tuple[str | None, dict[str, str]]:
+    """Find the oldest HA version that satisfies all requirements.
+
+    Returns:
+        Tuple of (version, blocking_requirements) where blocking_requirements
+        shows which packages block older versions.
+    """
+    print(f"\n{Colors.BOLD}Finding Minimum Compatible HA Version{Colors.RESET}")
+    print("=" * 70)
+
+    minimum_version: str | None = None
+    blocking_reqs: dict[str, str] = {}
+
+    # Track which requirements block which versions
+    req_min_versions: dict[str, str] = {}
+
+    # Test versions from oldest to newest
+    for ha_version in reversed(KNOWN_HA_VERSIONS):
+        if verbose:
+            print(f"Testing HA {ha_version}...", end=" ")
+
+        constraints = fetch_ha_constraints(ha_version, silent=True)
+        if constraints is None:
+            if verbose:
+                print(f"{Colors.YELLOW}not found{Colors.RESET}")
+            continue
+
+        errors, _ = check_requirements_against_constraints(requirements, constraints)
+
+        if errors:
+            if verbose:
+                print(f"{Colors.RED}incompatible{Colors.RESET}")
+                for err in errors:
+                    print(f"    {err}")
+            # Track blocking requirements
+            for err in errors:
+                pkg = err.split(":")[0]
+                if pkg not in req_min_versions:
+                    req_min_versions[pkg] = ha_version
+        else:
+            if verbose:
+                print(f"{Colors.GREEN}compatible{Colors.RESET}")
+            if minimum_version is None:
+                minimum_version = ha_version
+                # Continue to find all blocking requirements
+
+    # Determine what blocks older versions
+    for pkg, ver in req_min_versions.items():
+        # Find the version where it becomes compatible
+        for ha_version in KNOWN_HA_VERSIONS:
+            constraints = fetch_ha_constraints(ha_version, silent=True)
+            if constraints is None:
+                continue
+            # Check just this package
+            for req in requirements:
+                name, _ = parse_requirement(req)
+                if name and name.replace("-", "_") == pkg.replace("-", "_"):
+                    errs, _ = check_requirements_against_constraints([req], constraints)
+                    if not errs:
+                        blocking_reqs[pkg] = f"requires HA >= {ha_version}"
+                        break
+            break
+
+    return minimum_version, blocking_reqs
+
+
+def check_declared_minimum(
+    manifest_path: Path,
+    verbose: bool = False,
+) -> int:
+    """Check if the declared minimum HA version is correct.
+
+    Returns exit code (0 = OK, 1 = error)
+    """
+    print(f"{Colors.BOLD}Checking Declared Minimum HA Version{Colors.RESET}")
+    print("=" * 70)
+
+    declared_min = get_declared_ha_minimum(manifest_path)
+    requirements = load_manifest_requirements(manifest_path)
+
+    if not declared_min:
+        print(f"{Colors.YELLOW}Warning: No 'homeassistant' field in manifest.json{Colors.RESET}")
+        print("Consider adding a minimum HA version requirement.")
+        print()
+
+        # Find what it should be
+        min_version, blocking = find_minimum_ha_version(requirements, verbose)
+        if min_version:
+            print(f"\n{Colors.CYAN}Suggested minimum: {min_version}{Colors.RESET}")
+            if blocking:
+                print("\nBlocking requirements:")
+                for pkg, reason in blocking.items():
+                    print(f"  - {pkg}: {reason}")
+            print(f'\nAdd to manifest.json: "homeassistant": "{min_version}"')
+        return 1
+
+    print(f"Declared minimum: {Colors.BLUE}{declared_min}{Colors.RESET}")
+
+    # Fetch constraints for the declared minimum
+    constraints = fetch_ha_constraints(declared_min)
+    if constraints is None:
+        print(f"{Colors.RED}Error: Could not fetch constraints for HA {declared_min}{Colors.RESET}")
+        return 1
+
+    print(f"Loaded {len(constraints)} constraints from HA {declared_min}")
+
+    # Check compatibility
+    errors, warnings = check_requirements_against_constraints(requirements, constraints)
+
+    if errors:
+        print(f"\n{Colors.RED}{Colors.BOLD}ERROR: Declared minimum {declared_min} is too old!{Colors.RESET}")
+        print("\nThe following requirements are NOT satisfied by HA {declared_min}:")
+        for err in errors:
+            print(f"  {Colors.RED}x{Colors.RESET} {err}")
+
+        # Find correct minimum
+        print(f"\n{Colors.CYAN}Searching for correct minimum...{Colors.RESET}")
+        min_version, blocking = find_minimum_ha_version(requirements, verbose=False)
+        if min_version:
+            print(f"\n{Colors.GREEN}Correct minimum should be: {min_version}{Colors.RESET}")
+            print(f'\nUpdate manifest.json: "homeassistant": "{min_version}"')
+        return 1
+
+    print(f"\n{Colors.GREEN}{Colors.BOLD}OK: Declared minimum {declared_min} is valid{Colors.RESET}")
+    print("All requirements are satisfied by this HA version.")
+
+    # Optionally check if we can go lower
+    if verbose:
+        print(f"\n{Colors.CYAN}Checking if minimum can be lowered...{Colors.RESET}")
+        min_version, _ = find_minimum_ha_version(requirements, verbose=False)
+        if min_version and min_version != declared_min:
+            # Parse versions to compare
+            try:
+                declared_v = Version(declared_min)
+                min_v = Version(min_version)
+                if min_v < declared_v:
+                    print(f"Note: Minimum could potentially be lowered to {min_version}")
+            except InvalidVersion:
+                pass
+
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Check dependency compatibility with Home Assistant"
+        description="Check dependency compatibility with Home Assistant",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                          Check against latest HA (dev branch)
+  %(prog)s --ha-version 2025.1.0    Check against specific version
+  %(prog)s --find-minimum           Find oldest compatible HA version
+  %(prog)s --check-declared-minimum Verify manifest.json minimum is correct
+        """,
     )
     parser.add_argument(
         "--ha-version",
-        help="Home Assistant version to check against (default: latest dev)",
+        help="Home Assistant version to check against (default: dev branch)",
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Show all packages, not just issues",
+        help="Show all packages and detailed output",
     )
     parser.add_argument(
         "--manifest",
         type=Path,
         default=Path("custom_components/googlefindmy/manifest.json"),
         help="Path to manifest.json",
+    )
+    parser.add_argument(
+        "--find-minimum",
+        action="store_true",
+        help="Find the oldest HA version that satisfies all requirements",
+    )
+    parser.add_argument(
+        "--check-declared-minimum",
+        action="store_true",
+        help="Verify the declared minimum HA version in manifest.json is correct",
     )
     args = parser.parse_args()
 
@@ -243,12 +535,55 @@ def main() -> int:
     print(f"{Colors.BOLD}Home Assistant Dependency Compatibility Checker{Colors.RESET}")
     print()
 
-    # Fetch HA constraints
+    # Handle different modes
+    if args.check_declared_minimum:
+        return check_declared_minimum(args.manifest, args.verbose)
+
+    if args.find_minimum:
+        requirements = load_manifest_requirements(args.manifest)
+        print(f"Manifest: {args.manifest}")
+        print(f"Found {len(requirements)} integration requirements")
+
+        min_version, blocking = find_minimum_ha_version(requirements, args.verbose)
+
+        print()
+        if min_version:
+            print(f"{Colors.GREEN}{Colors.BOLD}Minimum compatible HA version: {min_version}{Colors.RESET}")
+            if blocking:
+                print("\nRequirements that determine the minimum:")
+                for pkg, reason in blocking.items():
+                    print(f"  - {pkg}: {reason}")
+
+            # Check current declaration
+            declared = get_declared_ha_minimum(args.manifest)
+            if declared:
+                try:
+                    declared_v = Version(declared)
+                    min_v = Version(min_version)
+                    if declared_v < min_v:
+                        print(f"\n{Colors.RED}Warning: Declared minimum ({declared}) is too old!{Colors.RESET}")
+                        print(f'Update manifest.json: "homeassistant": "{min_version}"')
+                        return 1
+                    elif declared_v > min_v:
+                        print(f"\n{Colors.CYAN}Note: Declared minimum ({declared}) could be lowered to {min_version}{Colors.RESET}")
+                except InvalidVersion:
+                    pass
+            else:
+                print(f'\n{Colors.CYAN}Suggestion: Add to manifest.json: "homeassistant": "{min_version}"{Colors.RESET}')
+        else:
+            print(f"{Colors.RED}Could not determine minimum HA version{Colors.RESET}")
+            return 1
+        return 0
+
+    # Standard mode: check against specific or latest version
     ha_version_str = args.ha_version or "latest (dev branch)"
     print(f"Checking against Home Assistant: {Colors.BLUE}{ha_version_str}{Colors.RESET}")
     print(f"Manifest: {args.manifest}")
 
     ha_constraints = fetch_ha_constraints(args.ha_version)
+    if ha_constraints is None:
+        return 1
+
     print(f"Loaded {len(ha_constraints)} HA package constraints")
 
     # Load our requirements

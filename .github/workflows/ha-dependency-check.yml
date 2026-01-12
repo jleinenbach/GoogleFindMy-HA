@@ -13,8 +13,8 @@ on:
         description: "Home Assistant version to test against (leave empty for latest)"
         required: false
         default: ""
-      create_pr:
-        description: "Create PR if updates are needed"
+      find_minimum:
+        description: "Find minimum compatible HA version"
         required: false
         default: "false"
         type: boolean
@@ -23,355 +23,16 @@ env:
   PYTHON_VERSION: "3.13"
 
 jobs:
-  check-ha-compatibility:
-    name: Check HA Dependency Compatibility
+  # Job 1: Check against latest/specified HA version (forward compatibility)
+  check-latest-ha:
+    name: Check Latest HA Compatibility
     runs-on: ubuntu-latest
     outputs:
-      has_conflicts: ${{ steps.check.outputs.has_conflicts }}
-      ha_version: ${{ steps.get_ha_version.outputs.version }}
-      report: ${{ steps.check.outputs.report }}
+      compatible: ${{ steps.check.outputs.compatible }}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Get latest Home Assistant version
-        id: get_ha_version
-        run: |
-          if [ -n "${{ github.event.inputs.ha_version }}" ]; then
-            HA_VERSION="${{ github.event.inputs.ha_version }}"
-          else
-            # Get latest stable HA version from PyPI
-            HA_VERSION=$(pip index versions homeassistant 2>/dev/null | grep -oP 'homeassistant \(\K[^)]+' | head -1)
-            if [ -z "$HA_VERSION" ]; then
-              # Fallback: use pip to find latest version
-              HA_VERSION=$(pip install homeassistant== 2>&1 | grep -oP 'versions: \K[^)]+' | tr ',' '\n' | tail -1 | tr -d ' ')
-            fi
-          fi
-          echo "version=$HA_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Testing against Home Assistant version: $HA_VERSION"
-
-      - name: Download Home Assistant constraints
-        id: download_constraints
-        run: |
-          HA_VERSION="${{ steps.get_ha_version.outputs.version }}"
-
-          # Try to download constraints from the release tag
-          CONSTRAINTS_URL="https://raw.githubusercontent.com/home-assistant/core/${HA_VERSION}/homeassistant/package_constraints.txt"
-          echo "Trying to fetch constraints from: $CONSTRAINTS_URL"
-
-          if ! curl -fsSL "$CONSTRAINTS_URL" -o ha_constraints.txt 2>/dev/null; then
-            # Fallback to dev branch if tag doesn't exist
-            CONSTRAINTS_URL="https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt"
-            echo "Tag not found, falling back to dev branch: $CONSTRAINTS_URL"
-            curl -fsSL "$CONSTRAINTS_URL" -o ha_constraints.txt
-          fi
-
-          # Also download HA core requirements
-          REQUIREMENTS_URL="https://raw.githubusercontent.com/home-assistant/core/${HA_VERSION}/requirements.txt"
-          if ! curl -fsSL "$REQUIREMENTS_URL" -o ha_requirements.txt 2>/dev/null; then
-            REQUIREMENTS_URL="https://raw.githubusercontent.com/home-assistant/core/dev/requirements.txt"
-            curl -fsSL "$REQUIREMENTS_URL" -o ha_requirements.txt
-          fi
-
-          echo "Downloaded HA constraints and requirements"
-          echo "=== HA Constraints (first 50 lines) ==="
-          head -50 ha_constraints.txt
-
-      - name: Check dependency compatibility
-        id: check
-        run: |
-          set +e  # Don't exit on error
-
-          # Create a virtual environment for testing
-          python -m venv test_env
-          source test_env/bin/activate
-
-          pip install --upgrade pip
-
-          echo "=== Installing Home Assistant ${{ steps.get_ha_version.outputs.version }} ==="
-          pip install "homeassistant==${{ steps.get_ha_version.outputs.version }}" --constraint ha_constraints.txt 2>&1 | tee ha_install.log
-          HA_INSTALL_EXIT=$?
-
-          if [ $HA_INSTALL_EXIT -ne 0 ]; then
-            echo "::warning::Failed to install Home Assistant ${{ steps.get_ha_version.outputs.version }}"
-          fi
-
-          echo ""
-          echo "=== Installing integration requirements ==="
-
-          # Parse manifest.json requirements
-          REQUIREMENTS=$(python -c "
-          import json
-          with open('custom_components/googlefindmy/manifest.json') as f:
-              manifest = json.load(f)
-          for req in manifest.get('requirements', []):
-              print(req)
-          ")
-
-          echo "Integration requirements:"
-          echo "$REQUIREMENTS"
-
-          # Try to install integration requirements with HA constraints
-          CONFLICTS=""
-          CONFLICT_COUNT=0
-
-          for req in $REQUIREMENTS; do
-            echo ""
-            echo "--- Testing: $req ---"
-            if ! pip install "$req" --constraint ha_constraints.txt 2>&1 | tee -a install.log; then
-              echo "::warning::Potential conflict with: $req"
-              CONFLICTS="${CONFLICTS}${req}\n"
-              CONFLICT_COUNT=$((CONFLICT_COUNT + 1))
-            fi
-          done
-
-          echo ""
-          echo "=== Running pip check ==="
-          pip check 2>&1 | tee pip_check.log
-          PIP_CHECK_EXIT=$?
-
-          # Generate report
-          REPORT="## Home Assistant Dependency Compatibility Report\n\n"
-          REPORT="${REPORT}**HA Version:** ${{ steps.get_ha_version.outputs.version }}\n"
-          REPORT="${REPORT}**Python Version:** ${{ env.PYTHON_VERSION }}\n\n"
-
-          if [ $PIP_CHECK_EXIT -ne 0 ] || [ $CONFLICT_COUNT -gt 0 ]; then
-            REPORT="${REPORT}### :warning: Compatibility Issues Found\n\n"
-
-            if [ -n "$CONFLICTS" ]; then
-              REPORT="${REPORT}**Installation conflicts:**\n"
-              REPORT="${REPORT}\`\`\`\n${CONFLICTS}\`\`\`\n\n"
-            fi
-
-            if [ $PIP_CHECK_EXIT -ne 0 ]; then
-              REPORT="${REPORT}**pip check output:**\n"
-              REPORT="${REPORT}\`\`\`\n$(cat pip_check.log)\`\`\`\n\n"
-            fi
-
-            echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
-          else
-            REPORT="${REPORT}### :white_check_mark: All dependencies compatible\n\n"
-            REPORT="${REPORT}All integration requirements are compatible with Home Assistant ${{ steps.get_ha_version.outputs.version }}.\n"
-            echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
-          fi
-
-          # Show installed versions for verification
-          REPORT="${REPORT}\n### Installed Package Versions\n\n"
-          REPORT="${REPORT}\`\`\`\n"
-          REPORT="${REPORT}$(pip list | grep -iE 'aiohttp|cryptography|httpx|protobuf|grpclib|homeassistant')\n"
-          REPORT="${REPORT}\`\`\`\n"
-
-          # Save report (escape for GitHub Output)
-          echo "report<<EOF" >> "$GITHUB_OUTPUT"
-          echo -e "$REPORT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-
-          deactivate
-
-          # Exit with appropriate code
-          if [ $PIP_CHECK_EXIT -ne 0 ] || [ $CONFLICT_COUNT -gt 0 ]; then
-            exit 1
-          fi
-
-      - name: Write summary
-        if: always()
-        run: |
-          echo "${{ steps.check.outputs.report }}" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload compatibility report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ha-compatibility-report
-          path: |
-            ha_constraints.txt
-            ha_requirements.txt
-            install.log
-            pip_check.log
-          retention-days: 30
-
-  # Version comparison job - checks if our pinned versions are too old
-  check-version-bounds:
-    name: Check Version Bounds Against HA
-    runs-on: ubuntu-latest
-    outputs:
-      outdated_deps: ${{ steps.compare.outputs.outdated_deps }}
-      suggestions: ${{ steps.compare.outputs.suggestions }}
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - name: Install packaging library
-        run: pip install packaging
-
-      - name: Compare version bounds
-        id: compare
-        run: |
-          python - <<'PYTHON_SCRIPT'
-          import json
-          import re
-          import urllib.request
-          import os
-          from packaging.version import Version, InvalidVersion
-          from packaging.specifiers import SpecifierSet
-
-          def parse_requirement(req_str):
-              """Parse a requirement string into (name, specifier)."""
-              # Handle various formats: pkg>=1.0, pkg==1.0, pkg~=1.0, etc.
-              match = re.match(r'^([a-zA-Z0-9_-]+)\s*(.*)$', req_str.strip())
-              if match:
-                  name = match.group(1).lower().replace('-', '_')
-                  specifier = match.group(2).strip()
-                  return name, specifier
-              return None, None
-
-          def get_min_version(specifier_str):
-              """Extract minimum version from a specifier like >=1.0.0."""
-              if not specifier_str:
-                  return None
-              match = re.search(r'>=\s*([0-9][0-9a-zA-Z._-]*)', specifier_str)
-              if match:
-                  try:
-                      return Version(match.group(1))
-                  except InvalidVersion:
-                      return None
-              return None
-
-          def get_pinned_version(specifier_str):
-              """Extract pinned version from specifier like ==1.0.0."""
-              if not specifier_str:
-                  return None
-              match = re.search(r'==\s*([0-9][0-9a-zA-Z._-]*)', specifier_str)
-              if match:
-                  try:
-                      return Version(match.group(1))
-                  except InvalidVersion:
-                      return None
-              return None
-
-          # Download HA constraints
-          constraints_url = "https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt"
-          with urllib.request.urlopen(constraints_url) as response:
-              ha_constraints_raw = response.read().decode('utf-8')
-
-          # Parse HA constraints into a dict
-          ha_constraints = {}
-          for line in ha_constraints_raw.splitlines():
-              line = line.strip()
-              if not line or line.startswith('#'):
-                  continue
-              name, spec = parse_requirement(line)
-              if name:
-                  ha_constraints[name] = spec
-
-          # Read our manifest requirements
-          with open('custom_components/googlefindmy/manifest.json') as f:
-              manifest = json.load(f)
-
-          our_requirements = manifest.get('requirements', [])
-
-          # Compare versions
-          outdated = []
-          suggestions = []
-
-          print("=== Dependency Version Comparison ===\n")
-          print(f"{'Package':<25} {'Our Requirement':<20} {'HA Constraint':<20} {'Status'}")
-          print("-" * 85)
-
-          for req in our_requirements:
-              name, our_spec = parse_requirement(req)
-              if not name:
-                  continue
-
-              ha_spec = ha_constraints.get(name, ha_constraints.get(name.replace('_', '-'), ''))
-
-              status = "OK"
-              suggestion = None
-
-              if ha_spec:
-                  ha_pinned = get_pinned_version(ha_spec)
-                  our_min = get_min_version(our_spec)
-
-                  if ha_pinned and our_min:
-                      if ha_pinned < our_min:
-                          status = "WARNING: HA uses older version"
-                          suggestion = f"{name}: HA pins {ha_pinned}, but we require >={our_min}"
-                          outdated.append(suggestion)
-                      elif ha_pinned > our_min:
-                          status = "OK (HA version is newer)"
-                      else:
-                          status = "OK (exact match)"
-                  elif ha_pinned:
-                      # We have no minimum, HA has a pin - check compatibility
-                      try:
-                          if our_spec and not SpecifierSet(our_spec).contains(ha_pinned):
-                              status = "CONFLICT: HA pin incompatible"
-                              suggestion = f"{name}: HA pins {ha_pinned}, incompatible with {our_spec}"
-                              outdated.append(suggestion)
-                          else:
-                              status = "OK"
-                      except Exception:
-                          status = "Unable to check"
-
-              print(f"{name:<25} {our_spec:<20} {ha_spec:<20} {status}")
-
-              if suggestion:
-                  suggestions.append(suggestion)
-
-          print("\n=== Summary ===")
-          if outdated:
-              print(f"\n:warning: Found {len(outdated)} potential issues:")
-              for item in outdated:
-                  print(f"  - {item}")
-          else:
-              print("\n:white_check_mark: All dependencies are compatible with Home Assistant constraints.")
-
-          # Write outputs
-          output_file = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
-          with open(output_file, 'a') as f:
-              f.write(f"outdated_deps={'true' if outdated else 'false'}\n")
-              f.write("suggestions<<EOF\n")
-              f.write('\n'.join(suggestions) + '\n')
-              f.write("EOF\n")
-
-          PYTHON_SCRIPT
-
-      - name: Fail if conflicts found
-        if: steps.compare.outputs.outdated_deps == 'true' && github.event_name == 'pull_request'
-        run: |
-          echo "::error::Dependency version conflicts detected with Home Assistant constraints"
-          echo "${{ steps.compare.outputs.suggestions }}"
-          exit 1
-
-  # Auto-fix job - creates PR with updated dependencies (only on schedule/manual)
-  create-update-pr:
-    name: Create Dependency Update PR
-    runs-on: ubuntu-latest
-    needs: [check-ha-compatibility, check-version-bounds]
-    if: |
-      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_pr == 'true')) &&
-      (needs.check-ha-compatibility.outputs.has_conflicts == 'true' || needs.check-version-bounds.outputs.outdated_deps == 'true')
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -381,119 +42,315 @@ jobs:
       - name: Install dependencies
         run: pip install packaging
 
-      - name: Generate dependency update suggestions
-        id: suggestions
+      - name: Check compatibility with latest HA
+        id: check
         run: |
-          python - <<'PYTHON_SCRIPT'
-          import json
-          import re
-          import urllib.request
-          import os
-          from packaging.version import Version, InvalidVersion
+          set +e
 
-          def parse_requirement(req_str):
-              match = re.match(r'^([a-zA-Z0-9_-]+)\s*(.*)$', req_str.strip())
-              if match:
-                  name = match.group(1).lower().replace('-', '_')
-                  specifier = match.group(2).strip()
-                  return name, specifier
-              return None, None
+          if [ -n "${{ github.event.inputs.ha_version }}" ]; then
+            python script/check_ha_compatibility.py \
+              --ha-version "${{ github.event.inputs.ha_version }}" \
+              --verbose
+          else
+            python script/check_ha_compatibility.py --verbose
+          fi
 
-          def get_pinned_version(specifier_str):
-              if not specifier_str:
-                  return None
-              match = re.search(r'==\s*([0-9][0-9a-zA-Z._-]*)', specifier_str)
-              if match:
-                  try:
-                      return Version(match.group(1))
-                  except InvalidVersion:
-                      return None
-              return None
+          EXIT_CODE=$?
 
-          # Download HA constraints
-          constraints_url = "https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt"
-          with urllib.request.urlopen(constraints_url) as response:
-              ha_constraints_raw = response.read().decode('utf-8')
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "compatible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "compatible=false" >> "$GITHUB_OUTPUT"
+          fi
 
-          ha_constraints = {}
-          for line in ha_constraints_raw.splitlines():
-              line = line.strip()
-              if not line or line.startswith('#'):
-                  continue
-              name, spec = parse_requirement(line)
-              if name:
-                  pinned = get_pinned_version(spec)
-                  if pinned:
-                      ha_constraints[name] = str(pinned)
+          exit $EXIT_CODE
 
-          # Read manifest
-          with open('custom_components/googlefindmy/manifest.json') as f:
-              manifest = json.load(f)
+      - name: Write summary
+        if: always()
+        run: |
+          echo "## Latest HA Compatibility Check" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.check.outputs.compatible }}" = "true" ]; then
+            echo ":white_check_mark: All dependencies compatible with latest Home Assistant" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo ":x: Compatibility issues found - see job output for details" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-          # Generate suggestions
-          suggestions = {}
-          for req in manifest.get('requirements', []):
-              name, spec = parse_requirement(req)
-              if name and name in ha_constraints:
-                  ha_version = ha_constraints[name]
-                  # Suggest updating minimum to match HA if our minimum is lower
-                  match = re.search(r'>=([0-9][0-9a-zA-Z._-]*)', spec)
-                  if match:
-                      our_min = match.group(1)
-                      try:
-                          if Version(our_min) < Version(ha_version):
-                              suggestions[name] = {
-                                  'current': spec,
-                                  'suggested': f'>={ha_version}',
-                                  'ha_version': ha_version
-                              }
-                      except InvalidVersion:
-                          pass
+  # Job 2: Verify declared minimum HA version is correct (backward compatibility)
+  check-declared-minimum:
+    name: Verify Declared Minimum HA Version
+    runs-on: ubuntu-latest
+    outputs:
+      valid: ${{ steps.check.outputs.valid }}
+      declared_version: ${{ steps.check.outputs.declared_version }}
+      suggested_version: ${{ steps.check.outputs.suggested_version }}
 
-          output_file = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
-          with open(output_file, 'a') as f:
-              f.write("suggestions<<EOF\n")
-              f.write(json.dumps(suggestions, indent=2) + '\n')
-              f.write("EOF\n")
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-          if suggestions:
-              print(f"Found {len(suggestions)} packages that could be updated:")
-              for pkg, info in suggestions.items():
-                  print(f"  {pkg}: {info['current']} -> {info['suggested']} (HA uses {info['ha_version']})")
-          else:
-              print("No updates needed.")
-
-          PYTHON_SCRIPT
-
-      - name: Create Pull Request
-        if: steps.suggestions.outputs.suggestions != '{}'
-        uses: peter-evans/create-pull-request@v6
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: chore/ha-dependency-update
-          delete-branch: true
-          title: "chore: update dependencies for Home Assistant compatibility"
-          body: |
-            ## Home Assistant Dependency Update
+          python-version: ${{ env.PYTHON_VERSION }}
 
-            This PR was automatically created by the HA Dependency Compatibility Check workflow.
+      - name: Install dependencies
+        run: pip install packaging
 
-            ### Changes
+      - name: Check declared minimum version
+        id: check
+        run: |
+          set +e
 
-            The following dependencies have been identified as potentially needing updates to maintain compatibility with the latest Home Assistant release:
+          # Get declared version from manifest
+          DECLARED=$(python -c "
+          import json
+          with open('custom_components/googlefindmy/manifest.json') as f:
+              m = json.load(f)
+          print(m.get('homeassistant', ''))
+          ")
+          echo "declared_version=$DECLARED" >> "$GITHUB_OUTPUT"
 
-            ${{ steps.suggestions.outputs.suggestions }}
+          # Run the check
+          python script/check_ha_compatibility.py --check-declared-minimum --verbose 2>&1 | tee check_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
 
-            ### What to do
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "valid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "valid=false" >> "$GITHUB_OUTPUT"
 
-            1. Review the suggested changes
-            2. Update `manifest.json` and `requirements.txt` with the new version bounds
-            3. Test the integration with the latest Home Assistant version
-            4. Merge this PR if all tests pass
+            # Try to extract suggested version
+            SUGGESTED=$(grep -oP 'Correct minimum should be: \K[0-9.]+' check_output.txt || \
+                        grep -oP 'Suggested minimum: \K[0-9.]+' check_output.txt || \
+                        echo "")
+            echo "suggested_version=$SUGGESTED" >> "$GITHUB_OUTPUT"
+          fi
 
-            ---
-            *This PR was automatically generated. Please review carefully before merging.*
-          labels: |
-            dependencies
-            automated pr
-          commit-message: "chore: update dependencies for Home Assistant compatibility"
+          exit $EXIT_CODE
+
+      - name: Write summary
+        if: always()
+        run: |
+          echo "## Declared Minimum HA Version Check" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          DECLARED="${{ steps.check.outputs.declared_version }}"
+          if [ -z "$DECLARED" ]; then
+            echo ":warning: No \`homeassistant\` field declared in manifest.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Declared minimum: \`$DECLARED\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.check.outputs.valid }}" = "true" ]; then
+            echo ":white_check_mark: Declared minimum version is valid" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo ":x: Declared minimum version is incorrect or missing" >> "$GITHUB_STEP_SUMMARY"
+            SUGGESTED="${{ steps.check.outputs.suggested_version }}"
+            if [ -n "$SUGGESTED" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "**Suggested minimum:** \`$SUGGESTED\`" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+  # Job 3: Find minimum compatible HA version (optional, on manual trigger)
+  find-minimum-version:
+    name: Find Minimum Compatible HA Version
+    runs-on: ubuntu-latest
+    if: github.event.inputs.find_minimum == 'true'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: pip install packaging
+
+      - name: Find minimum HA version
+        id: find
+        run: |
+          python script/check_ha_compatibility.py --find-minimum --verbose 2>&1 | tee find_output.txt
+
+          # Extract minimum version
+          MIN_VERSION=$(grep -oP 'Minimum compatible HA version: \K[0-9.]+' find_output.txt || echo "")
+          echo "minimum_version=$MIN_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Write summary
+        run: |
+          echo "## Minimum Compatible HA Version Search" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          MIN="${{ steps.find.outputs.minimum_version }}"
+          if [ -n "$MIN" ]; then
+            echo "**Minimum compatible version:** \`$MIN\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo ":x: Could not determine minimum version" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "<details><summary>Full output</summary>" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat find_output.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+
+  # Job 4: Installation test - actually install HA + integration deps
+  installation-test:
+    name: Installation Test
+    runs-on: ubuntu-latest
+    outputs:
+      success: ${{ steps.install.outputs.success }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Get HA version to test
+        id: ha_version
+        run: |
+          if [ -n "${{ github.event.inputs.ha_version }}" ]; then
+            echo "version=${{ github.event.inputs.ha_version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Get latest stable version from PyPI
+            pip install --upgrade pip
+            VERSION=$(pip index versions homeassistant 2>/dev/null | grep -oP 'homeassistant \(\K[^)]+' | head -1 || echo "")
+            if [ -z "$VERSION" ]; then
+              # Fallback to dev
+              VERSION="dev"
+            fi
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download HA constraints
+        id: constraints
+        run: |
+          HA_VERSION="${{ steps.ha_version.outputs.version }}"
+
+          # Try release tag first
+          URL="https://raw.githubusercontent.com/home-assistant/core/${HA_VERSION}/homeassistant/package_constraints.txt"
+          if ! curl -fsSL "$URL" -o ha_constraints.txt 2>/dev/null; then
+            # Fallback to dev
+            URL="https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/package_constraints.txt"
+            curl -fsSL "$URL" -o ha_constraints.txt
+          fi
+
+          echo "Downloaded constraints from: $URL"
+
+      - name: Create test environment and install
+        id: install
+        run: |
+          set +e
+
+          python -m venv test_env
+          source test_env/bin/activate
+
+          pip install --upgrade pip
+
+          echo "=== Installing Home Assistant ==="
+          HA_VERSION="${{ steps.ha_version.outputs.version }}"
+          if [ "$HA_VERSION" = "dev" ]; then
+            pip install homeassistant --constraint ha_constraints.txt
+          else
+            pip install "homeassistant==$HA_VERSION" --constraint ha_constraints.txt
+          fi
+
+          echo ""
+          echo "=== Installing integration requirements ==="
+          REQUIREMENTS=$(python -c "
+          import json
+          with open('custom_components/googlefindmy/manifest.json') as f:
+              m = json.load(f)
+          print(' '.join(m.get('requirements', [])))
+          ")
+
+          FAILED=0
+          for req in $REQUIREMENTS; do
+            echo "Installing: $req"
+            if ! pip install "$req" --constraint ha_constraints.txt 2>&1; then
+              echo "::error::Failed to install $req"
+              FAILED=1
+            fi
+          done
+
+          echo ""
+          echo "=== Running pip check ==="
+          pip check
+          PIP_CHECK=$?
+
+          if [ $FAILED -eq 0 ] && [ $PIP_CHECK -eq 0 ]; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+            echo ":white_check_mark: Installation successful"
+          else
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            echo ":x: Installation failed"
+            exit 1
+          fi
+
+      - name: Write summary
+        if: always()
+        run: |
+          echo "## Installation Test" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**HA Version:** ${{ steps.ha_version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.install.outputs.success }}" = "true" ]; then
+            echo ":white_check_mark: All packages installed successfully with HA constraints" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo ":x: Installation failed - see job output for details" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # Summary job
+  summary:
+    name: Compatibility Summary
+    runs-on: ubuntu-latest
+    needs: [check-latest-ha, check-declared-minimum, installation-test]
+    if: always()
+
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# Home Assistant Dependency Compatibility Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Latest HA check
+          if [ "${{ needs.check-latest-ha.outputs.compatible }}" = "true" ]; then
+            echo "| Latest HA Compatibility | :white_check_mark: Pass |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Latest HA Compatibility | :x: Fail |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Declared minimum check
+          if [ "${{ needs.check-declared-minimum.outputs.valid }}" = "true" ]; then
+            echo "| Declared Minimum Valid | :white_check_mark: Pass |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Declared Minimum Valid | :x: Fail |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # Installation test
+          if [ "${{ needs.installation-test.outputs.success }}" = "true" ]; then
+            echo "| Installation Test | :white_check_mark: Pass |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Installation Test | :x: Fail |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail if any check failed
+        if: |
+          needs.check-latest-ha.outputs.compatible != 'true' ||
+          needs.check-declared-minimum.outputs.valid != 'true' ||
+          needs.installation-test.outputs.success != 'true'
+        run: |
+          echo "One or more compatibility checks failed"
+          exit 1
