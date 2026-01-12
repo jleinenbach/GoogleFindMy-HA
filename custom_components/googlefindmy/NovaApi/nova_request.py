@@ -1128,25 +1128,23 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             await asyncio.sleep(delay)
                             continue
 
-                        # Exhausted all retries - this is a transient auth error.
-                        # The coordinator should NOT immediately trigger reauth;
-                        # subsequent poll cycles may succeed once backends sync.
-                        _LOGGER.warning(
+                        # Exhausted all retries - 401 is a client error indicating
+                        # invalid credentials. After 42s of retries, this is NOT
+                        # a propagation delay; the token chain is genuinely broken.
+                        _LOGGER.error(
                             "Nova API async request to %s: 401 persists after %d retries "
-                            "(total wait: %.0fs). Treating as transient auth failure.",
+                            "(total wait: %.0fs). Authentication is invalid; re-auth required.",
                             api_scope,
                             max_auth_retries,
                             sum(_AUTH_RETRY_DELAYS),
                         )
-                        # Invalidate the AAS token so the next poll cycle can attempt
-                        # a fresh token chain (OAuth -> AAS -> ADM). This is critical
-                        # when the underlying AAS token is invalid but gpsoauth didn't
-                        # explicitly reject it with a recognizable error.
+                        # Invalidate the AAS token so re-auth can generate a fresh
+                        # token chain (OAuth -> AAS -> ADM).
                         await policy.async_invalidate_aas_token()
                         raise NovaAuthError(
                             status,
-                            "Unauthorized after token refresh (transient; may self-heal)",
-                            is_permanent=False,
+                            "Unauthorized after token refresh; re-authentication required",
+                            is_permanent=True,
                         )
 
                     if status in HTTP_RETRY_ELIGIBLE:
