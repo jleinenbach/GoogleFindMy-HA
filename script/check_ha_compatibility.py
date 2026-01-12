@@ -468,7 +468,7 @@ def main() -> int:
         epilog="""
 Examples:
   %(prog)s                          Check against latest HA (dev branch)
-  %(prog)s --ha-version 2025.1.0    Check against specific version
+  %(prog)s --ha-version 2025.9.0    Check against specific version
   %(prog)s --find-minimum           Find oldest compatible HA version
   %(prog)s --check-declared-minimum Verify manifest.json minimum is correct
         """,
