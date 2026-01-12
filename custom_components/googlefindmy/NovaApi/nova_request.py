@@ -687,7 +687,16 @@ class TTLPolicy:
 
 
 class AsyncTTLPolicy(TTLPolicy):
-    """Native async version of the TTL policy (no blocking calls)."""
+    """Native async version of the TTL policy (no blocking calls).
+
+    This policy manages both ADM and AAS token TTL learning:
+    - ADM tokens: proactive refresh based on measured TTL
+    - AAS tokens: proactive refresh based on learned lifetime (when AAS+ADM chain fails)
+    """
+
+    # AAS token TTL learning constants
+    AAS_TTL_MARGIN_SEC = 300  # 5 min margin before expiry
+    AAS_DEFAULT_TTL_SEC = 7 * 24 * 3600  # 7 days default (conservative estimate)
 
     def __init__(  # noqa: PLR0913
         self,
@@ -713,13 +722,72 @@ class AsyncTTLPolicy(TTLPolicy):
         self._aset: Callable[[str, Any], Awaitable[None]] = set_value
         self._arefresh: Callable[[], Awaitable[str | None]] = refresh_fn
 
+    # --- AAS TTL learning cache keys ---
+    @property
+    def k_aas_issued(self) -> str:
+        """Cache key for AAS token issuance timestamp."""
+        return f"{self._ns}aas_token_issued_at_{self.username}"
+
+    @property
+    def k_aas_bestttl(self) -> str:
+        """Cache key for best known AAS token TTL."""
+        return f"{self._ns}aas_best_ttl_sec_{self.username}"
+
+    async def async_record_aas_issued(self) -> None:
+        """Record the issuance timestamp when a fresh AAS token is generated.
+
+        This enables TTL learning for AAS tokens by tracking how long they
+        remain valid before Google rejects them.
+        """
+        now = time.time()
+        for key in self._key_variants(f"aas_token_issued_at_{self.username}"):
+            try:
+                await self._aset(key, now)
+            except Exception:  # noqa: BLE001 - defensive cache write
+                pass
+
     async def async_invalidate_aas_token(self) -> None:
-        """Clear the cached AAS token so the next refresh generates a fresh one.
+        """Clear the cached AAS token and learn its actual TTL.
 
         This should be called when persistent 401 errors occur after a token
         refresh, as it indicates the underlying AAS token may be invalid even
         if gpsoauth didn't explicitly reject it.
+
+        TTL Learning: When invalidating, we record the observed lifetime to
+        enable proactive refresh before future tokens expire.
         """
+        now = time.time()
+
+        # Learn AAS TTL from observed lifetime
+        issued_raw = await self._aget(self.k_aas_issued)
+        if issued_raw is not None:
+            try:
+                issued_at = float(issued_raw)
+                observed_ttl = now - issued_at
+                observed_ttl_hours = observed_ttl / 3600
+                self.log.info(
+                    "AAS token for %s lived %.1f hours before invalidation.",
+                    self.username,
+                    observed_ttl_hours,
+                )
+                # Update best known TTL (conservative: take the shorter one)
+                best_raw = await self._aget(self.k_aas_bestttl)
+                if best_raw is None or observed_ttl < float(best_raw):
+                    # Apply 5% safety margin
+                    safe_ttl = observed_ttl * 0.95
+                    for key in self._key_variants(f"aas_best_ttl_sec_{self.username}"):
+                        try:
+                            await self._aset(key, safe_ttl)
+                        except Exception:  # noqa: BLE001 - defensive cache write
+                            pass
+                    self.log.info(
+                        "Updated AAS best TTL for %s to %.1f hours (with 5%% margin).",
+                        self.username,
+                        safe_ttl / 3600,
+                    )
+            except (TypeError, ValueError) as e:
+                self.log.debug("Failed to learn AAS TTL: %s", e)
+
         self.log.warning(
             "Invalidating cached AAS token for %s due to persistent 401 errors.",
             self.username,
@@ -729,6 +797,54 @@ class AsyncTTLPolicy(TTLPolicy):
                 await self._aset(key, None)
             except Exception:
                 pass
+        # Clear issued timestamp so next refresh records a fresh one
+        for key in self._key_variants(f"aas_token_issued_at_{self.username}"):
+            try:
+                await self._aset(key, None)
+            except Exception:
+                pass
+        # Also clear ADM issued timestamp to bypass stampede guard in async_on_401
+        # This ensures the subsequent refresh actually happens instead of being skipped
+        for key in self._key_variants(f"adm_token_issued_at_{self.username}"):
+            try:
+                await self._aset(key, None)
+            except Exception:
+                pass
+
+    async def async_check_aas_proactive_refresh(self) -> bool:
+        """Check if AAS token should be proactively refreshed based on learned TTL.
+
+        Returns:
+            True if AAS token was refreshed, False otherwise.
+        """
+        now = time.time()
+        issued_raw = await self._aget(self.k_aas_issued)
+        best_ttl_raw = await self._aget(self.k_aas_bestttl)
+
+        if issued_raw is None or best_ttl_raw is None:
+            return False
+
+        try:
+            issued_at = float(issued_raw)
+            best_ttl = float(best_ttl_raw)
+            age = now - issued_at
+            threshold = max(0.0, best_ttl - self.AAS_TTL_MARGIN_SEC)
+            threshold = self._jitter_sec(threshold, self.JITTER_SEC)
+
+            if age >= threshold:
+                self.log.info(
+                    "AAS token for %s reached measured threshold (%.1f hours) – "
+                    "proactively refreshing token chain.",
+                    self.username,
+                    best_ttl / 3600,
+                )
+                await self.async_invalidate_aas_token()
+                # The next ADM refresh will trigger a fresh AAS token generation
+                return True
+        except (TypeError, ValueError) as e:
+            self.log.debug("AAS proactive refresh check failed: %s", e)
+
+        return False
 
     async def _arm_probe_if_due_async(self, now: float) -> bool:
         startup_left = await self._aget(self.k_startleft)
@@ -808,6 +924,16 @@ class AsyncTTLPolicy(TTLPolicy):
         return tok
 
     async def async_pre_request(self) -> None:
+        """Perform proactive token refresh checks for both AAS and ADM tokens.
+
+        This method checks:
+        1. AAS token: if approaching learned TTL, invalidate to trigger fresh generation
+        2. ADM token: if approaching measured TTL, proactively refresh
+        """
+        # Check AAS token proactive refresh first (longer-lived, less frequent)
+        await self.async_check_aas_proactive_refresh()
+
+        # Then check ADM token proactive refresh (shorter-lived, more frequent)
         now = time.time()
         issued_at = await self._aget(self.k_issued)
         best_ttl = await self._aget(self.k_bestttl)
@@ -1064,7 +1190,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             ephemeral_session = True
 
     try:
-        refreshed_once = False
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
         while True:
@@ -1092,57 +1217,106 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     )
 
                     if status == HTTP_UNAUTHORIZED:
-                        # Progressive backoff delays for 401 retries after token refresh:
-                        # - 6s: Backend propagation delay (token sync across servers)
-                        # - 61s: Short cooldown (~1 min, odd to avoid boundary hits)
-                        # - 301s: Long cooldown (~5 min, Google's typical rate-limit window)
-                        _AUTH_RETRY_DELAYS = (6.0, 61.0, 301.0)
-                        max_auth_retries = len(_AUTH_RETRY_DELAYS)
+                        # 401 Retry Sequence (OAuth → AAS → ADM token chain):
+                        # ----------------------------------------------------------
+                        # Step 0 (initial): Request fails with 401
+                        # Step 1: Refresh ADM only → wait 6s (propagation) → retry
+                        # Step 2: If 401: wait 61s → invalidate AAS, refresh AAS+ADM → wait 6s → retry
+                        # Step 3: If 401: wait 501s (long cooldown) → retry
+                        # Step 4: If 401: permanent error, re-auth required
+                        #
+                        # Delays use odd numbers to avoid hitting rate-limit boundaries.
+                        # The 6s propagation delay allows Google's backend to sync new tokens.
+                        _PROPAGATION_DELAY_S = 6.0
+                        _SHORT_COOLDOWN_S = 61.0  # ~1 min
+                        _LONG_COOLDOWN_S = 501.0  # ~8 min
+                        # Auth retry step constants
+                        _AUTH_STEP_ADM_REFRESH = 0
+                        _AUTH_STEP_AAS_ADM_REFRESH = 1
+                        _AUTH_STEP_LONG_COOLDOWN = 2
+                        max_auth_retries = 4
 
-                        lvl = logging.INFO if not refreshed_once else logging.WARNING
+                        lvl = (
+                            logging.INFO
+                            if auth_retries_used == _AUTH_STEP_ADM_REFRESH
+                            else logging.WARNING
+                        )
                         _LOGGER.log(
                             lvl,
-                            "Nova API async request to %s: 401 Unauthorized. Refreshing token.",
+                            "Nova API async request to %s: 401 Unauthorized (attempt %d/%d).",
                             api_scope,
+                            auth_retries_used + 1,
+                            max_auth_retries,
                         )
 
-                        # Only refresh token on first 401; subsequent retries use the
-                        # already-refreshed token with increasing backoff delays.
-                        if not refreshed_once:
+                        if auth_retries_used == _AUTH_STEP_ADM_REFRESH:
+                            # Step 1: First 401 - refresh ADM token only, wait for propagation
+                            _LOGGER.info(
+                                "Nova API: refreshing ADM token (AAS unchanged)."
+                            )
                             try:
                                 await policy.async_on_401()
                             except NovaAuthPermanentError:
-                                # AAS token invalid - no point retrying, re-auth required
+                                # AAS token explicitly rejected - no point retrying
                                 raise
-                            refreshed_once = True
-
-                        if auth_retries_used < max_auth_retries:
-                            delay = _AUTH_RETRY_DELAYS[auth_retries_used]
                             _LOGGER.info(
-                                "Nova API async request to %s: 401 after refresh. "
-                                "Waiting %.0fs before retry %d/%d.",
-                                api_scope,
-                                delay,
-                                auth_retries_used + 1,
-                                max_auth_retries,
+                                "Nova API: waiting %.0fs for token propagation.",
+                                _PROPAGATION_DELAY_S,
                             )
+                            await asyncio.sleep(_PROPAGATION_DELAY_S)
                             auth_retries_used += 1
-                            await asyncio.sleep(delay)
                             continue
 
-                        # Exhausted all retries - 401 is a client error indicating
-                        # invalid credentials. After ~6 min of retries, this is NOT
-                        # a transient issue; the token chain is genuinely broken.
+                        if auth_retries_used == _AUTH_STEP_AAS_ADM_REFRESH:
+                            # Step 2: Second 401 - ADM refresh didn't help
+                            # Wait cooldown, then invalidate AAS and refresh entire chain
+                            _LOGGER.warning(
+                                "Nova API: ADM refresh failed. Waiting %.0fs before "
+                                "refreshing entire token chain (AAS+ADM).",
+                                _SHORT_COOLDOWN_S,
+                            )
+                            await asyncio.sleep(_SHORT_COOLDOWN_S)
+                            await policy.async_invalidate_aas_token()
+                            _LOGGER.info("Nova API: refreshing AAS+ADM token chain.")
+                            try:
+                                await policy.async_on_401()
+                            except NovaAuthPermanentError:
+                                raise
+                            _LOGGER.info(
+                                "Nova API: waiting %.0fs for token propagation.",
+                                _PROPAGATION_DELAY_S,
+                            )
+                            await asyncio.sleep(_PROPAGATION_DELAY_S)
+                            auth_retries_used += 1
+                            continue
+
+                        if auth_retries_used == _AUTH_STEP_LONG_COOLDOWN:
+                            # Step 3: Third 401 - even fresh AAS+ADM didn't help
+                            # Wait long cooldown, then retry once more
+                            _LOGGER.warning(
+                                "Nova API: AAS+ADM refresh failed. Waiting %.0fs "
+                                "(long cooldown) before final retry.",
+                                _LONG_COOLDOWN_S,
+                            )
+                            await asyncio.sleep(_LONG_COOLDOWN_S)
+                            auth_retries_used += 1
+                            continue
+
+                        # Step 4: Fourth 401 - all retries exhausted
+                        # Total wait: 6s + 61s + 6s + 501s = 574s (~9.5 min)
+                        total_wait = (
+                            _PROPAGATION_DELAY_S
+                            + _SHORT_COOLDOWN_S
+                            + _PROPAGATION_DELAY_S
+                            + _LONG_COOLDOWN_S
+                        )
                         _LOGGER.error(
                             "Nova API async request to %s: 401 persists after %d retries "
                             "(total wait: %.0fs). Authentication is invalid; re-auth required.",
                             api_scope,
                             max_auth_retries,
-                            sum(_AUTH_RETRY_DELAYS),
+                            total_wait,
                         )
-                        # Invalidate the AAS token so re-auth can generate a fresh
-                        # token chain (OAuth -> AAS -> ADM).
-                        await policy.async_invalidate_aas_token()
                         raise NovaAuthError(
                             status,
                             "Unauthorized after token refresh; re-authentication required",
