@@ -863,3 +863,514 @@ def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
     assert session.calls
     headers = session.calls[0]["kwargs"].get("headers", {})
     assert headers.get("Authorization") == "Bearer adm-token"
+
+
+def test_async_ttl_policy_invalidate_aas_token_clears_both_bare_and_namespaced() -> (
+    None
+):
+    """async_invalidate_aas_token must clear AAS token from both bare and namespaced keys.
+
+    This ensures that when persistent 401 errors indicate a potentially invalid
+    AAS token (even without explicit BadAuthentication), subsequent poll cycles
+    can generate a fresh OAuth -> AAS -> ADM token chain.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-invalidate-aas")
+        try:
+            namespace = "entry-invalidate-aas"
+            username = "user@example.com"
+
+            # Seed both bare and namespaced AAS tokens
+            await cache.set(DATA_AAS_TOKEN, "stale-bare-aas")
+            await cache.set(f"{namespace}:{DATA_AAS_TOKEN}", "stale-ns-aas")
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_invalidate_aas"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Verify tokens exist before invalidation
+            assert await cache.get(DATA_AAS_TOKEN) == "stale-bare-aas"
+            assert await cache.get(f"{namespace}:{DATA_AAS_TOKEN}") == "stale-ns-aas"
+
+            # Call the new invalidation method
+            await policy.async_invalidate_aas_token()
+
+            # Both keys must be cleared
+            assert await cache.get(DATA_AAS_TOKEN) is None
+            assert await cache.get(f"{namespace}:{DATA_AAS_TOKEN}") is None
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent 401 errors after token refresh must invalidate the AAS token.
+
+    When all auth_retries (3 attempts with backoff) are exhausted and 401
+    still persists, the AAS token should be cleared so subsequent poll cycles
+    can generate a fresh token chain (OAuth -> AAS -> ADM).
+
+    This regression test covers the bug where an invalid AAS token would remain
+    cached indefinitely, causing a loop of failed token refreshes.
+    """
+
+    cache = _StubCache()
+    # Need 4 responses: 1 initial 401 + 3 retries all returning 401
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+        ]
+    )
+
+    aas_invalidation_calls: list[str] = []
+
+    async def _exercise() -> None:
+        # Seed the AAS token that should be invalidated
+        await cache.set(DATA_AAS_TOKEN, "stale-aas-token")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            return "refreshed-adm"
+
+        # Mock asyncio.sleep to skip the 6s+12s+24s backoff delays
+        async def _instant_sleep(_: float) -> None:
+            pass
+
+        # Spy on async_invalidate_aas_token to verify it's called
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _spy_invalidate(self: AsyncTTLPolicy) -> None:
+            aas_invalidation_calls.append(self.username)
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _spy_invalidate,
+        )
+
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            token="initial-token",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+    with pytest.raises(NovaAuthError) as err:
+        asyncio.run(_exercise())
+
+    # Verify the error is transient (not permanent)
+    assert err.value.status == 401
+    assert not err.value.is_permanent
+
+    # Verify async_invalidate_aas_token was called
+    assert len(aas_invalidation_calls) == 1
+    assert aas_invalidation_calls[0] == "user@example.com"
+
+
+def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After AAS invalidation, next poll cycle should generate fresh token chain.
+
+    This test verifies the complete bug fix scenario:
+    1. First poll cycle: persistent 401s -> AAS token invalidated
+    2. Second poll cycle: AAS token is None -> success (simulating fresh generation)
+    """
+
+    cache = _StubCache()
+    poll_cycle = 0
+    aas_states_before_request: list[tuple[int, str | None]] = []
+
+    async def _exercise() -> tuple[str | None, str | None]:
+        nonlocal poll_cycle
+
+        # Seed initial stale AAS token
+        await cache.set(DATA_AAS_TOKEN, "stale-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return f"adm-cycle-{poll_cycle}"
+
+        async def _refresh() -> str:
+            return f"refreshed-adm-cycle-{poll_cycle}"
+
+        async def _instant_sleep(_: float) -> None:
+            pass
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+        # First poll cycle: all 401s -> should invalidate AAS token
+        poll_cycle = 1
+        aas_states_before_request.append((poll_cycle, await cache.get(DATA_AAS_TOKEN)))
+        session1 = _DummySession(
+            [
+                _DummyResponse(401, b"Unauthorized"),
+                _DummyResponse(401, b"Unauthorized"),
+                _DummyResponse(401, b"Unauthorized"),
+                _DummyResponse(401, b"Unauthorized"),
+            ]
+        )
+
+        try:
+            await async_nova_request(
+                "testScope",
+                "00",
+                username="user@example.com",
+                cache=cache,
+                session=session1,
+                refresh_override=_refresh,
+            )
+        except NovaAuthError:
+            pass  # Expected
+
+        # Verify AAS token was cleared after first cycle
+        aas_after_first = await cache.get(DATA_AAS_TOKEN)
+
+        # Second poll cycle: success with fresh AAS
+        poll_cycle = 2
+        session2 = _DummySession([_DummyResponse(200, b"\xca\xfe")])
+
+        second_result = await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session2,
+            refresh_override=_refresh,
+        )
+
+        return aas_after_first, second_result
+
+    aas_after_first, second_result = asyncio.run(_exercise())
+
+    # AAS should be None after first failed cycle
+    assert aas_after_first is None
+
+    # Second cycle should succeed with fresh token chain
+    assert second_result == "cafe"
+
+    # Verify AAS state progression:
+    # Cycle 1: AAS = "stale-aas" (before request)
+    # After cycle 1: AAS = None (invalidated due to persistent 401s)
+    assert aas_states_before_request[0] == (1, "stale-aas")
+
+
+def test_async_nova_request_preserves_aas_token_on_successful_401_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AAS token must be preserved when 401 recovery succeeds within retry window.
+
+    If the first 401 triggers a token refresh and the retry succeeds, the AAS
+    token should NOT be invalidated. This prevents unnecessary token regeneration
+    when the issue was transient (e.g., backend propagation delay).
+    """
+
+    cache = _StubCache()
+    # First request: 401, second request after refresh: success
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(200, b"\xbe\xef"),
+        ]
+    )
+
+    aas_invalidation_calls: list[str] = []
+
+    async def _exercise() -> tuple[str, str | None]:
+        await cache.set(DATA_AAS_TOKEN, "original-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            return "refreshed-adm"
+
+        # Spy on async_invalidate_aas_token to verify it's NOT called
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _spy_invalidate(self: AsyncTTLPolicy) -> None:
+            aas_invalidation_calls.append(self.username)
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _spy_invalidate,
+        )
+
+        # Don't pass token kwarg to avoid overwriting AAS in cache
+        result = await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+        final_aas = await cache.get(DATA_AAS_TOKEN)
+        return result, final_aas
+
+    result, final_aas = asyncio.run(_exercise())
+
+    # Request should succeed
+    assert result == "beef"
+
+    # AAS token should be preserved (not invalidated)
+    assert final_aas == "original-aas"
+
+    # async_invalidate_aas_token should NOT have been called
+    assert len(aas_invalidation_calls) == 0
+
+
+def test_async_nova_request_no_double_aas_invalidation_on_repeated_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AAS invalidation must happen exactly once per failed request cycle.
+
+    When 401s persist through all retries, async_invalidate_aas_token should
+    be called exactly once, not multiple times per retry.
+    """
+
+    cache = _StubCache()
+    session = _DummySession(
+        [
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+            _DummyResponse(401, b"Unauthorized"),
+        ]
+    )
+
+    invalidation_call_count = 0
+
+    async def _exercise() -> None:
+        nonlocal invalidation_call_count
+
+        await cache.set(DATA_AAS_TOKEN, "stale-aas")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return "initial-adm"
+
+        async def _refresh() -> str:
+            return "refreshed-adm"
+
+        async def _instant_sleep(_: float) -> None:
+            pass
+
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _counting_invalidate(self: AsyncTTLPolicy) -> None:
+            nonlocal invalidation_call_count
+            invalidation_call_count += 1
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _counting_invalidate,
+        )
+
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            token="initial-token",
+            cache=cache,
+            session=session,
+            refresh_override=_refresh,
+        )
+
+    with pytest.raises(NovaAuthError):
+        asyncio.run(_exercise())
+
+    # Invalidation should happen exactly once per failed cycle
+    assert invalidation_call_count == 1
+
+
+def test_async_nova_request_loop_prevention_across_multiple_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token renewal loop prevention must work across multiple consecutive failed cycles.
+
+    This test simulates the exact bug scenario: multiple poll cycles where each
+    cycle exhausts retries. The fix ensures that each cycle invalidates AAS,
+    allowing fresh token generation on subsequent cycles, eventually breaking
+    the loop when valid tokens are available.
+    """
+
+    cache = _StubCache()
+    cycle_count = 0
+    aas_invalidations: list[int] = []
+    aas_states_at_cycle_start: list[tuple[int, str | None]] = []
+
+    async def _exercise() -> str:
+        nonlocal cycle_count
+
+        await cache.set(DATA_AAS_TOKEN, "initial-stale-aas")
+        await cache.set(username_string, "user@example.com")
+
+        async def _fake_get_adm_token(
+            username: str | None = None,
+            *,
+            retries: int = 2,
+            backoff: float = 1.0,
+            cache: Any,
+        ) -> str:
+            return f"adm-cycle-{cycle_count}"
+
+        async def _refresh() -> str:
+            return f"refreshed-adm-cycle-{cycle_count}"
+
+        async def _instant_sleep(_: float) -> None:
+            pass
+
+        original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
+
+        async def _tracking_invalidate(self: AsyncTTLPolicy) -> None:
+            aas_invalidations.append(cycle_count)
+            await original_invalidate(self)
+
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+            _fake_get_adm_token,
+        )
+        monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+        monkeypatch.setattr(
+            AsyncTTLPolicy,
+            "async_invalidate_aas_token",
+            _tracking_invalidate,
+        )
+
+        # Simulate 3 failed cycles, then 1 successful cycle
+        for i in range(1, 4):
+            cycle_count = i
+            # Record AAS state at the start of each cycle
+            current_aas = await cache.get(DATA_AAS_TOKEN)
+            aas_states_at_cycle_start.append((i, current_aas))
+
+            session = _DummySession(
+                [
+                    _DummyResponse(401, b"Unauthorized"),
+                    _DummyResponse(401, b"Unauthorized"),
+                    _DummyResponse(401, b"Unauthorized"),
+                    _DummyResponse(401, b"Unauthorized"),
+                ]
+            )
+            try:
+                await async_nova_request(
+                    "testScope",
+                    "00",
+                    username="user@example.com",
+                    cache=cache,
+                    session=session,
+                    refresh_override=_refresh,
+                )
+            except NovaAuthError:
+                pass  # Expected for cycles 1-3
+
+        # Record final AAS state before successful cycle
+        cycle_count = 4
+        final_aas_before_success = await cache.get(DATA_AAS_TOKEN)
+        aas_states_at_cycle_start.append((4, final_aas_before_success))
+
+        session_success = _DummySession([_DummyResponse(200, b"\xde\xad")])
+
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session_success,
+            refresh_override=_refresh,
+        )
+
+    result = asyncio.run(_exercise())
+
+    # Final cycle should succeed
+    assert result == "dead"
+
+    # AAS should be invalidated once per failed cycle (cycles 1, 2, 3)
+    assert aas_invalidations == [1, 2, 3]
+
+    # Verify the AAS token state progression:
+    # Cycle 1: AAS = "initial-stale-aas" (before invalidation)
+    # Cycle 2: AAS = None (after cycle 1 invalidated it)
+    # Cycle 3: AAS = None (after cycle 2 invalidated it)
+    # Cycle 4: AAS = None (after cycle 3 invalidated it)
+    assert aas_states_at_cycle_start[0] == (1, "initial-stale-aas")
+    assert aas_states_at_cycle_start[1][1] is None  # Cycle 2 sees None
+    assert aas_states_at_cycle_start[2][1] is None  # Cycle 3 sees None
+    assert aas_states_at_cycle_start[3][1] is None  # Cycle 4 sees None

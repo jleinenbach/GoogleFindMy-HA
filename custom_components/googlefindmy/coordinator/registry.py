@@ -254,7 +254,7 @@ class RegistryOperations:
         )
         return supports_translation
 
-    @callback
+    @callback  # type: ignore[misc, untyped-decorator, unused-ignore]
     def _reindex_poll_targets_from_device_registry(
         self: GoogleFindMyCoordinator,
     ) -> None:

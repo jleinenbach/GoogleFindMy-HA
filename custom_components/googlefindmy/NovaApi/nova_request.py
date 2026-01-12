@@ -713,6 +713,23 @@ class AsyncTTLPolicy(TTLPolicy):
         self._aset: Callable[[str, Any], Awaitable[None]] = set_value
         self._arefresh: Callable[[], Awaitable[str | None]] = refresh_fn
 
+    async def async_invalidate_aas_token(self) -> None:
+        """Clear the cached AAS token so the next refresh generates a fresh one.
+
+        This should be called when persistent 401 errors occur after a token
+        refresh, as it indicates the underlying AAS token may be invalid even
+        if gpsoauth didn't explicitly reject it.
+        """
+        self.log.warning(
+            "Invalidating cached AAS token for %s due to persistent 401 errors.",
+            self.username,
+        )
+        for key in self._key_variants(DATA_AAS_TOKEN):
+            try:
+                await self._aset(key, None)
+            except Exception:
+                pass
+
     async def _arm_probe_if_due_async(self, now: float) -> bool:
         startup_left = await self._aget(self.k_startleft)
         probenext = await self._aget(self.k_probenext)
@@ -1121,6 +1138,11 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             max_auth_retries,
                             sum(_AUTH_RETRY_DELAYS),
                         )
+                        # Invalidate the AAS token so the next poll cycle can attempt
+                        # a fresh token chain (OAuth -> AAS -> ADM). This is critical
+                        # when the underlying AAS token is invalid but gpsoauth didn't
+                        # explicitly reject it with a recognizable error.
+                        await policy.async_invalidate_aas_token()
                         raise NovaAuthError(
                             status,
                             "Unauthorized after token refresh (transient; may self-heal)",
