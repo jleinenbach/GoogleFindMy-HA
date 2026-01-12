@@ -29,7 +29,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "bandit[toml]>=1.7.10",
-    "homeassistant>=2025.7.0",
+    "homeassistant>=2025.9.0",
     "hypothesis>=6.100.0",
     "mypy>=1.11",
     "pre-commit>=3.7",

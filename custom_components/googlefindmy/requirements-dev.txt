@@ -4,7 +4,7 @@
 # Hassfest runs exclusively in CI (.github/workflows/hassfest-auto-fix.yml);
 # please do not add a local wrapper or dependency for it here.
 bandit>=1.7
-homeassistant>=2025.7.0
+homeassistant>=2025.9.0
 beautifulsoup4>=4.12.3
 certifi>=2024.7.4
 ecdsa>=0.19.1
