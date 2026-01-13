@@ -266,12 +266,14 @@
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
+          "stale_threshold": "Limite de obsolescência (s)",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (áreas de alto tráfego por padrão ou todas as áreas para relatórios de crowdsourcing).",
+          "stale_threshold": "Quando uma localização é mais antiga do que este limite (em segundos), o estado do dispositivo muda para 'desconhecido'. Defina como 0 para desativar esta funcionalidade.",
           "subentry": "Armazene essas opções no grupo de recursos selecionado. "
         }
       },
@@ -531,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Idade da localização (s)"
+          },
+          "location_status": {
+            "name": "Estado da localização"
+          },
+          "last_latitude": {
+            "name": "Última latitude conhecida"
+          },
+          "last_longitude": {
+            "name": "Última longitude conhecida"
           }
         }
       }

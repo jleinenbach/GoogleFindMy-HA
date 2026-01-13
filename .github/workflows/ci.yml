@@ -348,6 +348,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pre-commit-
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libc-ares-dev
+
       - name: Install dependencies
         run: poetry install --with dev,test
 
