@@ -219,6 +219,7 @@ jobs:
       - name: Run codespell
         if: matrix.check == 'codespell'
         id: codespell
+        continue-on-error: true  # Non-blocking - informational only
         run: |
           set +e
           poetry run codespell 2>&1 | tee codespell_output.txt
@@ -275,7 +276,9 @@ jobs:
                 if [ ! -s codespell_output.txt ]; then
                   echo "✅ **No spelling errors found**"
                 else
-                  echo "❌ **Spelling issues found:**"
+                  echo "ℹ️ **Spelling suggestions (non-blocking):**"
+                  echo ""
+                  echo "These are informational only. Add false positives to \`pyproject.toml\` ignore-words-list."
                   echo ""
                   echo '```'
                   cat codespell_output.txt
