@@ -1,0 +1,66 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+{% for version, commits in context.history.released.items() %}
+## [{{ version.as_tag() }}]({{ version.tag_url }}) ({{ version.released.strftime("%Y-%m-%d") }})
+
+{% set feat_commits = commits | selectattr("type", "equalto", "feat") | list %}
+{% set fix_commits = commits | selectattr("type", "equalto", "fix") | list %}
+{% set perf_commits = commits | selectattr("type", "equalto", "perf") | list %}
+{% set docs_commits = commits | selectattr("type", "equalto", "docs") | list %}
+{% set refactor_commits = commits | selectattr("type", "equalto", "refactor") | list %}
+{% set other_commits = commits | rejectattr("type", "in", ["feat", "fix", "perf", "docs", "refactor"]) | list %}
+
+{% if feat_commits %}
+### Added
+
+{% for commit in feat_commits %}
+- {{ commit.scope ~ ": " if commit.scope }}{{ commit.descriptions[0] }} ([{{ commit.short_hash }}]({{ commit.hexsha | commit_hash_url }}))
+{% endfor %}
+{% endif %}
+
+{% if fix_commits %}
+### Fixed
+
+{% for commit in fix_commits %}
+- {{ commit.scope ~ ": " if commit.scope }}{{ commit.descriptions[0] }} ([{{ commit.short_hash }}]({{ commit.hexsha | commit_hash_url }}))
+{% endfor %}
+{% endif %}
+
+{% if perf_commits %}
+### Performance
+
+{% for commit in perf_commits %}
+- {{ commit.scope ~ ": " if commit.scope }}{{ commit.descriptions[0] }} ([{{ commit.short_hash }}]({{ commit.hexsha | commit_hash_url }}))
+{% endfor %}
+{% endif %}
+
+{% if docs_commits %}
+### Documentation
+
+{% for commit in docs_commits %}
+- {{ commit.scope ~ ": " if commit.scope }}{{ commit.descriptions[0] }} ([{{ commit.short_hash }}]({{ commit.hexsha | commit_hash_url }}))
+{% endfor %}
+{% endif %}
+
+{% if refactor_commits %}
+### Changed
+
+{% for commit in refactor_commits %}
+- {{ commit.scope ~ ": " if commit.scope }}{{ commit.descriptions[0] }} ([{{ commit.short_hash }}]({{ commit.hexsha | commit_hash_url }}))
+{% endfor %}
+{% endif %}
+
+{% if other_commits %}
+### Other
+
+{% for commit in other_commits %}
+- {{ commit.scope ~ ": " if commit.scope }}{{ commit.descriptions[0] }} ([{{ commit.short_hash }}]({{ commit.hexsha | commit_hash_url }}))
+{% endfor %}
+{% endif %}
+
+{% endfor %}

@@ -1,0 +1,63 @@
+name: Semantic PR
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate-pr-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title follows Conventional Commits
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Configure which types are allowed
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          # Configure which scopes are allowed (empty = all)
+          scopes: |
+            deps
+            auth
+            api
+            coordinator
+            config-flow
+            entities
+            services
+            diagnostics
+            discovery
+            fmdn
+            spot
+            nova
+            translations
+            ci
+            release
+          # Require a scope
+          requireScope: false
+          # Disallow uppercase in subject
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject "{subject}" found in the PR title "{title}"
+            should not start with an uppercase letter.
+          # For work-in-progress PRs
+          ignoreLabels: |
+            wip
+            work in progress
+          # Header pattern (type + optional scope + subject)
+          headerPattern: ^(\w+)(?:\(([^)]+)\))?!?:\s(.+)$
+          headerPatternCorrespondence: type, scope, subject

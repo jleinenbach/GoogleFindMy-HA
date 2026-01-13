@@ -1,6 +1,13 @@
+# pre-commit.ci configuration
 ci:
   autofix_prs: true
+  autofix_commit_msg: "style: auto-fix from pre-commit.ci"
   autoupdate_schedule: monthly
+  autoupdate_commit_msg: "chore(deps): update pre-commit hooks"
+  skip:
+    # Skip hooks that require the full test environment
+    - mypy
+    - pytest
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -12,6 +19,14 @@ repos:
           - --fix
           - --exit-non-zero-on-fix
       - id: ruff-format
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.2.6
+    hooks:
+      - id: codespell
+        additional_dependencies:
+          - tomli
+
   - repo: local
     hooks:
       - id: mypy
@@ -22,6 +37,7 @@ repos:
         types: [python]
         additional_dependencies:
           - .[dev]
+
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.10
     hooks:
@@ -34,6 +50,7 @@ repos:
           - custom_components
         additional_dependencies:
           - bandit[toml]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -41,6 +58,9 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-private-key
 
   - repo: local
     hooks:
@@ -49,12 +69,14 @@ repos:
         entry: python script/precommit_hooks/update_doctoc.py
         language: python
         files: ^AGENTS\.md$
+
       - id: translations-sync-check
         name: Ensure translations are up to date
         entry: python script/sync_translations.py --check
         language: python
         pass_filenames: false
         always_run: true
+
       - id: clean-pycache
         name: Remove Python cache artifacts
         entry: python script/clean_pycache.py
@@ -63,6 +85,7 @@ repos:
         language: python
         pass_filenames: false
         always_run: true
+
       - id: pytest
         name: pytest with coverage
         entry: python -m pytest --cov -q
