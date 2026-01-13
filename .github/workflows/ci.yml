@@ -80,7 +80,25 @@ jobs:
           wait-interval: 10
 
       - name: Run hassfest
+        id: hassfest
         uses: home-assistant/actions/hassfest@master
+
+      - name: Write hassfest summary
+        if: always()
+        run: |
+          {
+            echo "## Hassfest Validation"
+            echo ""
+            if [ "${{ steps.hassfest.outcome }}" = "success" ]; then
+              echo "✅ **Manifest validation passed**"
+              echo ""
+              echo "The \`manifest.json\` and integration structure are valid."
+            else
+              echo "❌ **Manifest validation failed**"
+              echo ""
+              echo "Check the logs above for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   hacs:
     name: HACS validation
@@ -112,17 +130,39 @@ jobs:
 
       - name: Run HACS validation
         if: steps.brands_probe.outputs.available == 'true'
+        id: hacs
         uses: hacs/action@main
         with:
           category: integration
           ignore: topics issues
 
-  quality:
-    name: Lint and tests
+      - name: Write HACS summary
+        if: always()
+        run: |
+          {
+            echo "## HACS Validation"
+            echo ""
+            if [ "${{ steps.brands_probe.outputs.available }}" != "true" ]; then
+              echo "⚠️ **Skipped** - brands.home-assistant.io unavailable"
+            elif [ "${{ steps.hacs.outcome }}" = "success" ]; then
+              echo "✅ **HACS validation passed**"
+              echo ""
+              echo "The integration meets HACS requirements."
+            else
+              echo "❌ **HACS validation failed**"
+              echo ""
+              echo "Check the logs above for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    name: Lint (${{ matrix.check }})
     runs-on: ubuntu-latest
-    needs:
-      - hassfest
-      - hacs
+    needs: hassfest
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [ruff, mypy, codespell, bandit]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -130,19 +170,172 @@ jobs:
           repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
 
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Cache pip
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('custom_components/googlefindmy/requirements-dev.txt', 'custom_components/googlefindmy/requirements.txt', 'pyproject.toml') }}
+          path: .venv
+          key: ${{ runner.os }}-poetry-${{ hashFiles('poetry.lock') }}
           restore-keys: |
-            ${{ runner.os }}-pip-
+            ${{ runner.os }}-poetry-
+
+      - name: Install dependencies
+        run: poetry install --with dev,test
+
+      - name: Run Ruff
+        if: matrix.check == 'ruff'
+        id: ruff
+        run: |
+          set +e
+          poetry run ruff check . 2>&1 | tee ruff_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Run mypy (strict)
+        if: matrix.check == 'mypy'
+        id: mypy
+        run: |
+          set +e
+          {
+            poetry run mypy --install-types --non-interactive --strict -p custom_components.googlefindmy
+            poetry run mypy --install-types --non-interactive --strict -p tests
+          } 2>&1 | tee mypy_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Run codespell
+        if: matrix.check == 'codespell'
+        id: codespell
+        run: |
+          set +e
+          poetry run codespell 2>&1 | tee codespell_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Run bandit (security)
+        if: matrix.check == 'bandit'
+        id: bandit
+        run: |
+          set +e
+          # Run bandit security scanner on custom_components and tests
+          # Exclude known false positives and test files that intentionally test security
+          poetry run bandit -r custom_components -c pyproject.toml -f txt 2>&1 | tee bandit_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Write lint summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.check }} Results"
+            echo ""
+            if [ "${{ matrix.check }}" = "ruff" ]; then
+              if [ -f ruff_output.txt ]; then
+                ISSUES=$(grep -c "^" ruff_output.txt 2>/dev/null || echo "0")
+                if [ "$ISSUES" = "0" ] || [ ! -s ruff_output.txt ]; then
+                  echo "✅ **No issues found**"
+                else
+                  echo "❌ **Issues found:**"
+                  echo ""
+                  echo '```'
+                  head -100 ruff_output.txt
+                  echo '```'
+                fi
+              fi
+            elif [ "${{ matrix.check }}" = "mypy" ]; then
+              if [ -f mypy_output.txt ]; then
+                ERRORS=$(grep -c "error:" mypy_output.txt 2>/dev/null || echo "0")
+                if [ "$ERRORS" = "0" ]; then
+                  echo "✅ **No type errors found**"
+                else
+                  echo "❌ **$ERRORS type error(s) found:**"
+                  echo ""
+                  echo '```'
+                  head -100 mypy_output.txt
+                  echo '```'
+                fi
+              fi
+            elif [ "${{ matrix.check }}" = "codespell" ]; then
+              if [ -f codespell_output.txt ]; then
+                if [ ! -s codespell_output.txt ]; then
+                  echo "✅ **No spelling errors found**"
+                else
+                  echo "❌ **Spelling issues found:**"
+                  echo ""
+                  echo '```'
+                  cat codespell_output.txt
+                  echo '```'
+                fi
+              fi
+            elif [ "${{ matrix.check }}" = "bandit" ]; then
+              if [ -f bandit_output.txt ]; then
+                ISSUES=$(grep -c "Issue:" bandit_output.txt 2>/dev/null || echo "0")
+                if [ "$ISSUES" = "0" ]; then
+                  echo "✅ **No security issues found**"
+                else
+                  echo "⚠️ **$ISSUES potential security issue(s) found:**"
+                  echo ""
+                  echo '```'
+                  cat bandit_output.txt
+                  echo '```'
+                fi
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs:
+      - hassfest
+      - hacs
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13"]
+        # Can add more Python versions when available:
+        # python-version: ["3.13", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: latest
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-py${{ matrix.python-version }}-poetry-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-py${{ matrix.python-version }}-poetry-
 
       - name: Cache pre-commit environments
         uses: actions/cache@v4
@@ -152,33 +345,97 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pre-commit-
 
-      - name: Install development dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r custom_components/googlefindmy/requirements-dev.txt
-
-      - name: Run Ruff
-        run: ruff check .
-
-      - name: Run mypy (strict)
-        run: |
-          mypy --install-types --non-interactive --strict -p custom_components.googlefindmy
-          mypy --install-types --non-interactive --strict -p tests
+      - name: Install dependencies
+        run: poetry install --with dev,test
 
       - name: Run pytest with coverage
         env:
           PYTHONPATH: .
         run: |
           set -o pipefail
-          python -m pytest -q --cov 2>&1 | tee pytest_output.log
+          poetry run pytest -q --cov --cov-report=xml --cov-report=term 2>&1 | tee pytest_output.log
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-py${{ matrix.python-version }}
+          fail_ci_if_error: false
+          verbose: true
 
       - name: Write short summary to GitHub Step Summary
         if: always()
         run: |
           {
-            echo "## Pytest summary"
+            echo "## Pytest summary (Python ${{ matrix.python-version }})"
             echo
             echo '```'
             tail -n 200 pytest_output.log
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Summary job to require all tests pass
+  ci-success:
+    name: CI Success
+    runs-on: ubuntu-latest
+    needs: [hassfest, hacs, lint, test]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        id: check
+        run: |
+          if [[ "${{ needs.hassfest.result }}" != "success" ]] || \
+             [[ "${{ needs.hacs.result }}" != "success" ]] || \
+             [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs.test.result }}" != "success" ]]; then
+            echo "One or more jobs failed"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "All CI jobs passed!"
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Write CI summary
+        if: always()
+        run: |
+          {
+            echo "# CI Summary"
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+
+            if [ "${{ needs.hassfest.result }}" = "success" ]; then
+              echo "| Hassfest | ✅ Pass |"
+            else
+              echo "| Hassfest | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.hacs.result }}" = "success" ]; then
+              echo "| HACS | ✅ Pass |"
+            else
+              echo "| HACS | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.lint.result }}" = "success" ]; then
+              echo "| Lint (ruff, mypy, codespell, bandit) | ✅ Pass |"
+            else
+              echo "| Lint (ruff, mypy, codespell, bandit) | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.test.result }}" = "success" ]; then
+              echo "| Tests | ✅ Pass |"
+            else
+              echo "| Tests | ❌ Fail |"
+            fi
+
+            echo ""
+            if [ "${{ steps.check.outputs.passed }}" = "true" ]; then
+              echo "## ✅ All checks passed!"
+            else
+              echo "## ❌ Some checks failed"
+              echo ""
+              echo "Please review the failed jobs above."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

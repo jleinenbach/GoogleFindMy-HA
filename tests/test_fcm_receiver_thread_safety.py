@@ -90,9 +90,12 @@ class TestDispatchToHassLoop:
             pass
 
         # Simulate being called from a non-event-loop context
+        coro = sample_coro()
         with patch.object(asyncio, "get_running_loop", side_effect=RuntimeError):
             with caplog.at_level(logging.ERROR):
-                receiver._dispatch_to_hass_loop(sample_coro(), label="no-loop-test")
+                receiver._dispatch_to_hass_loop(coro, label="no-loop-test")
+        # Close the coroutine to avoid RuntimeWarning about never awaited coroutine
+        coro.close()
 
         assert "FCM notification dropped" in caplog.text
         assert "Home Assistant loop not available" in caplog.text

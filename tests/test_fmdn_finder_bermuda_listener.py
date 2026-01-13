@@ -235,7 +235,15 @@ def hass_mock() -> MagicMock:
     hass.data = {"googlefindmy": {}}
     hass.bus = MagicMock()
     hass.bus.async_listen = MagicMock(return_value=MagicMock())  # Return unsubscribe callable
-    hass.async_create_task = MagicMock()
+
+    # Mock async_create_task to close coroutines to avoid RuntimeWarning
+    def _mock_create_task(coro, **kwargs):
+        """Close coroutine to prevent 'never awaited' warning."""
+        if hasattr(coro, "close"):
+            coro.close()
+        return MagicMock()
+
+    hass.async_create_task = MagicMock(side_effect=_mock_create_task)
     return hass
 
 

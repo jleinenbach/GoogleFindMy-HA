@@ -18,10 +18,19 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 
 
-def _fake_hass() -> SimpleNamespace:
-    """Return a minimal hass stand-in."""
+def _close_coro(coro: object, name: object = None) -> None:
+    """Close coroutine in sync context to avoid RuntimeWarning."""
+    if hasattr(coro, "close"):
+        coro.close()
 
-    return SimpleNamespace(async_create_task=lambda coro, name=None: asyncio.create_task(coro))
+
+def _fake_hass() -> SimpleNamespace:
+    """Return a minimal hass stand-in with coroutine-closing task helpers."""
+
+    return SimpleNamespace(
+        async_create_task=_close_coro,
+        async_create_background_task=_close_coro,
+    )
 
 
 @pytest.mark.asyncio
@@ -139,9 +148,11 @@ async def test_stale_lock_removed_by_confirmation_ttl() -> None:
     async def _async_save(payload: object) -> None:
         scheduled.append("payload")
 
-    def _record_task(coro: asyncio.Future, name: str | None = None) -> asyncio.Task:
+    def _record_task(coro: object, name: str | None = None) -> None:
         scheduled.append(name or "save")
-        return asyncio.create_task(coro)
+        # Close the coroutine to avoid RuntimeWarning
+        if hasattr(coro, "close"):
+            coro.close()
 
     resolver.hass = SimpleNamespace(
         async_create_task=_record_task, async_create_background_task=_record_task

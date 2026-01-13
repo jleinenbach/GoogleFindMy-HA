@@ -20,11 +20,18 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 )
 
 
+def _close_coro(coro: object, name: object = None) -> None:
+    """Close coroutine to avoid RuntimeWarning in test context."""
+    if hasattr(coro, "close"):
+        coro.close()
+
+
 def _fake_hass() -> SimpleNamespace:
-    """Return a lightweight hass stand-in."""
+    """Return a lightweight hass stand-in with coroutine-closing helpers."""
 
     return SimpleNamespace(
-        async_create_task=lambda coro: asyncio.create_task(coro),
+        async_create_task=_close_coro,
+        async_create_background_task=_close_coro,
         data={},
     )
 
@@ -96,8 +103,15 @@ async def test_resolver_saves_locks_via_store(monkeypatch: pytest.MonkeyPatch) -
         nonlocal saved_payload
         saved_payload = payload
 
+    # This test specifically needs tasks to run for persistence testing
+    hass_with_real_tasks = SimpleNamespace(
+        async_create_task=lambda coro, name=None: asyncio.create_task(coro),
+        async_create_background_task=lambda coro, name=None: asyncio.create_task(coro),
+        data={},
+    )
+
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
-    resolver.hass = _fake_hass()
+    resolver.hass = hass_with_real_tasks
     resolver._lookup = {}
     resolver._lookup_metadata = {}
     resolver._locks = {}

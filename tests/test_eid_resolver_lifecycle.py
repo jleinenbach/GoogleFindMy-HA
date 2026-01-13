@@ -17,7 +17,25 @@ from custom_components.googlefindmy.eid_resolver import (
 
 
 def _fake_hass() -> SimpleNamespace:
-    """Return a minimal hass stand-in."""
+    """Return a minimal hass stand-in.
+
+    For sync tests, coroutines are closed to avoid 'never awaited' warnings.
+    For async tests, use _fake_hass_async() instead.
+    """
+
+    def _close_coro(coro, name=None):
+        """Close coroutine in sync context to avoid RuntimeWarning."""
+        if hasattr(coro, "close"):
+            coro.close()
+
+    return SimpleNamespace(
+        async_create_task=_close_coro,
+        async_create_background_task=_close_coro,
+    )
+
+
+def _fake_hass_async() -> SimpleNamespace:
+    """Return a minimal hass stand-in for async tests."""
     return SimpleNamespace(
         async_create_task=lambda coro, name=None: asyncio.create_task(coro),
         async_create_background_task=lambda coro, name=None: asyncio.create_task(coro),

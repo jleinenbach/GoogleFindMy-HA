@@ -9,3 +9,5 @@ node_modules/
 *.egg-info/
 .hypothesis/
 jscpd-report/
+coverage.xml
+.venv/
