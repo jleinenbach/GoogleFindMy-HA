@@ -254,8 +254,10 @@ class _CoordinatedSession:
 
         if auth == "Bearer initial-token":
             self._initial_calls += 1
-            if self._initial_calls >= MAX_INITIAL_CALLS:
-                self._allow_refresh.set()
+            # With the pre-request gate, the second request waits before sending,
+            # so we trigger allow_refresh on the FIRST call (not after MAX_INITIAL_CALLS).
+            # This simulates the improved behavior where only one request triggers refresh.
+            self._allow_refresh.set()
             status, body = 401, b"unauthorized"
         elif auth == "Bearer refreshed-token":
             status, body = 200, b"ok"
@@ -340,11 +342,16 @@ def test_async_nova_request_reuses_cached_token_after_recent_refresh(
     results, calls, refreshes = asyncio.run(_exercise())
 
     assert results == ["6f6b", "6f6b"]
+    # With the pre-request gate, only ONE refresh should occur.
+    # The second request waits for the first to complete, then uses the cached token.
     assert refreshes == 1
 
     statuses = [call["status"] for call in calls]
-    assert statuses.count(UNAUTHORIZED_STATUS) == EXPECTED_RETRY_COUNT
-    assert statuses.count(SUCCESS_STATUS) == EXPECTED_RETRY_COUNT
+    # With pre-request gate: first request gets 401 and refreshes,
+    # second request waits and then succeeds with refreshed token.
+    # So we expect 1 unauthorized (from first request) and 2 successes.
+    assert statuses.count(UNAUTHORIZED_STATUS) == 1
+    assert statuses.count(SUCCESS_STATUS) == 2
     successful_auths = [
         call["auth"] for call in calls if call["status"] == SUCCESS_STATUS
     ]
@@ -1887,6 +1894,231 @@ def test_async_ttl_policy_aas_proactive_refresh_skips_when_fresh() -> None:
 
             # AAS token should still exist
             assert await cache.get(DATA_AAS_TOKEN) == "fresh-aas"
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_ttl_policy_ignores_very_short_ttl_in_recalibration() -> None:
+    """Very short observed TTLs should be ignored to avoid race condition artifacts.
+
+    When a token expires very quickly (< MIN_TTL_FOR_LEARNING_SEC), it typically
+    indicates a transient server issue (rate-limit, propagation race) rather than
+    the actual token lifetime. The TTL policy should ignore these observations
+    to prevent permanent corruption of the learned TTL.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-short-ttl")
+        try:
+            namespace = "entry-short-ttl"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_short_ttl"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Set a known best TTL of 2 hours (7200 seconds)
+            original_ttl = 7200.0
+            await cache.set(policy.k_bestttl, original_ttl)
+
+            # Simulate a token that was issued only 30 seconds ago (well below MIN_TTL)
+            # MIN_TTL_FOR_LEARNING_SEC is 300 seconds (5 minutes)
+            issued_time = time.time() - 30  # 30 seconds ago
+            await cache.set(policy.k_issued, issued_time)
+
+            # Trigger async_on_401 with adaptive downshift enabled
+            # The observed TTL (30s) is far below MIN_TTL_FOR_LEARNING_SEC (300s)
+            # so it should be ignored
+            await policy.async_on_401(adaptive_downshift=True)
+
+            # The best TTL should remain unchanged (not corrupted by the short TTL)
+            best_ttl_after = await cache.get(policy.k_bestttl)
+            assert best_ttl_after == original_ttl, (
+                f"Expected TTL to remain {original_ttl}, but got {best_ttl_after}"
+            )
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -> None:
+    """TTLs above the minimum threshold should still trigger recalibration.
+
+    When a token expires after MIN_TTL_FOR_LEARNING_SEC but significantly shorter
+    than the current best TTL, recalibration should still occur.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-legit-short")
+        try:
+            namespace = "entry-legit-short"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_legit_short"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Set a known best TTL of 2 hours (7200 seconds)
+            original_ttl = 7200.0
+            await cache.set(policy.k_bestttl, original_ttl)
+
+            # Simulate a token that was issued 10 minutes ago (600s > MIN_TTL of 300s)
+            # This is above the threshold but significantly shorter than 2h
+            # 600 + 120 (TTL_MARGIN_SEC) = 720 < 0.9 * 7200 = 6480, so recalibration triggers
+            observed_ttl = 600.0
+            issued_time = time.time() - observed_ttl
+            await cache.set(policy.k_issued, issued_time)
+
+            # Trigger async_on_401 with adaptive downshift enabled
+            await policy.async_on_401(adaptive_downshift=True)
+
+            # The best TTL should be updated to approximately observed * 0.95
+            # Use approximate comparison due to time elapsed between setting issued_time and now
+            expected_new_ttl = observed_ttl * 0.95  # ~570s
+            best_ttl_after = await cache.get(policy.k_bestttl)
+            assert best_ttl_after is not None
+            assert abs(best_ttl_after - expected_new_ttl) < 1.0, (
+                f"Expected TTL to be recalibrated to ~{expected_new_ttl}, "
+                f"but got {best_ttl_after}"
+            )
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
+    """CRITICAL: Both ADM and AAS tokens must have MIN_TTL protection.
+
+    This test documents a past bug where only ADM tokens had MIN_TTL protection,
+    leaving AAS tokens vulnerable to TTL corruption from transient server errors.
+
+    The token chain is: OAuth -> AAS (days/weeks) -> ADM (hours)
+    Both need protection against falsely learning very short TTLs.
+
+    ADM: MIN_TTL_FOR_LEARNING_SEC = 300 (5 minutes)
+    AAS: AAS_MIN_TTL_FOR_LEARNING_SEC = 3600 (1 hour)
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-both-tokens")
+        try:
+            namespace = "entry-both-tokens"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_both_tokens"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # --- Test 1: ADM token MIN_TTL protection ---
+            # ADM tokens typically live 1-4 hours; MIN_TTL is 5 minutes
+            adm_original_ttl = 7200.0  # 2 hours
+            await cache.set(policy.k_bestttl, adm_original_ttl)
+
+            # Simulate very short ADM lifetime (30 seconds - below MIN_TTL of 300s)
+            adm_short_ttl = 30.0
+            issued_time = time.time() - adm_short_ttl
+            await cache.set(policy.k_issued, issued_time)
+
+            await policy.async_on_401(adaptive_downshift=True)
+
+            # ADM TTL must remain unchanged (protected by MIN_TTL_FOR_LEARNING_SEC)
+            adm_ttl_after = await cache.get(policy.k_bestttl)
+            assert adm_ttl_after == adm_original_ttl, (
+                f"ADM TTL was corrupted! Expected {adm_original_ttl}, got {adm_ttl_after}. "
+                "MIN_TTL_FOR_LEARNING_SEC protection is missing!"
+            )
+
+            # --- Test 2: AAS token MIN_TTL protection ---
+            # AAS tokens typically live days/weeks; MIN_TTL is 1 hour
+            aas_original_ttl = 7 * 24 * 3600.0  # 7 days
+            await cache.set(policy.k_aas_bestttl, aas_original_ttl)
+
+            # Simulate very short AAS lifetime (30 minutes - below MIN_TTL of 1 hour)
+            aas_short_ttl = 30 * 60.0  # 30 minutes
+            aas_issued_time = time.time() - aas_short_ttl
+            await cache.set(policy.k_aas_issued, aas_issued_time)
+
+            await policy.async_invalidate_aas_token()
+
+            # AAS TTL must remain unchanged (protected by AAS_MIN_TTL_FOR_LEARNING_SEC)
+            aas_ttl_after = await cache.get(policy.k_aas_bestttl)
+            assert aas_ttl_after == aas_original_ttl, (
+                f"AAS TTL was corrupted! Expected {aas_original_ttl}, got {aas_ttl_after}. "
+                "AAS_MIN_TTL_FOR_LEARNING_SEC protection is missing!"
+            )
+
+            # --- Verify both constants exist and have sensible values ---
+            assert hasattr(policy, "MIN_TTL_FOR_LEARNING_SEC"), (
+                "ADM MIN_TTL constant missing from AsyncTTLPolicy!"
+            )
+            assert hasattr(policy, "AAS_MIN_TTL_FOR_LEARNING_SEC"), (
+                "AAS MIN_TTL constant missing from AsyncTTLPolicy!"
+            )
+            assert policy.MIN_TTL_FOR_LEARNING_SEC == 300, (
+                f"ADM MIN_TTL should be 300s (5min), got {policy.MIN_TTL_FOR_LEARNING_SEC}"
+            )
+            assert policy.AAS_MIN_TTL_FOR_LEARNING_SEC == 3600, (
+                f"AAS MIN_TTL should be 3600s (1h), got {policy.AAS_MIN_TTL_FOR_LEARNING_SEC}"
+            )
+            # AAS threshold must be higher than ADM (AAS tokens live longer)
+            assert (
+                policy.AAS_MIN_TTL_FOR_LEARNING_SEC > policy.MIN_TTL_FOR_LEARNING_SEC
+            ), "AAS MIN_TTL must be > ADM MIN_TTL since AAS tokens live longer!"
 
         finally:
             await cache.close()
