@@ -35,6 +35,7 @@ async def test_tracking_mode_predicts_next_rotation(
     resolver._load_task = None
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
+
     async def _noop_save(payload: object) -> None:
         return None
 

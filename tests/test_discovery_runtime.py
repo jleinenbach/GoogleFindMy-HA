@@ -22,7 +22,9 @@ from tests.helpers import config_entry_with_cloud_runtime
 class _FakeHass:
     """Minimal Home Assistant stub for discovery tests."""
 
-    def __init__(self, entry: Any | None = None, *, allow_missing_entry: bool = False) -> None:
+    def __init__(
+        self, entry: Any | None = None, *, allow_missing_entry: bool = False
+    ) -> None:
         self.data: dict[str, Any] = {}
         runtime_owner = entry
         if runtime_owner is None and not allow_missing_entry:

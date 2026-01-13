@@ -60,7 +60,9 @@ async def test_async_stop_sound_uses_cached_uuid() -> None:
 
 
 @pytest.mark.asyncio
-async def test_async_stop_sound_warns_when_uuid_missing(caplog: pytest.LogCaptureFixture) -> None:
+async def test_async_stop_sound_warns_when_uuid_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Stop sound should warn when no cached UUID is available."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)

@@ -26,8 +26,12 @@ async def test_raw_codec_content_type_on_wire_is_application_grpc(
     """
     received: list[list[tuple[str, str]]] = []
 
-    async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        connection = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False))
+    async def _handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        connection = h2.connection.H2Connection(
+            config=h2.config.H2Configuration(client_side=False)
+        )
         connection.initiate_connection()
         writer.write(connection.data_to_send())
         await writer.drain()
@@ -45,8 +49,14 @@ async def test_raw_codec_content_type_on_wire_is_application_grpc(
                     received.append(event.headers)
                     stream_id = event.stream_id
                 elif isinstance(event, h2.events.DataReceived):
-                    connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
-                elif isinstance(event, h2.events.StreamEnded) and stream_id is not None and not responded:
+                    connection.acknowledge_received_data(
+                        event.flow_controlled_length, event.stream_id
+                    )
+                elif (
+                    isinstance(event, h2.events.StreamEnded)
+                    and stream_id is not None
+                    and not responded
+                ):
                     payload = b"ok"
                     response_headers = [
                         (":status", "200"),
@@ -55,7 +65,9 @@ async def test_raw_codec_content_type_on_wire_is_application_grpc(
                     frame = b"\x00" + len(payload).to_bytes(4, "big") + payload
                     connection.send_headers(stream_id, response_headers)
                     connection.send_data(stream_id, frame)
-                    connection.send_headers(stream_id, [("grpc-status", "0")], end_stream=True)
+                    connection.send_headers(
+                        stream_id, [("grpc-status", "0")], end_stream=True
+                    )
                     writer.write(connection.data_to_send())
                     await writer.drain()
                     responded = True
@@ -71,12 +83,16 @@ async def test_raw_codec_content_type_on_wire_is_application_grpc(
         sockets = server.sockets or []
         port = sockets[0].getsockname()[1]
 
-        transport = SpotGrpcTransport(host="127.0.0.1", port=port, use_ssl=False, codec=RawCodec())
+        transport = SpotGrpcTransport(
+            host="127.0.0.1", port=port, use_ssl=False, codec=RawCodec()
+        )
         channel = await transport.get_channel()
 
         from grpclib.client import UnaryUnaryMethod
 
-        method = UnaryUnaryMethod(channel, "/google.internal.spot.v1.SpotService/Test", bytes, bytes)
+        method = UnaryUnaryMethod(
+            channel, "/google.internal.spot.v1.SpotService/Test", bytes, bytes
+        )
         async with method.open(timeout=5.0) as stream:
             await stream.send_message(b"ping", end=True)
             reply = await stream.recv_message()
@@ -104,14 +120,23 @@ def test_raw_codec_reports_base_content_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_transport_is_lazy_and_reuses_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_transport_is_lazy_and_reuses_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     Prove: no Channel is constructed at transport init, and get_channel() reuses it.
     """
     created: list[Any] = []
 
     class _DummyChannel:
-        def __init__(self, host: str, port: int, *, ssl: ssl.SSLContext | None = None, codec: Any = None) -> None:
+        def __init__(
+            self,
+            host: str,
+            port: int,
+            *,
+            ssl: ssl.SSLContext | None = None,
+            codec: Any = None,
+        ) -> None:
             self.host = host
             self.port = port
             self.ssl = ssl
@@ -139,14 +164,23 @@ async def test_transport_is_lazy_and_reuses_channel(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_transport_reset_closes_and_recreates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_transport_reset_closes_and_recreates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     Prove: reset() closes the current channel and forces a new one on next use.
     """
     created: list[Any] = []
 
     class _DummyChannel:
-        def __init__(self, host: str, port: int, *, ssl: ssl.SSLContext | None = None, codec: Any = None) -> None:
+        def __init__(
+            self,
+            host: str,
+            port: int,
+            *,
+            ssl: ssl.SSLContext | None = None,
+            codec: Any = None,
+        ) -> None:
             self.closed = False
             created.append(self)
 
@@ -170,7 +204,9 @@ async def test_transport_reset_closes_and_recreates(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_ssl_context_created_lazily_via_to_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_ssl_context_created_lazily_via_to_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     Prove: SSLContext creation is lazy and uses asyncio.to_thread.
     """
@@ -182,7 +218,14 @@ async def test_ssl_context_created_lazily_via_to_thread(monkeypatch: pytest.Monk
     created: list[Any] = []
 
     class _DummyChannel:
-        def __init__(self, host: str, port: int, *, ssl: ssl.SSLContext | None = None, codec: Any = None) -> None:
+        def __init__(
+            self,
+            host: str,
+            port: int,
+            *,
+            ssl: ssl.SSLContext | None = None,
+            codec: Any = None,
+        ) -> None:
             created.append(self)
 
         def close(self) -> None:

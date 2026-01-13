@@ -95,7 +95,9 @@ def _patch_spot_token_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
         AsyncMock(return_value="user@example.com"),
     )
     monkeypatch.setattr(
-        spot_request_module, "async_get_spot_token", AsyncMock(return_value="spot-token")
+        spot_request_module,
+        "async_get_spot_token",
+        AsyncMock(return_value="spot-token"),
     )
     monkeypatch.setattr(
         spot_request_module,
@@ -106,7 +108,9 @@ def _patch_spot_token_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.enable_socket
 @pytest.mark.asyncio
-async def test_content_type_on_wire_is_base_grpc(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_content_type_on_wire_is_base_grpc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The raw codec must emit exactly application/grpc on the wire."""
 
     headers_seen: list[tuple[str, str]] = []
@@ -129,7 +133,9 @@ async def test_content_type_on_wire_is_base_grpc(monkeypatch: pytest.MonkeyPatch
             _processor=_processor,
         )
 
-    monkeypatch.setattr(grpclib_protocol.Stream, "send_request", _recording_send_request)
+    monkeypatch.setattr(
+        grpclib_protocol.Stream, "send_request", _recording_send_request
+    )
 
     class _RecordingService:
         def __init__(self) -> None:
@@ -184,7 +190,9 @@ async def test_content_type_on_wire_is_base_grpc(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
-async def test_empty_ok_payload_retries_without_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_empty_ok_payload_retries_without_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Empty OK payloads should retry without resetting the shared channel."""
 
     plan = [b"", b"", b"restored"]

@@ -44,7 +44,9 @@ class _EntityRegistryStub:
         self.entities[entity_id] = entry
         self._entity_index[(domain, platform, unique_id)] = entity_id
 
-    def async_get_entity_id(self, domain: str, platform: str, unique_id: str) -> str | None:
+    def async_get_entity_id(
+        self, domain: str, platform: str, unique_id: str
+    ) -> str | None:
         return self._entity_index.get((domain, platform, unique_id))
 
     def async_get(self, entity_id: str) -> SimpleNamespace | None:
@@ -62,7 +64,9 @@ class _EntityRegistryStub:
         self._entity_index[(entry.domain, entry.platform, new_unique_id)] = entity_id
 
 
-def test_find_tracker_entity_entry_uses_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_tracker_entity_entry_uses_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Fallback scanning should locate tracker entries with legacy unique IDs."""
 
     registry = _EntityRegistryStub()
@@ -93,9 +97,13 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
 ) -> None:
     """The device tracker platform should hydrate a tracker even if the registry already has it."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
-    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
 
     async def _fake_trigger_cloud_discovery(*args: Any, **kwargs: Any) -> bool:
         return True
@@ -108,7 +116,9 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
 
     scheduled: list[asyncio.Task[Any]] = []
 
-    def _async_create_task(coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio.Task[Any]:
+    def _async_create_task(
+        coro: Coroutine[Any, Any, Any], *, name: str | None = None
+    ) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         scheduled.append(task)
         return task
@@ -127,13 +137,19 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
             self._listeners.append(listener)
             return lambda: None
 
-        def stable_subentry_identifier(self, *, key: str | None = None, feature: str | None = None) -> str:
+        def stable_subentry_identifier(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> str:
             return "tracker-subentry"
 
-        def get_subentry_metadata(self, *, key: str | None = None, feature: str | None = None) -> Any:
+        def get_subentry_metadata(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
             return SimpleNamespace(key=TRACKER_SUBENTRY_KEY)
 
-        def get_subentry_snapshot(self, key: str | None = None, *, feature: str | None = None) -> list[dict[str, Any]]:
+        def get_subentry_snapshot(
+            self, key: str | None = None, *, feature: str | None = None
+        ) -> list[dict[str, Any]]:
             self._snapshot_calls += 1
             if self._snapshot_calls == 1:
                 return []
@@ -189,9 +205,13 @@ def test_initial_snapshot_hydrates_registry_tracker(
 ) -> None:
     """Startup population should still create a tracker entity when the registry already knows it."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
-    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
 
     class _StubCoordinator(device_tracker.GoogleFindMyCoordinator):
         def __init__(self) -> None:
@@ -204,13 +224,19 @@ def test_initial_snapshot_hydrates_registry_tracker(
             self._listeners.append(listener)
             return lambda: None
 
-        def stable_subentry_identifier(self, *, key: str | None = None, feature: str | None = None) -> str:
+        def stable_subentry_identifier(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> str:
             return "tracker-subentry"
 
-        def get_subentry_metadata(self, *, key: str | None = None, feature: str | None = None) -> Any:
+        def get_subentry_metadata(
+            self, *, key: str | None = None, feature: str | None = None
+        ) -> Any:
             return SimpleNamespace(key=TRACKER_SUBENTRY_KEY)
 
-        def get_subentry_snapshot(self, key: str | None = None, *, feature: str | None = None) -> list[dict[str, Any]]:
+        def get_subentry_snapshot(
+            self, key: str | None = None, *, feature: str | None = None
+        ) -> list[dict[str, Any]]:
             return [{"id": "tracker-1", "name": "Keys"}]
 
         def find_tracker_entity_entry(self, device_id: str):
@@ -240,7 +266,9 @@ def test_initial_snapshot_hydrates_registry_tracker(
         added.append(list(entities))
         assert update_before_add is True
 
-    asyncio.run(device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities))
+    asyncio.run(
+        device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities)
+    )
 
     assert added and len(added[0]) == 1
     tracker_entity = added[0][0]
@@ -253,19 +281,29 @@ def test_device_tracker_avoids_duplicate_accuracy_logs(
 ) -> None:
     """Entity updates should rely on coordinator accuracy filtering."""
 
-    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
 
     class _CoordinatorStub:
         def __init__(self) -> None:
             self.hass = SimpleNamespace()
-            self.config_entry = SimpleNamespace(entry_id="entry-accuracy", options={}, runtime_data=None)
-            self._device_location_data: dict[tuple[str | None, str], dict[str, Any]] = {}
+            self.config_entry = SimpleNamespace(
+                entry_id="entry-accuracy", options={}, runtime_data=None
+            )
+            self._device_location_data: dict[
+                tuple[str | None, str], dict[str, Any]
+            ] = {}
             self._snapshots: dict[str, list[dict[str, Any]]] = {}
 
-        def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        def async_add_listener(
+            self, listener: Callable[[], None]
+        ) -> Callable[[], None]:
             return lambda: None
 
-        def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
+        def is_device_visible_in_subentry(
+            self, subentry_key: str, device_id: str
+        ) -> bool:
             return True
 
         def get_device_location_data_for_subentry(
@@ -332,7 +370,9 @@ def test_device_tracker_avoids_duplicate_accuracy_logs(
         for record in caplog.records
         if record.name == "custom_components.googlefindmy.device_tracker"
     )
-    assert entity._last_good_accuracy_data == coordinator.get_device_location_data_for_subentry(
-        TRACKER_SUBENTRY_KEY, "device-accuracy"
+    assert (
+        entity._last_good_accuracy_data
+        == coordinator.get_device_location_data_for_subentry(
+            TRACKER_SUBENTRY_KEY, "device-accuracy"
+        )
     )
-

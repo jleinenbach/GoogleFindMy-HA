@@ -73,10 +73,12 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
         async_listen=lambda *_args, **_kwargs: (lambda: None),
         async_listen_once=lambda *_args, **_kwargs: (lambda: None),
     )
-    hass.async_create_task = lambda coro, *, name=None: loop.create_task(coro, name=name)
-    hass.async_run_hass_job = lambda job, *args: getattr(job, "target", lambda *_: None)(
-        *args
+    hass.async_create_task = lambda coro, *, name=None: loop.create_task(
+        coro, name=name
     )
+    hass.async_run_hass_job = lambda job, *args: getattr(
+        job, "target", lambda *_: None
+    )(*args)
     hass.verify_event_loop_thread = lambda *_args, **_kwargs: None
     return hass
 
@@ -124,7 +126,9 @@ class TestTokenRefreshButtonSetup:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -173,7 +177,9 @@ class TestTokenRefreshButtonSetup:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -226,7 +232,9 @@ class TestTokenRefreshButtonAttributes:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -276,7 +284,9 @@ class TestTokenRefreshButtonAttributes:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -327,7 +337,9 @@ class TestTokenRefreshButtonAttributes:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -386,7 +398,9 @@ class TestTokenRefreshButtonPress:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -443,7 +457,9 @@ class TestTokenRefreshButtonPress:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -502,7 +518,9 @@ class TestTokenRefreshButtonPress:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -571,7 +589,9 @@ class TestTokenRefreshButtonUniqueIds:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)
@@ -618,7 +638,9 @@ class TestTokenRefreshButtonUniqueIds:
             subentry_key="tracker",
             service_subentry_key=SERVICE_SUBENTRY_KEY,
         )
-        coordinator = coordinator_cls(hass, cache=SimpleNamespace(entry_id=entry.entry_id))
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
         coordinator.config_entry = entry
 
         token_cache = _MockTokenCache(entry.entry_id)

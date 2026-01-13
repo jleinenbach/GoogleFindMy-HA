@@ -77,7 +77,9 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
         "device_tracker.googlefindmy_device_42",
     )
     # Use object-based patching (er is imported in registry.py)
-    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: entity_registry)
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
 
     hass = SimpleNamespace(states=_DummyStates())
     hass.states.set(
@@ -120,7 +122,9 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
         "device_tracker.googlefindmy_device_42",
     )
     # Use object-based patching (er is imported in registry.py)
-    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: entity_registry)
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
 
     hass = SimpleNamespace(states=_DummyStates())
     iso_seen = "2024-02-03T12:34:56Z"
@@ -160,7 +164,9 @@ def test_snapshot_logs_formats_when_entity_missing(
 
     entity_registry = _DummyEntityRegistry()
     # Use object-based patching (er is imported in registry.py)
-    monkeypatch.setattr(coordinator_registry.er, "async_get", lambda hass: entity_registry)
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
 
     hass = SimpleNamespace(states=_DummyStates())
 

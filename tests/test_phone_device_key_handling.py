@@ -162,9 +162,7 @@ def test_phone_device_no_missing_key_warning(caplog: pytest.LogCaptureFixture) -
     )
 
     # Should have debug message about keys coming from Locate flow
-    debug_messages = [
-        r.message for r in caplog.records if r.levelno == logging.DEBUG
-    ]
+    debug_messages = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
     assert any(
         "keys will be obtained via Locate flow" in msg for msg in debug_messages
     ), (

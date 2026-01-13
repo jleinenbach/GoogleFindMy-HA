@@ -56,8 +56,13 @@ async def test_relative_time_calculation_uses_elapsed_anchor(
 
     await resolver._refresh_cache()
 
-    calls = [call.kwargs["time_counter"] for call in resolver._generate_variant.call_args_list]
-    assert aligned_expected in calls, f"Expected counter {aligned_expected} not found in {calls}"
+    calls = [
+        call.kwargs["time_counter"]
+        for call in resolver._generate_variant.call_args_list
+    ]
+    assert aligned_expected in calls, (
+        f"Expected counter {aligned_expected} not found in {calls}"
+    )
 
 
 @pytest.mark.asyncio

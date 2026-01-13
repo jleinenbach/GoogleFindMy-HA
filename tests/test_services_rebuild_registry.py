@@ -43,7 +43,9 @@ async def _register_rebuild_service(hass: FakeHass, ctx: dict[str, Any]) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_rebuild_registry_reloads_primary_entry(caplog: pytest.LogCaptureFixture) -> None:
+async def test_rebuild_registry_reloads_primary_entry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """When no entry IDs are provided, reload the first config entry."""
 
     manager = FakeConfigEntriesManager(
@@ -66,7 +68,9 @@ async def test_rebuild_registry_reloads_primary_entry(caplog: pytest.LogCaptureF
 
 
 @pytest.mark.asyncio
-async def test_rebuild_registry_runs_migration_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_rebuild_registry_runs_migration_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Invoke migration helpers when the mode is set to ``migrate``."""
 
     manager = FakeConfigEntriesManager([FakeConfigEntry(entry_id="primary")])
@@ -98,7 +102,9 @@ async def test_rebuild_registry_runs_migration_mode(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_rebuild_registry_reloads_specific_ids(caplog: pytest.LogCaptureFixture) -> None:
+async def test_rebuild_registry_reloads_specific_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Reload only the config entries explicitly requested by ID."""
 
     manager = FakeConfigEntriesManager(
@@ -155,7 +161,8 @@ async def test_rebuild_registry_filters_by_device_ids(
 
     assert manager.reload_calls == ["secondary"]
     assert any(
-        "Reloading config entry: secondary" in record.message for record in caplog.records
+        "Reloading config entry: secondary" in record.message
+        for record in caplog.records
     )
 
 
@@ -200,9 +207,7 @@ async def test_rebuild_registry_logs_warning_for_invalid_ids(
     handler = await _register_rebuild_service(hass, {})
 
     caplog.set_level(logging.INFO)
-    await handler(
-        ServiceCall({services.ATTR_ENTRY_ID: ["missing-1", "missing-2"]})
-    )
+    await handler(ServiceCall({services.ATTR_ENTRY_ID: ["missing-1", "missing-2"]}))
 
     assert manager.reload_calls == []
     assert any(
@@ -212,7 +217,9 @@ async def test_rebuild_registry_logs_warning_for_invalid_ids(
 
 
 @pytest.mark.asyncio
-async def test_rebuild_registry_handles_missing_entries(caplog: pytest.LogCaptureFixture) -> None:
+async def test_rebuild_registry_handles_missing_entries(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Gracefully warn when the integration has no config entries to reload."""
 
     manager = FakeConfigEntriesManager([])
@@ -280,9 +287,7 @@ async def test_rebuild_registry_detaches_orphaned_tracker(
                     return device
             return None
 
-        def async_entries_for_config_entry(
-            self, entry_id: str
-        ) -> tuple[Any, ...]:
+        def async_entries_for_config_entry(self, entry_id: str) -> tuple[Any, ...]:
             return tuple(
                 device
                 for device in self._devices.values()
@@ -326,7 +331,9 @@ async def test_rebuild_registry_detaches_orphaned_tracker(
                             device.config_subentry_id = non_null[0]
                         elif len(subset) == 1 and None in subset:
                             device.config_subentry_id = None
-                if removed_entry and not getattr(device, "config_entries_subentries", {}):
+                if removed_entry and not getattr(
+                    device, "config_entries_subentries", {}
+                ):
                     device.config_subentry_id = None
             self.updated.append((device_id, dict(changes)))
 
@@ -596,9 +603,7 @@ async def test_rebuild_registry_detaches_redundant_hub_link(
                     return device
             return None
 
-        def async_entries_for_config_entry(
-            self, entry_id: str
-        ) -> tuple[Any, ...]:
+        def async_entries_for_config_entry(self, entry_id: str) -> tuple[Any, ...]:
             return tuple(
                 device
                 for device in self._devices.values()
@@ -642,7 +647,9 @@ async def test_rebuild_registry_detaches_redundant_hub_link(
                             device.config_subentry_id = non_null[0]
                         elif len(subset) == 1 and None in subset:
                             device.config_subentry_id = None
-                if removed_entry and not getattr(device, "config_entries_subentries", {}):
+                if removed_entry and not getattr(
+                    device, "config_entries_subentries", {}
+                ):
                     device.config_subentry_id = None
             self.updated.append((device_id, dict(changes)))
 
@@ -830,7 +837,9 @@ async def test_rebuild_registry_handles_legacy_remove_config_subentry_kwarg(
                             device.config_subentry_id = non_null[0]
                         elif len(subset) == 1 and None in subset:
                             device.config_subentry_id = None
-                if removed_entry and not getattr(device, "config_entries_subentries", {}):
+                if removed_entry and not getattr(
+                    device, "config_entries_subentries", {}
+                ):
                     device.config_subentry_id = None
 
             self.updated.append((device_id, dict(changes)))

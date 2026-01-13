@@ -40,7 +40,10 @@ class _DummyHass:
         self.created: list[tuple[asyncio.Task[object], str | None]] = []
 
     def async_create_task(
-        self, coro: asyncio.Future | Coroutine[object, object, object], *, name: str | None = None
+        self,
+        coro: asyncio.Future | Coroutine[object, object, object],
+        *,
+        name: str | None = None,
     ) -> asyncio.Task:
         task = self.loop.create_task(coro, name=name)
         self.created.append((task, name))
@@ -85,7 +88,9 @@ async def coordinator(monkeypatch: pytest.MonkeyPatch):
     await asyncio.sleep(0)
 
 
-def _prime_cached_devices(coordinator: GoogleFindMyCoordinator, wall_now: float) -> None:
+def _prime_cached_devices(
+    coordinator: GoogleFindMyCoordinator, wall_now: float
+) -> None:
     coordinator._last_device_list = [{"id": "dev-id"}]
     coordinator._last_list_poll_mono = time.monotonic()
     coordinator._last_poll_mono = time.monotonic()
@@ -115,8 +120,12 @@ async def test_predictive_polling_defers_until_predicted_window(
     coordinator._async_start_poll_cycle = poll_cycle
 
     monkeypatch.setattr(coordinator, "_ensure_service_device_exists", lambda: None)
-    monkeypatch.setattr(coordinator, "_ensure_registry_for_devices", lambda *_args, **_kwargs: 0)
-    monkeypatch.setattr(coordinator, "_refresh_subentry_index", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        coordinator, "_ensure_registry_for_devices", lambda *_args, **_kwargs: 0
+    )
+    monkeypatch.setattr(
+        coordinator, "_refresh_subentry_index", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         coordinator,
         "_async_build_device_snapshot_with_fallbacks",
@@ -128,9 +137,13 @@ async def test_predictive_polling_defers_until_predicted_window(
 
     assert result == []
     assert scheduled, "Predictive retry should be scheduled when update is imminent"
-    expected_delay = (coordinator._get_predicted_poll_time() - time.time()) + _PREDICTION_BUFFER_S
+    expected_delay = (
+        coordinator._get_predicted_poll_time() - time.time()
+    ) + _PREDICTION_BUFFER_S
     assert scheduled[0] == pytest.approx(expected_delay, rel=0.1)
-    poll_names = [name for _, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"]
+    poll_names = [
+        name for _, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"
+    ]
     assert len(poll_names) == baseline_polls
     assert poll_cycle.await_count == 0
 
@@ -153,8 +166,12 @@ async def test_predictive_polling_triggers_overdue_poll(
     )
 
     monkeypatch.setattr(coordinator, "_ensure_service_device_exists", lambda: None)
-    monkeypatch.setattr(coordinator, "_ensure_registry_for_devices", lambda *_args, **_kwargs: 0)
-    monkeypatch.setattr(coordinator, "_refresh_subentry_index", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        coordinator, "_ensure_registry_for_devices", lambda *_args, **_kwargs: 0
+    )
+    monkeypatch.setattr(
+        coordinator, "_refresh_subentry_index", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(
         coordinator,
         "_async_build_device_snapshot_with_fallbacks",
@@ -170,7 +187,9 @@ async def test_predictive_polling_triggers_overdue_poll(
 
     await coordinator._async_update_data()
     poll_tasks = [
-        task for task, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"
+        task
+        for task, name in coordinator.hass.created
+        if name == f"{DOMAIN}.poll_cycle"
     ]
     assert len(poll_tasks) == baseline_polls + 1
     await asyncio.wait_for(poll_tasks[-1], timeout=1)

@@ -216,20 +216,28 @@ async def test_integration_device_info_uses_service_device(
 ) -> None:
     """Integration startup should link diagnostic entities to the service device."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     integration = importlib.import_module("custom_components.googlefindmy")
-    coordinator_module = importlib.import_module("custom_components.googlefindmy.coordinator")
+    coordinator_module = importlib.import_module(
+        "custom_components.googlefindmy.coordinator"
+    )
     button_module = importlib.import_module("custom_components.googlefindmy.button")
     importlib.import_module("custom_components.googlefindmy.sensor")
     importlib.import_module("custom_components.googlefindmy.device_tracker")
-    binary_sensor_module = importlib.import_module("custom_components.googlefindmy.binary_sensor")
+    binary_sensor_module = importlib.import_module(
+        "custom_components.googlefindmy.binary_sensor"
+    )
     map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
 
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
 
-    config_flow_module = importlib.import_module("custom_components.googlefindmy.config_flow")
+    config_flow_module = importlib.import_module(
+        "custom_components.googlefindmy.config_flow"
+    )
     config_entries_module = importlib.import_module("homeassistant.config_entries")
     if config_entries_module.HANDLERS.get(DOMAIN) is None:
         config_entries_module.HANDLERS.register(DOMAIN)(config_flow_module.ConfigFlow)
@@ -265,7 +273,9 @@ async def test_integration_device_info_uses_service_device(
         "_async_normalize_device_names": AsyncMock(return_value=None),
         "_async_release_shared_fcm": AsyncMock(return_value=None),
         "_async_self_heal_duplicate_entities": AsyncMock(return_value=None),
-        "_ensure_post_migration_consistency": AsyncMock(return_value=(True, "user@example.com")),
+        "_ensure_post_migration_consistency": AsyncMock(
+            return_value=(True, "user@example.com")
+        ),
     }
     for attribute, mock in async_defaults.items():
         monkeypatch.setattr(integration, attribute, mock, raising=False)
@@ -291,7 +301,9 @@ async def test_integration_device_info_uses_service_device(
     monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", coordinator_cls)
     monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
     monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
-    monkeypatch.setattr(map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False)
+    monkeypatch.setattr(
+        map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False
+    )
 
     if not hasattr(hass, "http") or hass.http is None:
         hass.http = SimpleNamespace(register_view=lambda *_: None)  # type: ignore[assignment]
@@ -301,8 +313,9 @@ async def test_integration_device_info_uses_service_device(
     http_module = importlib.import_module("homeassistant.components.http")
     monkeypatch.setattr(http_module, "async_setup", AsyncMock(return_value=True))
     if hasattr(http_module, "async_setup_entry"):
-        monkeypatch.setattr(http_module, "async_setup_entry", AsyncMock(return_value=True))
-
+        monkeypatch.setattr(
+            http_module, "async_setup_entry", AsyncMock(return_value=True)
+        )
 
     monkeypatch.setattr(
         map_view_module,
@@ -328,7 +341,6 @@ async def test_integration_device_info_uses_service_device(
         _StubMapRedirectView,
         raising=False,
     )
-
 
     async def _forward_entry_setups(
         entry_obj: MockConfigEntry,
@@ -345,7 +357,10 @@ async def test_integration_device_info_uses_service_device(
             return
         for sensor_key in ("auth_status", "polling"):
             unique_id = f"{entry_obj.entry_id}:{SERVICE_SUBENTRY_KEY}:{sensor_key}"
-            if any(str(entity.unique_id) == unique_id for entity in entity_registry.entities.values()):
+            if any(
+                str(entity.unique_id) == unique_id
+                for entity in entity_registry.entities.values()
+            ):
                 continue
             entity_registry.async_get_or_create(
                 "binary_sensor",
@@ -361,7 +376,6 @@ async def test_integration_device_info_uses_service_device(
         _forward_entry_setups,
         raising=False,
     )
-
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -398,7 +412,11 @@ async def test_integration_device_info_uses_service_device(
     assert service_device is not None
 
     async def _register_service_entities(
-        entities: list[Any], _update_before_add: bool = True, *, config_subentry_id: str | None = None, **_kwargs: Any,
+        entities: list[Any],
+        _update_before_add: bool = True,
+        *,
+        config_subentry_id: str | None = None,
+        **_kwargs: Any,
     ) -> None:
         del _update_before_add, config_subentry_id, _kwargs
         for entity in entities:
@@ -422,7 +440,9 @@ async def test_integration_device_info_uses_service_device(
         subentry_manager = getattr(runtime_data, "subentry_manager", None)
         service_subentry = None
         if subentry_manager is not None:
-            service_subentry = subentry_manager.managed_subentries.get(SERVICE_SUBENTRY_KEY)
+            service_subentry = subentry_manager.managed_subentries.get(
+                SERVICE_SUBENTRY_KEY
+            )
         config_id = getattr(service_subentry, "config_subentry_id", None)
         if not isinstance(config_id, str) or not config_id:
             config_id = f"{entry.entry_id}:{SERVICE_SUBENTRY_KEY}"

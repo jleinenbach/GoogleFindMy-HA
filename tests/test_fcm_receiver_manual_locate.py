@@ -139,9 +139,7 @@ def test_process_background_update_uses_thread(
         decode_calls.append((entry_id, payload_hex))
         return {"latitude": 1.0, "payload": payload_hex, "entry_id": entry_id}
 
-    monkeypatch.setattr(
-        receiver, "_decode_background_location_async", decode_stub
-    )
+    monkeypatch.setattr(receiver, "_decode_background_location_async", decode_stub)
     monkeypatch.setattr(
         receiver, "_schedule_flush", lambda key: schedule_calls.append(key)
     )

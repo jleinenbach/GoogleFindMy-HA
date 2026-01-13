@@ -256,10 +256,11 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Ajuster les paramètres de localisation :\n• Intervalle d'interrogation de localisation : fréquence des interrogations (60–3600 secondes)\n• Délai entre interrogations d'appareils : intervalle entre les requêtes par appareil (1–60 secondes)\n\nFiltre Google Home :\n• Activer pour associer les détections des appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Ajuster les paramètres de localisation :\n• Intervalle d'interrogation de localisation : fréquence des interrogations (60–3600 secondes)\n• Délai entre interrogations d'appareils : intervalle entre les requêtes par appareil (1–60 secondes)\n• Seuil d'obsolescence : au-delà de ce délai sans mise à jour, l'état du traceur passe à inconnu\n\nFiltre Google Home :\n• Activer pour associer les détections des appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
-          "location_poll_interval": "Intervalle d’interrogation de position (s)",
-          "device_poll_delay": "Délai entre les interrogations d’appareil (s)",
+          "location_poll_interval": "Intervalle d'interrogation de position (s)",
+          "device_poll_delay": "Délai entre les interrogations d'appareil (s)",
+          "stale_threshold": "Seuil d'obsolescence (s)",
           "google_home_filter_enabled": "Filtrer les appareils Google Home",
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
           "enable_stats_entities": "Créer des entités de statistiques",
@@ -269,8 +270,9 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
+          "stale_threshold": "Après ce délai en secondes sans mise à jour de position, l'état du traceur passe à inconnu. Les dernières coordonnées connues restent disponibles dans les attributs. Par défaut : 1800 (30 minutes).",
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
-          "map_view_token_expiration": "Lorsqu’elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu’elle est désactivée (par défaut), ils n’expirent pas.",
+          "map_view_token_expiration": "Lorsqu'elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu'elle est désactivée (par défaut), ils n'expirent pas.",
           "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut les zones à forte affluence ou Toutes les zones pour une contribution participative).",
           "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
         }
@@ -531,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Âge de la position (s)"
+          },
+          "location_status": {
+            "name": "État de la position"
+          },
+          "last_latitude": {
+            "name": "Dernière latitude connue"
+          },
+          "last_longitude": {
+            "name": "Dernière longitude connue"
           }
         }
       }

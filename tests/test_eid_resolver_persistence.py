@@ -64,10 +64,15 @@ async def test_refresh_triggers_persistence_on_id_update(hass) -> None:
     hass.async_create_background_task = MagicMock()
     hass.async_create_task = MagicMock()
 
-    with patch.object(
-        GoogleFindMyEIDResolver, "_collect_device_secrets", AsyncMock(return_value=[identity])
-    ), patch.object(
-        GoogleFindMyEIDResolver, "_generate_variant", return_value=b"\x01" * 20
+    with (
+        patch.object(
+            GoogleFindMyEIDResolver,
+            "_collect_device_secrets",
+            AsyncMock(return_value=[identity]),
+        ),
+        patch.object(
+            GoogleFindMyEIDResolver, "_generate_variant", return_value=b"\x01" * 20
+        ),
     ):
         await resolver._refresh_cache()
 

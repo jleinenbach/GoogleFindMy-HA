@@ -49,7 +49,9 @@ async def test_button_restores_last_pressed(monkeypatch: pytest.MonkeyPatch) -> 
 
     await button.async_added_to_hass()
 
-    assert button._attr_last_pressed == datetime(2025, 1, 2, 3, 4, 5, tzinfo=dt_util.UTC)
+    assert button._attr_last_pressed == datetime(
+        2025, 1, 2, 3, 4, 5, tzinfo=dt_util.UTC
+    )
 
 
 @pytest.mark.asyncio

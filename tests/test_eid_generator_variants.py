@@ -139,13 +139,19 @@ def test_generate_eid_variants_match_golden_vectors() -> None:
         eid = generate_eid_variant(SAMPLE_EIK, SAMPLE_COUNTER, variant)
         assert eid.hex() == expected_hex
 
-        if variant in (EidVariant.LEGACY_SECP160R1_X20_BE, EidVariant.MODERN_P256_X20_TRUNC_BE, EidVariant.MODERN_P256_X20_TRUNC_LE):
+        if variant in (
+            EidVariant.LEGACY_SECP160R1_X20_BE,
+            EidVariant.MODERN_P256_X20_TRUNC_BE,
+            EidVariant.MODERN_P256_X20_TRUNC_LE,
+        ):
             assert len(eid) == LEGACY_EID_LENGTH
         else:
             assert len(eid) == MODERN_EID_LENGTH
 
 
-def test_lenient_normalization_masks_out_of_range(caplog: pytest.LogCaptureFixture) -> None:
+def test_lenient_normalization_masks_out_of_range(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Lenient normalization should mask oversized counters to u32 without failure."""
 
     oversize = (1 << 40) + SAMPLE_COUNTER

@@ -153,10 +153,16 @@ async def test_hub_flow_aborts_when_hub_unsupported(
 
     hass = SimpleNamespace(config_entries=_ConfigEntriesManager())
 
-    def _no_hub(_: ConfigEntry) -> dict[str, Callable[[], config_flow.ConfigSubentryFlow]]:
+    def _no_hub(
+        _: ConfigEntry,
+    ) -> dict[str, Callable[[], config_flow.ConfigSubentryFlow]]:
         return {
-            config_flow.SUBENTRY_TYPE_SERVICE: lambda: config_flow.ServiceSubentryFlowHandler(entry),
-            config_flow.SUBENTRY_TYPE_TRACKER: lambda: config_flow.TrackerSubentryFlowHandler(entry),
+            config_flow.SUBENTRY_TYPE_SERVICE: lambda: config_flow.ServiceSubentryFlowHandler(
+                entry
+            ),
+            config_flow.SUBENTRY_TYPE_TRACKER: lambda: config_flow.TrackerSubentryFlowHandler(
+                entry
+            ),
         }
 
     monkeypatch.setattr(
@@ -214,5 +220,6 @@ async def test_hub_subentry_flow_logs_and_delegates(
 
     assert result is sentinel
     assert any(
-        "Hub subentry flow requested" in record.getMessage() for record in caplog.records
+        "Hub subentry flow requested" in record.getMessage()
+        for record in caplog.records
     ), "Expected hub subentry flow to log when invoked"

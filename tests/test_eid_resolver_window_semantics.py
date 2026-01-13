@@ -81,7 +81,7 @@ def test_compute_lock_windows_uses_expected_counter_for_candidate_value() -> Non
         registry_id=identity.registry_id,
         config_entry_id=identity.config_entry_id,
         canonical_id=identity.canonical_id,
-        key_bytes=b"\xAA" * 16,
+        key_bytes=b"\xaa" * 16,
         identity=identity,
         lock=lock,
         locked_variant=EidVariant.MODERN_P256_X32_BE,
@@ -90,15 +90,19 @@ def test_compute_lock_windows_uses_expected_counter_for_candidate_value() -> Non
     )
 
     now_unix = rotation_timestamp + (params.rotation_period * 3)
-    windows = resolver._compute_lock_windows(work_item, now_unix=now_unix, params=params)
+    windows = resolver._compute_lock_windows(
+        work_item, now_unix=now_unix, params=params
+    )
     assert windows
 
-    expected_counter = rotation_timestamp + (
-        (now_unix - lock.created_at) // params.rotation_period
-    ) * params.rotation_period
-    assert (
-        windows[0].candidate_value == expected_counter
-    ), "FAIL: lock WindowSpec.candidate_value must equal expected_counter (counter 'now')."
+    expected_counter = (
+        rotation_timestamp
+        + ((now_unix - lock.created_at) // params.rotation_period)
+        * params.rotation_period
+    )
+    assert windows[0].candidate_value == expected_counter, (
+        "FAIL: lock WindowSpec.candidate_value must equal expected_counter (counter 'now')."
+    )
 
 
 def test_known_offset_out_of_range_is_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -114,7 +118,7 @@ def test_known_offset_out_of_range_is_ignored(monkeypatch: pytest.MonkeyPatch) -
         registry_id=identity.registry_id,
         config_entry_id=identity.config_entry_id,
         canonical_id=identity.canonical_id,
-        key_bytes=b"\xBB" * 16,
+        key_bytes=b"\xbb" * 16,
         identity=identity,
         lock=None,
         locked_variant=None,
@@ -138,9 +142,9 @@ def test_known_offset_out_of_range_is_ignored(monkeypatch: pytest.MonkeyPatch) -
     base_candidate = now_unix - identity.pair_date
     normalized = _normalize_counter_candidate(base_candidate, basis="pair_date")
 
-    assert (
-        pair_date_window.candidate_value == normalized
-    ), "FAIL: implausible known_offset was applied; candidate_value must remain unshifted."
+    assert pair_date_window.candidate_value == normalized, (
+        "FAIL: implausible known_offset was applied; candidate_value must remain unshifted."
+    )
     assert len(pair_date_window.windows) > 3, (
         "FAIL: implausible known_offset was applied, narrowing discovery and risking silent death. "
         "Bound known_offset before applying it."
@@ -157,7 +161,7 @@ def test_time_windows_are_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
         registry_id=identity.registry_id,
         config_entry_id=identity.config_entry_id,
         canonical_id=identity.canonical_id,
-        key_bytes=b"\xCC" * 16,
+        key_bytes=b"\xcc" * 16,
         identity=identity,
         lock=None,
         locked_variant=None,
@@ -202,7 +206,9 @@ def test_time_windows_are_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
     monkeypatch.setattr(
-        GoogleFindMyEIDResolver, "_compute_lock_windows", lambda _self, *a, **k: lock_windows
+        GoogleFindMyEIDResolver,
+        "_compute_lock_windows",
+        lambda _self, *a, **k: lock_windows,
     )
     monkeypatch.setattr(
         GoogleFindMyEIDResolver,
@@ -219,7 +225,11 @@ def test_time_windows_are_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
     assert invalid_hint is False
     assert merged
 
-    timestamps = [(spec.time_basis, window.timestamp) for spec in merged for window in spec.windows]
+    timestamps = [
+        (spec.time_basis, window.timestamp)
+        for spec in merged
+        for window in spec.windows
+    ]
     assert timestamps == [("pair_date", duplicate_ts)], (
         "FAIL: duplicate windows detected after merging lock and discovery windows. "
         "Deduplicate by (time_basis, timestamp) before variant generation."

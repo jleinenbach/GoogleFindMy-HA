@@ -25,7 +25,11 @@ class _DummyCache(TokenCache):
 
 
 class _StubStream:
-    def __init__(self, outcomes: list[Any], metadata_sink: list[Iterable[tuple[str, str]]] | None = None) -> None:
+    def __init__(
+        self,
+        outcomes: list[Any],
+        metadata_sink: list[Iterable[tuple[str, str]]] | None = None,
+    ) -> None:
         self._outcomes = outcomes
         self._metadata_sink = metadata_sink
 
@@ -48,21 +52,36 @@ class _StubStream:
 
 
 class _StubMethod:
-    def __init__(self, outcomes: list[Any], metadata_sink: list[Iterable[tuple[str, str]]] | None = None) -> None:
+    def __init__(
+        self,
+        outcomes: list[Any],
+        metadata_sink: list[Iterable[tuple[str, str]]] | None = None,
+    ) -> None:
         self._outcomes = outcomes
         self.calls = 0
         self.metadata_sink = metadata_sink
 
-    def open(self, *, metadata: Iterable[tuple[str, str]] | None = None, timeout: float | None = None) -> _StubStream:
+    def open(
+        self,
+        *,
+        metadata: Iterable[tuple[str, str]] | None = None,
+        timeout: float | None = None,
+    ) -> _StubStream:
         self.calls += 1
         if self.metadata_sink is not None and metadata is not None:
             self.metadata_sink.append(tuple(metadata))
         return _StubStream(self._outcomes, self.metadata_sink)
 
 
-def _install_stub_method(monkeypatch: pytest.MonkeyPatch, outcomes: list[Any], metadata_sink: list[Iterable[tuple[str, str]]] | None = None) -> _StubMethod:
+def _install_stub_method(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[Any],
+    metadata_sink: list[Iterable[tuple[str, str]]] | None = None,
+) -> _StubMethod:
     stub = _StubMethod(list(outcomes), metadata_sink)
-    monkeypatch.setattr(spot_request_module, "UnaryUnaryMethod", lambda *args, **kwargs: stub)
+    monkeypatch.setattr(
+        spot_request_module, "UnaryUnaryMethod", lambda *args, **kwargs: stub
+    )
     return stub
 
 
@@ -85,9 +104,15 @@ async def test_metadata_contains_authorization_and_user_agent(
     cache = _DummyCache()
     await cache.set("username", "user")
 
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -116,9 +141,15 @@ async def test_transient_status_retries(monkeypatch: pytest.MonkeyPatch) -> None
     cache = _DummyCache()
     await cache.set("username", "user")
 
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -135,10 +166,15 @@ async def test_transient_status_retries(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_auth_retry_once_then_permanent_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_auth_retry_once_then_permanent_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Authentication errors trigger one invalidation before raising permanently."""
 
-    plan = [grpclib.exceptions.GRPCError(Status.UNAUTHENTICATED, "fail"), grpclib.exceptions.GRPCError(Status.UNAUTHENTICATED, "fail")]
+    plan = [
+        grpclib.exceptions.GRPCError(Status.UNAUTHENTICATED, "fail"),
+        grpclib.exceptions.GRPCError(Status.UNAUTHENTICATED, "fail"),
+    ]
     _install_stub_method(monkeypatch, plan)
 
     cache = _DummyCache()
@@ -146,9 +182,15 @@ async def test_auth_retry_once_then_permanent_failure(monkeypatch: pytest.Monkey
 
     invalidate = AsyncMock()
     monkeypatch.setattr(spot_request_module, "_invalidate_token_async", invalidate)
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -168,15 +210,23 @@ async def test_auth_retry_once_then_permanent_failure(monkeypatch: pytest.Monkey
 async def test_rate_limit_after_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Resource exhaustion should raise after bounded retries."""
 
-    plan = [grpclib.exceptions.GRPCError(Status.RESOURCE_EXHAUSTED, "slow")] * (spot_request_module._SPOT_MAX_RETRIES + 1)
+    plan = [grpclib.exceptions.GRPCError(Status.RESOURCE_EXHAUSTED, "slow")] * (
+        spot_request_module._SPOT_MAX_RETRIES + 1
+    )
     _install_stub_method(monkeypatch, plan)
 
     cache = _DummyCache()
     await cache.set("username", "user")
 
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -200,9 +250,15 @@ async def test_trailers_only_after_retries(monkeypatch: pytest.MonkeyPatch) -> N
     cache = _DummyCache()
     await cache.set("username", "user")
 
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -220,7 +276,9 @@ async def test_trailers_only_after_retries(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_protocol_error_triggers_transport_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_protocol_error_triggers_transport_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Protocol errors should reset the shared channel and then succeed."""
 
     plan = [grpclib.exceptions.ProtocolError("boom"), b"reply"]
@@ -229,9 +287,15 @@ async def test_protocol_error_triggers_transport_reset(monkeypatch: pytest.Monke
     cache = _DummyCache()
     await cache.set("username", "user")
 
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -250,7 +314,9 @@ async def test_protocol_error_triggers_transport_reset(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_os_error_resets_after_final_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_os_error_resets_after_final_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """OSError scenarios reset the transport on the terminal failure."""
 
     plan = [OSError("boom")] * (spot_request_module._SPOT_MAX_RETRIES + 1)
@@ -259,9 +325,15 @@ async def test_os_error_resets_after_final_attempt(monkeypatch: pytest.MonkeyPat
     cache = _DummyCache()
     await cache.set("username", "user")
 
-    monkeypatch.setattr(spot_request_module, "async_get_username", AsyncMock(return_value="user"))
-    monkeypatch.setattr(spot_request_module, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_username", AsyncMock(return_value="user")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_spot_token", AsyncMock(return_value="token")
+    )
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     transport = AsyncMock()
     transport.get_channel = AsyncMock(return_value=object())
@@ -295,7 +367,9 @@ async def test_invalid_aas_token_clears_once(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(spot_request_module, "async_get_username", _username)
     monkeypatch.setattr(spot_request_module, "async_get_spot_token", _spot_token)
-    monkeypatch.setattr(spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm"))
+    monkeypatch.setattr(
+        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm")
+    )
 
     cache = _DummyCache()
     await cache.set(spot_request_module.DATA_AAS_TOKEN, "stale")

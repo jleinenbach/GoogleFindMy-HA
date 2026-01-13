@@ -57,7 +57,9 @@ def test_calculate_accuracy_from_rssi():
 @pytest.mark.asyncio
 async def test_should_upload_location_first_upload(hass_mock):
     """Test that first upload is always allowed."""
-    location = LocationData(latitude=52.5200, longitude=13.4050, accuracy=50, timestamp=time.time())
+    location = LocationData(
+        latitude=52.5200, longitude=13.4050, accuracy=50, timestamp=time.time()
+    )
 
     should_upload, reason = await _should_upload_location(hass_mock, "abc123", location)
 
@@ -90,9 +92,13 @@ async def test_should_upload_location_throttled_by_time(hass_mock):
     hass_mock.data[DATA_FMDN_UPLOAD_CACHE] = {"abc123": cache_entry}
 
     # Try to upload same location
-    new_location = LocationData(latitude=52.5200, longitude=13.4050, accuracy=50, timestamp=time.time())
+    new_location = LocationData(
+        latitude=52.5200, longitude=13.4050, accuracy=50, timestamp=time.time()
+    )
 
-    should_upload, reason = await _should_upload_location(hass_mock, "abc123", new_location)
+    should_upload, reason = await _should_upload_location(
+        hass_mock, "abc123", new_location
+    )
 
     assert should_upload is False
     assert "too_soon" in reason
@@ -131,7 +137,9 @@ async def test_should_upload_location_throttled_by_distance(hass_mock):
         timestamp=time.time(),
     )
 
-    should_upload, reason = await _should_upload_location(hass_mock, "abc123", new_location)
+    should_upload, reason = await _should_upload_location(
+        hass_mock, "abc123", new_location
+    )
 
     assert should_upload is False
     assert "too_close" in reason
@@ -169,7 +177,9 @@ async def test_should_upload_location_allowed_by_distance(hass_mock):
         timestamp=time.time(),
     )
 
-    should_upload, reason = await _should_upload_location(hass_mock, "abc123", new_location)
+    should_upload, reason = await _should_upload_location(
+        hass_mock, "abc123", new_location
+    )
 
     assert should_upload is True
     assert "distance_threshold_met" in reason
@@ -207,7 +217,9 @@ async def test_should_upload_location_accuracy_improved(hass_mock):
         timestamp=time.time(),
     )
 
-    should_upload, reason = await _should_upload_location(hass_mock, "abc123", new_location)
+    should_upload, reason = await _should_upload_location(
+        hass_mock, "abc123", new_location
+    )
 
     assert should_upload is True
     assert "accuracy_improved" in reason

@@ -16,7 +16,6 @@ def MessageToDict(
     float_precision: int | None = ...,
     always_print_fields_with_no_presence: bool = ...,
 ) -> dict[str, Any]: ...
-
 def MessageToJson(
     message: Message,
     *,

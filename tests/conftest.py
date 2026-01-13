@@ -620,7 +620,9 @@ def _stub_homeassistant() -> None:
     const_module.STATE_UNAVAILABLE = "unavailable"
     const_module.STATE_UNKNOWN = "unknown"
     const_module.STATE_HOME = "home"  # For FMDN Finder location filtering
-    const_module.EVENT_STATE_CHANGED = "state_changed"  # For FMDN Finder event listening
+    const_module.EVENT_STATE_CHANGED = (
+        "state_changed"  # For FMDN Finder event listening
+    )
     const_module.Platform = Platform
     sys.modules["homeassistant.const"] = const_module
 
@@ -1603,7 +1605,8 @@ def _stub_homeassistant() -> None:
     ) -> list[_StubEntityRegistryEntry]:
         """Get all entity registry entries for a device."""
         return [
-            entry for entry in registry.entities.values()
+            entry
+            for entry in registry.entities.values()
             if getattr(entry, "device_id", None) == device_id
         ]
 
@@ -2079,7 +2082,9 @@ def use_real_homeassistant_modules() -> Iterable[None]:
             ...
     """
     saved_modules = {
-        name: module for name, module in sys.modules.items() if name.startswith("homeassistant")
+        name: module
+        for name, module in sys.modules.items()
+        if name.startswith("homeassistant")
     }
     for name in list(sys.modules):
         if name.startswith("homeassistant"):
@@ -2095,7 +2100,9 @@ def use_real_homeassistant_modules() -> Iterable[None]:
     # Some pytest-homeassistant-custom-component versions require this shim
     if not hasattr(_aiohttp_client, "_async_make_resolver"):
 
-        async def _async_make_resolver(*args: Any, **kwargs: Any) -> None:  # pragma: no cover
+        async def _async_make_resolver(
+            *args: Any, **kwargs: Any
+        ) -> None:  # pragma: no cover
             return None
 
         _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]

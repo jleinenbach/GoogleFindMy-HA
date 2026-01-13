@@ -266,12 +266,14 @@
           "delete_caches_on_remove": "Caches verwijderen bij verwijderen item",
           "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen",
           "contributor_mode": "Locatiebijdragermodus",
+          "stale_threshold": "Verouderingsdrempel (s)",
           "subentry": "Functiegroep"
         },
         "data_description": {
           "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
           "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
           "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard drukbezochte gebieden, of Alle gebieden voor crowdsourced rapportage).",
+          "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de apparaatstatus 'onbekend'. Stel in op 0 om deze functie uit te schakelen.",
           "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor voorbeelden."
         }
       },
@@ -531,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Hoogte (m)"
+          },
+          "location_age": {
+            "name": "Locatieleeftijd (s)"
+          },
+          "location_status": {
+            "name": "Locatiestatus"
+          },
+          "last_latitude": {
+            "name": "Laatst bekende breedtegraad"
+          },
+          "last_longitude": {
+            "name": "Laatst bekende lengtegraad"
           }
         }
       }

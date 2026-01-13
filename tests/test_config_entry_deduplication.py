@@ -81,7 +81,9 @@ def _entry_with_email(entry_id: str, email: str, **kwargs: Any) -> _StubConfigEn
 
 
 @pytest.mark.asyncio
-async def test_coalesce_prefers_valid_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_coalesce_prefers_valid_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     integration = import_module("custom_components.googlefindmy")
 
     valid = _entry_with_email("valid", "user@example.com", version=4)
@@ -101,9 +103,7 @@ async def test_coalesce_prefers_valid_credentials(monkeypatch: pytest.MonkeyPatc
         ),
     }
 
-    async def _fake_assess(
-        hass_obj: Any, entry: Any, *, normalized_email: str
-    ) -> Any:
+    async def _fake_assess(hass_obj: Any, entry: Any, *, normalized_email: str) -> Any:
         return health[entry.entry_id]
 
     monkeypatch.setattr(integration, "_async_assess_entry_health", _fake_assess)
@@ -144,9 +144,7 @@ async def test_coalesce_tie_breaks_by_schema(monkeypatch: pytest.MonkeyPatch) ->
 
     health = integration._EntryHealth(status="valid", reason="probe_ok")
 
-    async def _fake_assess(
-        hass_obj: Any, entry: Any, *, normalized_email: str
-    ) -> Any:
+    async def _fake_assess(hass_obj: Any, entry: Any, *, normalized_email: str) -> Any:
         return health
 
     monkeypatch.setattr(integration, "_async_assess_entry_health", _fake_assess)
@@ -185,9 +183,7 @@ async def test_coalesce_handles_unknown_credentials(
 
     unknown = integration._EntryHealth(status="unknown", reason="timeout")
 
-    async def _fake_assess(
-        hass_obj: Any, entry: Any, *, normalized_email: str
-    ) -> Any:
+    async def _fake_assess(hass_obj: Any, entry: Any, *, normalized_email: str) -> Any:
         return unknown
 
     monkeypatch.setattr(integration, "_async_assess_entry_health", _fake_assess)
@@ -222,9 +218,7 @@ async def test_async_migrate_entry_uses_coalesced_entry(
         coalesce_calls.append(canonical_entry.entry_id)
         return primary
 
-    monkeypatch.setattr(
-        integration, "async_coalesce_account_entries", _fake_coalesce
-    )
+    monkeypatch.setattr(integration, "async_coalesce_account_entries", _fake_coalesce)
 
     post_calls: list[str] = []
 
@@ -234,18 +228,14 @@ async def test_async_migrate_entry_uses_coalesced_entry(
         post_calls.append(entry.entry_id)
         return True, "main@example.com"
 
-    monkeypatch.setattr(
-        integration, "_ensure_post_migration_consistency", _fake_post
-    )
+    monkeypatch.setattr(integration, "_ensure_post_migration_consistency", _fake_post)
 
     soft_calls: list[str] = []
 
     async def _fake_soft(hass_obj: Any, entry: Any) -> None:
         soft_calls.append(entry.entry_id)
 
-    monkeypatch.setattr(
-        integration, "_async_soft_migrate_data_to_options", _fake_soft
-    )
+    monkeypatch.setattr(integration, "_async_soft_migrate_data_to_options", _fake_soft)
 
     result = await integration.async_migrate_entry(hass, duplicate)
 

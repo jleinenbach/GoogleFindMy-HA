@@ -95,6 +95,7 @@ from .const import (
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_OPTIONS,
     DEFAULT_SEMANTIC_DETECTION_RADIUS,
+    DEFAULT_STALE_THRESHOLD,
     # Core domain & credential keys
     DOMAIN,
     OPT_CONTRIBUTOR_MODE,
@@ -107,6 +108,7 @@ from .const import (
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPT_SEMANTIC_LOCATIONS,
+    OPT_STALE_THRESHOLD,
     OPTION_KEYS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -5254,6 +5256,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 OPT_DELETE_CACHES_ON_REMOVE, DEFAULT_DELETE_CACHES_ON_REMOVE
             ),
             OPT_CONTRIBUTOR_MODE: _get(OPT_CONTRIBUTOR_MODE, DEFAULT_CONTRIBUTOR_MODE),
+            OPT_STALE_THRESHOLD: _get(OPT_STALE_THRESHOLD, DEFAULT_STALE_THRESHOLD),
         }
         if (
             OPT_GOOGLE_HOME_FILTER_ENABLED is not None
@@ -5355,6 +5358,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         _register(
             vol.Optional(OPT_CONTRIBUTOR_MODE),
             vol.In([CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]),
+        )
+        _register(
+            vol.Optional(OPT_STALE_THRESHOLD),
+            vol.All(vol.Coerce(int), vol.Range(min=60, max=86400)),
         )
 
         base_schema = vol.Schema(fields)

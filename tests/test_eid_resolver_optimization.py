@@ -23,7 +23,9 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 
 
 @pytest.mark.asyncio
-async def test_known_time_basis_skips_alternate_strategies(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_known_time_basis_skips_alternate_strategies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """When the time basis is known, skip alternate counter strategies."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
@@ -103,7 +105,9 @@ async def test_known_time_basis_skips_alternate_strategies(monkeypatch: pytest.M
         seen_windows.append(target_time)
         return (target_time + 1,)
 
-    monkeypatch.setattr(resolver_module, "iter_rotation_windows", _iter_rotation_windows)
+    monkeypatch.setattr(
+        resolver_module, "iter_rotation_windows", _iter_rotation_windows
+    )
 
     seen_counters: list[int] = []
 

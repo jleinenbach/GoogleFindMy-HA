@@ -61,7 +61,9 @@ class _EntryStub:
 class _HassStub:
     """Home Assistant stub exposing the data layout used by async_remove_entry."""
 
-    def __init__(self, entry: _EntryStub, runtime_data: integration.RuntimeData) -> None:
+    def __init__(
+        self, entry: _EntryStub, runtime_data: integration.RuntimeData
+    ) -> None:
         self.data: dict[str, Any] = {
             DOMAIN: {
                 "entries": {entry.entry_id: runtime_data},
@@ -84,7 +86,11 @@ def _no_fcm_release(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     return calls
 
 
-def _setup_runtime(entry: _EntryStub) -> tuple[_CoordinatorStub, _TokenCacheStub, _GoogleHomeFilterStub, integration.RuntimeData]:
+def _setup_runtime(
+    entry: _EntryStub,
+) -> tuple[
+    _CoordinatorStub, _TokenCacheStub, _GoogleHomeFilterStub, integration.RuntimeData
+]:
     """Create runtime objects associated with the entry stub."""
 
     coordinator = _CoordinatorStub()
@@ -206,7 +212,11 @@ def test_async_remove_entry_fallback_store_remove(
     assert entry.entry_id not in hass.data[DOMAIN]["entries"]
     assert entry.runtime_data is None
     assert store_args == [
-        (hass, integration.STORAGE_VERSION, f"{integration.STORAGE_KEY}_{entry.entry_id}")
+        (
+            hass,
+            integration.STORAGE_VERSION,
+            f"{integration.STORAGE_KEY}_{entry.entry_id}",
+        )
     ]
     assert store_removals == [f"{integration.STORAGE_KEY}_{entry.entry_id}"]
     assert _no_fcm_release

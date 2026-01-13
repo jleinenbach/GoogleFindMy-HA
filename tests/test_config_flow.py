@@ -28,9 +28,7 @@ class _CoordinatorStub:
         self.refresh_invocations: list[bool] = []
         self.ensure_entries: list[Any] = []
 
-    def attach_subentry_manager(
-        self, manager: Any, *, is_reload: bool = False
-    ) -> None:
+    def attach_subentry_manager(self, manager: Any, *, is_reload: bool = False) -> None:
         self.attached_managers.append((manager, is_reload))
 
     def _build_core_subentry_definitions(self) -> list[Any]:
@@ -67,4 +65,3 @@ async def test_core_subentry_repair_passes_entry_to_service_device_ensure() -> N
 
     assert manager.calls, "core subentry definitions should be synced"
     assert coordinator.ensure_entries == [entry]
-

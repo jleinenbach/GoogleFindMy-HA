@@ -70,7 +70,9 @@ async def _patch_integration_runtime(  # noqa: PLR0915
     monkeypatch.setattr(integration, "async_setup", AsyncMock(return_value=True))
     monkeypatch.setattr(integration, "CONFIG_SCHEMA", lambda config: {})
 
-    cache = SimpleNamespace(async_set_cached_value=AsyncMock(), async_get_cached_value=AsyncMock())
+    cache = SimpleNamespace(
+        async_set_cached_value=AsyncMock(), async_get_cached_value=AsyncMock()
+    )
     monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))
     monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
     monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
@@ -85,7 +87,9 @@ async def _patch_integration_runtime(  # noqa: PLR0915
         "_async_normalize_device_names": AsyncMock(return_value=None),
         "_async_release_shared_fcm": AsyncMock(return_value=None),
         "_async_self_heal_duplicate_entities": AsyncMock(return_value=None),
-        "_ensure_post_migration_consistency": AsyncMock(return_value=(True, "user@example.com")),
+        "_ensure_post_migration_consistency": AsyncMock(
+            return_value=(True, "user@example.com")
+        ),
     }
     for attribute, mock in async_defaults.items():
         monkeypatch.setattr(integration, attribute, mock, raising=False)
@@ -111,8 +115,12 @@ async def _patch_integration_runtime(  # noqa: PLR0915
     monkeypatch.setattr(coordinator_module, "GoogleFindMyCoordinator", coordinator_cls)
     monkeypatch.setattr(integration, "GoogleFindMyCoordinator", coordinator_cls)
     monkeypatch.setattr(button_module, "GoogleFindMyCoordinator", coordinator_cls)
-    monkeypatch.setattr(map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False)
-    monkeypatch.setattr(binary_sensor_module, "GoogleFindMyCoordinator", coordinator_cls)
+    monkeypatch.setattr(
+        map_view_module, "GoogleFindMyCoordinator", coordinator_cls, raising=False
+    )
+    monkeypatch.setattr(
+        binary_sensor_module, "GoogleFindMyCoordinator", coordinator_cls
+    )
 
     if not hasattr(hass, "http") or hass.http is None:
         hass.http = SimpleNamespace(register_view=lambda *_: None)  # type: ignore[assignment]
@@ -120,7 +128,9 @@ async def _patch_integration_runtime(  # noqa: PLR0915
         monkeypatch.setattr(hass.http, "register_view", lambda *_: None)
 
     http_module = importlib.import_module("homeassistant.components.http")
-    monkeypatch.setattr(http_module, "async_setup", AsyncMock(return_value=True), raising=False)
+    monkeypatch.setattr(
+        http_module, "async_setup", AsyncMock(return_value=True), raising=False
+    )
     monkeypatch.setattr(
         http_module, "async_setup_entry", AsyncMock(return_value=True), raising=False
     )
@@ -144,7 +154,10 @@ async def _patch_integration_runtime(  # noqa: PLR0915
         return integration_cache.get(domain) or integration_cache.get(DOMAIN)
 
     monkeypatch.setattr(
-        loader_module, "async_get_integration", _fake_async_get_integration, raising=False
+        loader_module,
+        "async_get_integration",
+        _fake_async_get_integration,
+        raising=False,
     )
     monkeypatch.setattr(
         loader_module,
@@ -163,7 +176,9 @@ async def _patch_integration_runtime(  # noqa: PLR0915
         raising=False,
     )
     config_entry_setup = getattr(
-        config_entries_module.ConfigEntry, "_ConfigEntry__async_setup_with_context", None
+        config_entries_module.ConfigEntry,
+        "_ConfigEntry__async_setup_with_context",
+        None,
     )
     if config_entry_setup is not None:
         monkeypatch.setitem(
@@ -173,7 +188,9 @@ async def _patch_integration_runtime(  # noqa: PLR0915
         )
     hass.config_entries._async_forward_entry_setup.__globals__["loader"] = loader_module
 
-    async def _forward_entry_setups(entry_obj: MockConfigEntry, platforms: Iterable[object]) -> None:
+    async def _forward_entry_setups(
+        entry_obj: MockConfigEntry, platforms: Iterable[object]
+    ) -> None:
         await _fake_async_get_integration(hass, entry_obj.domain)
 
     monkeypatch.setattr(
@@ -209,7 +226,9 @@ async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
 ) -> None:
     """Ensure tracker and service devices have registry entries with entities."""
 
-    del deterministic_config_subentry_id  # fixture applies ensure_config_subentry_id fallbacks
+    del (
+        deterministic_config_subentry_id
+    )  # fixture applies ensure_config_subentry_id fallbacks
 
     dummy_devices = [
         {"id": "DEVICE123", "name": "Test Phone"},
@@ -258,11 +277,17 @@ async def test_devices_and_entities_registered(  # noqa: PLR0913, PLR0915
 
     tracker_subentry = subentry_manager.managed_subentries.get(TRACKER_SUBENTRY_KEY)
     assert tracker_subentry is not None
-    tracker_subentry_id = getattr(tracker_subentry, "config_subentry_id", None) or f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}"
+    tracker_subentry_id = (
+        getattr(tracker_subentry, "config_subentry_id", None)
+        or f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}"
+    )
 
     service_subentry = subentry_manager.managed_subentries.get(SERVICE_SUBENTRY_KEY)
     assert service_subentry is not None
-    service_subentry_id = getattr(service_subentry, "config_subentry_id", None) or f"{entry.entry_id}:{SERVICE_SUBENTRY_KEY}"
+    service_subentry_id = (
+        getattr(service_subentry, "config_subentry_id", None)
+        or f"{entry.entry_id}:{SERVICE_SUBENTRY_KEY}"
+    )
 
     for device in dummy_devices:
         identifier = (

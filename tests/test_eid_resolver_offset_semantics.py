@@ -30,6 +30,7 @@ async def test_pair_date_offset_beats_drifted_unix(
         async_create_task=lambda coro: asyncio.create_task(coro),
         data={},
     )
+
     async def _async_noop(_payload=None):
         return None
 
@@ -55,7 +56,7 @@ async def test_pair_date_offset_beats_drifted_unix(
     unix_target = base_now
     pair_collision_ts = pair_target
     unix_collision_ts = unix_target + ROTATION_PERIOD
-    collision_eid = b"\xAB" * LEGACY_EID_LENGTH
+    collision_eid = b"\xab" * LEGACY_EID_LENGTH
 
     identity = DeviceIdentity(
         registry_id="device-id",
@@ -111,7 +112,9 @@ async def test_pair_date_offset_beats_drifted_unix(
             return collision_eid
         return time_counter.to_bytes(LEGACY_EID_LENGTH, byteorder="big", signed=False)
 
-    monkeypatch.setattr(resolver_module, "iter_rotation_windows", _iter_rotation_windows)
+    monkeypatch.setattr(
+        resolver_module, "iter_rotation_windows", _iter_rotation_windows
+    )
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_generate_variant", _generate_variant)
 
     await resolver._refresh_cache()

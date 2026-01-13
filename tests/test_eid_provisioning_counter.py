@@ -24,10 +24,13 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
     """Resolver should match EIDs generated from the current unix rotation window."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
-    resolver.hass = SimpleNamespace(data={}, async_create_task=lambda coro: asyncio.create_task(coro))
+    resolver.hass = SimpleNamespace(
+        data={}, async_create_task=lambda coro: asyncio.create_task(coro)
+    )
     resolver._lookup = {}
     resolver._lookup_metadata = {}
     resolver._locks = {}
+
     async def _async_noop(payload=None):
         return None
 
@@ -40,7 +43,7 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
 
     identity_key = bytes.fromhex("00" * 32)
     now_unix = 1_700_000_000
-    base_counter = (now_unix - (now_unix % ROTATION_PERIOD))
+    base_counter = now_unix - (now_unix % ROTATION_PERIOD)
 
     identity = DeviceIdentity(
         registry_id="registry-id",
@@ -72,7 +75,9 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(time, "time", lambda: float(now_unix))
 
-    eid = generate_eid_variant(identity_key, base_counter, EidVariant.LEGACY_SECP160R1_X20_BE)
+    eid = generate_eid_variant(
+        identity_key, base_counter, EidVariant.LEGACY_SECP160R1_X20_BE
+    )
     payload = bytes([FMDN_FRAME_TYPE]) + eid + b"\x00"
 
     await resolver._refresh_cache()

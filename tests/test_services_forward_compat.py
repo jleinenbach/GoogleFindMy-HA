@@ -125,6 +125,7 @@ def _build_stop_sound_service_hass(monkeypatch: pytest.MonkeyPatch):
 
     return hass, coordinator, _StubServiceCall, ctx, canonical_id
 
+
 def _integration_root() -> Path:
     return Path(__file__).resolve().parents[1] / "custom_components" / "googlefindmy"
 
@@ -322,8 +323,8 @@ def test_stop_sound_service_forwards_request_uuid(
 ) -> None:
     """Stop sound handler should pass an explicit request UUID to the coordinator."""
 
-    hass, coordinator, ServiceCallStub, ctx, canonical_id = _build_stop_sound_service_hass(
-        monkeypatch
+    hass, coordinator, ServiceCallStub, ctx, canonical_id = (
+        _build_stop_sound_service_hass(monkeypatch)
     )
 
     async def _invoke() -> None:
@@ -344,15 +345,17 @@ def test_stop_sound_service_rejects_non_string_uuid(
 ) -> None:
     """Invalid UUID types must raise ServiceValidationError."""
 
-    hass, coordinator, ServiceCallStub, ctx, _canonical_id = _build_stop_sound_service_hass(
-        monkeypatch
+    hass, coordinator, ServiceCallStub, ctx, _canonical_id = (
+        _build_stop_sound_service_hass(monkeypatch)
     )
 
     async def _invoke() -> None:
         await services.async_register_services(hass, ctx)
         handler = hass.services.registered[(DOMAIN, SERVICE_STOP_SOUND)]
         with pytest.raises(ServiceValidationError):
-            await handler(ServiceCallStub({"device_id": "device-42", "request_uuid": 999}))
+            await handler(
+                ServiceCallStub({"device_id": "device-42", "request_uuid": 999})
+            )
 
     asyncio.run(_invoke())
 
