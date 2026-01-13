@@ -1198,6 +1198,40 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     )
     await policy.async_pre_request()
 
+    # --- Pre-request gate: wait if auth refresh is in progress ---
+    # This prevents unnecessary 401s when another request is already refreshing.
+    # Instead of each request hitting Google's API and getting 401, they wait here.
+    ns_deadline_key = (
+        f"{ns_prefix}{AUTH_RETRY_DEADLINE_KEY}"
+        if ns_prefix
+        else AUTH_RETRY_DEADLINE_KEY
+    )
+    deadline_raw = await _cache_get(ns_deadline_key)
+    if deadline_raw is not None:
+        try:
+            deadline = float(deadline_raw)
+            now = time.time()
+            if now < deadline:
+                wait_time = min(deadline - now + 1.0, 120.0)
+                _LOGGER.info(
+                    "Nova API: auth refresh in progress. Waiting %.1fs before request to %s.",
+                    wait_time,
+                    api_scope,
+                )
+                await asyncio.sleep(wait_time)
+                # Reload token after waiting (may have been refreshed)
+                token_key = f"adm_token_{user}"
+                if ns_prefix:
+                    token_key = f"{ns_prefix}adm_token_{user}"
+                fresh_token = await _cache_get(token_key)
+                if fresh_token:
+                    headers["Authorization"] = f"Bearer {fresh_token}"
+                    _LOGGER.debug(
+                        "Nova API: using refreshed token for request to %s.", api_scope
+                    )
+        except (ValueError, TypeError):
+            pass  # Invalid deadline, proceed normally
+
     ephemeral_session = False
     if session is None:
         hass_ref = _STATE.get("hass")

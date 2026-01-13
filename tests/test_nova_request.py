@@ -254,8 +254,10 @@ class _CoordinatedSession:
 
         if auth == "Bearer initial-token":
             self._initial_calls += 1
-            if self._initial_calls >= MAX_INITIAL_CALLS:
-                self._allow_refresh.set()
+            # With the pre-request gate, the second request waits before sending,
+            # so we trigger allow_refresh on the FIRST call (not after MAX_INITIAL_CALLS).
+            # This simulates the improved behavior where only one request triggers refresh.
+            self._allow_refresh.set()
             status, body = 401, b"unauthorized"
         elif auth == "Bearer refreshed-token":
             status, body = 200, b"ok"
@@ -340,11 +342,16 @@ def test_async_nova_request_reuses_cached_token_after_recent_refresh(
     results, calls, refreshes = asyncio.run(_exercise())
 
     assert results == ["6f6b", "6f6b"]
+    # With the pre-request gate, only ONE refresh should occur.
+    # The second request waits for the first to complete, then uses the cached token.
     assert refreshes == 1
 
     statuses = [call["status"] for call in calls]
-    assert statuses.count(UNAUTHORIZED_STATUS) == EXPECTED_RETRY_COUNT
-    assert statuses.count(SUCCESS_STATUS) == EXPECTED_RETRY_COUNT
+    # With pre-request gate: first request gets 401 and refreshes,
+    # second request waits and then succeeds with refreshed token.
+    # So we expect 1 unauthorized (from first request) and 2 successes.
+    assert statuses.count(UNAUTHORIZED_STATUS) == 1
+    assert statuses.count(SUCCESS_STATUS) == 2
     successful_auths = [
         call["auth"] for call in calls if call["status"] == SUCCESS_STATUS
     ]
