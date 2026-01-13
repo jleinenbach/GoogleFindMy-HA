@@ -7,10 +7,47 @@ Notes for AI/automation:
 - Only mark items you have actually performed or verified.
 -->
 
+<!-- ================================================================
+     PR TITLE FORMAT (Required)
+     ================================================================
+     Your PR title MUST follow Conventional Commits format:
+
+       <type>(<scope>): <subject>
+
+     Examples:
+       feat(auth): add OAuth2 refresh token support
+       fix(coordinator): resolve race condition in polling
+       docs: update installation instructions
+       ci: add bandit security scanning
+       refactor(config-flow): simplify error handling
+
+     Types:
+       feat     - New feature (triggers minor version bump)
+       fix      - Bug fix (triggers patch version bump)
+       docs     - Documentation only changes
+       style    - Formatting, missing semicolons, etc
+       refactor - Code change that neither fixes a bug nor adds a feature
+       perf     - Performance improvement
+       test     - Adding or correcting tests
+       build    - Changes to build system or dependencies
+       ci       - Changes to CI configuration
+       chore    - Other changes that don't modify src or test files
+       revert   - Reverts a previous commit
+
+     Scopes (optional):
+       auth, api, coordinator, config-flow, entities, services,
+       diagnostics, discovery, fmdn, spot, nova, translations, ci, release
+
+     Subject rules:
+       - Use imperative mood ("add" not "added", "fix" not "fixed")
+       - Don't capitalize first letter
+       - No period at the end
+     ================================================================ -->
+
 # Summary
 <!-- 1–3 sentences: What changed and why it matters for users/reviewers. -->
 
-- Type: ☐ fix ☐ feat ☐ refactor ☐ docs ☐ chore
+- Type: ☐ fix ☐ feat ☐ refactor ☐ docs ☐ chore ☐ ci ☐ test ☐ perf
 - Scope/Area: …
 - Linked issues: Fixes #…
 
@@ -73,7 +110,7 @@ Notes for AI/automation:
 ### Expected areas (check all that apply)
 - ☐ **Config flow**: user/invalid, duplicate abort (`async_set_unique_id` + `_abort_if_unique_id_configured`), connectivity pre-check, **reauth** (success/failure → reload), **reconfigure**
 - ☐ **Lifecycle**: `async_setup_entry`, **reload**, `async_unload_entry` (no zombie listeners)
-- ☐ **Coordinator & availability**: `UpdateFailed` on transient errors; entities flip to `unavailable`; single “down/back” log
+- ☐ **Coordinator & availability**: `UpdateFailed` on transient errors; entities flip to `unavailable`; single "down/back" log
 - ☐ **Diagnostics**: strictly redacted (no tokens/emails/locations/IDs)
 - ☐ **Services**: success/error paths with localized messages; rate limiting where applicable
 - ☐ **Discovery & dynamic devices** (if supported)
@@ -119,10 +156,12 @@ Notes for AI/automation:
 ---
 
 ## Local Verification (run before pushing)
-### bash:
+```bash
 pre-commit run --all-files
 python3 -m script.hassfest
 pytest -q
+poetry run bandit -r custom_components -c pyproject.toml
+```
 
 ---
 

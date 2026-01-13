@@ -80,7 +80,25 @@ jobs:
           wait-interval: 10
 
       - name: Run hassfest
+        id: hassfest
         uses: home-assistant/actions/hassfest@master
+
+      - name: Write hassfest summary
+        if: always()
+        run: |
+          {
+            echo "## Hassfest Validation"
+            echo ""
+            if [ "${{ steps.hassfest.outcome }}" = "success" ]; then
+              echo "✅ **Manifest validation passed**"
+              echo ""
+              echo "The \`manifest.json\` and integration structure are valid."
+            else
+              echo "❌ **Manifest validation failed**"
+              echo ""
+              echo "Check the logs above for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   hacs:
     name: HACS validation
@@ -112,10 +130,30 @@ jobs:
 
       - name: Run HACS validation
         if: steps.brands_probe.outputs.available == 'true'
+        id: hacs
         uses: hacs/action@main
         with:
           category: integration
           ignore: topics issues
+
+      - name: Write HACS summary
+        if: always()
+        run: |
+          {
+            echo "## HACS Validation"
+            echo ""
+            if [ "${{ steps.brands_probe.outputs.available }}" != "true" ]; then
+              echo "⚠️ **Skipped** - brands.home-assistant.io unavailable"
+            elif [ "${{ steps.hacs.outcome }}" = "success" ]; then
+              echo "✅ **HACS validation passed**"
+              echo ""
+              echo "The integration meets HACS requirements."
+            else
+              echo "❌ **HACS validation failed**"
+              echo ""
+              echo "Check the logs above for details."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   lint:
     name: Lint (${{ matrix.check }})
@@ -124,7 +162,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        check: [ruff, mypy, codespell]
+        check: [ruff, mypy, codespell, bandit]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -157,17 +195,108 @@ jobs:
 
       - name: Run Ruff
         if: matrix.check == 'ruff'
-        run: poetry run ruff check .
+        id: ruff
+        run: |
+          set +e
+          poetry run ruff check . 2>&1 | tee ruff_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
 
       - name: Run mypy (strict)
         if: matrix.check == 'mypy'
+        id: mypy
         run: |
-          poetry run mypy --install-types --non-interactive --strict -p custom_components.googlefindmy
-          poetry run mypy --install-types --non-interactive --strict -p tests
+          set +e
+          {
+            poetry run mypy --install-types --non-interactive --strict -p custom_components.googlefindmy
+            poetry run mypy --install-types --non-interactive --strict -p tests
+          } 2>&1 | tee mypy_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
 
       - name: Run codespell
         if: matrix.check == 'codespell'
-        run: poetry run codespell
+        id: codespell
+        run: |
+          set +e
+          poetry run codespell 2>&1 | tee codespell_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Run bandit (security)
+        if: matrix.check == 'bandit'
+        id: bandit
+        run: |
+          set +e
+          # Run bandit security scanner on custom_components and tests
+          # Exclude known false positives and test files that intentionally test security
+          poetry run bandit -r custom_components -c pyproject.toml -f txt 2>&1 | tee bandit_output.txt
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Write lint summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.check }} Results"
+            echo ""
+            if [ "${{ matrix.check }}" = "ruff" ]; then
+              if [ -f ruff_output.txt ]; then
+                ISSUES=$(grep -c "^" ruff_output.txt 2>/dev/null || echo "0")
+                if [ "$ISSUES" = "0" ] || [ ! -s ruff_output.txt ]; then
+                  echo "✅ **No issues found**"
+                else
+                  echo "❌ **Issues found:**"
+                  echo ""
+                  echo '```'
+                  head -100 ruff_output.txt
+                  echo '```'
+                fi
+              fi
+            elif [ "${{ matrix.check }}" = "mypy" ]; then
+              if [ -f mypy_output.txt ]; then
+                ERRORS=$(grep -c "error:" mypy_output.txt 2>/dev/null || echo "0")
+                if [ "$ERRORS" = "0" ]; then
+                  echo "✅ **No type errors found**"
+                else
+                  echo "❌ **$ERRORS type error(s) found:**"
+                  echo ""
+                  echo '```'
+                  head -100 mypy_output.txt
+                  echo '```'
+                fi
+              fi
+            elif [ "${{ matrix.check }}" = "codespell" ]; then
+              if [ -f codespell_output.txt ]; then
+                if [ ! -s codespell_output.txt ]; then
+                  echo "✅ **No spelling errors found**"
+                else
+                  echo "❌ **Spelling issues found:**"
+                  echo ""
+                  echo '```'
+                  cat codespell_output.txt
+                  echo '```'
+                fi
+              fi
+            elif [ "${{ matrix.check }}" = "bandit" ]; then
+              if [ -f bandit_output.txt ]; then
+                ISSUES=$(grep -c "Issue:" bandit_output.txt 2>/dev/null || echo "0")
+                if [ "$ISSUES" = "0" ]; then
+                  echo "✅ **No security issues found**"
+                else
+                  echo "⚠️ **$ISSUES potential security issue(s) found:**"
+                  echo ""
+                  echo '```'
+                  cat bandit_output.txt
+                  echo '```'
+                fi
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   test:
     name: Test (Python ${{ matrix.python-version }})
@@ -255,12 +384,58 @@ jobs:
     if: always()
     steps:
       - name: Check all jobs passed
+        id: check
         run: |
           if [[ "${{ needs.hassfest.result }}" != "success" ]] || \
              [[ "${{ needs.hacs.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]]; then
             echo "One or more jobs failed"
+            echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "All CI jobs passed!"
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Write CI summary
+        if: always()
+        run: |
+          {
+            echo "# CI Summary"
+            echo ""
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+
+            if [ "${{ needs.hassfest.result }}" = "success" ]; then
+              echo "| Hassfest | ✅ Pass |"
+            else
+              echo "| Hassfest | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.hacs.result }}" = "success" ]; then
+              echo "| HACS | ✅ Pass |"
+            else
+              echo "| HACS | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.lint.result }}" = "success" ]; then
+              echo "| Lint (ruff, mypy, codespell, bandit) | ✅ Pass |"
+            else
+              echo "| Lint (ruff, mypy, codespell, bandit) | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.test.result }}" = "success" ]; then
+              echo "| Tests | ✅ Pass |"
+            else
+              echo "| Tests | ❌ Fail |"
+            fi
+
+            echo ""
+            if [ "${{ steps.check.outputs.passed }}" = "true" ]; then
+              echo "## ✅ All checks passed!"
+            else
+              echo "## ❌ Some checks failed"
+              echo ""
+              echo "Please review the failed jobs above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

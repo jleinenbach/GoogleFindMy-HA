@@ -485,6 +485,29 @@ skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.p
 ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-emptive"
 check-filenames = true
 
+[tool.bandit]
+# Exclude auto-generated protobuf files and test files
+exclude_dirs = [
+    "custom_components/googlefindmy/ProtoDecoders",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto",
+    "tests",
+    ".venv",
+]
+# Skip specific checks that are false positives for this codebase
+skips = [
+    "B101",  # assert_used - Tests use assert; production uses proper checks
+    "B105",  # hardcoded_password_string - False positives (form field names)
+    "B110",  # try_except_pass - Intentional silent exception handling
+    "B112",  # try_except_continue - Intentional defensive loop handling
+    "B311",  # random - Not used for cryptographic purposes
+    "B404",  # import_subprocess - Used safely in controlled contexts
+    "B603",  # subprocess_without_shell_equals_true - Safe subprocess usage
+    "B607",  # start_process_with_partial_path - Chrome driver uses system PATH
+]
+# Severity threshold
+severity = "low"
+confidence = "low"
+
 [tool.semantic_release]
 version_toml = ["pyproject.toml:tool.poetry.version"]
 branch = "main"
