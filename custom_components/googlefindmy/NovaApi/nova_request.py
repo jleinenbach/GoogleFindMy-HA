@@ -301,6 +301,9 @@ _STATE: dict[str, Any] = {
     "cache_provider": None,
 }
 
+# Key for storing auth retry deadline in cache (prevents parallel refresh storms)
+AUTH_RETRY_DEADLINE_KEY = "auth_retry_deadline"
+
 
 def register_hass(hass: HomeAssistant) -> None:
     """Register a Home Assistant instance to provide a shared ClientSession."""
@@ -1259,6 +1262,41 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         _AUTH_STEP_LONG_COOLDOWN = 2
                         max_auth_retries = 4
 
+                        # --- Race condition guard ---
+                        # Check if another request is already handling auth refresh.
+                        # If so, wait for it to complete instead of starting parallel refreshes.
+                        ns_deadline_key = (
+                            f"{ns_prefix}{AUTH_RETRY_DEADLINE_KEY}"
+                            if ns_prefix
+                            else AUTH_RETRY_DEADLINE_KEY
+                        )
+                        deadline_raw = await _cache_get(ns_deadline_key)
+                        now = time.time()
+                        if deadline_raw is not None:
+                            try:
+                                deadline = float(deadline_raw)
+                                if now < deadline:
+                                    # Another request is handling refresh - wait and retry
+                                    wait_time = min(deadline - now + 1.0, 30.0)
+                                    _LOGGER.info(
+                                        "Nova API: auth refresh in progress by another request. "
+                                        "Waiting %.1fs before retry.",
+                                        wait_time,
+                                    )
+                                    await asyncio.sleep(wait_time)
+                                    # Reload token from cache (may have been refreshed)
+                                    token_key = f"adm_token_{user}"
+                                    if ns_prefix:
+                                        token_key = f"{ns_prefix}adm_token_{user}"
+                                    fresh_token = await _cache_get(token_key)
+                                    if fresh_token:
+                                        headers["Authorization"] = (
+                                            f"Bearer {fresh_token}"
+                                        )
+                                    continue  # Retry with possibly fresh token
+                            except (ValueError, TypeError):
+                                pass  # Invalid deadline, proceed normally
+
                         # Log all auth retries as WARNING for visibility.
                         # Previously, attempt 1/4 was logged as INFO, making it invisible
                         # in WARNING-level logs and causing confusion ("only 2/4 appears").
@@ -1271,6 +1309,11 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
 
                         if auth_retries_used == _AUTH_STEP_ADM_REFRESH:
                             # Step 1: First 401 - refresh ADM token only, wait for propagation
+                            # Set deadline to prevent parallel refresh storms
+                            await _cache_set(
+                                ns_deadline_key,
+                                time.time() + _PROPAGATION_DELAY_S + 2.0,
+                            )
                             _LOGGER.info(
                                 "Nova API: refreshing ADM token (AAS unchanged)."
                             )
@@ -1278,18 +1321,30 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 await policy.async_on_401()
                             except NovaAuthPermanentError:
                                 # AAS token explicitly rejected - no point retrying
+                                await _cache_set(
+                                    ns_deadline_key, None
+                                )  # Clear deadline
                                 raise
                             _LOGGER.info(
                                 "Nova API: waiting %.0fs for token propagation.",
                                 _PROPAGATION_DELAY_S,
                             )
                             await asyncio.sleep(_PROPAGATION_DELAY_S)
+                            await _cache_set(ns_deadline_key, None)  # Clear deadline
                             auth_retries_used += 1
                             continue
 
                         if auth_retries_used == _AUTH_STEP_AAS_ADM_REFRESH:
                             # Step 2: Second 401 - ADM refresh didn't help
                             # Wait cooldown, then invalidate AAS and refresh entire chain
+                            # Set deadline for entire cooldown + refresh period
+                            await _cache_set(
+                                ns_deadline_key,
+                                time.time()
+                                + _SHORT_COOLDOWN_S
+                                + _PROPAGATION_DELAY_S
+                                + 2.0,
+                            )
                             _LOGGER.warning(
                                 "Nova API: ADM refresh failed. Waiting %.0fs before "
                                 "refreshing entire token chain (AAS+ADM).",
@@ -1301,24 +1356,32 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             try:
                                 await policy.async_on_401()
                             except NovaAuthPermanentError:
+                                await _cache_set(
+                                    ns_deadline_key, None
+                                )  # Clear deadline
                                 raise
                             _LOGGER.info(
                                 "Nova API: waiting %.0fs for token propagation.",
                                 _PROPAGATION_DELAY_S,
                             )
                             await asyncio.sleep(_PROPAGATION_DELAY_S)
+                            await _cache_set(ns_deadline_key, None)  # Clear deadline
                             auth_retries_used += 1
                             continue
 
                         if auth_retries_used == _AUTH_STEP_LONG_COOLDOWN:
                             # Step 3: Third 401 - even fresh AAS+ADM didn't help
                             # Wait long cooldown, then retry once more
+                            await _cache_set(
+                                ns_deadline_key, time.time() + _LONG_COOLDOWN_S + 2.0
+                            )
                             _LOGGER.warning(
                                 "Nova API: AAS+ADM refresh failed. Waiting %.0fs "
                                 "(long cooldown) before final retry.",
                                 _LONG_COOLDOWN_S,
                             )
                             await asyncio.sleep(_LONG_COOLDOWN_S)
+                            await _cache_set(ns_deadline_key, None)  # Clear deadline
                             auth_retries_used += 1
                             continue
 
