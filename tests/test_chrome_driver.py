@@ -18,7 +18,9 @@ class _BootstrapChromeOptions:
         """Ignore bootstrap arguments added during import."""
 
 
-def _bootstrap_chrome(*, options: object) -> object:  # pragma: no cover - defensive placeholder
+def _bootstrap_chrome(
+    *, options: object
+) -> object:  # pragma: no cover - defensive placeholder
     """Return a generic driver object during bootstrap imports."""
 
     return object()
@@ -61,7 +63,9 @@ def _reset_uc(monkeypatch: pytest.MonkeyPatch) -> None:
     chrome_driver._reset_uc_cache(None)
 
 
-def test_get_options_headless_uses_expected_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_options_headless_uses_expected_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure headless options populate the expected Chrome arguments."""
 
     uc_module = chrome_driver._get_uc_module()
@@ -81,7 +85,9 @@ def test_get_options_headless_uses_expected_arguments(monkeypatch: pytest.Monkey
     ]
 
 
-def test_create_driver_headless_passes_options_to_uc(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_driver_headless_passes_options_to_uc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify the driver factory returns the fake driver and forwards options."""
 
     fake_driver = object()
@@ -131,7 +137,9 @@ def test_create_driver_fallback_logs_and_raises_runtime_error(
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
 
-    def chrome_stub(*, options: FakeChromeOptions, version_main: int | None = None) -> object:
+    def chrome_stub(
+        *, options: FakeChromeOptions, version_main: int | None = None
+    ) -> object:
         chrome_calls.append(options)
         raise SentinelError("driver start failed")
 
@@ -144,7 +152,9 @@ def test_create_driver_fallback_logs_and_raises_runtime_error(
         chrome_driver.create_driver(headless=True)
 
     # When headless=True, no additional headless fallback is attempted
-    assert len(chrome_calls) == 2, "Both bundled and fallback Chrome invocations should be attempted"
+    assert len(chrome_calls) == 2, (
+        "Both bundled and fallback Chrome invocations should be attempted"
+    )
     assert chrome_calls[0].binary_location is None
     assert chrome_calls[1].binary_location == "/opt/chrome"
     assert "Default ChromeDriver startup failed" in " ".join(caplog.messages)
@@ -163,7 +173,9 @@ def test_create_driver_headless_fallback_on_non_headless_mode(
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
 
-    def chrome_stub(*, options: FakeChromeOptions, version_main: int | None = None) -> object:
+    def chrome_stub(
+        *, options: FakeChromeOptions, version_main: int | None = None
+    ) -> object:
         chrome_calls.append(options)
         raise SentinelError("driver start failed")
 
@@ -176,7 +188,9 @@ def test_create_driver_headless_fallback_on_non_headless_mode(
         chrome_driver.create_driver(headless=False)
 
     # When headless=False, 3 attempts are made: normal, fallback path, then headless fallback
-    assert len(chrome_calls) == 3, "Bundled, fallback, and headless fallback should be attempted"
+    assert len(chrome_calls) == 3, (
+        "Bundled, fallback, and headless fallback should be attempted"
+    )
     assert chrome_calls[0].binary_location is None
     assert chrome_calls[1].binary_location == "/opt/chrome"
     assert chrome_calls[2].binary_location == "/opt/chrome"

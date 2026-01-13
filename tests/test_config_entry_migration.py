@@ -154,7 +154,9 @@ async def test_async_migrate_entry_normalizes_metadata(
     assert first_update["unique_id"] == "acct:user@example.com"
     options_update = hass.config_entries.updated[1][1]
     assert options_update["options"][OPT_MIN_POLL_INTERVAL] == 45
-    assert hass.config_entries.updated[2][1]["version"] == integration.CONFIG_ENTRY_VERSION
+    assert (
+        hass.config_entries.updated[2][1]["version"] == integration.CONFIG_ENTRY_VERSION
+    )
 
 
 @pytest.mark.asyncio

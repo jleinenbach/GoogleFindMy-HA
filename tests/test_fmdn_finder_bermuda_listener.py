@@ -81,7 +81,9 @@ async def test_bermuda_state_change_with_area_change(hass_mock: MagicMock) -> No
 
 
 @pytest.mark.asyncio
-async def test_bermuda_state_change_ignores_non_bermuda_trackers(hass_mock: MagicMock) -> None:
+async def test_bermuda_state_change_ignores_non_bermuda_trackers(
+    hass_mock: MagicMock,
+) -> None:
     """Test that non-Bermuda tracker entities are ignored."""
 
     await async_setup_bermuda_listener(hass_mock)
@@ -114,7 +116,9 @@ async def test_bermuda_state_change_ignores_non_bermuda_trackers(hass_mock: Magi
 
 
 @pytest.mark.asyncio
-async def test_bermuda_state_change_ignores_unchanged_area(hass_mock: MagicMock) -> None:
+async def test_bermuda_state_change_ignores_unchanged_area(
+    hass_mock: MagicMock,
+) -> None:
     """Test that unchanged area does not trigger upload."""
 
     await async_setup_bermuda_listener(hass_mock)
@@ -234,7 +238,9 @@ def hass_mock() -> MagicMock:
     hass = MagicMock()
     hass.data = {"googlefindmy": {}}
     hass.bus = MagicMock()
-    hass.bus.async_listen = MagicMock(return_value=MagicMock())  # Return unsubscribe callable
+    hass.bus.async_listen = MagicMock(
+        return_value=MagicMock()
+    )  # Return unsubscribe callable
 
     # Mock async_create_task to close coroutines to avoid RuntimeWarning
     def _mock_create_task(coro, **kwargs):
@@ -306,7 +312,9 @@ async def test_find_googlefindmy_device_via_congealment() -> None:
 
     # Bermuda entity (platform=bermuda) - same HA device!
     bermuda_entity = MagicMock()
-    bermuda_entity.entity_id = "device_tracker.moto_tag_jens_schlusselbund_bermuda_tracker_2"
+    bermuda_entity.entity_id = (
+        "device_tracker.moto_tag_jens_schlusselbund_bermuda_tracker_2"
+    )
     bermuda_entity.domain = "device_tracker"
     bermuda_entity.platform = "bermuda"
     bermuda_entity.device_id = ha_device_id  # SAME device!
@@ -314,12 +322,15 @@ async def test_find_googlefindmy_device_via_congealment() -> None:
     # Mock entity registry
     mock_ent_reg = MagicMock()
 
-    with patch(
-        "homeassistant.helpers.entity_registry.async_get",
-        return_value=mock_ent_reg,
-    ), patch(
-        "homeassistant.helpers.entity_registry.async_entries_for_device",
-        return_value=[gfm_entity, bermuda_entity],  # Both entities on same device
+    with (
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=mock_ent_reg,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[gfm_entity, bermuda_entity],  # Both entities on same device
+        ),
     ):
         result = await _async_find_googlefindmy_device(hass, ha_device_id)
 
@@ -359,12 +370,15 @@ async def test_find_googlefindmy_device_no_gfm_entity_on_device() -> None:
 
     mock_ent_reg = MagicMock()
 
-    with patch(
-        "homeassistant.helpers.entity_registry.async_get",
-        return_value=mock_ent_reg,
-    ), patch(
-        "homeassistant.helpers.entity_registry.async_entries_for_device",
-        return_value=[bermuda_only_entity],  # No GoogleFindMy entity
+    with (
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=mock_ent_reg,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[bermuda_only_entity],  # No GoogleFindMy entity
+        ),
     ):
         result = await _async_find_googlefindmy_device(hass, ha_device_id)
 
@@ -409,12 +423,15 @@ async def test_find_googlefindmy_device_extracts_device_id_from_unique_id() -> N
 
     mock_ent_reg = MagicMock()
 
-    with patch(
-        "homeassistant.helpers.entity_registry.async_get",
-        return_value=mock_ent_reg,
-    ), patch(
-        "homeassistant.helpers.entity_registry.async_entries_for_device",
-        return_value=[gfm_entity],
+    with (
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=mock_ent_reg,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[gfm_entity],
+        ),
     ):
         result = await _async_find_googlefindmy_device(hass, ha_device_id)
 
@@ -467,12 +484,15 @@ async def test_find_googlefindmy_device_ignores_non_device_tracker_entities() ->
 
     mock_ent_reg = MagicMock()
 
-    with patch(
-        "homeassistant.helpers.entity_registry.async_get",
-        return_value=mock_ent_reg,
-    ), patch(
-        "homeassistant.helpers.entity_registry.async_entries_for_device",
-        return_value=[gfm_sensor, gfm_tracker],  # Sensor comes first
+    with (
+        patch(
+            "homeassistant.helpers.entity_registry.async_get",
+            return_value=mock_ent_reg,
+        ),
+        patch(
+            "homeassistant.helpers.entity_registry.async_entries_for_device",
+            return_value=[gfm_sensor, gfm_tracker],  # Sensor comes first
+        ),
     ):
         result = await _async_find_googlefindmy_device(hass, ha_device_id)
 

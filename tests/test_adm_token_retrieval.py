@@ -1311,7 +1311,6 @@ def test_perform_oauth_with_provided_aas_non_dict_response(
     """Non-dict gpsoauth response should raise RuntimeError."""
 
     async def _exercise() -> None:
-
         def fake_perform_oauth(
             username: str,
             aas_token: str,
@@ -1414,9 +1413,7 @@ def test_async_get_adm_token_isolated_empty_username() -> None:
     """Empty username should raise RuntimeError."""
     with pytest.raises(RuntimeError, match="Username is empty/invalid"):
         asyncio.run(
-            adm_token_retrieval.async_get_adm_token_isolated(
-                "", aas_token="aas-token"
-            )
+            adm_token_retrieval.async_get_adm_token_isolated("", aas_token="aas-token")
         )
 
 
@@ -1793,11 +1790,7 @@ def test_async_get_adm_token_finally_block_read_failure(
 
         class PartialFailCache(_DummyTokenCache):
             async def get(self, name: str) -> Any:
-                if (
-                    name == DATA_AUTH_METHOD
-                    and call_count[0] > 2
-                    and call_count[0] < 5
-                ):
+                if name == DATA_AUTH_METHOD and call_count[0] > 2 and call_count[0] < 5:
                     call_count[0] += 1
                     raise RuntimeError("Read failed")
                 call_count[0] += 1
@@ -1924,8 +1917,6 @@ def test_async_get_adm_token_auth_method_switch_failure(
         assert switch_attempts[0] >= 1
 
     asyncio.run(_exercise())
-
-
 
 
 def test_async_get_adm_token_isolated_without_cache_funcs(

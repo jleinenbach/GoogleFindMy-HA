@@ -46,9 +46,7 @@ def _build_single_device_with_seed_report(
 
     # Ensure has_reports=True inside decoder so the decrypt hook is executed.
     reports = device.information.locationInformation.reports
-    reports.recentLocationAndNetworkLocations.recentLocation.semanticLocation.locationName = (
-        "seed"
-    )
+    reports.recentLocationAndNetworkLocations.recentLocation.semanticLocation.locationName = "seed"
 
     return devices_list, device
 
@@ -57,7 +55,11 @@ def _prepare_registration_secrets(device: Any) -> Any:
     """Ensure deviceRegistration.encryptedUserSecrets is present for HasField checks."""
 
     registration = device.information.deviceRegistration
-    secrets = registration.encryptedUser_secrets if hasattr(registration, "encryptedUser_secrets") else registration.encryptedUserSecrets
+    secrets = (
+        registration.encryptedUser_secrets
+        if hasattr(registration, "encryptedUser_secrets")
+        else registration.encryptedUserSecrets
+    )
 
     # Make the submessage present in proto3 so registration.HasField('encryptedUserSecrets') is True.
     # A single non-default field is sufficient.
@@ -164,7 +166,11 @@ def test_device_list_registration_anchor_fields_propagate(
     # pairDate is a scalar in proto3 (unset -> 0), so we only set a non-zero value here.
     registration.pairDate = 1_800_000_111
 
-    secrets = registration.encryptedUser_secrets if hasattr(registration, "encryptedUser_secrets") else registration.encryptedUserSecrets
+    secrets = (
+        registration.encryptedUser_secrets
+        if hasattr(registration, "encryptedUser_secrets")
+        else registration.encryptedUserSecrets
+    )
     if set_creation_date:
         # Any subfield assignment makes HasField('creationDate') true.
         secrets.creationDate.seconds = int(creation_seconds or 0)

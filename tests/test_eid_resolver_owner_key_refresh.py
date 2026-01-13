@@ -14,12 +14,16 @@ from tests.helpers import DummyCache
 
 
 @pytest.mark.asyncio
-async def test_try_decrypt_identity_key_refreshes_owner_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_try_decrypt_identity_key_refreshes_owner_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cache = DummyCache()
     calls: list[bool] = []
     decrypt_inputs: list[bytes] = []
 
-    async def fake_async_get_owner_key(*, cache: object, force_refresh: bool = False, **kwargs):  # type: ignore[no-untyped-def]
+    async def fake_async_get_owner_key(
+        *, cache: object, force_refresh: bool = False, **kwargs
+    ):  # type: ignore[no-untyped-def]
         calls.append(force_refresh)
         version = 2 if force_refresh else 1
         key = bytes([version]) * 32

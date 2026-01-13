@@ -115,7 +115,9 @@ def test_request_oauth_account_token_flow_missing_cookie(
     driver = FakeDriver(cookie_after_wait=None)
     wait_factory = _apply_flow_patches(monkeypatch, driver)
 
-    with pytest.raises(RuntimeError, match="OAuth token cookie missing despite wait completion"):
+    with pytest.raises(
+        RuntimeError, match="OAuth token cookie missing despite wait completion"
+    ):
         request_oauth_account_token_flow(headless=True)
 
     assert driver.quit_calls == 1

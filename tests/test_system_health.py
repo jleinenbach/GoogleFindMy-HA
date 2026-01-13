@@ -126,9 +126,7 @@ def test_async_register_uses_registration_object() -> None:
 
     system_health.async_register(hass, registration)
 
-    assert registration.calls == [
-        (system_health.async_get_system_health_info, None)
-    ]
+    assert registration.calls == [(system_health.async_get_system_health_info, None)]
 
 
 @pytest.mark.asyncio

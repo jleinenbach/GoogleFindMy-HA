@@ -41,4 +41,3 @@ def test_pytest_config_emits_no_config_warnings() -> None:
 
     combined_output = "\n".join((result.stdout, result.stderr))
     assert "PytestConfigWarning" not in combined_output
-

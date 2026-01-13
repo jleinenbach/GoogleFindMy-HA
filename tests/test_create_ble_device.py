@@ -82,13 +82,19 @@ class _StubOwnerOperations:
 def test_register_esp32(monkeypatch) -> None:
     module = create_ble_device
 
-    monkeypatch.setattr(module, "DeviceComponentInformation", _StubDeviceComponentInformation)
-    monkeypatch.setattr(module, "PublicKeyIdList", SimpleNamespace(PublicKeyIdInfo=_StubPublicKeyIdInfo))
-    monkeypatch.setattr(module, "RegisterBleDeviceRequest", _StubRegisterBleDeviceRequest)
+    monkeypatch.setattr(
+        module, "DeviceComponentInformation", _StubDeviceComponentInformation
+    )
+    monkeypatch.setattr(
+        module, "PublicKeyIdList", SimpleNamespace(PublicKeyIdInfo=_StubPublicKeyIdInfo)
+    )
+    monkeypatch.setattr(
+        module, "RegisterBleDeviceRequest", _StubRegisterBleDeviceRequest
+    )
     monkeypatch.setattr(module, "FMDNOwnerOperations", _StubOwnerOperations)
 
     fake_owner_key = b"owner-key"
-    fake_eik = b"\xAA" * 32
+    fake_eik = b"\xaa" * 32
     fake_eid = b"EID0123456789ABCDEF"
     fake_time_value = 1_700_000_000
 
@@ -143,12 +149,12 @@ def test_register_esp32(monkeypatch) -> None:
     assert request_instance.ringKey == b"stub-ring"
     assert request_instance.recoveryKey == b"stub-recovery"
     assert request_instance.unwantedTrackingKey == b"stub-tracking"
-    assert generate_calls == [
-        (fake_eik, 0, module.EidVariant.LEGACY_SECP160R1_X20_BE)
-    ]
+    assert generate_calls == [(fake_eik, 0, module.EidVariant.LEGACY_SECP160R1_X20_BE)]
 
     expected_truncated_eid = fake_eid[:10]
-    public_key_entries = request_instance.e2eePublicKeyRegistration.publicKeyIdList.publicKeyIdInfo
+    public_key_entries = (
+        request_instance.e2eePublicKeyRegistration.publicKeyIdList.publicKeyIdInfo
+    )
     assert len(public_key_entries) == 3
     assert [entry.publicKeyId.truncatedEid for entry in public_key_entries] == [
         expected_truncated_eid,
@@ -165,7 +171,9 @@ def test_register_esp32(monkeypatch) -> None:
     assert flip_calls == [
         (b"cipher-" + fake_owner_key + fake_eik, True),
     ]
-    encrypted_user_secrets = request_instance.e2eePublicKeyRegistration.encryptedUserSecrets
+    encrypted_user_secrets = (
+        request_instance.e2eePublicKeyRegistration.encryptedUserSecrets
+    )
     assert (
         encrypted_user_secrets.encryptedIdentityKey
         == b"flip-cipher-" + fake_owner_key + fake_eik

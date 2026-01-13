@@ -50,7 +50,9 @@ def test_connectivity_sensor_tracks_push_and_attributes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_changes_notify_coordinators(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_health_changes_notify_coordinators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     receiver = FcmReceiverHA()
 
     async def _noop_start(entry_id: str, cache: Any) -> None:

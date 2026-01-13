@@ -101,7 +101,9 @@ def main() -> int:
     if not has_missing:
         return 0
 
-    print("\nMissing translation keys detected. Add the paths above to the locale files.")
+    print(
+        "\nMissing translation keys detected. Add the paths above to the locale files."
+    )
     return 1
 
 

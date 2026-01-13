@@ -22,7 +22,9 @@ class _DummyCache:
     async def async_get_cached_value(self, _key: str):  # pragma: no cover - stub
         return None
 
-    async def async_set_cached_value(self, _key: str, _value):  # pragma: no cover - stub
+    async def async_set_cached_value(
+        self, _key: str, _value
+    ):  # pragma: no cover - stub
         return None
 
 

@@ -56,9 +56,7 @@ class _StubCoordinator:
     def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
         return True
 
-    def attach_subentry_manager(
-        self, manager: Any, *, is_reload: bool = False
-    ) -> None:
+    def attach_subentry_manager(self, manager: Any, *, is_reload: bool = False) -> None:
         self.subentry_manager = manager
         self._is_reload = is_reload
 
@@ -139,9 +137,7 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     helpers_http_module = ModuleType("homeassistant.helpers.http")
     helpers_http_module.HomeAssistantView = _HttpViewStub
     helpers_http_module.request_handler_factory = lambda hass, view, handler: handler
-    monkeypatch.setitem(
-        sys.modules, "homeassistant.helpers.http", helpers_http_module
-    )
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.http", helpers_http_module)
 
     core_module = install_homeassistant_core_callback_stub(monkeypatch)
 
@@ -177,9 +173,7 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     dt_module.as_local = lambda value: value
     dt_module.UTC = UTC
     dt_module.as_utc = (
-        lambda value: value
-        if value.tzinfo is not None
-        else value.replace(tzinfo=UTC)
+        lambda value: value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     )
 
     def _parse_datetime(value: Any) -> datetime | None:

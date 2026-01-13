@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-if importlib.util.find_spec("pytest_homeassistant_custom_component") is None:  # pragma: no cover - optional dependency
+if (
+    importlib.util.find_spec("pytest_homeassistant_custom_component") is None
+):  # pragma: no cover - optional dependency
     pytest.skip(
         "pytest-homeassistant-custom-component is required for the recovery manager tests",
         allow_module_level=True,
@@ -96,7 +98,9 @@ async def test_entity_recovery_manager_recovers_missing_entities(
             }
             self._listeners: list[Callable[[], None]] = []
 
-        def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        def async_add_listener(
+            self, listener: Callable[[], None]
+        ) -> Callable[[], None]:
             self._listeners.append(listener)
             return lambda: None
 
@@ -124,13 +128,17 @@ async def test_entity_recovery_manager_recovers_missing_entities(
             resolved = key or self.get_subentry_metadata(feature=feature).key
             return [dict(row) for row in self._snapshots.get(resolved, [])]
 
-        def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
+        def is_device_visible_in_subentry(
+            self, subentry_key: str, device_id: str
+        ) -> bool:
             return device_id in self._visible.get(subentry_key, set())
 
         def is_device_present(self, device_id: str) -> bool:
             return device_id in self._present
 
-        def find_tracker_entity_entry(self, device_id: str) -> None:  # pragma: no cover - compatibility
+        def find_tracker_entity_entry(
+            self, device_id: str
+        ) -> None:  # pragma: no cover - compatibility
             return None
 
         def get_device_location_data_for_subentry(
@@ -206,7 +214,11 @@ async def test_entity_recovery_manager_recovers_missing_entities(
         expected: set[str] = set()
         for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
             dev_id = device.get("id")
-            if not isinstance(dev_id, str) or not dev_id or not _tracker_is_visible(dev_id):
+            if (
+                not isinstance(dev_id, str)
+                or not dev_id
+                or not _tracker_is_visible(dev_id)
+            ):
                 continue
             expected.add(f"{entry_id}:{tracker_subentry_identifier}:{dev_id}")
         return expected
@@ -218,7 +230,11 @@ async def test_entity_recovery_manager_recovers_missing_entities(
             return built
         for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
             dev_id = device.get("id")
-            if not isinstance(dev_id, str) or not dev_id or not _tracker_is_visible(dev_id):
+            if (
+                not isinstance(dev_id, str)
+                or not dev_id
+                or not _tracker_is_visible(dev_id)
+            ):
                 continue
             uid = f"{entry_id}:{tracker_subentry_identifier}:{dev_id}"
             if uid not in missing:
@@ -246,7 +262,11 @@ async def test_entity_recovery_manager_recovers_missing_entities(
         expected: set[str] = set()
         for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
             dev_id = device.get("id")
-            if not isinstance(dev_id, str) or not dev_id or not _tracker_is_visible(dev_id):
+            if (
+                not isinstance(dev_id, str)
+                or not dev_id
+                or not _tracker_is_visible(dev_id)
+            ):
                 continue
             for action in ("play_sound", "stop_sound", "locate_device"):
                 expected.add(
@@ -261,7 +281,11 @@ async def test_entity_recovery_manager_recovers_missing_entities(
             return built
         for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
             dev_id = device.get("id")
-            if not isinstance(dev_id, str) or not dev_id or not _tracker_is_visible(dev_id):
+            if (
+                not isinstance(dev_id, str)
+                or not dev_id
+                or not _tracker_is_visible(dev_id)
+            ):
                 continue
             for action, entity_cls in {
                 "play_sound": GoogleFindMyPlaySoundButton,
@@ -296,7 +320,9 @@ async def test_entity_recovery_manager_recovers_missing_entities(
             return set()
         expected: set[str] = set()
         for stat_key in created_stats:
-            expected.add(f"{DOMAIN}_{entry_id}_{service_subentry_identifier}_{stat_key}")
+            expected.add(
+                f"{DOMAIN}_{entry_id}_{service_subentry_identifier}_{stat_key}"
+            )
         for device in coordinator.get_subentry_snapshot(TRACKER_SUBENTRY_KEY):
             dev_id = device.get("id")
             name = device.get("name")
@@ -441,7 +467,9 @@ async def test_entity_recovery_manager_recovers_missing_entities(
 
     await manager.async_recover_missing_entities()
 
-    recovered_trackers = {entity.unique_id for entity in added_entities["device_tracker"]}
+    recovered_trackers = {
+        entity.unique_id for entity in added_entities["device_tracker"]
+    }
     assert recovered_trackers == {tracker_ids[1]}
 
     recovered_buttons = {entity.unique_id for entity in added_entities["button"]}

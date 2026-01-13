@@ -125,7 +125,10 @@ class TestEidDataPersistence:
         stored = coordinator._device_location_data[device_id]
         assert stored.get("identity_key") == location_data["identity_key"]
         assert stored.get("pair_date") == location_data["pair_date"]
-        assert stored.get("secrets_creation_date") == location_data["secrets_creation_date"]
+        assert (
+            stored.get("secrets_creation_date")
+            == location_data["secrets_creation_date"]
+        )
 
     def test_persist_anchor_metadata_stores_encrypted_identity_key(self) -> None:
         """_persist_anchor_metadata should store encrypted_identity_key."""
@@ -142,7 +145,10 @@ class TestEidDataPersistence:
         )
 
         stored = coordinator._device_location_data[device_id]
-        assert stored.get("encrypted_identity_key") == location_data["encrypted_identity_key"]
+        assert (
+            stored.get("encrypted_identity_key")
+            == location_data["encrypted_identity_key"]
+        )
         assert stored.get("owner_key_version") == 1
 
     def test_persist_anchor_metadata_merges_with_existing(self) -> None:
@@ -162,7 +168,9 @@ class TestEidDataPersistence:
             "pair_date": 1765910348,
             "secrets_creation_date": 1765910400,
         }
-        coordinator._persist_anchor_metadata(device_id, new_location, clear_metadata_only=False)
+        coordinator._persist_anchor_metadata(
+            device_id, new_location, clear_metadata_only=False
+        )
 
         stored = coordinator._device_location_data[device_id]
         # Original data should be preserved
@@ -211,7 +219,9 @@ class TestDecryptLocationsDataFlow:
 
         # Add required methods for update_device_cache
         coordinator._is_on_hass_loop = lambda: True
-        coordinator._normalize_identity_key = lambda x: x if isinstance(x, bytes) else None
+        coordinator._normalize_identity_key = (
+            lambda x: x if isinstance(x, bytes) else None
+        )
         coordinator._apply_weighted_location_fusion = lambda dev_id, slot: True
         coordinator._apply_semantic_mapping = lambda slot: None
         coordinator._apply_report_type_cooldown = lambda dev_id, hint: None
@@ -255,13 +265,21 @@ class TestDecryptLocationsDataFlow:
             "device_type": 2,  # DEVICE_TYPE_PHONE
         }
 
-        coordinator._persist_anchor_metadata(device_id, decrypt_output, clear_metadata_only=True)
+        coordinator._persist_anchor_metadata(
+            device_id, decrypt_output, clear_metadata_only=True
+        )
 
         stored = coordinator._device_location_data[device_id]
         assert stored.get("identity_key") == decrypt_output["identity_key"]
-        assert stored.get("encrypted_identity_key") == decrypt_output["encrypted_identity_key"]
+        assert (
+            stored.get("encrypted_identity_key")
+            == decrypt_output["encrypted_identity_key"]
+        )
         assert stored.get("owner_key_version") == 2
-        assert stored.get("secrets_creation_date") == decrypt_output["secrets_creation_date"]
+        assert (
+            stored.get("secrets_creation_date")
+            == decrypt_output["secrets_creation_date"]
+        )
         assert stored.get("pair_date") == decrypt_output["pair_date"]
 
 
@@ -301,8 +319,13 @@ class TestNbeListDevicesDataFlow:
 
         # Verify data is accessible
         assert len(coordinator._last_device_list) == 2
-        assert coordinator._last_device_list[0]["identity_key"] == b"\x01\x02\x03\x04" * 8
-        assert coordinator._last_device_list[1]["encrypted_identity_key"] == "another_encrypted_key"
+        assert (
+            coordinator._last_device_list[0]["identity_key"] == b"\x01\x02\x03\x04" * 8
+        )
+        assert (
+            coordinator._last_device_list[1]["encrypted_identity_key"]
+            == "another_encrypted_key"
+        )
 
 
 # ============================================================================
@@ -350,7 +373,10 @@ class TestGetActiveDeviceIdentities:
         # Verify the list is accessible
         assert len(coordinator._last_device_list) == 1
         assert coordinator._last_device_list[0]["id"] == device_id
-        assert coordinator._last_device_list[0]["encrypted_identity_key"] == "hex_encrypted_key_data"
+        assert (
+            coordinator._last_device_list[0]["encrypted_identity_key"]
+            == "hex_encrypted_key_data"
+        )
 
     def test_cache_has_priority_over_last_list(self) -> None:
         """Data in _device_location_data should take priority over _last_device_list."""

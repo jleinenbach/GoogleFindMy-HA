@@ -88,7 +88,9 @@ def _install_stub_method(
             idx = min(_StubMethod.call_count, len(self._plan) - 1)
             behavior = self._plan[idx]
             _StubMethod.call_count += 1
-            _StubMethod.last_metadata = tuple(metadata) if metadata is not None else None
+            _StubMethod.last_metadata = (
+                tuple(metadata) if metadata is not None else None
+            )
             return _StubStream(behavior)
 
     _StubMethod.call_count = 0
@@ -106,14 +108,18 @@ def test_raw_codec_uses_base_grpc_content_type() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spot_request_metadata_excludes_gzip(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_spot_request_metadata_excludes_gzip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """SPOT requests should avoid advertising gzip when decompression isn't enabled."""
 
     plan = [b"reply"]
     stub_method = _install_stub_method(monkeypatch, plan)
     cache = _DummyCache()
 
-    result = await spot_request_module.async_spot_request("Scope", b"payload", cache=cache)
+    result = await spot_request_module.async_spot_request(
+        "Scope", b"payload", cache=cache
+    )
 
     assert result == b"reply"
     assert stub_method.last_metadata is not None
@@ -134,26 +140,32 @@ def _patch_token_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(spot_request_module, "_async_sleep", AsyncMock())
     monkeypatch.setattr(spot_request_module, "_compute_delay", lambda *_: 0.0)
     monkeypatch.setattr(
-        spot_request_module, "async_get_username", AsyncMock(return_value="user@example.com")
+        spot_request_module,
+        "async_get_username",
+        AsyncMock(return_value="user@example.com"),
     )
     monkeypatch.setattr(
-        spot_request_module, "async_get_spot_token", AsyncMock(return_value="spot-token")
+        spot_request_module,
+        "async_get_spot_token",
+        AsyncMock(return_value="spot-token"),
     )
     monkeypatch.setattr(
-        spot_request_module, "async_get_adm_token_api", AsyncMock(return_value="adm-token")
+        spot_request_module,
+        "async_get_adm_token_api",
+        AsyncMock(return_value="adm-token"),
     )
     monkeypatch.setattr(
         spot_request_module.SPOT_GRPC_TRANSPORT,
         "get_channel",
         AsyncMock(return_value=object()),
     )
-    monkeypatch.setattr(
-        spot_request_module.SPOT_GRPC_TRANSPORT, "reset", AsyncMock()
-    )
+    monkeypatch.setattr(spot_request_module.SPOT_GRPC_TRANSPORT, "reset", AsyncMock())
 
 
 @pytest.mark.asyncio
-async def test_spot_request_retries_transient_status(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_spot_request_retries_transient_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """UNAVAILABLE errors should be retried until success."""
 
     plan = [
@@ -172,7 +184,9 @@ async def test_spot_request_retries_transient_status(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_spot_request_auth_failure_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_spot_request_auth_failure_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Auth errors should invalidate the token once and then fail permanently."""
 
     plan = [
@@ -294,7 +308,9 @@ async def test_spot_request_oserror_retries_without_global_reset(
     stub_method = _install_stub_method(monkeypatch, plan)
     cache = _DummyCache()
 
-    result = await spot_request_module.async_spot_request("Scope", b"payload", cache=cache)
+    result = await spot_request_module.async_spot_request(
+        "Scope", b"payload", cache=cache
+    )
 
     assert result == b"reply"
     assert stub_method.call_count == 2
@@ -304,17 +320,23 @@ async def test_spot_request_oserror_retries_without_global_reset(
 class _AuthErrorAPI:
     """API stub raising SpotAuthPermanentError for manual locate tests."""
 
-    async def async_get_device_location(self, _dev_id: str, _dev_name: str) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, _dev_id: str, _dev_name: str
+    ) -> dict[str, Any]:
         raise SpotAuthPermanentError("session expired")
 
 
 class _DummyBus:
     """Capture fired events for assertions (no-op for these tests)."""
 
-    def async_fire(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
+    def async_fire(
+        self, *_args: object, **_kwargs: object
+    ) -> None:  # pragma: no cover - stub
         return None
 
-    def async_listen(self, *_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
+    def async_listen(
+        self, *_args: object, **_kwargs: object
+    ) -> None:  # pragma: no cover - stub
         return None
 
 
@@ -335,7 +357,9 @@ class _DummyCacheProtocol:
     async def async_get_cached_value(self, _key: str) -> Any:  # pragma: no cover - stub
         return None
 
-    async def async_set_cached_value(self, _key: str, _value: Any) -> None:  # pragma: no cover - stub
+    async def async_set_cached_value(
+        self, _key: str, _value: Any
+    ) -> None:  # pragma: no cover - stub
         return None
 
 

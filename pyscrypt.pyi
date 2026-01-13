@@ -4,7 +4,6 @@ from typing import SupportsBytes
 
 _password_type = bytes | bytearray | memoryview | SupportsBytes
 
-
 def hash(
     password: _password_type,
     *,

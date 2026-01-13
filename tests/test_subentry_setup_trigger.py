@@ -222,7 +222,9 @@ async def test_async_setup_legacy_subentry_attaches_bucket_runtime_data() -> Non
 
 
 @pytest.mark.asyncio
-async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogCaptureFixture) -> None:
+async def test_async_setup_subentry_errors_when_unregistered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Modern subentry setup should fail loudly if the subentry is unknown."""
 
     async def _async_refresh() -> None:
@@ -305,9 +307,7 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
 
     tasks: list[asyncio.Task[Any]] = []
 
-    def _capture_task(
-        coro: Any, *, name: str | None = None
-    ) -> asyncio.Task[Any]:
+    def _capture_task(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task
@@ -364,9 +364,7 @@ async def test_async_setup_new_subentries_stops_after_retry_limit(
 
     tasks: list[asyncio.Task[Any]] = []
 
-    def _capture_task(
-        coro: Any, *, name: str | None = None
-    ) -> asyncio.Task[Any]:
+    def _capture_task(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task
@@ -387,6 +385,7 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
 
     tracker_key = "tracker"
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
+
     class _RetryingConfigEntriesManager(FakeConfigEntriesManager):
         def __init__(self) -> None:
             super().__init__([parent_entry])
@@ -522,7 +521,9 @@ async def test_async_setup_new_subentries_ignores_value_error(
         forward_calls.append((entry, tuple(platforms)))
         raise ValueError("already setup")
 
-    monkeypatch.setattr(config_entries, "async_forward_entry_setups", _raise_value_error)
+    monkeypatch.setattr(
+        config_entries, "async_forward_entry_setups", _raise_value_error
+    )
 
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
@@ -725,7 +726,10 @@ async def test_async_setup_new_subentries_forwards_placeholder_with_skip_registe
         (parent_entry, ("button", "device_tracker", "sensor")),
     ]
     assert hass.dispatcher_signals == [
-        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", (placeholder_subentry,)),
+        (
+            f"googlefindmy_subentry_setup_{parent_entry.entry_id}",
+            (placeholder_subentry,),
+        ),
     ]
 
 
@@ -950,7 +954,9 @@ async def test_parent_unload_success_refreshes_resolver_when_entries_remain() ->
 
     tasks: list[asyncio.Task[object]] = []
 
-    def _capture_task(coro: Awaitable[object], name: str | None = None) -> asyncio.Task[object]:  # noqa: ARG001
+    def _capture_task(
+        coro: Awaitable[object], name: str | None = None
+    ) -> asyncio.Task[object]:  # noqa: ARG001
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task

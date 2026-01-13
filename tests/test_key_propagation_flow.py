@@ -31,7 +31,9 @@ class _LocationContainer:
         return False
 
 
-def _build_coordinator(monkeypatch: pytest.MonkeyPatch) -> coordinator_module.GoogleFindMyCoordinator:
+def _build_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> coordinator_module.GoogleFindMyCoordinator:
     coordinator = coordinator_module.GoogleFindMyCoordinator.__new__(
         coordinator_module.GoogleFindMyCoordinator
     )
@@ -90,13 +92,19 @@ async def test_decrypted_key_reaches_coordinator_cache(
     )
 
     common_stub = SimpleNamespace(Status=_StatusEnum)
-    device_update_stub = SimpleNamespace(Location=lambda: SimpleNamespace(ParseFromString=lambda *_a, **_kw: None))
+    device_update_stub = SimpleNamespace(
+        Location=lambda: SimpleNamespace(ParseFromString=lambda *_a, **_kw: None)
+    )
 
-    async def _stub_async_retrieve_identity_key(*_args: Any, **_kwargs: Any) -> list[bytes]:
+    async def _stub_async_retrieve_identity_key(
+        *_args: Any, **_kwargs: Any
+    ) -> list[bytes]:
         return [identity_key]
 
     monkeypatch.setattr(decrypt_module, "_get_common_pb2", lambda: common_stub)
-    monkeypatch.setattr(decrypt_module, "_get_device_update_pb2", lambda: device_update_stub)
+    monkeypatch.setattr(
+        decrypt_module, "_get_device_update_pb2", lambda: device_update_stub
+    )
     monkeypatch.setattr(
         decrypt_module,
         "async_retrieve_identity_key",

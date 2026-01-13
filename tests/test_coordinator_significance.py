@@ -249,9 +249,7 @@ def test_identity_key_delta_triggers_resolver_refresh() -> None:
     coordinator = _make_coordinator(existing)
 
     refresh_calls: list[str] = []
-    coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append(
-        "refresh"
-    )
+    coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append("refresh")
 
     incoming = {
         "latitude": existing["latitude"] + 0.0002,
@@ -284,9 +282,7 @@ def test_identity_key_stability_skips_resolver_refresh() -> None:
     coordinator = _make_coordinator(existing)
 
     refresh_calls: list[str] = []
-    coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append(
-        "refresh"
-    )
+    coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append("refresh")
 
     incoming = {
         "latitude": existing["latitude"],

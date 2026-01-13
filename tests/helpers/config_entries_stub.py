@@ -121,7 +121,11 @@ def install_config_entries_stubs(target: ModuleType) -> None:
             return {"type": "abort", **kwargs}
 
         def async_create_entry(
-            self, *, title: str, data: Mapping[str, Any], options: Mapping[str, Any] | None = None
+            self,
+            *,
+            title: str,
+            data: Mapping[str, Any],
+            options: Mapping[str, Any] | None = None,
         ) -> dict[str, Any]:
             entry: dict[str, Any] = {
                 "type": "create_entry",

@@ -74,7 +74,7 @@ def test_non_match_does_not_log_info(
 def test_probe_logs_sliced_key(
     resolver: GoogleFindMyEIDResolver, caplog: pytest.LogCaptureFixture
 ) -> None:
-    raw_payload = b"\x40" + (b"\x03" * EID_LENGTH) + b"\xFF"
+    raw_payload = b"\x40" + (b"\x03" * EID_LENGTH) + b"\xff"
     resolver._lookup = {}
 
     caplog.set_level(logging.DEBUG)

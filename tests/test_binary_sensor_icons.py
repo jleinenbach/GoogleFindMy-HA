@@ -68,6 +68,7 @@ if device_registry_module is None:
     sys.modules["homeassistant.helpers.device_registry"] = device_registry_module
 
 if not hasattr(device_registry_module, "DeviceEntryType"):
+
     class DeviceEntryType:  # noqa: D401 - stub enum container
         SERVICE = "service"
 

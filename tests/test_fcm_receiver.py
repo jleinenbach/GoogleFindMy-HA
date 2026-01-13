@@ -284,13 +284,17 @@ def test_domain_provider_sets_default_entry_on_selected_receiver() -> None:
     assert online_receiver.get_fcm_token() == "online-token"
 
 
-async def _async_release(receiver: FcmReceiverHA, hass: Any, entry: _DummyEntry) -> None:
+async def _async_release(
+    receiver: FcmReceiverHA, hass: Any, entry: _DummyEntry
+) -> None:
     receiver.request_stop()
     await _async_release_shared_fcm(hass, entry)
 
 
 @pytest.mark.asyncio
-async def test_register_clears_latched_fatal_error(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_register_clears_latched_fatal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     receiver = FcmReceiverHA()
     entry_id = "entry-id"
     receiver._fatal_errors[entry_id] = "BadAuthentication"

@@ -53,7 +53,11 @@ def _find_asyncio_run_calls(path: Path) -> list[tuple[int, int]]:
             continue
         func = node.func
         if isinstance(func, ast.Attribute):
-            if func.attr == "run" and isinstance(func.value, ast.Name) and func.value.id == "asyncio":
+            if (
+                func.attr == "run"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "asyncio"
+            ):
                 calls.append((node.lineno, node.col_offset))
     return calls
 

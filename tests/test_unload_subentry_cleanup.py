@@ -235,9 +235,7 @@ class _SubentryConfigEntriesHelper:
         self.unload_platform_calls: list[tuple[Any, tuple[object, ...]]] = []
         self.forward_unload_calls: list[tuple[Any, tuple[object, ...]]] = []
 
-    async def async_unload_platforms(
-        self, entry: Any, platforms: list[object]
-    ) -> bool:  # noqa: FBT001 - Home Assistant signature
+    async def async_unload_platforms(self, entry: Any, platforms: list[object]) -> bool:  # noqa: FBT001 - Home Assistant signature
         self.unload_platform_calls.append((entry, tuple(platforms)))
         return True
 
@@ -296,13 +294,14 @@ async def test_async_purge_unloaded_subentry_registrations_removes_registries() 
         config_subentry_id="other-subentry",
     )
 
-    removed_entities, removed_devices = (
-        await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
-            hass,
-            parent_entry_id=parent_entry_id,
-            config_subentry_id=config_subentry_id,
-            entry_type=SUBENTRY_TYPE_TRACKER,
-        )
+    (
+        removed_entities,
+        removed_devices,
+    ) = await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
+        hass,
+        parent_entry_id=parent_entry_id,
+        config_subentry_id=config_subentry_id,
+        entry_type=SUBENTRY_TYPE_TRACKER,
     )
 
     assert removed_entities == 1
@@ -345,7 +344,9 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
         def __init__(self) -> None:
             self.unload_calls: list[tuple[Any, tuple[object, ...]]] = []
 
-        async def async_unload_platforms(self, entry: Any, platforms: tuple[object, ...]) -> bool:  # noqa: FBT001
+        async def async_unload_platforms(
+            self, entry: Any, platforms: tuple[object, ...]
+        ) -> bool:  # noqa: FBT001
             self.unload_calls.append((entry, platforms))
             raise ValueError("never loaded")
 
@@ -370,7 +371,9 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
     assert hass.config_entries.unload_calls == [(subentry, integration.PLATFORMS)]
 
 
-async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_cache() -> None:
+async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_cache() -> (
+    None
+):
     """Subentry unload should clear runtime data without touching the parent cache."""
 
     runtime_data = integration.RuntimeData(
@@ -600,7 +603,9 @@ async def test_async_unload_entry_preserves_registry_and_user_names(
     )
 
     device_registry = _DeviceRegistryStub()
-    with patch("homeassistant.helpers.device_registry.async_get", return_value=device_registry):
+    with patch(
+        "homeassistant.helpers.device_registry.async_get", return_value=device_registry
+    ):
         device = device_registry.async_get_or_create(
             config_entry_id=entry.entry_id,
             identifiers={(DOMAIN, "device-to-keep")},

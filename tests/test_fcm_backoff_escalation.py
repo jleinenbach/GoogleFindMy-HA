@@ -40,12 +40,16 @@ async def test_fcm_backoff_escalation_creates_and_clears_issue(
     receiver._stop_evts[entry_id] = stop_evt
 
     pc = _StubClient(stop_evt)
-    monkeypatch.setattr(receiver, "_ensure_client_for_entry", AsyncMock(return_value=pc))
+    monkeypatch.setattr(
+        receiver, "_ensure_client_for_entry", AsyncMock(return_value=pc)
+    )
     register_mock = AsyncMock(side_effect=[False] * 12 + [True])
     monkeypatch.setattr(receiver, "_register_for_fcm_entry", register_mock)
 
     monkeypatch.setattr(fcm_receiver_ha.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(fcm_receiver_ha.random, "uniform", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(
+        fcm_receiver_ha.random, "uniform", lambda *_args, **_kwargs: 0.0
+    )
 
     create_issue_attempts: list[int] = []
     create_issue = MagicMock(

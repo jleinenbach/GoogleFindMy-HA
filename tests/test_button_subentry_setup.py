@@ -47,10 +47,12 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
         async_listen=lambda *_args, **_kwargs: (lambda: None),
         async_listen_once=lambda *_args, **_kwargs: (lambda: None),
     )
-    hass.async_create_task = lambda coro, *, name=None: loop.create_task(coro, name=name)
-    hass.async_run_hass_job = lambda job, *args: getattr(job, "target", lambda *_: None)(
-        *args
+    hass.async_create_task = lambda coro, *, name=None: loop.create_task(
+        coro, name=name
     )
+    hass.async_run_hass_job = lambda job, *args: getattr(
+        job, "target", lambda *_: None
+    )(*args)
     hass.verify_event_loop_thread = lambda *_args, **_kwargs: None
     return hass
 
@@ -97,9 +99,7 @@ async def test_setup_iterates_tracker_subentries(stub_coordinator_factory: Any) 
     await asyncio.gather(*pending)
 
     assert {config for _, config in added} == {tracker_subentry.subentry_id}
-    assert {
-        entity.unique_id for entity, _ in added
-    } == {
+    assert {entity.unique_id for entity, _ in added} == {
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_play_sound",
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_stop_sound",
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_locate_device",
@@ -107,7 +107,9 @@ async def test_setup_iterates_tracker_subentries(stub_coordinator_factory: Any) 
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_adds_new_tracker_subentries(stub_coordinator_factory: Any) -> None:
+async def test_dispatcher_adds_new_tracker_subentries(
+    stub_coordinator_factory: Any,
+) -> None:
     """Dispatcher callbacks should attach buttons for newly added subentries."""
 
     loop = asyncio.get_running_loop()
@@ -197,7 +199,9 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
 
 
 @pytest.mark.asyncio
-async def test_hidden_devices_skipped_by_visibility(stub_coordinator_factory: Any) -> None:
+async def test_hidden_devices_skipped_by_visibility(
+    stub_coordinator_factory: Any,
+) -> None:
     """Visibility metadata should prevent hidden trackers from exposing buttons."""
 
     loop = asyncio.get_running_loop()

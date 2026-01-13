@@ -205,7 +205,9 @@ def test_diagnostics_merge_entry_data_and_options(
         return SimpleNamespace(name="Test Integration", version="1.2.3")
 
     monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
-    monkeypatch.setattr(diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={}))
+    monkeypatch.setattr(
+        diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={})
+    )
     monkeypatch.setattr(
         diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
     )

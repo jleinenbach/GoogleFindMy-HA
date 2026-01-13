@@ -31,7 +31,8 @@ def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        async_create_task=lambda coro, name=None: asyncio.get_running_loop().create_task(coro),
+        async_create_task=lambda coro,
+        name=None: asyncio.get_running_loop().create_task(coro),
         data={},
     )
     resolver._store = SimpleNamespace(async_load=lambda: None, async_save=AsyncMock())
@@ -83,7 +84,9 @@ async def test_reset_device_offset_clears_state_and_schedules_refresh(
     async def _refresh(self: GoogleFindMyEIDResolver) -> None:
         refresh_calls.append(None)
 
-    def _create_task(coro: Coroutine[Any, Any, None], name: str | None = None) -> asyncio.Task[None]:
+    def _create_task(
+        coro: Coroutine[Any, Any, None], name: str | None = None
+    ) -> asyncio.Task[None]:
         task = asyncio.create_task(coro)
         scheduled_tasks.append(task)
         scheduled_names.append(name)
@@ -155,7 +158,9 @@ def test_reset_device_offset_noop_when_unknown(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_refresh_pipeline_is_deterministic_and_invariant(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_pipeline_is_deterministic_and_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Refresh should be deterministic and leave lookup/metadata aligned."""
 
     resolver = _build_resolver(monkeypatch)
@@ -186,7 +191,11 @@ async def test_refresh_pipeline_is_deterministic_and_invariant(monkeypatch: pyte
     monkeypatch.setattr(
         resolver.__class__,
         "_generate_variant",
-        lambda self, key_bytes, *, time_counter, variant: f"{variant.value}-{time_counter}".encode(),
+        lambda self,
+        key_bytes,
+        *,
+        time_counter,
+        variant: f"{variant.value}-{time_counter}".encode(),
     )
 
     await resolver._refresh_cache()
@@ -279,13 +288,15 @@ async def test_lock_save_scheduled_after_match(monkeypatch: pytest.MonkeyPatch) 
     resolver = _build_resolver(monkeypatch)
     payload = b"B" * LEGACY_EID_LENGTH
     resolver._lookup = {
-        payload: [resolver_module.EIDMatch(
-            device_id="dev-lock",
-            config_entry_id="entry-lock",
-            canonical_id="can-lock",
-            time_offset=0,
-            is_reversed=False,
-        )]
+        payload: [
+            resolver_module.EIDMatch(
+                device_id="dev-lock",
+                config_entry_id="entry-lock",
+                canonical_id="can-lock",
+                time_offset=0,
+                is_reversed=False,
+            )
+        ]
     }
     resolver._lookup_metadata = {
         payload: {
@@ -297,10 +308,13 @@ async def test_lock_save_scheduled_after_match(monkeypatch: pytest.MonkeyPatch) 
             "advertisement_reversed": False,
         }
     }
+
     async def _fake_async_save(self: GoogleFindMyEIDResolver) -> None:  # noqa: ANN001
         return None
 
-    monkeypatch.setattr(resolver_module.GoogleFindMyEIDResolver, "_async_save_locks", _fake_async_save)
+    monkeypatch.setattr(
+        resolver_module.GoogleFindMyEIDResolver, "_async_save_locks", _fake_async_save
+    )
 
     original_schedule = resolver._schedule_lock_save
     spy_schedule = MagicMock()
@@ -310,7 +324,9 @@ async def test_lock_save_scheduled_after_match(monkeypatch: pytest.MonkeyPatch) 
         return original_schedule()
 
     monkeypatch.setattr(
-        resolver_module.GoogleFindMyEIDResolver, "_schedule_lock_save", _schedule_lock_save_spy
+        resolver_module.GoogleFindMyEIDResolver,
+        "_schedule_lock_save",
+        _schedule_lock_save_spy,
     )
 
     match = resolver.resolve_eid(payload)

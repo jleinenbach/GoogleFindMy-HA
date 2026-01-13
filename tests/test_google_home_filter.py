@@ -97,7 +97,9 @@ class _FakeStates:
         return [state for key, state in self._mapping.items() if key.startswith(prefix)]
 
 
-def test_should_filter_detection_when_zone_passive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_should_filter_detection_when_zone_passive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Passive ``zone.home`` prevents substitution for Google Home detections."""
 
     _ensure_core_state_module(monkeypatch)
@@ -110,7 +112,9 @@ def test_should_filter_detection_when_zone_passive(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(
         registry_module,
         "async_get",
-        lambda _hass: SimpleNamespace(async_get_entity_id=lambda *_args, **_kwargs: None),
+        lambda _hass: SimpleNamespace(
+            async_get_entity_id=lambda *_args, **_kwargs: None
+        ),
         raising=False,
     )
     monkeypatch.setattr(
@@ -146,7 +150,10 @@ def test_should_filter_detection_when_zone_passive(monkeypatch: pytest.MonkeyPat
 
     gh_filter = GoogleHomeFilter(hass, filter_config)
 
-    assert gh_filter.should_filter_detection("device-1", "Nest Speaker") == (False, None)
+    assert gh_filter.should_filter_detection("device-1", "Nest Speaker") == (
+        False,
+        None,
+    )
 
 
 def test_should_filter_detection_substitutes_home_coordinates(

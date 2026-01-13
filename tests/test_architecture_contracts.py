@@ -67,7 +67,9 @@ def test_decoder_output_fits_identity() -> None:
         "canonical_id": "canonical-id",
         "identity_key": b"",
     }
-    identity_kwargs = {key: stub_payload[key] for key in shared_fields if key not in base_kwargs}
+    identity_kwargs = {
+        key: stub_payload[key] for key in shared_fields if key not in base_kwargs
+    }
     kwargs = {**base_kwargs, **identity_kwargs}
 
     signature = inspect.signature(DeviceIdentity)

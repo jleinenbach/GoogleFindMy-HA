@@ -183,7 +183,10 @@ class TestFilterAndDedupeDevices:
 
     def test_filters_valid_devices(self) -> None:
         """Should keep devices with valid string IDs."""
-        candidates = [{"id": "dev1", "name": "Device 1"}, {"id": "dev2", "name": "Device 2"}]
+        candidates = [
+            {"id": "dev1", "name": "Device 1"},
+            {"id": "dev2", "name": "Device 2"},
+        ]
         devices, seen = filter_and_dedupe_devices(candidates)
         assert len(devices) == 2
         assert seen == {"dev1", "dev2"}
@@ -254,7 +257,13 @@ class TestFilterAndDedupeDevices:
     def test_preserves_all_device_fields(self) -> None:
         """Should preserve all fields from original device."""
         candidates = [
-            {"id": "dev1", "name": "Test", "latitude": 1.0, "longitude": 2.0, "extra": "value"}
+            {
+                "id": "dev1",
+                "name": "Test",
+                "latitude": 1.0,
+                "longitude": 2.0,
+                "extra": "value",
+            }
         ]
         devices, seen = filter_and_dedupe_devices(candidates)
         assert devices[0]["name"] == "Test"
@@ -276,30 +285,50 @@ class TestShouldDeferEmptyList:
 
     def test_defer_when_streak_below_quorum_with_previous(self) -> None:
         """Should defer when streak is below quorum and has previous list."""
-        assert should_defer_empty_list(streak=1, quorum=3, has_previous_list=True) is True
-        assert should_defer_empty_list(streak=2, quorum=3, has_previous_list=True) is True
+        assert (
+            should_defer_empty_list(streak=1, quorum=3, has_previous_list=True) is True
+        )
+        assert (
+            should_defer_empty_list(streak=2, quorum=3, has_previous_list=True) is True
+        )
 
     def test_not_defer_when_streak_reaches_quorum(self) -> None:
         """Should not defer when streak reaches quorum."""
-        assert should_defer_empty_list(streak=3, quorum=3, has_previous_list=True) is False
-        assert should_defer_empty_list(streak=4, quorum=3, has_previous_list=True) is False
+        assert (
+            should_defer_empty_list(streak=3, quorum=3, has_previous_list=True) is False
+        )
+        assert (
+            should_defer_empty_list(streak=4, quorum=3, has_previous_list=True) is False
+        )
 
     def test_not_defer_when_no_previous_list(self) -> None:
         """Should not defer when there's no previous list."""
-        assert should_defer_empty_list(streak=1, quorum=3, has_previous_list=False) is False
+        assert (
+            should_defer_empty_list(streak=1, quorum=3, has_previous_list=False)
+            is False
+        )
 
     def test_not_defer_at_zero_streak(self) -> None:
         """Zero streak should not trigger deferral."""
-        assert should_defer_empty_list(streak=0, quorum=3, has_previous_list=True) is False
+        assert (
+            should_defer_empty_list(streak=0, quorum=3, has_previous_list=True) is False
+        )
 
     def test_quorum_of_one(self) -> None:
         """Quorum of 1 should never defer."""
-        assert should_defer_empty_list(streak=0, quorum=1, has_previous_list=True) is False
+        assert (
+            should_defer_empty_list(streak=0, quorum=1, has_previous_list=True) is False
+        )
 
     def test_high_quorum(self) -> None:
         """Should respect high quorum values."""
-        assert should_defer_empty_list(streak=9, quorum=10, has_previous_list=True) is True
-        assert should_defer_empty_list(streak=10, quorum=10, has_previous_list=True) is False
+        assert (
+            should_defer_empty_list(streak=9, quorum=10, has_previous_list=True) is True
+        )
+        assert (
+            should_defer_empty_list(streak=10, quorum=10, has_previous_list=True)
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------

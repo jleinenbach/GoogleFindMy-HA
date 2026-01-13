@@ -35,9 +35,9 @@ def test_service_device_translation_key_present() -> None:
         data = _load_json(path)
         assert isinstance(data, dict), f"{path} did not decode to a mapping"
         device_section = data.get("device")
-        assert isinstance(
-            device_section, dict
-        ), f"{path} is missing the 'device' translation section"
+        assert isinstance(device_section, dict), (
+            f"{path} is missing the 'device' translation section"
+        )
         entry = device_section.get(SERVICE_DEVICE_TRANSLATION_KEY)
         assert (
             isinstance(entry, dict)
@@ -69,9 +69,9 @@ def test_subentry_translation_titles_present() -> None:
         data = _load_json(path)
         assert isinstance(data, dict), f"{path} did not decode to a mapping"
         subentries = data.get("config_subentries")
-        assert isinstance(
-            subentries, dict
-        ), f"{path} missing 'config_subentries' translations"
+        assert isinstance(subentries, dict), (
+            f"{path} missing 'config_subentries' translations"
+        )
         for key in expected_keys:
             entry = subentries.get(key)
             assert (

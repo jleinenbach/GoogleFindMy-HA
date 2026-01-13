@@ -242,9 +242,9 @@ async def test_coordinator_repairs_missing_core_subentries_on_cold_start(
 
     before_tasks = len(created_tasks)
     coordinator._refresh_subentry_index()
-    assert (
-        len(created_tasks) == before_tasks + 1
-    ), "missing core subentries should trigger a repair task"
+    assert len(created_tasks) == before_tasks + 1, (
+        "missing core subentries should trigger a repair task"
+    )
 
     new_tasks = created_tasks[before_tasks:]
     if new_tasks:
@@ -271,7 +271,7 @@ async def test_coordinator_repairs_missing_core_subentries_on_cold_start(
 
 @pytest.mark.asyncio
 async def test_coordinator_skips_repair_during_reload_refresh(
-    coordinator_teardown_defaults: Callable[[Any], None]
+    coordinator_teardown_defaults: Callable[[Any], None],
 ) -> None:
     """Reload-driven refresh should skip scheduling core subentry repairs."""
 
@@ -299,9 +299,9 @@ async def test_coordinator_skips_repair_during_reload_refresh(
 
     before_tasks = len(created_tasks)
     coordinator._refresh_subentry_index()
-    assert (
-        len(created_tasks) == before_tasks
-    ), "reload refresh should not schedule core subentry repairs"
+    assert len(created_tasks) == before_tasks, (
+        "reload refresh should not schedule core subentry repairs"
+    )
 
     assert not manager.calls, "repair should be skipped during reload refresh"
     assert coordinator._pending_subentry_repair is None
@@ -320,7 +320,7 @@ async def test_coordinator_skips_repair_during_reload_refresh(
 
 @pytest.mark.asyncio
 async def test_coordinator_cancels_pending_repair_on_shutdown(
-    coordinator_teardown_defaults: Callable[[Any], None]
+    coordinator_teardown_defaults: Callable[[Any], None],
 ) -> None:
     """Queued repair tasks should be cancelled during unload."""
 
@@ -354,7 +354,7 @@ async def test_coordinator_cancels_pending_repair_on_shutdown(
 
 @pytest.mark.asyncio
 async def test_repair_skips_post_processing_after_entry_removal(
-    coordinator_teardown_defaults: Callable[[Any], None]
+    coordinator_teardown_defaults: Callable[[Any], None],
 ) -> None:
     """Repair finalization should bail out when the entry disappears."""
 

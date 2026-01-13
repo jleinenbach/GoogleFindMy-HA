@@ -68,10 +68,9 @@ def test_self_heal_removes_only_incorrect_tracker_links(
     assert ghost_tracker.via_device_id is None
     assert clean_tracker.via_device_id is None
     assert foreign_tracker.via_device_id == "service-device"
-    assert [
-        (device_id, changes)
-        for device_id, changes in registry.updated
-    ] == [("ghost-tracker", {"via_device_id": None})]
+    assert [(device_id, changes) for device_id, changes in registry.updated] == [
+        ("ghost-tracker", {"via_device_id": None})
+    ]
 
     # Idempotence: running the helper again should not mutate any devices.
     _self_heal_device_registry(hass, entry)
