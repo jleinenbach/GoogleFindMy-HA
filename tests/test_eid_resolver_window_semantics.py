@@ -21,13 +21,19 @@ from custom_components.googlefindmy.eid_resolver import (
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import ROTATION_PERIOD
 
 
+def _close_coro(coro: object, name: object = None) -> None:
+    """Close coroutine in sync context to avoid RuntimeWarning."""
+    if hasattr(coro, "close"):
+        coro.close()
+
+
 def _resolver() -> GoogleFindMyEIDResolver:
     """Return a resolver with initialized caches and a fake hass."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        async_create_task=lambda coro, name=None: asyncio.create_task(coro),
-        async_create_background_task=lambda coro, name=None: asyncio.create_task(coro),
+        async_create_task=_close_coro,
+        async_create_background_task=_close_coro,
     )
     resolver._lookup = {}
     resolver._lookup_metadata = {}
