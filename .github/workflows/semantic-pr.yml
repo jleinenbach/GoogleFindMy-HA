@@ -13,7 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate PR title follows Conventional Commits
+        id: semantic
         uses: amannn/action-semantic-pull-request@v5
+        continue-on-error: true  # Non-blocking - informational only
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -64,3 +66,29 @@ jobs:
           # Header pattern (type + optional scope + subject)
           headerPattern: ^(\w+)(?:\(([^)]+)\))?!?:\s(.+)$
           headerPatternCorrespondence: type, scope, subject
+
+      - name: Write PR title validation summary
+        if: always()
+        run: |
+          {
+            echo "## PR Title Validation"
+            echo ""
+            if [ "${{ steps.semantic.outcome }}" = "success" ]; then
+              echo "✅ **PR title follows Conventional Commits format**"
+            else
+              echo "ℹ️ **PR title suggestion (non-blocking):**"
+              echo ""
+              echo "Consider using [Conventional Commits](https://www.conventionalcommits.org/) format:"
+              echo ""
+              echo '```'
+              echo "type(scope): description"
+              echo ""
+              echo "Examples:"
+              echo "  feat(auth): add OAuth2 support"
+              echo "  fix(api): handle timeout errors"
+              echo "  docs: update README"
+              echo '```'
+              echo ""
+              echo "Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
