@@ -262,6 +262,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
     "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
+    "ignore:It looks like `register_random` was passed an object that could be garbage collected:hypothesis.errors.HypothesisWarning:trio._core._run",
 ]
 markers = [
     "hypothesis: Property-based tests using Hypothesis (can be run in isolation with -m hypothesis)",
