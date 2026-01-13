@@ -133,8 +133,15 @@ def test_reset_device_offset_noop_when_unknown(monkeypatch: pytest.MonkeyPatch) 
     def _schedule_lock_save(self: GoogleFindMyEIDResolver) -> None:
         schedule_calls.append(None)
 
+    # Mock async_create_task to close the coroutine (no event loop in sync test)
+    def _mock_create_task(coro, name=None):
+        if hasattr(coro, "close"):
+            coro.close()
+        return None
+
     monkeypatch.setattr(resolver.__class__, "async_refresh", _refresh)
     monkeypatch.setattr(resolver.__class__, "_schedule_lock_save", _schedule_lock_save)
+    resolver.hass.async_create_task = _mock_create_task
 
     resolver.reset_device_offset("reg-1")
 
