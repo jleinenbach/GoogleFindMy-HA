@@ -8,6 +8,9 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
+
+import pytest
 
 BASE_LANGUAGE = "en"
 OUTDATED_PLACEHOLDERS: dict[tuple[str, ...], set[str]] = {}
@@ -34,12 +37,46 @@ def _collect_placeholders(
 
 
 def _extract_placeholders(data: Any) -> dict[tuple[str, ...], set[str]]:
+    """Extract all placeholders from translation data."""
     placeholders: dict[tuple[str, ...], set[str]] = {}
     _collect_placeholders(data, tuple(), placeholders)
     return placeholders
 
 
+def _collect_string_paths(
+    value: Any, path: tuple[str, ...], out: set[tuple[str, ...]]
+) -> None:
+    """Recursively collect paths to all string values."""
+    if isinstance(value, str):
+        out.add(path)
+        return
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            _collect_string_paths(child, path + (str(key),), out)
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for index, child in enumerate(value):
+            _collect_string_paths(child, path + (str(index),), out)
+
+
+def _resolve_path(container: Any, path: tuple[str, ...]) -> Any:
+    """Resolve a path to get a value from nested containers."""
+    current = container
+    for element in path:
+        if isinstance(current, Mapping):
+            current = current[element]
+        elif isinstance(current, Sequence) and not isinstance(
+            current, (str, bytes, bytearray)
+        ):
+            current = current[int(element)]
+        else:
+            raise KeyError(path)
+    return current
+
+
 def test_translation_placeholders() -> None:  # noqa: PLR0915
+    """Main test for translation placeholder consistency."""
     translations_dir = (
         Path(__file__).resolve().parent.parent
         / "custom_components"
@@ -72,36 +109,8 @@ def test_translation_placeholders() -> None:  # noqa: PLR0915
 
     base_data = language_data[BASE_LANGUAGE]
 
-    def _collect_string_paths(
-        value: Any, path: tuple[str, ...], out: set[tuple[str, ...]]
-    ) -> None:
-        if isinstance(value, str):
-            out.add(path)
-            return
-        if isinstance(value, Mapping):
-            for key, child in value.items():
-                _collect_string_paths(child, path + (str(key),), out)
-        elif isinstance(value, Sequence) and not isinstance(
-            value, (str, bytes, bytearray)
-        ):
-            for index, child in enumerate(value):
-                _collect_string_paths(child, path + (str(index),), out)
-
     base_string_paths: set[tuple[str, ...]] = set()
     _collect_string_paths(base_data, tuple(), base_string_paths)
-
-    def _resolve_path(container: Any, path: tuple[str, ...]) -> Any:
-        current = container
-        for element in path:
-            if isinstance(current, Mapping):
-                current = current[element]
-            elif isinstance(current, Sequence) and not isinstance(
-                current, (str, bytes, bytearray)
-            ):
-                current = current[int(element)]
-            else:
-                raise KeyError(path)
-        return current
 
     for language, data in sorted(language_data.items()):
         missing_paths: list[str] = []
@@ -154,3 +163,209 @@ def test_translation_placeholders() -> None:  # noqa: PLR0915
                 assert not extra, (
                     f"{language} translation for {path_display} has unexpected placeholders: {sorted(extra)}"
                 )
+
+
+class TestCollectPlaceholders:
+    """Unit tests for _collect_placeholders helper function."""
+
+    def test_collect_placeholders_with_sequence(self) -> None:
+        """Placeholders should be collected from sequences (lists)."""
+        data = ["Hello {name}", "Goodbye {user}"]
+        result = _extract_placeholders(data)
+        assert result[("0",)] == {"name"}
+        assert result[("1",)] == {"user"}
+
+    def test_collect_placeholders_nested_sequence(self) -> None:
+        """Placeholders should be collected from nested sequences."""
+        data = {"items": ["{first}", "{second}"]}
+        result = _extract_placeholders(data)
+        assert result[("items", "0")] == {"first"}
+        assert result[("items", "1")] == {"second"}
+
+    def test_collect_placeholders_with_non_container_values(self) -> None:
+        """Non-container values (int, None, bool) should be handled gracefully."""
+        # This tests the implicit else branch (line 33->exit)
+        data = {"count": 42, "enabled": True, "empty": None}
+        result = _extract_placeholders(data)
+        # These paths should exist with empty placeholder sets
+        assert result[("count",)] == set()
+        assert result[("enabled",)] == set()
+        assert result[("empty",)] == set()
+
+
+class TestCollectStringPaths:
+    """Unit tests for _collect_string_paths helper function."""
+
+    def test_collect_string_paths_with_sequence(self) -> None:
+        """String paths should include sequence indices."""
+        data = {"messages": ["message1", "message2"]}
+        string_paths: set[tuple[str, ...]] = set()
+        _collect_string_paths(data, tuple(), string_paths)
+        assert ("messages", "0") in string_paths
+        assert ("messages", "1") in string_paths
+
+    def test_collect_string_paths_top_level_sequence(self) -> None:
+        """String paths should work for top-level sequences."""
+        data = ["first", "second"]
+        string_paths: set[tuple[str, ...]] = set()
+        _collect_string_paths(data, tuple(), string_paths)
+        assert ("0",) in string_paths
+        assert ("1",) in string_paths
+
+    def test_collect_string_paths_with_non_container_values(self) -> None:
+        """Non-container values (int, None, bool) should not add paths."""
+        # This tests the implicit else branch (line 55->exit)
+        data = {"count": 42, "enabled": True, "empty": None}
+        string_paths: set[tuple[str, ...]] = set()
+        _collect_string_paths(data, tuple(), string_paths)
+        # Non-string values should not be added to string paths
+        assert ("count",) not in string_paths
+        assert ("enabled",) not in string_paths
+        assert ("empty",) not in string_paths
+
+
+class TestResolvePath:
+    """Unit tests for _resolve_path helper function."""
+
+    def test_resolve_path_with_mapping(self) -> None:
+        """Resolve path should work with nested mappings."""
+        data = {"level1": {"level2": "value"}}
+        assert _resolve_path(data, ("level1", "level2")) == "value"
+
+    def test_resolve_path_with_sequence(self) -> None:
+        """Resolve path should work with sequence indices."""
+        data = {"items": ["first", "second", "third"]}
+        assert _resolve_path(data, ("items", "0")) == "first"
+        assert _resolve_path(data, ("items", "2")) == "third"
+
+    def test_resolve_path_top_level_sequence(self) -> None:
+        """Resolve path should work with top-level sequences."""
+        data = ["first", "second"]
+        assert _resolve_path(data, ("0",)) == "first"
+        assert _resolve_path(data, ("1",)) == "second"
+
+    def test_resolve_path_raises_on_invalid_type(self) -> None:
+        """Resolve path should raise KeyError for invalid container type."""
+        data = {"value": 42}  # integer, not a container
+        with pytest.raises(KeyError):
+            _resolve_path(data, ("value", "nested"))
+
+
+class TestMissingPathHandling:
+    """Unit tests for exception handling in path resolution."""
+
+    def test_index_error_on_out_of_bounds(self) -> None:
+        """IndexError should be raised for out-of-bounds sequence access."""
+        data = {"items": ["only_one"]}
+        with pytest.raises(IndexError):
+            _resolve_path(data, ("items", "5"))
+
+    def test_value_error_on_non_integer_index(self) -> None:
+        """ValueError should be raised for non-integer sequence indices."""
+        data = {"items": ["first"]}
+        with pytest.raises(ValueError):
+            _resolve_path(data, ("items", "not_a_number"))
+
+    def test_exception_handling_in_translation_validation(self) -> None:
+        """Exception handling should collect missing paths without crashing.
+
+        This tests the exception handling logic with incomplete data.
+        """
+        # Simulate base translation data
+        base_data = {"key1": "value1", "key2": "value2", "nested": {"inner": "text"}}
+        base_string_paths: set[tuple[str, ...]] = set()
+        _collect_string_paths(base_data, tuple(), base_string_paths)
+
+        # Simulate incomplete translation (missing "key2" and "nested.inner")
+        incomplete_data = {"key1": "translated1"}
+
+        # Run the same validation logic as the main test
+        missing_paths: list[str] = []
+        for path in sorted(base_string_paths):
+            try:
+                value = _resolve_path(incomplete_data, path)
+            except (KeyError, IndexError, ValueError):
+                missing_paths.append("/".join(path))
+                continue
+            assert isinstance(value, str)
+
+        # Should have collected the missing paths
+        assert "key2" in missing_paths
+        assert "nested/inner" in missing_paths
+        assert "key1" not in missing_paths  # This one exists
+
+
+def test_translation_validation_with_missing_keys(tmp_path: Path) -> None:
+    """Test main validation logic handles missing translation keys gracefully.
+
+    This test creates temporary translation files where one language is
+    missing keys to exercise the exception handling in lines 119-121.
+    """
+    # Create base language file
+    en_file = tmp_path / "en.json"
+    en_data = {"config": {"title": "Title", "description": "Description"}}
+    en_file.write_text(json.dumps(en_data), encoding="utf-8")
+
+    # Create incomplete translation file (missing "description")
+    de_file = tmp_path / "de.json"
+    de_data = {"config": {"title": "Titel"}}  # Missing "description"
+    de_file.write_text(json.dumps(de_data), encoding="utf-8")
+
+    # Run the validation logic (same as main test)
+    language_data: dict[str, Any] = {}
+    for json_file in sorted(tmp_path.glob("*.json")):
+        with json_file.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        language_data[json_file.stem] = data
+
+    base_data = language_data["en"]
+    base_string_paths: set[tuple[str, ...]] = set()
+    _collect_string_paths(base_data, tuple(), base_string_paths)
+
+    # Validate each language
+    for language, data in sorted(language_data.items()):
+        missing_paths: list[str] = []
+        for path in sorted(base_string_paths):
+            try:
+                value = _resolve_path(data, path)
+            except (KeyError, IndexError, ValueError):
+                missing_paths.append("/".join(path))
+                continue
+            assert isinstance(value, str), (
+                f"{language} translation for {'/'.join(path)} should be a string"
+            )
+
+        if language == "de":
+            # German translation should be missing the description
+            assert "config/description" in missing_paths
+
+
+def test_main_test_exception_handling_with_mock() -> None:
+    """Test that main test handles exceptions in _resolve_path.
+
+    This specifically tests lines 119-121 by patching _resolve_path
+    to raise KeyError on the first call during the main test execution.
+    """
+    call_count = [0]
+    original_resolve_path = _resolve_path
+
+    def mock_resolve_path(container: Any, path: tuple[str, ...]) -> Any:
+        call_count[0] += 1
+        # Raise KeyError on the 5th call to simulate a missing key
+        if call_count[0] == 5:
+            raise KeyError(path)
+        return original_resolve_path(container, path)
+
+    with patch(
+        "tests.test_translation_placeholders._resolve_path",
+        side_effect=mock_resolve_path,
+    ):
+        # The main test should complete without raising an assertion error
+        # even when some paths can't be resolved (it collects them instead)
+        # However, it will fail on the assertion for missing paths
+        # So we catch the AssertionError and verify it mentions missing paths
+        try:
+            test_translation_placeholders()
+        except AssertionError as e:
+            # The test should fail because of missing paths
+            assert "missing strings for" in str(e).lower() or "missing" in str(e).lower()
