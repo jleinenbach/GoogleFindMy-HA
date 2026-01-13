@@ -56,6 +56,7 @@ from .const import (
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
+    TOKEN_REFRESH_COOLDOWN_S,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator
@@ -153,6 +154,22 @@ RESET_STATISTICS_DESCRIPTION = ButtonEntityDescription(
     key="reset_statistics",
     translation_key="reset_statistics",
     icon="mdi:restart",
+)
+
+# Entity description for regenerating AAS token
+REGENERATE_AAS_TOKEN_DESCRIPTION = ButtonEntityDescription(
+    key="regenerate_aas_token",
+    translation_key="regenerate_aas_token",
+    icon="mdi:key-chain",
+    entity_category=EntityCategory.CONFIG,
+)
+
+# Entity description for regenerating ADM token
+REGENERATE_ADM_TOKEN_DESCRIPTION = ButtonEntityDescription(
+    key="regenerate_adm_token",
+    translation_key="regenerate_adm_token",
+    icon="mdi:key-change",
+    entity_category=EntityCategory.CONFIG,
 )
 
 
@@ -398,6 +415,8 @@ async def async_setup_entry(
             )
 
         entities: list[ButtonEntity] = []
+
+        # Stats reset button
         entity = GoogleFindMyStatsResetButton(
             coordinator,
             subentry_key=scope.subentry_key,
@@ -414,6 +433,29 @@ async def async_setup_entry(
                 entities.append(entity)
         else:
             entities.append(entity)
+
+        # Token regeneration buttons (disabled by default)
+        for button_cls in (
+            GoogleFindMyRegenerateAasTokenButton,
+            GoogleFindMyRegenerateAdmTokenButton,
+        ):
+            token_button = button_cls(
+                coordinator,
+                subentry_key=scope.subentry_key,
+                subentry_identifier=identifier,
+            )
+            btn_unique_id = getattr(token_button, "unique_id", None)
+            if isinstance(btn_unique_id, str):
+                if btn_unique_id in added_unique_ids:
+                    _LOGGER.debug(
+                        "Button setup (service): skipping duplicate unique_id %s",
+                        btn_unique_id,
+                    )
+                else:
+                    added_unique_ids.add(btn_unique_id)
+                    entities.append(token_button)
+            else:
+                entities.append(token_button)
 
         if entities:
             _LOGGER.debug(
@@ -1274,3 +1316,248 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
             _LOGGER.info("Successfully submitted manual locate for %s", device_name)
         except Exception as err:  # Avoid crashing the update loop
             _LOGGER.error("Error submitting manual locate for %s: %s", device_name, err)
+
+
+# ----------------------------- Token Regeneration Buttons -----------------------------------
+
+
+class GoogleFindMyTokenRefreshButtonBase(GoogleFindMyEntity, ButtonEntity, RestoreEntityType):
+    """Base class for token regeneration buttons with shared cooldown logic.
+
+    Token regeneration buttons are disabled by default and share a cooldown
+    across all token refresh operations for the same config entry.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = False  # Disabled by default
+    _token_type: str = "token"  # Override in subclasses
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+
+    async def async_added_to_hass(self) -> None:
+        """Restore last press timestamp to avoid 'Unknown' state."""
+        await super().async_added_to_hass()
+        if (state := await self.async_get_last_state()) is None:
+            return
+
+        restored_value = (
+            state.attributes.get("last_press") if hasattr(state, "attributes") else None
+        )
+        if restored_value is None:
+            restored_value = state.state
+
+        parse_datetime = getattr(dt_util, "parse_datetime", None)
+        restored = parse_datetime(restored_value) if callable(parse_datetime) else None
+        if restored is None:
+            try:
+                restored = datetime.fromisoformat(restored_value)
+            except (TypeError, ValueError):
+                return
+
+        self._attr_last_pressed = restored
+        self.async_write_ha_state()
+
+    def _update_last_pressed(self) -> None:
+        """Record the current timestamp and push state to Home Assistant."""
+        self._attr_last_pressed = dt_util.utcnow()
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Attach the token refresh button to the per-entry service device."""
+        return self.service_device_info(include_subentry_identifier=True)
+
+    @property
+    def available(self) -> bool:
+        """Return True if the button is not on cooldown."""
+        from .Auth.token_refresh import is_refresh_on_cooldown
+
+        entry_id = self.entry_id or "default"
+        on_cooldown, _ = is_refresh_on_cooldown(entry_id)
+        return not on_cooldown
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional state attributes including cooldown info."""
+        from .Auth.token_refresh import get_cooldown_remaining
+
+        entry_id = self.entry_id or "default"
+        remaining = get_cooldown_remaining(entry_id)
+
+        attrs: dict[str, Any] = {
+            "cooldown_seconds": TOKEN_REFRESH_COOLDOWN_S,
+        }
+        if remaining > 0:
+            attrs["cooldown_remaining"] = round(remaining, 1)
+        return attrs
+
+
+class GoogleFindMyRegenerateAasTokenButton(GoogleFindMyTokenRefreshButtonBase):
+    """Button to regenerate the AAS (Android AuthSub) token.
+
+    Regenerating the AAS token will also invalidate the ADM token since
+    ADM depends on AAS. The ADM token will be regenerated on the next API call.
+    """
+
+    _attr_entity_description = REGENERATE_AAS_TOKEN_DESCRIPTION
+    _attr_icon = REGENERATE_AAS_TOKEN_DESCRIPTION.icon
+    _attr_translation_key = REGENERATE_AAS_TOKEN_DESCRIPTION.translation_key
+    _token_type = "AAS"
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            "regenerate_aas_token",
+            separator="_",
+        )
+
+    async def async_press(self) -> None:
+        """Handle the button press to regenerate AAS token."""
+        from .Auth.token_refresh import async_regenerate_aas_token
+
+        entry_id = self.entry_id or "unknown"
+
+        if not self.available:
+            _LOGGER.info(
+                "AAS token regeneration button pressed but cooldown active (entry: %s)",
+                entry_id,
+            )
+            return
+
+        _LOGGER.info(
+            "AAS token regeneration button pressed (entry: %s)",
+            entry_id,
+        )
+
+        # Get the token cache from runtime data
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        runtime_data = getattr(config_entry, "runtime_data", None)
+        cache = getattr(runtime_data, "token_cache", None)
+        if cache is None:
+            cache = getattr(self.coordinator, "cache", None)
+
+        if cache is None:
+            _LOGGER.error(
+                "AAS token regeneration failed: no token cache available (entry: %s)",
+                entry_id,
+            )
+            return
+
+        success = await async_regenerate_aas_token(cache=cache)
+
+        if success:
+            self._update_last_pressed()
+            _LOGGER.info(
+                "AAS token regeneration completed successfully (entry: %s)",
+                entry_id,
+            )
+        else:
+            _LOGGER.warning(
+                "AAS token regeneration failed (entry: %s)",
+                entry_id,
+            )
+
+
+class GoogleFindMyRegenerateAdmTokenButton(GoogleFindMyTokenRefreshButtonBase):
+    """Button to regenerate the ADM (Android Device Manager) token.
+
+    Regenerating the ADM token will use the existing AAS token if valid,
+    otherwise it will trigger AAS regeneration as well.
+    """
+
+    _attr_entity_description = REGENERATE_ADM_TOKEN_DESCRIPTION
+    _attr_icon = REGENERATE_ADM_TOKEN_DESCRIPTION.icon
+    _attr_translation_key = REGENERATE_ADM_TOKEN_DESCRIPTION.translation_key
+    _token_type = "ADM"
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            "regenerate_adm_token",
+            separator="_",
+        )
+
+    async def async_press(self) -> None:
+        """Handle the button press to regenerate ADM token."""
+        from .Auth.token_refresh import async_regenerate_adm_token
+
+        entry_id = self.entry_id or "unknown"
+
+        if not self.available:
+            _LOGGER.info(
+                "ADM token regeneration button pressed but cooldown active (entry: %s)",
+                entry_id,
+            )
+            return
+
+        _LOGGER.info(
+            "ADM token regeneration button pressed (entry: %s)",
+            entry_id,
+        )
+
+        # Get the token cache from runtime data
+        config_entry = getattr(self.coordinator, "config_entry", None)
+        runtime_data = getattr(config_entry, "runtime_data", None)
+        cache = getattr(runtime_data, "token_cache", None)
+        if cache is None:
+            cache = getattr(self.coordinator, "cache", None)
+
+        if cache is None:
+            _LOGGER.error(
+                "ADM token regeneration failed: no token cache available (entry: %s)",
+                entry_id,
+            )
+            return
+
+        success = await async_regenerate_adm_token(cache=cache)
+
+        if success:
+            self._update_last_pressed()
+            _LOGGER.info(
+                "ADM token regeneration completed successfully (entry: %s)",
+                entry_id,
+            )
+        else:
+            _LOGGER.warning(
+                "ADM token regeneration failed (entry: %s)",
+                entry_id,
+            )

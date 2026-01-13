@@ -146,6 +146,13 @@ DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
 LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 """Cooldown window (seconds) applied after a manual locate trigger."""
 
+# Token regeneration policy (buttons)
+TOKEN_REFRESH_COOLDOWN_S: int = 180
+"""Cooldown window (seconds) between token regeneration requests (3 minutes).
+
+This cooldown is shared across all token regeneration buttons (AAS/ADM).
+"""
+
 # Quality/logic thresholds
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
 DEFAULT_SEMANTIC_DETECTION_RADIUS: float = (
@@ -527,6 +534,7 @@ __all__ = [
     "DEFAULT_DELETE_CACHES_ON_REMOVE",
     "DEFAULT_OPTIONS",
     "CONFIG_FIELDS",
+    "TOKEN_REFRESH_COOLDOWN_S",
     "SERVICE_LOCATE_DEVICE",
     "SERVICE_PLAY_SOUND",
     "SERVICE_STOP_SOUND",
