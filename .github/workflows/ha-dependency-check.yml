@@ -59,14 +59,14 @@ jobs:
         if: always()
         run: |
           {
-            echo "## 🔍 Latest HA Compatibility"
+            echo "## Latest HA Compatibility"
             echo ""
             echo "**Target:** Home Assistant ${{ steps.check.outputs.ha_version }}"
             echo ""
             if [ "${{ steps.check.outputs.compatible }}" = "true" ]; then
-              echo "✅ All dependencies are compatible"
+              echo "All dependencies are compatible"
             else
-              echo "❌ Compatibility issues found"
+              echo "Compatibility issues found"
               echo ""
               echo "<details><summary>Details</summary>"
               echo ""
@@ -113,19 +113,19 @@ jobs:
         if: always()
         run: |
           {
-            echo "## 📋 Declared Minimum Validation"
+            echo "## Declared Minimum Validation"
             echo ""
             DECLARED="${{ steps.check.outputs.declared_version }}"
             if [ -n "$DECLARED" ]; then
               echo "**Declared minimum:** \`$DECLARED\` (from pyproject.toml)"
             else
-              echo "**Declared minimum:** ⚠️ Not specified"
+              echo "**Declared minimum:** Not specified"
             fi
             echo ""
             if [ "${{ steps.check.outputs.valid }}" = "true" ]; then
-              echo "✅ Declared minimum version satisfies all requirements"
+              echo "Declared minimum version satisfies all requirements"
             else
-              echo "❌ Declared minimum is invalid or missing"
+              echo "Declared minimum is invalid or missing"
               echo ""
               echo "<details><summary>Details</summary>"
               echo ""
@@ -165,13 +165,13 @@ jobs:
       - name: Write job summary
         run: |
           {
-            echo "## 🔎 Minimum Version Search"
+            echo "## Minimum Version Search"
             echo ""
             MIN="${{ steps.find.outputs.minimum_version }}"
             if [ -n "$MIN" ]; then
               echo "**Minimum compatible version:** \`$MIN\`"
             else
-              echo "❌ Could not determine minimum version"
+              echo "Could not determine minimum version"
             fi
             echo ""
             echo "<details><summary>Full search output</summary>"
@@ -254,14 +254,14 @@ jobs:
         if: always()
         run: |
           {
-            echo "## 📦 Installation Test"
+            echo "## Installation Test"
             echo ""
             echo "**Target:** Home Assistant ${{ steps.ha_version.outputs.version }}"
             echo ""
             if [ "${{ steps.install.outputs.success }}" = "true" ]; then
-              echo "✅ All packages installed successfully with HA constraints"
+              echo "All packages installed successfully with HA constraints"
             else
-              echo "❌ Installation failed"
+              echo "Installation failed"
               echo ""
               echo "<details><summary>Install log</summary>"
               echo ""
@@ -282,27 +282,27 @@ jobs:
       - name: Generate summary
         run: |
           {
-            echo "# 📊 Home Assistant Dependency Compatibility"
+            echo "# Home Assistant Dependency Compatibility"
             echo ""
             echo "| Check | Status |"
             echo "|-------|--------|"
 
             if [ "${{ needs.check-latest-ha.outputs.compatible }}" = "true" ]; then
-              echo "| Latest HA Compatibility | ✅ Pass |"
+              echo "| Latest HA Compatibility | Pass |"
             else
-              echo "| Latest HA Compatibility | ❌ Fail |"
+              echo "| Latest HA Compatibility | Fail |"
             fi
 
             if [ "${{ needs.check-declared-minimum.outputs.valid }}" = "true" ]; then
-              echo "| Declared Minimum Valid | ✅ Pass |"
+              echo "| Declared Minimum Valid | Pass |"
             else
-              echo "| Declared Minimum Valid | ❌ Fail |"
+              echo "| Declared Minimum Valid | Fail |"
             fi
 
             if [ "${{ needs.installation-test.outputs.success }}" = "true" ]; then
-              echo "| Installation Test | ✅ Pass |"
+              echo "| Installation Test | Pass |"
             else
-              echo "| Installation Test | ❌ Fail |"
+              echo "| Installation Test | Fail |"
             fi
 
             echo ""

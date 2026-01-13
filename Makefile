@@ -1,43 +1,27 @@
-.PHONY: bootstrap-base-deps bootstrap-doctoc clean clean-node-modules clean-wheelhouse doctoc install-ha-stubs lint test-ha test-single test-stubs wheelhouse test-deps translation-check test-cov check-ha-compat
+.PHONY: bootstrap-doctoc clean clean-node-modules doctoc lint test-single test-cov test-ha test-unload translation-check check-ha-compat install install-dev
 
-VENV ?= .venv
 PYTHON ?= python3
 NPM ?= npm
-DEV_REQUIREMENTS ?= custom_components/googlefindmy/requirements-dev.txt
+POETRY ?= poetry
 PYTEST_ARGS ?=
 PYTEST_COV_FLAGS ?= --cov-report=term-missing
-SKIP_WHEELHOUSE_REFRESH ?= 0
-WHEELHOUSE ?= .wheelhouse
-WHEELHOUSE_SENTINEL := $(WHEELHOUSE)/.requirements-dev.stamp
-BOOTSTRAP_SENTINEL := .bootstrap/homeassistant-preinstall.stamp
-BASE_BOOTSTRAP_PACKAGES := \
-        homeassistant \
-        pytest-homeassistant-custom-component \
-        gpsoauth \
-        ecdsa \
-        pyscrypt \
-        http-ece \
-        'httpx[http2]'
+
 # Remove DOCTOC_SENTINEL via `make clean` to force a DocToc reinstall when the cached dev dependency changes.
 DOCTOC_SENTINEL := .bootstrap/doctoc-preinstall.stamp
 NPM_CACHE ?= .npm-cache
 
 clean:
-	@python script/clean_pycache.py
-	@if [ -f "$(BOOTSTRAP_SENTINEL)" ]; then \
-		echo "[make clean] Removing Home Assistant bootstrap sentinel"; \
-		rm -f "$(BOOTSTRAP_SENTINEL)"; \
-	fi
+	@$(PYTHON) script/clean_pycache.py
 	@if [ -f "$(DOCTOC_SENTINEL)" ]; then \
 		echo "[make clean] Removing DocToc bootstrap sentinel"; \
 		rm -f "$(DOCTOC_SENTINEL)"; \
 	fi
 
 clean-node-modules:
-	@python script/clean_node_modules.py
+	@$(PYTHON) script/clean_node_modules.py
 
 lint:
-	@ruff check . --fix
+	@$(POETRY) run ruff check . --fix
 
 bootstrap-doctoc:
 	@mkdir -p .bootstrap
@@ -49,85 +33,38 @@ doctoc: bootstrap-doctoc
 	@echo "[make doctoc] Regenerating AGENTS.md table of contents"
 	@$(NPM) run doctoc -- AGENTS.md
 
-wheelhouse: $(WHEELHOUSE_SENTINEL)
-	@echo "[make wheelhouse] Wheel cache is ready at $(WHEELHOUSE)"
+install:
+	@echo "[make install] Installing Poetry dependencies"
+	@$(POETRY) install
 
-clean-wheelhouse:
-	@if [ -d "$(WHEELHOUSE)" ]; then \
-		echo "[make clean-wheelhouse] Removing cached wheels in $(WHEELHOUSE)"; \
-		rm -rf "$(WHEELHOUSE)"; \
-	else \
-		echo "[make clean-wheelhouse] No wheel cache present"; \
-	fi
-
-install-ha-stubs:
-	@echo "[make install-ha-stubs] Installing Home Assistant pytest dependencies"
-	@$(PYTHON) -m pip install --upgrade -r custom_components/googlefindmy/requirements-ha-stubs.txt
-
-test-stubs:
-	@echo "[make test-stubs] Installing Home Assistant test dependencies"
-	@$(PYTHON) -m pip install --upgrade -r custom_components/googlefindmy/requirements-ha-stubs.txt
-	@echo "[make test-stubs] Preloading optional integration drivers"
-	@$(PYTHON) -m pip install --upgrade -c custom_components/googlefindmy/constraints-test-stubs.txt -r custom_components/googlefindmy/requirements-dev.txt
-
-test-deps:
-	@echo "[make test-deps] Installing stub and integration development dependencies"
-	@$(MAKE) test-stubs
-	@$(PYTHON) -m pip install --upgrade -r $(DEV_REQUIREMENTS)
+install-dev:
+	@echo "[make install-dev] Installing Poetry dependencies with dev and test groups"
+	@$(POETRY) install --with dev,test
 
 translation-check:
 	@echo "[make translation-check] Checking for missing translation keys"
-	@$(PYTHON) -m script.translation_key_check
+	@$(POETRY) run python -m script.translation_key_check
 
 test-single:
-	@echo "[make test-single] Ensuring Home Assistant test dependencies are installed"
-	@$(MAKE) test-stubs
 	@echo "[make test-single] Running pytest $(PYTEST_ARGS) $(TEST)"
-	@$(PYTHON) -m pytest $(PYTEST_ARGS) $(TEST)
+	@$(POETRY) run pytest $(PYTEST_ARGS) $(TEST)
 
-bootstrap-base-deps: $(BOOTSTRAP_SENTINEL)
-	@echo "[make bootstrap-base-deps] Home Assistant base dependencies are ready"
+test-cov:
+	@echo "[make test-cov] Running pytest -q --cov with coverage"
+	@bash -o pipefail -c "$(POETRY) run pytest -q --cov $(PYTEST_COV_FLAGS) $(PYTEST_ARGS) 2>&1 | tee pytest_output.log"
 
-$(BOOTSTRAP_SENTINEL):
-	@mkdir -p $(dir $(BOOTSTRAP_SENTINEL))
-	@echo "[make bootstrap-base-deps] Pre-installing Home Assistant base dependencies (including common runtime crypto/HTTP helpers)"
-	@$(PYTHON) -m pip install --upgrade -c custom_components/googlefindmy/constraints-test-stubs.txt $(BASE_BOOTSTRAP_PACKAGES)
-	@touch $(BOOTSTRAP_SENTINEL)
-
-$(WHEELHOUSE_SENTINEL): $(DEV_REQUIREMENTS)
-	@mkdir -p $(WHEELHOUSE)
-	@if [ "$(SKIP_WHEELHOUSE_REFRESH)" = "1" ] && find "$(WHEELHOUSE)" -mindepth 1 -maxdepth 1 -type f >/dev/null 2>&1; then \
-	echo "[make wheelhouse] Reusing existing wheel cache in $(WHEELHOUSE)"; \
-	else \
-	echo "[make wheelhouse] Downloading development wheels into $(WHEELHOUSE)"; \
-	echo "[make wheelhouse] Hint: set SKIP_WHEELHOUSE_REFRESH=1 to reuse the cache on future make test-ha runs"; \
-	$(PYTHON) -m pip download --requirement $(DEV_REQUIREMENTS) --dest $(WHEELHOUSE) --exists-action=i; \
-	fi
-	@touch $(WHEELHOUSE_SENTINEL)
-
-$(VENV)/bin/activate: $(DEV_REQUIREMENTS) $(WHEELHOUSE_SENTINEL) $(BOOTSTRAP_SENTINEL)
-	@$(PYTHON) -m venv $(VENV)
-	@$(VENV)/bin/pip install --find-links=$(WHEELHOUSE) -r $(DEV_REQUIREMENTS)
-	@touch $(VENV)/bin/activate
-
-# Use `make test-ha` when you need the full virtualenv + wheelhouse parity that mirrors CI's smoke path; use `make test-cov` for a quicker
-# coverage run against the current interpreter with `PYTHONPATH=.` (which auto-loads `sitecustomize.py`).
-test-ha: $(VENV)/bin/activate
+test-ha:
 	@echo "[make test-ha] Running targeted Home Assistant regression smoke tests"
-	@. $(VENV)/bin/activate && pytest $(PYTEST_ARGS) \
+	@$(POETRY) run pytest $(PYTEST_ARGS) \
 			tests/test_entity_recovery_manager.py \
 			tests/test_homeassistant_callback_stub_helper.py
 	@echo "[make test-ha] Executing full-suite coverage run (see pytest_output.log for details)"
-	@bash -o pipefail -c ". $(VENV)/bin/activate && pytest -q --cov $(PYTEST_COV_FLAGS) $${PYTEST_ARGS:+$${PYTEST_ARGS} } 2>&1 | tee pytest_output.log"
+	@bash -o pipefail -c "$(POETRY) run pytest -q --cov $(PYTEST_COV_FLAGS) $${PYTEST_ARGS:+$${PYTEST_ARGS} } 2>&1 | tee pytest_output.log"
 
-test-unload: $(VENV)/bin/activate
+test-unload:
 	@echo "[make test-unload] Running parent unload rollback regression suite"
-	@. $(VENV)/bin/activate && pytest -q $(PYTEST_ARGS) tests/test_unload_subentry_cleanup.py
-
-test-cov:
-	@echo "[make test-cov] Running pytest -q --cov with PYTHONPATH=. to load sitecustomize"
-	@bash -o pipefail -c "PYTHONPATH=. $(PYTHON) -m pytest -q --cov $(PYTEST_COV_FLAGS) $(PYTEST_ARGS) 2>&1 | tee pytest_output.log"
+	@$(POETRY) run pytest -q $(PYTEST_ARGS) tests/test_unload_subentry_cleanup.py
 
 check-ha-compat:
 	@echo "[make check-ha-compat] Checking dependency compatibility with Home Assistant"
-	@$(PYTHON) script/check_ha_compatibility.py --verbose
+	@$(POETRY) run python script/check_ha_compatibility.py --verbose
