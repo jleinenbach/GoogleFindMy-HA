@@ -256,7 +256,7 @@
       },
       "settings": {
         "title": "Opzioni",
-        "description": "Regola le impostazioni di localizzazione:\n• Intervallo di polling posizione: frequenza con cui interrogare le posizioni (60–3600 secondi)\n• Ritardo tra i polling dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Soglia di obsolescenza: dopo questo tempo senza aggiornamenti, lo stato del tracker diventa sconosciuto\n\nFiltro Google Home:\n• Abilita per associare i rilevamenti dei dispositivi Google Home alla zona Casa\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: "nest" corrisponde a "Kitchen Nest Mini"",
+        "description": "Regola le impostazioni di localizzazione:\n• Intervallo di polling posizione: frequenza con cui interrogare le posizioni (60–3600 secondi)\n• Ritardo tra i polling dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Soglia di obsolescenza: dopo questo tempo senza aggiornamenti, lo stato del tracker diventa sconosciuto\n\nFiltro Google Home:\n• Abilita per associare i rilevamenti dei dispositivi Google Home alla zona Casa\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: \"nest\" corrisponde a \"Kitchen Nest Mini\"",
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
