@@ -10,8 +10,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import asyncio
-import time
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -42,13 +40,17 @@ class TestCooldownMechanism:
 
     def setup_method(self) -> None:
         """Clear cooldowns before each test."""
-        from custom_components.googlefindmy.Auth.token_refresh import clear_all_cooldowns
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            clear_all_cooldowns,
+        )
 
         clear_all_cooldowns()
 
     def test_cooldown_not_active_initially(self) -> None:
         """Token refresh should not be on cooldown initially."""
-        from custom_components.googlefindmy.Auth.token_refresh import is_refresh_on_cooldown
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            is_refresh_on_cooldown,
+        )
 
         on_cooldown, remaining = is_refresh_on_cooldown("test-entry")
         assert not on_cooldown
@@ -56,7 +58,9 @@ class TestCooldownMechanism:
 
     def test_cooldown_remaining_initially_zero(self) -> None:
         """Cooldown remaining should be zero initially."""
-        from custom_components.googlefindmy.Auth.token_refresh import get_cooldown_remaining
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            get_cooldown_remaining,
+        )
 
         remaining = get_cooldown_remaining("test-entry")
         assert remaining == 0.0
@@ -126,7 +130,9 @@ class TestAasTokenRegeneration:
 
     def setup_method(self) -> None:
         """Clear cooldowns before each test."""
-        from custom_components.googlefindmy.Auth.token_refresh import clear_all_cooldowns
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            clear_all_cooldowns,
+        )
 
         clear_all_cooldowns()
 
@@ -260,7 +266,9 @@ class TestAdmTokenRegeneration:
 
     def setup_method(self) -> None:
         """Clear cooldowns before each test."""
-        from custom_components.googlefindmy.Auth.token_refresh import clear_all_cooldowns
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            clear_all_cooldowns,
+        )
 
         clear_all_cooldowns()
 
@@ -362,7 +370,9 @@ class TestSharedCooldown:
 
     def setup_method(self) -> None:
         """Clear cooldowns before each test."""
-        from custom_components.googlefindmy.Auth.token_refresh import clear_all_cooldowns
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            clear_all_cooldowns,
+        )
 
         clear_all_cooldowns()
 

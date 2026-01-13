@@ -133,13 +133,13 @@ async def async_regenerate_aas_token(
         try:
             # Invalidate AAS token
             await cache.set(DATA_AAS_TOKEN, None)
-            _LOGGER.debug("Invalidated AAS token for %s", masked_user)
+            _LOGGER.info("Invalidated AAS token for %s", masked_user)
 
             # Invalidate ADM token (depends on AAS)
             if user:
                 adm_key = f"adm_token_{user.strip().lower()}"
                 await cache.set(adm_key, None)
-                _LOGGER.debug("Invalidated ADM token for %s", masked_user)
+                _LOGGER.info("Invalidated ADM token for %s (AAS dependency)", masked_user)
 
             # Trigger AAS token regeneration
             # The existing function handles retries and backoff internally
@@ -225,7 +225,7 @@ async def async_regenerate_adm_token(
             # Invalidate ADM token only
             adm_key = f"adm_token_{user.strip().lower()}"
             await cache.set(adm_key, None)
-            _LOGGER.debug("Invalidated ADM token for %s", masked_user)
+            _LOGGER.info("Invalidated ADM token for %s", masked_user)
 
             # Trigger ADM token regeneration
             # This will use existing AAS token or trigger AAS regeneration if needed

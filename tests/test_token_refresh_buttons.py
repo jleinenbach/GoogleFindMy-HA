@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
-from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
 from custom_components.googlefindmy import button

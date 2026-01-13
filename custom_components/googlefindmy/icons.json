@@ -35,6 +35,12 @@
       },
       "reset_statistics": {
         "default": "mdi:restart"
+      },
+      "regenerate_aas_token": {
+        "default": "mdi:key-chain"
+      },
+      "regenerate_adm_token": {
+        "default": "mdi:key-change"
       }
     },
     "sensor": {

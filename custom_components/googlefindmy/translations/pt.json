@@ -420,6 +420,28 @@
       },
       "reset_statistics": {
         "name": "Redefinir estatísticas"
+      },
+      "regenerate_aas_token": {
+        "name": "Regenerar token AAS",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Período de espera (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Tempo restante de espera (s)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "Regenerar token ADM",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Período de espera (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Tempo restante de espera (s)"
+          }
+        }
       }
     },
     "binary_sensor": {
