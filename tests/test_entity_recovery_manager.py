@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -25,35 +25,9 @@ if TYPE_CHECKING:
 
 
 @pytest.fixture(autouse=True)
-def use_real_homeassistant_modules() -> Iterator[None]:
-    """Temporarily replace the stubbed Home Assistant modules with the real ones."""
-
-    import sys
-
-    saved_modules = {
-        name: module for name, module in sys.modules.items() if name.startswith("homeassistant")
-    }
-    for name in list(sys.modules):
-        if name.startswith("homeassistant"):
-            del sys.modules[name]
-
-    import homeassistant  # noqa: F401  # ensure the real package is loaded
-    from homeassistant.helpers import aiohttp_client as _aiohttp_client
-
-    if not hasattr(_aiohttp_client, "_async_make_resolver"):
-
-        async def _async_make_resolver(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - plugin shim
-            return None
-
-        _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]
-
-    try:
-        yield
-    finally:
-        for name in list(sys.modules):
-            if name.startswith("homeassistant"):
-                del sys.modules[name]
-        sys.modules.update(saved_modules)
+def _use_real_ha_modules(use_real_homeassistant_modules: None) -> None:
+    """Activate real Home Assistant modules from the central conftest fixture."""
+    pass
 
 
 @pytest.mark.asyncio
