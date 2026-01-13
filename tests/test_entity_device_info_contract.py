@@ -35,35 +35,10 @@ from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 pytest_plugins = ("pytest_homeassistant_custom_component",)
 
 
-
 @pytest.fixture(autouse=True)
-def use_real_homeassistant_modules() -> Any:
-    """Temporarily replace the stubbed Home Assistant modules with the real ones."""
-
-    import sys
-
-    saved_modules = {
-        name: module for name, module in sys.modules.items() if name.startswith("homeassistant")
-    }
-    for name in list(sys.modules):
-        if name.startswith("homeassistant"):
-            del sys.modules[name]
-
-    import homeassistant  # noqa: F401  # ensure the real package is loaded
-    from homeassistant.helpers import aiohttp_client as _aiohttp_client
-
-    if not hasattr(_aiohttp_client, '_async_make_resolver'):
-        async def _async_make_resolver(*args: Any, **kwargs: Any) -> None:  # pragma: no cover - plugin shim
-            return None
-
-        _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]
-
-    yield
-
-    for name in list(sys.modules):
-        if name.startswith("homeassistant"):
-            del sys.modules[name]
-    sys.modules.update(saved_modules)
+def _use_real_ha_modules(use_real_homeassistant_modules: None) -> None:
+    """Activate real Home Assistant modules from the central conftest fixture."""
+    pass
 
 
 class _DummyTokenCache:

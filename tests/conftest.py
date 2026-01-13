@@ -2059,3 +2059,51 @@ components_pkg.__path__ = [str(ROOT / "custom_components")]
 
 gf_pkg = importlib.import_module("custom_components.googlefindmy")
 setattr(components_pkg, "googlefindmy", gf_pkg)
+
+
+@pytest.fixture
+def use_real_homeassistant_modules() -> Iterable[None]:
+    """Temporarily replace the stubbed Home Assistant modules with the real ones.
+
+    Use this fixture in tests that require the real Home Assistant implementation
+    provided by pytest-homeassistant-custom-component instead of the lightweight
+    stubs installed by conftest.py.
+
+    Example:
+        @pytest.mark.asyncio
+        async def test_integration_flow(
+            hass: HomeAssistant,
+            use_real_homeassistant_modules: None,
+        ) -> None:
+            # Test runs with real HA modules
+            ...
+    """
+    saved_modules = {
+        name: module for name, module in sys.modules.items() if name.startswith("homeassistant")
+    }
+    for name in list(sys.modules):
+        if name.startswith("homeassistant"):
+            del sys.modules[name]
+
+    import homeassistant  # noqa: F401 - ensure the real package is loaded
+    from homeassistant.helpers import aiohttp_client as _aiohttp_client
+    from homeassistant.util import dt as dt_util
+
+    # Ensure timezone is set for HA fixtures
+    dt_util.DEFAULT_TIME_ZONE = dt_util.UTC
+
+    # Some pytest-homeassistant-custom-component versions require this shim
+    if not hasattr(_aiohttp_client, "_async_make_resolver"):
+
+        async def _async_make_resolver(*args: Any, **kwargs: Any) -> None:  # pragma: no cover
+            return None
+
+        _aiohttp_client._async_make_resolver = _async_make_resolver  # type: ignore[attr-defined]
+
+    try:
+        yield
+    finally:
+        for name in list(sys.modules):
+            if name.startswith("homeassistant"):
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
