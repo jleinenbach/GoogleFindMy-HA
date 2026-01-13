@@ -2023,3 +2023,104 @@ def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -> None
             await cache.close()
 
     asyncio.run(_run())
+
+
+def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
+    """CRITICAL: Both ADM and AAS tokens must have MIN_TTL protection.
+
+    This test documents a past bug where only ADM tokens had MIN_TTL protection,
+    leaving AAS tokens vulnerable to TTL corruption from transient server errors.
+
+    The token chain is: OAuth -> AAS (days/weeks) -> ADM (hours)
+    Both need protection against falsely learning very short TTLs.
+
+    ADM: MIN_TTL_FOR_LEARNING_SEC = 300 (5 minutes)
+    AAS: AAS_MIN_TTL_FOR_LEARNING_SEC = 3600 (1 hour)
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-both-tokens")
+        try:
+            namespace = "entry-both-tokens"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_both_tokens"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # --- Test 1: ADM token MIN_TTL protection ---
+            # ADM tokens typically live 1-4 hours; MIN_TTL is 5 minutes
+            adm_original_ttl = 7200.0  # 2 hours
+            await cache.set(policy.k_bestttl, adm_original_ttl)
+
+            # Simulate very short ADM lifetime (30 seconds - below MIN_TTL of 300s)
+            adm_short_ttl = 30.0
+            issued_time = time.time() - adm_short_ttl
+            await cache.set(policy.k_issued, issued_time)
+
+            await policy.async_on_401(adaptive_downshift=True)
+
+            # ADM TTL must remain unchanged (protected by MIN_TTL_FOR_LEARNING_SEC)
+            adm_ttl_after = await cache.get(policy.k_bestttl)
+            assert adm_ttl_after == adm_original_ttl, (
+                f"ADM TTL was corrupted! Expected {adm_original_ttl}, got {adm_ttl_after}. "
+                "MIN_TTL_FOR_LEARNING_SEC protection is missing!"
+            )
+
+            # --- Test 2: AAS token MIN_TTL protection ---
+            # AAS tokens typically live days/weeks; MIN_TTL is 1 hour
+            aas_original_ttl = 7 * 24 * 3600.0  # 7 days
+            await cache.set(policy.k_aas_bestttl, aas_original_ttl)
+
+            # Simulate very short AAS lifetime (30 minutes - below MIN_TTL of 1 hour)
+            aas_short_ttl = 30 * 60.0  # 30 minutes
+            aas_issued_time = time.time() - aas_short_ttl
+            await cache.set(policy.k_aas_issued, aas_issued_time)
+
+            await policy.async_invalidate_aas_token()
+
+            # AAS TTL must remain unchanged (protected by AAS_MIN_TTL_FOR_LEARNING_SEC)
+            aas_ttl_after = await cache.get(policy.k_aas_bestttl)
+            assert aas_ttl_after == aas_original_ttl, (
+                f"AAS TTL was corrupted! Expected {aas_original_ttl}, got {aas_ttl_after}. "
+                "AAS_MIN_TTL_FOR_LEARNING_SEC protection is missing!"
+            )
+
+            # --- Verify both constants exist and have sensible values ---
+            assert hasattr(policy, "MIN_TTL_FOR_LEARNING_SEC"), (
+                "ADM MIN_TTL constant missing from AsyncTTLPolicy!"
+            )
+            assert hasattr(policy, "AAS_MIN_TTL_FOR_LEARNING_SEC"), (
+                "AAS MIN_TTL constant missing from AsyncTTLPolicy!"
+            )
+            assert policy.MIN_TTL_FOR_LEARNING_SEC == 300, (
+                f"ADM MIN_TTL should be 300s (5min), got {policy.MIN_TTL_FOR_LEARNING_SEC}"
+            )
+            assert policy.AAS_MIN_TTL_FOR_LEARNING_SEC == 3600, (
+                f"AAS MIN_TTL should be 3600s (1h), got {policy.AAS_MIN_TTL_FOR_LEARNING_SEC}"
+            )
+            # AAS threshold must be higher than ADM (AAS tokens live longer)
+            assert (
+                policy.AAS_MIN_TTL_FOR_LEARNING_SEC > policy.MIN_TTL_FOR_LEARNING_SEC
+            ), "AAS MIN_TTL must be > ADM MIN_TTL since AAS tokens live longer!"
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
