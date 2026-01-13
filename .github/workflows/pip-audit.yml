@@ -42,6 +42,8 @@ jobs:
           python -m pip install pip-audit
           sudo apt-get update
           sudo apt-get install -y jq
+          # Install poetry export plugin (not included by default in Poetry 1.5+)
+          poetry self add poetry-plugin-export
 
       - name: Export requirements from Poetry
         run: |
@@ -103,6 +105,8 @@ jobs:
           python -m pip install pip-audit
           sudo apt-get update
           sudo apt-get install -y jq
+          # Install poetry export plugin (not included by default in Poetry 1.5+)
+          poetry self add poetry-plugin-export
 
       - name: Audit and update Poetry dependencies
         id: fixrun

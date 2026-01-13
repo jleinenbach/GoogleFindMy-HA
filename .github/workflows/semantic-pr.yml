@@ -54,10 +54,13 @@ jobs:
           subjectPatternError: |
             The subject "{subject}" found in the PR title "{title}"
             should not start with an uppercase letter.
-          # For work-in-progress PRs
+          # Labels that bypass validation (WIP PRs or automated PRs)
           ignoreLabels: |
             wip
             work in progress
+            skip-semantic-pr
+            automated-pr
+            dependencies
           # Header pattern (type + optional scope + subject)
           headerPattern: ^(\w+)(?:\(([^)]+)\))?!?:\s(.+)$
           headerPatternCorrespondence: type, scope, subject
