@@ -256,10 +256,11 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
+        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Stale threshold: After this time without updates, tracker state becomes unknown\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: nest matches Kitchen Nest Mini",
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
+          "stale_threshold": "Stale threshold (s)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
@@ -269,6 +270,7 @@
           "subentry": "Feature group"
         },
         "data_description": {
+          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Last known coordinates remain available in attributes. Default: 1800 (30 minutes).",
           "delete_caches_on_remove": "Remove cached tokens and device metadata when this entry is deleted.",
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
           "contributor_mode": "Choose how your device contributes to Google's network (High-traffic areas by default, or All areas for crowdsourced reporting).",
@@ -531,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Location age (s)"
+          },
+          "location_status": {
+            "name": "Location status"
+          },
+          "last_latitude": {
+            "name": "Last known latitude"
+          },
+          "last_longitude": {
+            "name": "Last known longitude"
           }
         }
       }

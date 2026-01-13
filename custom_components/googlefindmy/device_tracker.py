@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -43,7 +44,9 @@ from . import EntityRecoveryManager, _extract_email_from_entry
 from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
+    DEFAULT_STALE_THRESHOLD,
     DOMAIN,
+    OPT_STALE_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -958,9 +961,64 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 return True
         return self._last_good_accuracy_data is not None
 
+    def _get_stale_threshold(self) -> int:
+        """Return the configured stale threshold in seconds."""
+        entry = getattr(self.coordinator, "config_entry", None)
+        if entry is None:
+            return DEFAULT_STALE_THRESHOLD
+        options = getattr(entry, "options", {})
+        if not isinstance(options, Mapping):
+            return DEFAULT_STALE_THRESHOLD
+        threshold = options.get(OPT_STALE_THRESHOLD, DEFAULT_STALE_THRESHOLD)
+        try:
+            return int(threshold)
+        except (TypeError, ValueError):
+            return DEFAULT_STALE_THRESHOLD
+
+    def _get_location_age(self) -> float | None:
+        """Return the age of the location data in seconds, or None if unknown."""
+        data = self._current_row() or self._last_good_accuracy_data
+        if not data:
+            return None
+        last_seen = data.get("last_seen")
+        if last_seen is None:
+            return None
+        try:
+            last_seen_epoch = float(last_seen)
+            return time.time() - last_seen_epoch
+        except (TypeError, ValueError):
+            return None
+
+    def _is_location_stale(self) -> bool:
+        """Return True if the location data is considered stale."""
+        age = self._get_location_age()
+        if age is None:
+            return False  # No age information, assume not stale
+        threshold = self._get_stale_threshold()
+        return age > threshold
+
+    def _get_location_status(self) -> str:
+        """Return the location status string based on data age."""
+        age = self._get_location_age()
+        if age is None:
+            return "unknown"
+        threshold = self._get_stale_threshold()
+        if age > threshold:
+            return "stale"
+        elif age > threshold / 2:
+            return "aging"
+        else:
+            return "current"
+
     @property
     def latitude(self) -> float | None:
-        """Return latitude value of the device (float, if known)."""
+        """Return latitude value of the device (float, if known).
+
+        Returns None if location data is stale (older than stale_threshold),
+        causing HA to show 'unknown' state.
+        """
+        if self._is_location_stale():
+            return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
             return None
@@ -968,7 +1026,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
     @property
     def longitude(self) -> float | None:
-        """Return longitude value of the device (float, if known)."""
+        """Return longitude value of the device (float, if known).
+
+        Returns None if location data is stale (older than stale_threshold),
+        causing HA to show 'unknown' state.
+        """
+        if self._is_location_stale():
+            return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
             return None
@@ -1025,6 +1089,11 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         - Adds a normalized UTC timestamp mirror (`last_seen_utc`).
         - Uses `accuracy_m` (float meters) rather than `gps_accuracy` for stability.
         - Includes source labeling (`source_label`/`source_rank`) for transparency.
+
+        Additionally exposes staleness information:
+        - `location_age`: Seconds since last location update.
+        - `location_status`: 'current', 'aging', 'stale', or 'unknown'.
+        - `last_latitude`/`last_longitude`: Last known coordinates when stale.
         """
         row = self._current_row()
         attributes = _as_ha_attributes(row) or {}
@@ -1032,6 +1101,24 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # Expose the stable tracker identifier for interoperability with
         # third-party integrations that cannot rely on rotating MAC addresses.
         attributes["google_device_id"] = self.device_id
+
+        # Add staleness information
+        location_age = self._get_location_age()
+        if location_age is not None:
+            attributes["location_age"] = round(location_age)
+        attributes["location_status"] = self._get_location_status()
+
+        # When location is stale, expose last known coordinates in attributes
+        # so they remain available for map views and history
+        if self._is_location_stale():
+            data = self._current_row() or self._last_good_accuracy_data
+            if data:
+                last_lat = data.get("latitude")
+                last_lon = data.get("longitude")
+                if last_lat is not None:
+                    attributes["last_latitude"] = last_lat
+                if last_lon is not None:
+                    attributes["last_longitude"] = last_lon
 
         return attributes
 
