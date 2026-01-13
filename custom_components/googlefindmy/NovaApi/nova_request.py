@@ -713,6 +713,10 @@ class AsyncTTLPolicy(TTLPolicy):
     # AAS token TTL learning constants
     AAS_TTL_MARGIN_SEC = 300  # 5 min margin before expiry
     AAS_DEFAULT_TTL_SEC = 7 * 24 * 3600  # 7 days default (conservative estimate)
+    # Minimum AAS TTL threshold: ignore learning for very short lifetimes.
+    # AAS tokens typically live days/weeks, so 1 hour is a safe minimum.
+    # Short lifetimes usually indicate transient server issues, not actual TTL.
+    AAS_MIN_TTL_FOR_LEARNING_SEC = 3600  # 1 hour
 
     def __init__(  # noqa: PLR0913
         self,
@@ -762,6 +766,47 @@ class AsyncTTLPolicy(TTLPolicy):
             except Exception:  # noqa: BLE001 - defensive cache write
                 pass
 
+    async def _learn_aas_ttl(self, now: float) -> None:
+        """Learn AAS token TTL from observed lifetime before invalidation."""
+        issued_raw = await self._aget(self.k_aas_issued)
+        if issued_raw is None:
+            return
+        try:
+            issued_at = float(issued_raw)
+            observed_ttl = now - issued_at
+            observed_ttl_hours = observed_ttl / 3600
+            self.log.info(
+                "AAS token for %s lived %.1f hours before invalidation.",
+                self.username,
+                observed_ttl_hours,
+            )
+            # Skip TTL learning for very short lifetimes - these typically indicate
+            # transient server issues (rate-limit, propagation race) not actual TTL.
+            if observed_ttl < self.AAS_MIN_TTL_FOR_LEARNING_SEC:
+                self.log.debug(
+                    "Ignoring AAS TTL learning: observed %.1f hours < %.1f hours minimum threshold.",
+                    observed_ttl_hours,
+                    self.AAS_MIN_TTL_FOR_LEARNING_SEC / 3600,
+                )
+                return
+            # Update best known TTL (conservative: take the shorter one)
+            best_raw = await self._aget(self.k_aas_bestttl)
+            if best_raw is None or observed_ttl < float(best_raw):
+                # Apply 5% safety margin
+                safe_ttl = observed_ttl * 0.95
+                for key in self._key_variants(f"aas_best_ttl_sec_{self.username}"):
+                    try:
+                        await self._aset(key, safe_ttl)
+                    except Exception:  # noqa: BLE001 - defensive cache write
+                        pass
+                self.log.info(
+                    "Updated AAS best TTL for %s to %.1f hours (with 5%% margin).",
+                    self.username,
+                    safe_ttl / 3600,
+                )
+        except (TypeError, ValueError) as e:
+            self.log.debug("Failed to learn AAS TTL: %s", e)
+
     async def async_invalidate_aas_token(self) -> None:
         """Clear the cached AAS token and learn its actual TTL.
 
@@ -773,36 +818,7 @@ class AsyncTTLPolicy(TTLPolicy):
         enable proactive refresh before future tokens expire.
         """
         now = time.time()
-
-        # Learn AAS TTL from observed lifetime
-        issued_raw = await self._aget(self.k_aas_issued)
-        if issued_raw is not None:
-            try:
-                issued_at = float(issued_raw)
-                observed_ttl = now - issued_at
-                observed_ttl_hours = observed_ttl / 3600
-                self.log.info(
-                    "AAS token for %s lived %.1f hours before invalidation.",
-                    self.username,
-                    observed_ttl_hours,
-                )
-                # Update best known TTL (conservative: take the shorter one)
-                best_raw = await self._aget(self.k_aas_bestttl)
-                if best_raw is None or observed_ttl < float(best_raw):
-                    # Apply 5% safety margin
-                    safe_ttl = observed_ttl * 0.95
-                    for key in self._key_variants(f"aas_best_ttl_sec_{self.username}"):
-                        try:
-                            await self._aset(key, safe_ttl)
-                        except Exception:  # noqa: BLE001 - defensive cache write
-                            pass
-                    self.log.info(
-                        "Updated AAS best TTL for %s to %.1f hours (with 5%% margin).",
-                        self.username,
-                        safe_ttl / 3600,
-                    )
-            except (TypeError, ValueError) as e:
-                self.log.debug("Failed to learn AAS TTL: %s", e)
+        await self._learn_aas_ttl(now)
 
         self.log.warning(
             "Invalidating cached AAS token for %s due to persistent 401 errors.",
