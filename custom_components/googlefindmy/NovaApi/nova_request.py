@@ -459,6 +459,11 @@ class TTLPolicy:
 
     TTL_MARGIN_SEC, JITTER_SEC = 120, 90
     PROBE_INTERVAL_SEC, PROBE_INTERVAL_JITTER_PCT = 6 * 3600, 0.1
+    # Minimum TTL threshold: ignore TTL learning for tokens that expire too quickly,
+    # as this typically indicates a transient server issue (rate-limit, propagation
+    # delay) rather than the actual token lifetime. 5 minutes is a safe minimum since
+    # ADM tokens typically last 1-4 hours.
+    MIN_TTL_FOR_LEARNING_SEC = 300  # 5 minutes
 
     def __init__(  # noqa: PLR0913
         self,
@@ -667,8 +672,16 @@ class TTLPolicy:
             if adaptive_downshift:
                 best = self._get(self.k_bestttl)
                 try:
-                    # If clearly shorter than our current model (>10% shorter), recalibrate immediately.
-                    if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
+                    # Skip TTL learning for very short lifetimes - these typically indicate
+                    # transient server issues (rate-limit, propagation race) not actual TTL.
+                    if age_sec < self.MIN_TTL_FOR_LEARNING_SEC:
+                        self.log.debug(
+                            "Ignoring TTL learning: observed %.1f min < %.1f min minimum threshold.",
+                            age_min,
+                            self.MIN_TTL_FOR_LEARNING_SEC / 60.0,
+                        )
+                    # If clearly shorter than our current model (>10% shorter), recalibrate.
+                    elif best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
                         self.log.warning(
                             "Unexpected short TTL – recalibrating best known TTL with safety buffer."
                         )
@@ -1027,7 +1040,17 @@ class AsyncTTLPolicy(TTLPolicy):
                 if adaptive_downshift:
                     best = await self._aget(self.k_bestttl)
                     try:
-                        if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
+                        # Skip TTL learning for very short lifetimes - these typically indicate
+                        # transient server issues (rate-limit, propagation race) not actual TTL.
+                        if age_sec < self.MIN_TTL_FOR_LEARNING_SEC:
+                            self.log.debug(
+                                "Ignoring TTL learning: observed %.1f min < %.1f min minimum threshold.",
+                                age_min,
+                                self.MIN_TTL_FOR_LEARNING_SEC / 60.0,
+                            )
+                        elif best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(
+                            best
+                        ):
                             self.log.warning(
                                 "Unexpected short TTL – recalibrating best known TTL with safety buffer (async)."
                             )
@@ -1236,13 +1259,10 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         _AUTH_STEP_LONG_COOLDOWN = 2
                         max_auth_retries = 4
 
-                        lvl = (
-                            logging.INFO
-                            if auth_retries_used == _AUTH_STEP_ADM_REFRESH
-                            else logging.WARNING
-                        )
-                        _LOGGER.log(
-                            lvl,
+                        # Log all auth retries as WARNING for visibility.
+                        # Previously, attempt 1/4 was logged as INFO, making it invisible
+                        # in WARNING-level logs and causing confusion ("only 2/4 appears").
+                        _LOGGER.warning(
                             "Nova API async request to %s: 401 Unauthorized (attempt %d/%d).",
                             api_scope,
                             auth_retries_used + 1,

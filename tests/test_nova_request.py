@@ -1892,3 +1892,127 @@ def test_async_ttl_policy_aas_proactive_refresh_skips_when_fresh() -> None:
             await cache.close()
 
     asyncio.run(_run())
+
+
+def test_async_ttl_policy_ignores_very_short_ttl_in_recalibration() -> None:
+    """Very short observed TTLs should be ignored to avoid race condition artifacts.
+
+    When a token expires very quickly (< MIN_TTL_FOR_LEARNING_SEC), it typically
+    indicates a transient server issue (rate-limit, propagation race) rather than
+    the actual token lifetime. The TTL policy should ignore these observations
+    to prevent permanent corruption of the learned TTL.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-short-ttl")
+        try:
+            namespace = "entry-short-ttl"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_short_ttl"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Set a known best TTL of 2 hours (7200 seconds)
+            original_ttl = 7200.0
+            await cache.set(policy.k_bestttl, original_ttl)
+
+            # Simulate a token that was issued only 30 seconds ago (well below MIN_TTL)
+            # MIN_TTL_FOR_LEARNING_SEC is 300 seconds (5 minutes)
+            issued_time = time.time() - 30  # 30 seconds ago
+            await cache.set(policy.k_issued, issued_time)
+
+            # Trigger async_on_401 with adaptive downshift enabled
+            # The observed TTL (30s) is far below MIN_TTL_FOR_LEARNING_SEC (300s)
+            # so it should be ignored
+            await policy.async_on_401(adaptive_downshift=True)
+
+            # The best TTL should remain unchanged (not corrupted by the short TTL)
+            best_ttl_after = await cache.get(policy.k_bestttl)
+            assert best_ttl_after == original_ttl, (
+                f"Expected TTL to remain {original_ttl}, but got {best_ttl_after}"
+            )
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
+
+
+def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -> None:
+    """TTLs above the minimum threshold should still trigger recalibration.
+
+    When a token expires after MIN_TTL_FOR_LEARNING_SEC but significantly shorter
+    than the current best TTL, recalibration should still occur.
+    """
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-legit-short")
+        try:
+            namespace = "entry-legit-short"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger("test_legit_short"),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # Set a known best TTL of 2 hours (7200 seconds)
+            original_ttl = 7200.0
+            await cache.set(policy.k_bestttl, original_ttl)
+
+            # Simulate a token that was issued 10 minutes ago (600s > MIN_TTL of 300s)
+            # This is above the threshold but significantly shorter than 2h
+            # 600 + 120 (TTL_MARGIN_SEC) = 720 < 0.9 * 7200 = 6480, so recalibration triggers
+            observed_ttl = 600.0
+            issued_time = time.time() - observed_ttl
+            await cache.set(policy.k_issued, issued_time)
+
+            # Trigger async_on_401 with adaptive downshift enabled
+            await policy.async_on_401(adaptive_downshift=True)
+
+            # The best TTL should be updated to approximately observed * 0.95
+            # Use approximate comparison due to time elapsed between setting issued_time and now
+            expected_new_ttl = observed_ttl * 0.95  # ~570s
+            best_ttl_after = await cache.get(policy.k_bestttl)
+            assert best_ttl_after is not None
+            assert abs(best_ttl_after - expected_new_ttl) < 1.0, (
+                f"Expected TTL to be recalibrated to ~{expected_new_ttl}, "
+                f"but got {best_ttl_after}"
+            )
+
+        finally:
+            await cache.close()
+
+    asyncio.run(_run())
