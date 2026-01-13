@@ -961,3 +961,1035 @@ def test_async_get_adm_token_isolated_falls_back_without_android_id(
 
     assert token == "adm-token"
     assert recorded["android_id"] == expected_android_id
+
+
+# ---------------------------------------------------------------------------
+# Additional tests for 100% coverage of adm_token_retrieval.py
+# ---------------------------------------------------------------------------
+
+
+def test_mask_email_no_at_sign() -> None:
+    """Emails without @ should return <unknown>."""
+    assert adm_token_retrieval._mask_email("noemail") == "<unknown>"
+    assert adm_token_retrieval._mask_email("") == "<unknown>"
+    assert adm_token_retrieval._mask_email(None) == "<unknown>"
+
+
+def test_mask_email_empty_local_part() -> None:
+    """Emails with empty local part should mask properly."""
+    assert adm_token_retrieval._mask_email("@example.com") == "*@example.com"
+
+
+def test_mask_email_single_char_local() -> None:
+    """Emails with single-char local part should return single asterisk."""
+    assert adm_token_retrieval._mask_email("a@example.com") == "*@example.com"
+
+
+def test_clip_truncates_long_strings() -> None:
+    """Strings longer than the limit should be truncated with ellipsis."""
+    long_string = "x" * 300
+    result = adm_token_retrieval._clip(long_string, limit=200)
+    assert len(result) == 200
+    assert result.endswith("…")
+
+
+def test_coerce_android_id_string_invalid() -> None:
+    """Invalid string android_id should return None."""
+    assert adm_token_retrieval._coerce_android_id("not_a_number", "test") is None
+
+
+def test_coerce_android_id_unsupported_type() -> None:
+    """Unsupported types should return None."""
+    assert adm_token_retrieval._coerce_android_id([1, 2, 3], "test") is None
+
+
+def test_coerce_android_id_none() -> None:
+    """None should return None without logging."""
+    assert adm_token_retrieval._coerce_android_id(None, "test") is None
+
+
+def test_normalize_service_adm_alias() -> None:
+    """ADM aliases should normalize correctly."""
+    assert (
+        adm_token_retrieval._normalize_service("android_device_manager")
+        == "android_device_manager"
+    )
+    assert adm_token_retrieval._normalize_service("ADM") == "android_device_manager"
+    assert adm_token_retrieval._normalize_service("adm") == "android_device_manager"
+
+
+def test_normalize_service_custom() -> None:
+    """Custom service names should pass through unchanged."""
+    assert adm_token_retrieval._normalize_service("custom_service") == "custom_service"
+
+
+def test_normalize_service_whitespace() -> None:
+    """Whitespace should be stripped."""
+    assert (
+        adm_token_retrieval._normalize_service("  android_device_manager  ")
+        == "android_device_manager"
+    )
+
+
+def test_is_non_retryable_auth_http_signals() -> None:
+    """HTTP-style auth denials should not be retryable."""
+    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("401")) is True
+    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("403")) is True
+
+
+def test_is_non_retryable_auth_neither_marker() -> None:
+    """Errors with neither Token nor Auth markers should not be retryable."""
+    err = RuntimeError("Neither 'Token' nor 'Auth' found")
+    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_seed_username_in_cache_requires_cache() -> None:
+    """_seed_username_in_cache must raise ValueError without cache."""
+    with pytest.raises(ValueError, match="TokenCache instance is required"):
+        asyncio.run(
+            adm_token_retrieval._seed_username_in_cache("user@example.com", cache=None)
+        )
+
+
+def test_seed_username_in_cache_exception_handling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache exceptions during seeding should be handled gracefully."""
+
+    async def _exercise() -> None:
+        class FailingCache(_DummyTokenCache):
+            async def get(self, name: str) -> Any:
+                raise RuntimeError("Cache read failed")
+
+        cache = FailingCache()
+        # Should not raise
+        await adm_token_retrieval._seed_username_in_cache(
+            "user@example.com", cache=cache
+        )
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_entry_requires_cache() -> None:
+    """_resolve_android_id_for_entry must raise ValueError without cache."""
+    with pytest.raises(ValueError, match="TokenCache instance is required"):
+        asyncio.run(
+            adm_token_retrieval._resolve_android_id_for_entry(
+                "user@example.com", cache=None
+            )
+        )
+
+
+def test_resolve_android_id_for_entry_cache_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache write failures should be handled gracefully."""
+
+    async def _exercise() -> None:
+        class FailingWriteCache(_DummyTokenCache):
+            async def set(self, name: str, value: Any) -> None:
+                if "android_id" in name:
+                    raise RuntimeError("Cache write failed")
+                await super().set(name, value)
+
+        cache = FailingWriteCache()
+        cache._data["fcm_credentials"] = {"gcm": {"android_id": "0x1234"}}
+
+        # Should still return the android_id despite cache write failure
+        result = await adm_token_retrieval._resolve_android_id_for_entry(
+            "user@example.com", cache=cache
+        )
+        assert result == 0x1234
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_entry_generates_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing android_id should be generated and persisted."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache()
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+        expected = 0xABCDEF + 0x1000000000000000
+
+        result = await adm_token_retrieval._resolve_android_id_for_entry(
+            "user@example.com", cache=cache
+        )
+
+        assert result == expected
+        assert cache._data["android_id_user@example.com"] == expected
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_entry_generation_cache_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache write failures during generation should be handled gracefully."""
+
+    async def _exercise() -> None:
+        class FailingWriteCache(_DummyTokenCache):
+            async def set(self, name: str, value: Any) -> None:
+                if "android_id" in name:
+                    raise RuntimeError("Cache write failed")
+                await super().set(name, value)
+
+        cache = FailingWriteCache()
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+        expected = 0xABCDEF + 0x1000000000000000
+
+        result = await adm_token_retrieval._resolve_android_id_for_entry(
+            "user@example.com", cache=cache
+        )
+        assert result == expected
+
+    asyncio.run(_exercise())
+
+
+def test_generate_adm_token_requires_cache() -> None:
+    """_generate_adm_token must raise ValueError without cache."""
+    with pytest.raises(ValueError, match="TokenCache instance is required"):
+        asyncio.run(
+            adm_token_retrieval._generate_adm_token("user@example.com", cache=None)
+        )
+
+
+def test_async_get_adm_token_requires_cache() -> None:
+    """async_get_adm_token must raise ValueError without cache."""
+    with pytest.raises(ValueError, match="TokenCache instance is required"):
+        asyncio.run(adm_token_retrieval.async_get_adm_token(cache=None))
+
+
+def test_async_get_adm_token_empty_username() -> None:
+    """Empty username should raise RuntimeError."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache()
+        with pytest.raises(RuntimeError, match="Username is empty/invalid"):
+            await adm_token_retrieval.async_get_adm_token("", cache=cache)
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_whitespace_username() -> None:
+    """Whitespace-only username should raise RuntimeError."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache()
+        with pytest.raises(RuntimeError, match="Username is empty/invalid"):
+            await adm_token_retrieval.async_get_adm_token("   ", cache=cache)
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_isolated_flow_cache_get_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache get failures should be handled gracefully."""
+
+    async def _exercise() -> None:
+        call_count = 0
+
+        async def failing_get(key: str) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("Cache read failed")
+            return None
+
+        async def cache_set(key: str, value: Any) -> None:
+            pass
+
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+        expected = 0xABCDEF + 0x1000000000000000
+
+        result = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
+            "user@example.com",
+            secrets_bundle=None,
+            cache_get=failing_get,
+            cache_set=cache_set,
+        )
+        assert result == expected
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_isolated_flow_fcm_cache_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FCM credentials cache failures should be handled gracefully."""
+
+    async def _exercise() -> None:
+        async def failing_get(key: str) -> Any:
+            if key == "fcm_credentials":
+                raise RuntimeError("FCM cache read failed")
+            return None
+
+        async def cache_set(key: str, value: Any) -> None:
+            pass
+
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+        expected = 0xABCDEF + 0x1000000000000000
+
+        result = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
+            "user@example.com",
+            secrets_bundle=None,
+            cache_get=failing_get,
+            cache_set=cache_set,
+        )
+        assert result == expected
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_isolated_flow_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache set failures during android_id persistence should be handled."""
+
+    async def _exercise() -> None:
+        async def cache_get(key: str) -> Any:
+            return None
+
+        async def failing_set(key: str, value: Any) -> None:
+            raise RuntimeError("Cache write failed")
+
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+        expected = 0xABCDEF + 0x1000000000000000
+
+        result = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
+            "user@example.com",
+            secrets_bundle=None,
+            cache_get=cache_get,
+            cache_set=failing_set,
+        )
+        assert result == expected
+
+    asyncio.run(_exercise())
+
+
+def test_resolve_android_id_for_isolated_flow_secrets_bundle_persist_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache set failures after reading from secrets bundle should be handled."""
+
+    async def _exercise() -> None:
+        async def cache_get(key: str) -> Any:
+            return None
+
+        async def failing_set(key: str, value: Any) -> None:
+            raise RuntimeError("Cache write failed")
+
+        bundle = {"fcm_credentials": {"gcm": {"android_id": "0x1234"}}}
+
+        result = await adm_token_retrieval._resolve_android_id_for_isolated_flow(
+            "user@example.com",
+            secrets_bundle=bundle,
+            cache_get=cache_get,
+            cache_set=failing_set,
+        )
+        assert result == 0x1234
+
+    asyncio.run(_exercise())
+
+
+def test_perform_oauth_with_provided_aas_non_dict_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-dict gpsoauth response should raise RuntimeError."""
+
+    async def _exercise() -> None:
+
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> list[Any]:
+            return []
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+
+        with pytest.raises(RuntimeError, match="non-dict response"):
+            await adm_token_retrieval._perform_oauth_with_provided_aas(
+                "user@example.com", "aas-token", android_id=0x1234
+            )
+
+    asyncio.run(_exercise())
+
+
+def test_perform_oauth_with_provided_aas_uses_auth_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy Auth field should be used if Token is missing."""
+
+    async def _exercise() -> None:
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            return {"Auth": "adm-from-auth"}
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+
+        result = await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com", "aas-token", android_id=0x1234
+        )
+        assert result == "adm-from-auth"
+
+    asyncio.run(_exercise())
+
+
+def test_perform_oauth_with_provided_aas_error_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Error response should raise RuntimeError with error details."""
+
+    async def _exercise() -> None:
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            return {"Error": "BadAuthentication"}
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+
+        with pytest.raises(RuntimeError, match="Missing 'Token'/'Auth'"):
+            await adm_token_retrieval._perform_oauth_with_provided_aas(
+                "user@example.com", "aas-token", android_id=0x1234
+            )
+
+    asyncio.run(_exercise())
+
+
+def test_perform_oauth_with_provided_aas_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exceptions during oauth should be re-raised."""
+
+    async def _exercise() -> None:
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            raise ValueError("Unexpected error")
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+
+        with pytest.raises(ValueError, match="Unexpected error"):
+            await adm_token_retrieval._perform_oauth_with_provided_aas(
+                "user@example.com", "aas-token", android_id=0x1234
+            )
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_isolated_empty_username() -> None:
+    """Empty username should raise RuntimeError."""
+    with pytest.raises(RuntimeError, match="Username is empty/invalid"):
+        asyncio.run(
+            adm_token_retrieval.async_get_adm_token_isolated(
+                "", aas_token="aas-token"
+            )
+        )
+
+
+def test_async_get_adm_token_isolated_no_aas_token() -> None:
+    """Missing AAS token should raise RuntimeError."""
+    with pytest.raises(RuntimeError, match="requires an AAS token"):
+        asyncio.run(
+            adm_token_retrieval.async_get_adm_token_isolated("user@example.com")
+        )
+
+
+def test_async_get_adm_token_isolated_extracts_from_bundle() -> None:
+    """AAS token should be extracted from secrets bundle."""
+
+    async def _exercise(monkeypatch: pytest.MonkeyPatch) -> None:
+        recorded: dict[str, Any] = {}
+
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            recorded["aas_token"] = aas_token
+            return {"Token": "adm-token"}
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+
+        result = await adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            secrets_bundle={"aas_token": "bundle-aas-token"},
+        )
+
+        assert result == "adm-token"
+        assert recorded["aas_token"] == "bundle-aas-token"
+
+    import pytest
+
+    monkeypatch = pytest.MonkeyPatch()
+    asyncio.run(_exercise(monkeypatch))
+
+
+def test_async_get_adm_token_isolated_retries_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient errors should be retried with backoff."""
+
+    async def _exercise() -> None:
+        attempts: list[int] = []
+        sleep_durations: list[float] = []
+
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise RuntimeError("Temporary failure")
+            return {"Token": "adm-token"}
+
+        async def fake_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(adm_token_retrieval.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+
+        result = await adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            retries=1,
+            backoff=1.0,
+        )
+
+        assert result == "adm-token"
+        assert len(attempts) == 2
+        assert sleep_durations == [1.0]
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_isolated_no_retry_on_auth_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth errors should not be retried."""
+
+    async def _exercise() -> None:
+        attempts: list[int] = []
+
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            attempts.append(1)
+            raise RuntimeError("BadAuthentication")
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+
+        with pytest.raises(RuntimeError, match="BadAuthentication"):
+            await adm_token_retrieval.async_get_adm_token_isolated(
+                "user@example.com",
+                aas_token="aas-token",
+                retries=3,
+            )
+
+        assert len(attempts) == 1
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_isolated_persists_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token metadata should be persisted via cache_set."""
+
+    async def _exercise() -> None:
+        persisted: dict[str, Any] = {}
+
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            return {"Token": "adm-token"}
+
+        async def cache_get(key: str) -> Any:
+            return None
+
+        async def cache_set(key: str, value: Any) -> None:
+            persisted[key] = value
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+
+        result = await adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            cache_get=cache_get,
+            cache_set=cache_set,
+        )
+
+        assert result == "adm-token"
+        assert "adm_token_user@example.com" in persisted
+        assert "adm_token_issued_at_user@example.com" in persisted
+        assert "adm_probe_startup_left_user@example.com" in persisted
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_isolated_metadata_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata write failures should be handled gracefully."""
+
+    async def _exercise() -> None:
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            return {"Token": "adm-token"}
+
+        async def cache_get(key: str) -> Any:
+            return None
+
+        async def failing_set(key: str, value: Any) -> None:
+            if "issued_at" in key or "probe" in key:
+                raise RuntimeError("Metadata write failed")
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+
+        # Should still succeed despite metadata write failures
+        result = await adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            cache_get=cache_get,
+            cache_set=failing_set,
+        )
+
+        assert result == "adm-token"
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_isolated_checks_existing_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing metadata should prevent overwriting."""
+
+    async def _exercise() -> None:
+        persisted: dict[str, Any] = {}
+
+        def fake_perform_oauth(
+            username: str,
+            aas_token: str,
+            android_id: int,
+            **kwargs: Any,
+        ) -> dict[str, str]:
+            return {"Token": "adm-token"}
+
+        async def cache_get(key: str) -> Any:
+            if "issued_at" in key or "probe" in key:
+                return "existing"
+            return None
+
+        async def cache_set(key: str, value: Any) -> None:
+            persisted[key] = value
+
+        monkeypatch.setattr(
+            adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+        )
+        monkeypatch.setattr(
+            adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF
+        )
+
+        await adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            cache_get=cache_get,
+            cache_set=cache_set,
+        )
+
+        # Existing metadata should not be overwritten
+        assert "adm_token_issued_at_user@example.com" not in persisted
+        assert "adm_probe_startup_left_user@example.com" not in persisted
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_clear_cache_on_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient errors should clear the cache key for retry."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        attempts: list[int] = []
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary failure")
+            return "adm-success"
+
+        async def fake_sleep(duration: float) -> None:
+            pass
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+        monkeypatch.setattr(adm_token_retrieval.asyncio, "sleep", fake_sleep)
+
+        cache = _DummyTokenCache({DATA_AUTH_METHOD: "secrets_json"})
+
+        token = await adm_token_retrieval.async_get_adm_token(
+            user, retries=1, cache=cache
+        )
+
+        assert token == "adm-success"
+        assert len(attempts) == 2
+        # Verify cache was cleared before retry
+        cleared_calls = [
+            (k, v) for k, v in cache.set_calls if k == f"adm_token_{user}" and v is None
+        ]
+        assert len(cleared_calls) >= 1
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_clear_cache_failure_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache clear failures should be silent (best-effort)."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        attempts: list[int] = []
+
+        class PartialFailCache(_DummyTokenCache):
+            async def set(self, name: str, value: Any) -> None:
+                if value is None and "adm_token" in name:
+                    raise RuntimeError("Cache clear failed")
+                await super().set(name, value)
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("temporary failure")
+            return "adm-success"
+
+        async def fake_sleep(duration: float) -> None:
+            pass
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+        monkeypatch.setattr(adm_token_retrieval.asyncio, "sleep", fake_sleep)
+
+        cache = PartialFailCache({DATA_AUTH_METHOD: "secrets_json"})
+
+        # Should succeed despite cache clear failure
+        token = await adm_token_retrieval.async_get_adm_token(
+            user, retries=1, cache=cache
+        )
+        assert token == "adm-success"
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_finally_restores_auth_method(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth method should be restored in finally block after OAuth fallback."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            if cache._data.get(DATA_AUTH_METHOD) == "secrets_json":
+                raise InvalidAasTokenError("stale AAS")
+            return "adm-success"
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+
+        cache = _DummyTokenCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                CONF_OAUTH_TOKEN: "oauth-token",
+            }
+        )
+
+        token = await adm_token_retrieval.async_get_adm_token(user, cache=cache)
+
+        assert token == "adm-success"
+        # Auth method should be restored
+        assert cache._data.get(DATA_AUTH_METHOD) == "secrets_json"
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_finally_block_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finally block should handle auth_method read failures."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        call_count = [0]
+
+        class PartialFailCache(_DummyTokenCache):
+            async def get(self, name: str) -> Any:
+                if (
+                    name == DATA_AUTH_METHOD
+                    and call_count[0] > 2
+                    and call_count[0] < 5
+                ):
+                    call_count[0] += 1
+                    raise RuntimeError("Read failed")
+                call_count[0] += 1
+                return await super().get(name)
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            if call_count[0] < 3:
+                raise InvalidAasTokenError("stale AAS")
+            return "adm-success"
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+
+        cache = PartialFailCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                CONF_OAUTH_TOKEN: "oauth-token",
+            }
+        )
+
+        token = await adm_token_retrieval.async_get_adm_token(user, cache=cache)
+        assert token == "adm-success"
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_finally_block_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finally block should handle auth_method write failures."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        generate_count = [0]
+
+        class PartialFailCache(_DummyTokenCache):
+            async def set(self, name: str, value: Any) -> None:
+                # Fail on restore attempt in finally block
+                if name == DATA_AUTH_METHOD and value == "secrets_json":
+                    if generate_count[0] > 1:
+                        raise RuntimeError("Write failed")
+                await super().set(name, value)
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            generate_count[0] += 1
+            if generate_count[0] == 1:
+                raise InvalidAasTokenError("stale AAS")
+            return "adm-success"
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+
+        cache = PartialFailCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                CONF_OAUTH_TOKEN: "oauth-token",
+            }
+        )
+
+        # Should succeed despite restore failure
+        token = await adm_token_retrieval.async_get_adm_token(user, cache=cache)
+        assert token == "adm-success"
+
+    asyncio.run(_exercise())
+
+
+def test_normalize_service_empty() -> None:
+    """Empty or None service should return empty string."""
+    assert adm_token_retrieval._normalize_service("") == ""
+    assert adm_token_retrieval._normalize_service(None) == ""
+
+
+def test_resolve_android_id_for_entry_fcm_without_gcm() -> None:
+    """FCM credentials without gcm block should fall back to cached."""
+
+    async def _exercise() -> None:
+        cache = _DummyTokenCache(
+            {"fcm_credentials": {"not_gcm": {}}, "android_id_user@example.com": 0x12345}
+        )
+
+        result = await adm_token_retrieval._resolve_android_id_for_entry(
+            "user@example.com", cache=cache
+        )
+        assert result == 0x12345
+
+    asyncio.run(_exercise())
+
+
+def test_async_get_adm_token_auth_method_switch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auth method switch failure should be logged but fallback continues."""
+
+    async def _exercise() -> None:
+        user = "user@example.com"
+        switch_attempts = [0]
+
+        class PartialFailCache(_DummyTokenCache):
+            async def set(self, name: str, value: Any) -> None:
+                if (
+                    name == DATA_AUTH_METHOD
+                    and value == adm_token_retrieval._AUTH_METHOD_INDIVIDUAL_TOKENS
+                ):
+                    switch_attempts[0] += 1
+                    raise RuntimeError("Switch failed")
+                await super().set(name, value)
+
+        async def fake_generate(username: str, *, cache: _DummyTokenCache) -> str:
+            # After first fail, succeed
+            if switch_attempts[0] > 0:
+                return "adm-success"
+            raise InvalidAasTokenError("stale AAS")
+
+        monkeypatch.setattr(adm_token_retrieval, "_generate_adm_token", fake_generate)
+
+        cache = PartialFailCache(
+            {
+                DATA_AUTH_METHOD: "secrets_json",
+                CONF_OAUTH_TOKEN: "oauth-token",
+            }
+        )
+
+        # Should succeed via fallback despite switch failure
+        token = await adm_token_retrieval.async_get_adm_token(user, cache=cache)
+        assert token == "adm-success"
+        assert switch_attempts[0] >= 1
+
+    asyncio.run(_exercise())
+
+
+
+
+def test_async_get_adm_token_isolated_without_cache_funcs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolated flow without cache functions should still work."""
+
+    def fake_perform_oauth(
+        username: str,
+        aas_token: str,
+        android_id: int,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        return {"Token": "adm-token"}
+
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
+    monkeypatch.setattr(adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF)
+
+    token = asyncio.run(
+        adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            # No cache_get or cache_set
+        )
+    )
+
+    assert token == "adm-token"
+
+
+def test_async_get_adm_token_isolated_without_cache_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolated flow with cache_set but no cache_get should handle metadata."""
+
+    persisted: dict[str, Any] = {}
+
+    def fake_perform_oauth(
+        username: str,
+        aas_token: str,
+        android_id: int,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        return {"Token": "adm-token"}
+
+    async def cache_set(key: str, value: Any) -> None:
+        persisted[key] = value
+
+    monkeypatch.setattr(
+        adm_token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
+    )
+    monkeypatch.setattr(adm_token_retrieval.secrets, "randbelow", lambda *_: 0xABCDEF)
+
+    token = asyncio.run(
+        adm_token_retrieval.async_get_adm_token_isolated(
+            "user@example.com",
+            aas_token="aas-token",
+            cache_set=cache_set,
+            # No cache_get
+        )
+    )
+
+    assert token == "adm-token"
+    # Metadata should still be persisted
+    assert "adm_token_issued_at_user@example.com" in persisted
+    assert "adm_probe_startup_left_user@example.com" in persisted
