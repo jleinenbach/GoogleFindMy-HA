@@ -29,4 +29,3 @@ def drain_loop(loop: asyncio.AbstractEventLoop) -> None:
 
     if current_loop is loop:
         asyncio.set_event_loop(None)
-

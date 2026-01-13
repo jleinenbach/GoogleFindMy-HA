@@ -53,9 +53,7 @@ def _collect_string_paths(
     if isinstance(value, Mapping):
         for key, child in value.items():
             _collect_string_paths(child, path + (str(key),), out)
-    elif isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for index, child in enumerate(value):
             _collect_string_paths(child, path + (str(index),), out)
 
@@ -368,4 +366,6 @@ def test_main_test_exception_handling_with_mock() -> None:
             test_translation_placeholders()
         except AssertionError as e:
             # The test should fail because of missing paths
-            assert "missing strings for" in str(e).lower() or "missing" in str(e).lower()
+            assert (
+                "missing strings for" in str(e).lower() or "missing" in str(e).lower()
+            )

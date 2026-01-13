@@ -33,7 +33,10 @@ def test_get_fmdn_shared_key_returns_latest_epoch_bytes() -> None:
 @pytest.mark.parametrize(
     ("payload", "expected_message"),
     [
-        (json.dumps(["not", "an", "object"]), "Vault keys payload must be a JSON object."),
+        (
+            json.dumps(["not", "an", "object"]),
+            "Vault keys payload must be a JSON object.",
+        ),
         (
             json.dumps({"unexpected": []}),
             "Vault keys JSON does not contain a finder_hw list.",

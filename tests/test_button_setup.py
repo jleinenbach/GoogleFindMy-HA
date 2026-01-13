@@ -194,9 +194,7 @@ def _load_can_request_location_impl() -> Any:
 
     # Method moved to locate.py (LocateOperations mixin) during refactoring
     locate_path = (
-        Path(__file__)
-        .resolve()
-        .parent.parent
+        Path(__file__).resolve().parent.parent
         / "custom_components"
         / "googlefindmy"
         / "coordinator"
@@ -215,7 +213,9 @@ async def test_blank_device_name_populates_buttons(
 ) -> None:
     """Buttons are added even when the device label is blank or missing."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     _ensure_button_dependencies()
     button_module = importlib.import_module("custom_components.googlefindmy.button")

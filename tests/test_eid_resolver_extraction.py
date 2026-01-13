@@ -19,7 +19,7 @@ def test_extract_truncated_modern_frame() -> None:
     resolver = GoogleFindMyEIDResolver(hass)
 
     header = bytes([MODERN_FRAME_TYPE, 0x00])
-    fake_eid_data = b"\xAA" * LEGACY_EID_LENGTH
+    fake_eid_data = b"\xaa" * LEGACY_EID_LENGTH
     payload = header + fake_eid_data
 
     candidates, frame_type = resolver._extract_candidates(payload)
@@ -36,11 +36,11 @@ def test_extract_standard_legacy_frame() -> None:
     hass = MagicMock()
     resolver = GoogleFindMyEIDResolver(hass)
 
-    payload = bytes([0x40, 0x00]) + (b"\xBB" * LEGACY_EID_LENGTH)
+    payload = bytes([0x40, 0x00]) + (b"\xbb" * LEGACY_EID_LENGTH)
 
     candidates, frame_type = resolver._extract_candidates(payload)
 
     assert frame_type == 0x40
     assert len(candidates) == 1
-    assert candidates[0] == b"\xBB" * LEGACY_EID_LENGTH
+    assert candidates[0] == b"\xbb" * LEGACY_EID_LENGTH
     assert len(candidates[0]) == LEGACY_EID_LENGTH

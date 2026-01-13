@@ -44,7 +44,9 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
         async_listen=lambda *_args, **_kwargs: (lambda: None),
         async_listen_once=lambda *_args, **_kwargs: (lambda: None),
     )
-    hass.async_create_task = lambda coro, *, name=None: loop.create_task(coro, name=name)
+    hass.async_create_task = lambda coro, *, name=None: loop.create_task(
+        coro, name=name
+    )
     return hass
 
 
@@ -92,9 +94,7 @@ async def test_setup_iterates_service_subentries(stub_coordinator_factory: Any) 
     await asyncio.gather(*pending)
 
     assert {config for _, config in added} == {service_subentry.subentry_id}
-    assert {
-        entity.unique_id for entity, _ in added
-    } == {
+    assert {entity.unique_id for entity, _ in added} == {
         f"{entry.entry_id}:{service_subentry.subentry_id}:polling",
         f"{entry.entry_id}:{service_subentry.subentry_id}:auth_status",
         f"{entry.entry_id}:{service_subentry.subentry_id}:connectivity",
@@ -102,7 +102,9 @@ async def test_setup_iterates_service_subentries(stub_coordinator_factory: Any) 
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_adds_new_service_subentries(stub_coordinator_factory: Any) -> None:
+async def test_dispatcher_adds_new_service_subentries(
+    stub_coordinator_factory: Any,
+) -> None:
     """Dispatcher callbacks should attach entities for newly added subentries."""
 
     loop = asyncio.get_running_loop()

@@ -10,8 +10,12 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import quote
 
-START_MARKER = "<!-- START doctoc generated TOC please keep comment here to allow auto update -->"
-END_MARKER = "<!-- END doctoc generated TOC please keep comment here to allow auto update -->"
+START_MARKER = (
+    "<!-- START doctoc generated TOC please keep comment here to allow auto update -->"
+)
+END_MARKER = (
+    "<!-- END doctoc generated TOC please keep comment here to allow auto update -->"
+)
 HEADER_LINE = "**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*"
 
 _HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<title>.+?)\s*$")
@@ -75,7 +79,12 @@ def _render_toc(headings: list[tuple[int, str]]) -> list[str]:
     """Render DocToc-compatible Markdown for the collected headings."""
 
     seen_slugs: dict[str, int] = defaultdict(int)
-    toc_lines = [START_MARKER, "<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->", HEADER_LINE, ""]
+    toc_lines = [
+        START_MARKER,
+        "<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->",
+        HEADER_LINE,
+        "",
+    ]
 
     for level, title in headings:
         indent = "  " * (level - 1)

@@ -34,7 +34,9 @@ def _fake_hass() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_lock_confirmation_updates_on_match(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_lock_confirmation_updates_on_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """BUG C: confirmation timestamps must update every time a lock hits."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
@@ -50,13 +52,15 @@ async def test_lock_confirmation_updates_on_match(monkeypatch: pytest.MonkeyPatc
 
     device_id = "device-id"
     eid_bytes = b"\x99" * 20
-    resolver._lookup[eid_bytes] = [EIDMatch(
-        device_id=device_id,
-        config_entry_id="entry-id",
-        canonical_id="canonical-id",
-        time_offset=0,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid_bytes] = [
+        EIDMatch(
+            device_id=device_id,
+            config_entry_id="entry-id",
+            canonical_id="canonical-id",
+            time_offset=0,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid_bytes] = {
         "timestamp_basis": "pair_date",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
@@ -103,13 +107,15 @@ async def test_purge_stale_locks_keeps_recently_confirmed_lock(
 
     device_id = "device-id"
     eid_bytes = b"\x01" * 20
-    resolver._lookup[eid_bytes] = [EIDMatch(
-        device_id=device_id,
-        config_entry_id="entry-id",
-        canonical_id="canonical-id",
-        time_offset=0,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid_bytes] = [
+        EIDMatch(
+            device_id=device_id,
+            config_entry_id="entry-id",
+            canonical_id="canonical-id",
+            time_offset=0,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid_bytes] = {
         "timestamp_basis": "pair_date",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
@@ -145,6 +151,7 @@ async def test_stale_lock_removed_by_confirmation_ttl() -> None:
     """BUG C: stale locks must clear when they are no longer confirmed."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
+
     async def _async_save(payload: object) -> None:
         scheduled.append("payload")
 

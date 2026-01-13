@@ -86,7 +86,9 @@ async def test_reconfigure_flow_skips_already_configured_abort() -> None:
     ) -> dict[str, str]:
         return {"type": "form", "step_id": "reconfigure"}
 
-    flow.async_step_reconfigure = _fake_reconfigure.__get__(flow, config_flow.ConfigFlow)  # type: ignore[assignment]
+    flow.async_step_reconfigure = _fake_reconfigure.__get__(
+        flow, config_flow.ConfigFlow
+    )  # type: ignore[assignment]
 
     result = await flow.async_step_user()
 
@@ -103,11 +105,15 @@ async def test_reconfigure_reload_recreates_subentries_and_platforms() -> None:
     flow = config_flow.ConfigFlow()
     hass = SimpleNamespace()
     hass.config_entries = _ConfigEntriesManagerStub(entry)
-    hass.config_entries.forward_setup_calls: list[tuple[_EntryStub, tuple[str, ...]]] = []
+    hass.config_entries.forward_setup_calls: list[
+        tuple[_EntryStub, tuple[str, ...]]
+    ] = []
     hass.config_entries.setup_calls = []
     hass.verify_event_loop_thread = lambda *_args, **_kwargs: None
 
-    async def _forward_setups(entry_to_forward: _EntryStub, platforms: tuple[str, ...]) -> None:
+    async def _forward_setups(
+        entry_to_forward: _EntryStub, platforms: tuple[str, ...]
+    ) -> None:
         hass.config_entries.forward_setup_calls.append(
             (entry_to_forward, tuple(platforms))
         )
@@ -142,7 +148,9 @@ async def test_reconfigure_reload_recreates_subentries_and_platforms() -> None:
 
     await _async_setup_new_subentries(flow.hass, entry, entry.subentries.values())
 
-    created_ids = [payload["config_subentry_id"] for payload in hass.config_entries.created]
+    created_ids = [
+        payload["config_subentry_id"] for payload in hass.config_entries.created
+    ]
     setup_calls_first = list(hass.config_entries.setup_calls)
     assert setup_calls_first, "Subentry setup should record config_subentry_id"
     assert setup_calls_first == created_ids
@@ -170,7 +178,9 @@ async def test_reconfigure_reload_recreates_subentries_and_platforms() -> None:
         context_map=context_map,
     )
 
-    recreated_ids = [payload["config_subentry_id"] for payload in hass.config_entries.created]
+    recreated_ids = [
+        payload["config_subentry_id"] for payload in hass.config_entries.created
+    ]
 
     await _async_setup_new_subentries(flow.hass, entry, entry.subentries.values())
 

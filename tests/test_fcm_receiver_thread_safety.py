@@ -215,9 +215,7 @@ class TestExtractCanonicIdAsync:
             call_thread_ids.append(threading.current_thread().ident)
             return "extracted-id"
 
-        with patch.object(
-            receiver, "_extract_canonic_id_from_response", mock_extract
-        ):
+        with patch.object(receiver, "_extract_canonic_id_from_response", mock_extract):
             result = await receiver._extract_canonic_id_async("deadbeef")
 
         assert result == "extracted-id"

@@ -61,7 +61,7 @@ def _identity() -> DeviceIdentity:
     return DeviceIdentity(
         registry_id="device-id",
         canonical_id="canonical-id",
-        identity_key=b"\xAA" * 16,
+        identity_key=b"\xaa" * 16,
         config_entry_id="entry-id",
         manufacturer="",
         model="",
@@ -123,7 +123,7 @@ def test_known_offset_does_not_cross_bases(monkeypatch: pytest.MonkeyPatch) -> N
         registry_id=identity.registry_id,
         config_entry_id=identity.config_entry_id,
         canonical_id=identity.canonical_id,
-        key_bytes=b"\xBB" * 16,
+        key_bytes=b"\xbb" * 16,
         identity=identity,
         lock=None,
         locked_variant=None,
@@ -144,7 +144,9 @@ def test_known_offset_does_not_cross_bases(monkeypatch: pytest.MonkeyPatch) -> N
     assert secrets_spec is not None
 
     base_candidate = now_unix - identity.secrets_creation_date
-    expected_normalized = _normalize_counter_candidate(base_candidate, basis="secrets_creation_date")
+    expected_normalized = _normalize_counter_candidate(
+        base_candidate, basis="secrets_creation_date"
+    )
 
     assert secrets_spec.candidate_value == expected_normalized, (
         "FAIL (R2): known_offset was applied across time bases (pair_date -> secrets_creation_date). "
@@ -153,18 +155,22 @@ def test_known_offset_does_not_cross_bases(monkeypatch: pytest.MonkeyPatch) -> N
     )
 
 
-def test_confirmation_refresh_and_purge_stability(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_confirmation_refresh_and_purge_stability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """AC1/R3: confirmation must refresh on HIT and prevent premature purge."""
 
     resolver = _resolver()
     eid_bytes = b"\x99" * 20
-    resolver._lookup[eid_bytes] = [EIDMatch(
-        device_id="device-id",
-        config_entry_id="entry-id",
-        canonical_id="canonical-id",
-        time_offset=0,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid_bytes] = [
+        EIDMatch(
+            device_id="device-id",
+            config_entry_id="entry-id",
+            canonical_id="canonical-id",
+            time_offset=0,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid_bytes] = {
         "timestamp_basis": "pair_date",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
@@ -207,7 +213,7 @@ def test_soft_gate_keeps_discovery_windows(monkeypatch: pytest.MonkeyPatch) -> N
         registry_id=identity.registry_id,
         config_entry_id=identity.config_entry_id,
         canonical_id=identity.canonical_id,
-        key_bytes=b"\xCC" * 16,
+        key_bytes=b"\xcc" * 16,
         identity=identity,
         lock=None,
         locked_variant=None,
@@ -277,13 +283,15 @@ def test_resolve_eid_does_not_store_lock_tracking_as_known_timebasis(
 
     resolver = _resolver()
     eid = b"\x11" * 20
-    resolver._lookup[eid] = [EIDMatch(
-        device_id="dev",
-        config_entry_id="entry",
-        canonical_id="can",
-        time_offset=7,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid] = [
+        EIDMatch(
+            device_id="dev",
+            config_entry_id="entry",
+            canonical_id="can",
+            time_offset=7,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid] = {
         "timestamp_basis": "lock_tracking",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
@@ -312,13 +320,15 @@ def test_resolve_eid_missing_timestamp_basis_uses_previous_valid_basis(
     resolver._known_timebases["dev"] = "pair_date"
 
     eid = b"\x22" * 20
-    resolver._lookup[eid] = [EIDMatch(
-        device_id="dev",
-        config_entry_id="entry",
-        canonical_id="can",
-        time_offset=3,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid] = [
+        EIDMatch(
+            device_id="dev",
+            config_entry_id="entry",
+            canonical_id="can",
+            time_offset=3,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid] = {
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,
     }
@@ -340,13 +350,15 @@ def test_resolve_eid_normalizes_variant_and_never_persists_invalid_lock_variant(
 
     resolver = _resolver()
     eid = b"\x33" * 20
-    resolver._lookup[eid] = [EIDMatch(
-        device_id="dev",
-        config_entry_id="entry",
-        canonical_id="can",
-        time_offset=0,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid] = [
+        EIDMatch(
+            device_id="dev",
+            config_entry_id="entry",
+            canonical_id="can",
+            time_offset=0,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid] = {
         "timestamp_basis": "pair_date",
         "variant": "0",  # intentionally invalid for EidVariant in many implementations
@@ -435,7 +447,7 @@ def test_unix_hint_is_ignored_when_absolute_unix_disabled() -> None:
         registry_id=identity.registry_id,
         config_entry_id=identity.config_entry_id,
         canonical_id=identity.canonical_id,
-        key_bytes=b"\xCC" * 16,
+        key_bytes=b"\xcc" * 16,
         identity=identity,
         lock=None,
         locked_variant=None,
@@ -472,13 +484,15 @@ def test_resolve_eid_does_not_poison_anchor_offsets_with_lock_tracking_basis(
     resolver._known_offsets[("dev", "pair_date")] = 123
 
     eid = b"\x11" * 20
-    resolver._lookup[eid] = [EIDMatch(
-        device_id="dev",
-        config_entry_id="entry",
-        canonical_id="can",
-        time_offset=7,
-        is_reversed=False,
-    )]
+    resolver._lookup[eid] = [
+        EIDMatch(
+            device_id="dev",
+            config_entry_id="entry",
+            canonical_id="can",
+            time_offset=7,
+            is_reversed=False,
+        )
+    ]
     resolver._lookup_metadata[eid] = {
         "timestamp_basis": "lock_tracking",
         "variant": EidVariant.LEGACY_SECP160R1_X20_BE.value,

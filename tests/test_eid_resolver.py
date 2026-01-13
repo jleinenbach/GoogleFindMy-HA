@@ -37,7 +37,9 @@ def _fake_hass() -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
-async def test_resolver_extracts_service_data_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolver_extracts_service_data_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Resolver should parse a service-data payload with frame type at octet 7."""
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
@@ -45,6 +47,7 @@ async def test_resolver_extracts_service_data_legacy(monkeypatch: pytest.MonkeyP
     resolver._lookup = {}
     resolver._lookup_metadata = {}
     resolver._locks = {}
+
     async def _async_noop(payload=None):
         return None
 
@@ -58,7 +61,7 @@ async def test_resolver_extracts_service_data_legacy(monkeypatch: pytest.MonkeyP
     identity = DeviceIdentity(
         registry_id="registry-id",
         canonical_id="canonical-id",
-        identity_key=b"\xAA" * 32,
+        identity_key=b"\xaa" * 32,
         encrypted_identity_key=None,
         owner_key_version=None,
         device_type=None,
@@ -84,13 +87,17 @@ async def test_resolver_extracts_service_data_legacy(monkeypatch: pytest.MonkeyP
     await resolver._refresh_cache()
 
     eid = next(iter(resolver._lookup))
-    service_data = b"\x00" * 7 + bytes([resolver_module.FMDN_FRAME_TYPE]) + eid + b"\x99"
+    service_data = (
+        b"\x00" * 7 + bytes([resolver_module.FMDN_FRAME_TYPE]) + eid + b"\x99"
+    )
 
     match = resolver.resolve_eid(service_data)
     assert match is not None
     assert isinstance(match, EIDMatch)
     assert match.device_id == "registry-id"
-    assert resolver._locks[match.device_id].frame_type == resolver_module.FMDN_FRAME_TYPE
+    assert (
+        resolver._locks[match.device_id].frame_type == resolver_module.FMDN_FRAME_TYPE
+    )
 
 
 @pytest.mark.asyncio
@@ -125,7 +132,7 @@ async def test_resolver_saves_locks_via_store(monkeypatch: pytest.MonkeyPatch) -
     identity = DeviceIdentity(
         registry_id="persist-id",
         canonical_id="canonical-id",
-        identity_key=b"\xBB" * 32,
+        identity_key=b"\xbb" * 32,
         encrypted_identity_key=None,
         owner_key_version=None,
         device_type=None,
@@ -169,6 +176,7 @@ async def test_resolver_handles_raw_eid(monkeypatch: pytest.MonkeyPatch) -> None
     resolver._lookup = {}
     resolver._lookup_metadata = {}
     resolver._locks = {}
+
     async def _async_noop(payload=None):
         return None
 
@@ -182,7 +190,7 @@ async def test_resolver_handles_raw_eid(monkeypatch: pytest.MonkeyPatch) -> None
     identity = DeviceIdentity(
         registry_id="raw-id",
         canonical_id="raw-canonical",
-        identity_key=b"\xCC" * 32,
+        identity_key=b"\xcc" * 32,
         encrypted_identity_key=None,
         owner_key_version=None,
         device_type=None,
@@ -220,8 +228,8 @@ def test_extract_candidates_sliding_window() -> None:
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = _fake_hass()
-    payload = b"\x00" * 10 + b"A" * LEGACY_EID_LENGTH + b"\xFF" * 10
+    payload = b"\x00" * 10 + b"A" * LEGACY_EID_LENGTH + b"\xff" * 10
 
     candidates, frame = resolver._extract_candidates(payload)
     assert frame is None
-    assert payload[10:10 + LEGACY_EID_LENGTH] in candidates
+    assert payload[10 : 10 + LEGACY_EID_LENGTH] in candidates

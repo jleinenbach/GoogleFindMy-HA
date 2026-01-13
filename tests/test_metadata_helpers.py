@@ -18,7 +18,9 @@ from custom_components.googlefindmy.entity import GoogleFindMyDeviceEntity
 
 
 @pytest.mark.asyncio
-async def test_async_normalize_device_names_strips_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_async_normalize_device_names_strips_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Device names are normalized while user overrides remain untouched."""
 
     hass = SimpleNamespace()
@@ -50,7 +52,9 @@ async def test_async_normalize_device_names_strips_prefix(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_async_refresh_device_urls_updates_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_async_refresh_device_urls_updates_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Refresh helper rebuilds configuration URLs for integration devices."""
 
     fake_now = 1_209_600  # deterministic week bucket

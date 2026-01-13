@@ -11,27 +11,22 @@ class DescriptorBase:
     name: str
     full_name: str
 
-
 class EnumDescriptor(DescriptorBase):
     values_by_name: _Mapping[str, EnumValueDescriptor]
     values: _Sequence[EnumValueDescriptor]
 
-
 class EnumValueDescriptor(DescriptorBase):
     index: int
     number: int
-
 
 class FieldDescriptor(DescriptorBase):
     number: int
     type: int
     label: int
 
-
 class Descriptor(DescriptorBase):
     fields: _Sequence[FieldDescriptor]
     enum_types: _Sequence[EnumDescriptor]
-
 
 class FileDescriptor(DescriptorBase):
     package: str
@@ -42,15 +37,12 @@ class FileDescriptor(DescriptorBase):
 
     def GetMessages(self, packages: _Iterable[str]) -> _Mapping[str, Descriptor]: ...
 
-
 class ServiceDescriptor(DescriptorBase):
     methods: _Sequence[MethodDescriptor]
-
 
 class MethodDescriptor(DescriptorBase):
     input_type: Descriptor
     output_type: Descriptor
-
 
 __all__ = [
     "Descriptor",

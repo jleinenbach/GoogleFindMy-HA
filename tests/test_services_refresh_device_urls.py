@@ -214,7 +214,9 @@ def test_refresh_device_urls_skips_when_base_url_missing(
 
     async def _run_refresh() -> None:
         await services.async_register_services(hass, ctx)
-        handler = hass.services.registered[(const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)]
+        handler = hass.services.registered[
+            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+        ]
         await handler(ServiceCall({}))
 
     asyncio.run(_run_refresh())
@@ -271,7 +273,9 @@ def test_refresh_device_urls_skips_when_base_url_is_none(
 
     async def _run_refresh() -> None:
         await services.async_register_services(hass, ctx)
-        handler = hass.services.registered[(const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)]
+        handler = hass.services.registered[
+            (const.DOMAIN, const.SERVICE_REFRESH_DEVICE_URLS)
+        ]
         await handler(ServiceCall({}))
 
     asyncio.run(_run_refresh())

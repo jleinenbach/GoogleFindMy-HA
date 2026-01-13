@@ -24,7 +24,9 @@ async def test_close_only_when_bucket_empty(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_close_skipped_when_entries_remain(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_close_skipped_when_entries_remain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Closing is skipped if another entry remains loaded."""
 
     bucket: dict[str, object] = {"one": object(), "two": object()}

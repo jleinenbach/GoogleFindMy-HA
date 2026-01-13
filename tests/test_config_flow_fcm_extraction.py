@@ -71,7 +71,12 @@ async def test_secrets_json_extracts_fcm_credentials(
         options: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         captured["result"] = {"title": title, "data": data, "options": options}
-        return {"type": "create_entry", "title": title, "data": data, "options": options}
+        return {
+            "type": "create_entry",
+            "title": title,
+            "data": data,
+            "options": options,
+        }
 
     hass = _FlowHass()
     flow = config_flow.ConfigFlow()

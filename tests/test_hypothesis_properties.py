@@ -88,7 +88,9 @@ def parse_grpc_frame(data: bytes) -> tuple[int, int, bytes] | None:
     return compressed, length, payload
 
 
-@given(compressed=grpc_compressed_flag, length=grpc_message_length, payload=binary_payload)
+@given(
+    compressed=grpc_compressed_flag, length=grpc_message_length, payload=binary_payload
+)
 @hypothesis_settings
 def test_grpc_frame_roundtrip(compressed: int, length: int, payload: bytes) -> None:
     """Verify that gRPC frame building and parsing are inverses."""
@@ -181,7 +183,9 @@ def test_translation_files_have_consistent_placeholders() -> None:
         return result
 
     en_strings = get_all_strings(en_data)
-    en_placeholders = {path: extract_placeholders(text) for path, text in en_strings.items()}
+    en_placeholders = {
+        path: extract_placeholders(text) for path, text in en_strings.items()
+    }
 
     errors: list[str] = []
     for lang_file in translations_dir.glob("*.json"):
@@ -255,7 +259,9 @@ def generate_entity_unique_id(entry_id: str, device_id: str, entity_type: str) -
 @given(
     entry_id=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"),
     device_id=device_id_strategy,
-    entity_type=st.sampled_from(["device_tracker", "sensor", "button", "binary_sensor"]),
+    entity_type=st.sampled_from(
+        ["device_tracker", "sensor", "button", "binary_sensor"]
+    ),
 )
 @hypothesis_settings
 def test_entity_unique_id_is_deterministic(
@@ -270,7 +276,9 @@ def test_entity_unique_id_is_deterministic(
 @given(
     entry_id=st.text(min_size=1, max_size=32, alphabet="abcdef0123456789"),
     device_id=device_id_strategy,
-    entity_type=st.sampled_from(["device_tracker", "sensor", "button", "binary_sensor"]),
+    entity_type=st.sampled_from(
+        ["device_tracker", "sensor", "button", "binary_sensor"]
+    ),
 )
 @hypothesis_settings
 def test_entity_unique_id_contains_all_parts(
@@ -298,7 +306,9 @@ def test_integration_version_matches_manifest() -> None:
 
     # Extract version from const.py
     const_content = const_path.read_text()
-    const_match = re.search(r'INTEGRATION_VERSION:\s*str\s*=\s*["\']([^"\']+)["\']', const_content)
+    const_match = re.search(
+        r'INTEGRATION_VERSION:\s*str\s*=\s*["\']([^"\']+)["\']', const_content
+    )
     assert const_match, "INTEGRATION_VERSION not found in const.py"
     const_version = const_match.group(1)
 
@@ -333,7 +343,9 @@ def test_micro_sign_constant_is_greek_mu() -> None:
         micro_char = chr(int(micro_match.group(2), 16))
 
     # Greek small letter mu is U+03BC, micro sign is U+00B5
-    assert micro_char == "\u03bc", f"MICRO should be Greek mu (U+03BC), got U+{ord(micro_char):04X}"
+    assert micro_char == "\u03bc", (
+        f"MICRO should be Greek mu (U+03BC), got U+{ord(micro_char):04X}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -343,7 +355,11 @@ def test_micro_sign_constant_is_greek_mu() -> None:
 
 @given(
     data=st.recursive(
-        st.none() | st.booleans() | st.integers() | st.floats(allow_nan=False) | st.text(),
+        st.none()
+        | st.booleans()
+        | st.integers()
+        | st.floats(allow_nan=False)
+        | st.text(),
         lambda children: st.lists(children) | st.dictionaries(st.text(), children),
         max_leaves=10,
     )

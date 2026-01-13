@@ -163,12 +163,14 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
         if decrypt_attempts == 1:
             raise ValueError("stale")
         assert owner_key == b"\x01" * 32
-        return b"\xAA" * 32
+        return b"\xaa" * 32
 
     monkeypatch.setattr(
         decrypt_locations, "async_get_owner_key", fake_async_get_owner_key
     )
-    monkeypatch.setattr(decrypt_locations, "async_get_eid_info", fake_async_get_eid_info)
+    monkeypatch.setattr(
+        decrypt_locations, "async_get_eid_info", fake_async_get_eid_info
+    )
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(decrypt_locations, "decrypt_eik", fake_decrypt)
     monkeypatch.setattr(decrypt_locations, "flip_bits", lambda data, _: data)
@@ -189,7 +191,7 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
         decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
 
-    assert result == [b"\xAA" * 32]
+    assert result == [b"\xaa" * 32]
     assert cache.values.get("owner_key_user@example.com") is None
     assert owner_calls == [cache, cache]
     assert eid_calls == [cache]

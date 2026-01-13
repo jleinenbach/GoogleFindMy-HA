@@ -45,7 +45,7 @@ PATTERNS = {
         re.IGNORECASE,
     ),
     "grpc_service": re.compile(
-        r'(google\.internal\.spot\.v\d+\.SpotService/[A-Za-z0-9_]+)',
+        r"(google\.internal\.spot\.v\d+\.SpotService/[A-Za-z0-9_]+)",
         re.IGNORECASE,
     ),
     "url_path": re.compile(
@@ -57,10 +57,10 @@ PATTERNS = {
         re.IGNORECASE,
     ),
     "protobuf_class": re.compile(
-        r'(LocationReportsUpload|UploadLocationReports|LocationReport)',
+        r"(LocationReportsUpload|UploadLocationReports|LocationReport)",
     ),
     "api_call": re.compile(
-        r'(?:upload|send|post).*(?:location|report|beacon)',
+        r"(?:upload|send|post).*(?:location|report|beacon)",
         re.IGNORECASE,
     ),
 }
@@ -73,7 +73,7 @@ HIGH_CONFIDENCE_KEYWORDS = [
     "/v1/upload",
     "spot-pa.googleapis.com",
     "google.internal.spot",  # gRPC service pattern
-    "SpotService/Upload",    # gRPC method pattern
+    "SpotService/Upload",  # gRPC method pattern
 ]
 
 # Relevant logcat tags
@@ -98,8 +98,8 @@ def parse_logcat_line(line: str) -> tuple[str, str, str] | None:
     """
     # Format: timestamp pid tid priority tag: message
     match = re.match(
-        r'(?:\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+)?'
-        r'([VDIWEF])/([^:]+):\s*(.+)',
+        r"(?:\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+\d+\s+\d+\s+)?"
+        r"([VDIWEF])/([^:]+):\s*(.+)",
         line,
     )
 
@@ -251,7 +251,9 @@ def print_summary(candidates: list[EndpointCandidate]) -> None:  # noqa: PLR0915
             continue
 
         confidence_candidates = by_confidence[confidence]
-        print(f"\n{confidence.upper()} CONFIDENCE ({len(confidence_candidates)} matches):")
+        print(
+            f"\n{confidence.upper()} CONFIDENCE ({len(confidence_candidates)} matches):"
+        )
         print("-" * 80)
 
         for candidate in confidence_candidates:
@@ -263,7 +265,7 @@ def print_summary(candidates: list[EndpointCandidate]) -> None:  # noqa: PLR0915
             print(f"     Method: {candidate.method}")
             print(f"     Source: {candidate.source}")
             if len(candidate.log_line) > LOG_LINE_MAX_LENGTH:
-                print(f"     Log: {candidate.log_line[:LOG_LINE_MAX_LENGTH-3]}...")
+                print(f"     Log: {candidate.log_line[: LOG_LINE_MAX_LENGTH - 3]}...")
             else:
                 print(f"     Log: {candidate.log_line}")
 
@@ -288,7 +290,9 @@ def print_summary(candidates: list[EndpointCandidate]) -> None:  # noqa: PLR0915
         print("⚠️  No high-confidence matches found.")
         print()
         print("Most likely endpoint (based on existing Spot API patterns):")
-        print("   https://spot-pa.googleapis.com/google.internal.spot.v1.SpotService/UploadLocationReports")
+        print(
+            "   https://spot-pa.googleapis.com/google.internal.spot.v1.SpotService/UploadLocationReports"
+        )
         print()
         print("This pattern matches confirmed working endpoints in the codebase:")
         print("   - CreateBleDevice")

@@ -20,8 +20,10 @@ def _build_resolver(lookup_key: bytes, match: EIDMatch) -> GoogleFindMyEIDResolv
     resolver._decryption_status = {}
     resolver._last_lock_confirmation = {}
     resolver._locks = {}
+
     async def _async_noop(payload=None):
         return None
+
     resolver._store = SimpleNamespace(async_load=_async_noop, async_save=_async_noop)
     resolver._unsub_interval = None
     resolver._unsub_alignment = None

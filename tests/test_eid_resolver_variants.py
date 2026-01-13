@@ -92,7 +92,9 @@ def test_iter_rotation_windows_skips_negative_neighbors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_cache_uses_relative_timebases(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_cache_uses_relative_timebases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Relative bases must use elapsed time since the anchor."""
 
     resolver = _build_resolver(monkeypatch)
@@ -151,7 +153,9 @@ async def test_refresh_cache_uses_relative_timebases(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_cache_populates_all_variants_and_bases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Cache refresh should cover both curves, truncation, and byte-order options."""
 
     resolver = _build_resolver(monkeypatch)
@@ -197,7 +201,9 @@ async def test_refresh_cache_populates_all_variants_and_bases(monkeypatch: pytes
 
 
 @pytest.mark.asyncio
-async def test_refresh_cache_skips_negative_neighbor_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_cache_skips_negative_neighbor_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Zero-valued anchor candidates should be skipped entirely.
 
     Devices with pair_date=0 (like phones without deviceRegistration) should not
@@ -231,7 +237,9 @@ async def test_refresh_cache_skips_negative_neighbor_windows(monkeypatch: pytest
     ) -> bytes:
         assert 0 <= time_counter <= FHNA_COUNTER_MASK
         call_log.append(time_counter)
-        return original_generate(self, key_bytes, time_counter=time_counter, variant=variant)
+        return original_generate(
+            self, key_bytes, time_counter=time_counter, variant=variant
+        )
 
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_generate_variant", _guarded_generate)
 
@@ -252,7 +260,9 @@ async def test_refresh_cache_skips_negative_neighbor_windows(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_refresh_cache_converts_millisecond_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_refresh_cache_converts_millisecond_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Millisecond timestamps should normalize to seconds when plausible."""
 
     resolver = _build_resolver(monkeypatch)
@@ -282,7 +292,9 @@ async def test_refresh_cache_converts_millisecond_candidates(monkeypatch: pytest
     ) -> bytes:
         assert 0 <= time_counter <= FHNA_COUNTER_MASK
         call_log.append(time_counter)
-        return original_generate(self, key_bytes, time_counter=time_counter, variant=variant)
+        return original_generate(
+            self, key_bytes, time_counter=time_counter, variant=variant
+        )
 
     monkeypatch.setattr(GoogleFindMyEIDResolver, "_generate_variant", _guarded_generate)
 
@@ -296,13 +308,16 @@ async def test_refresh_cache_converts_millisecond_candidates(monkeypatch: pytest
     assert call_log
     assert all(ts <= FHNA_COUNTER_MASK for ts in call_log)
     assert any(
-        meta["timestamp_basis"] == "secrets_creation_date" and meta["rotation_timestamp"] <= FHNA_COUNTER_MASK
+        meta["timestamp_basis"] == "secrets_creation_date"
+        and meta["rotation_timestamp"] <= FHNA_COUNTER_MASK
         for meta in resolver._lookup_metadata.values()
     )
 
 
 @pytest.mark.asyncio
-async def test_resolve_eid_persists_variant_and_format(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_resolve_eid_persists_variant_and_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Resolver hits should persist the chosen variant and advertisement format."""
 
     resolver = _build_resolver(monkeypatch)
@@ -330,7 +345,11 @@ async def test_resolve_eid_persists_variant_and_format(monkeypatch: pytest.Monke
     await resolver._refresh_cache()
 
     reversed_entry = next(
-        (eid for eid, meta in resolver._lookup_metadata.items() if meta["advertisement_reversed"]),
+        (
+            eid
+            for eid, meta in resolver._lookup_metadata.items()
+            if meta["advertisement_reversed"]
+        ),
         None,
     )
     assert reversed_entry is not None

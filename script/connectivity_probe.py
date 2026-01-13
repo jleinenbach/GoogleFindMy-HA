@@ -5,6 +5,7 @@ This helper runs the project-standard connectivity check
 transcript to a log file, and prints the log location for quick citation reuse.
 Use the optional ``--output`` flag to redirect the log elsewhere.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -15,17 +15,23 @@ class _DummyAPI:
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
 
-    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         return dict(self._payload)
 
 
 class _TrackingFilter:
-    def __init__(self, should_filter: bool = False, replacement: dict[str, float] | None = None) -> None:
+    def __init__(
+        self, should_filter: bool = False, replacement: dict[str, float] | None = None
+    ) -> None:
         self.should_filter = should_filter
         self.replacement = replacement
         self.called = 0
 
-    def should_filter_detection(self, *_args: Any, **_kwargs: Any) -> tuple[bool, dict[str, float] | None]:
+    def should_filter_detection(
+        self, *_args: Any, **_kwargs: Any
+    ) -> tuple[bool, dict[str, float] | None]:
         self.called += 1
         return self.should_filter, self.replacement
 
@@ -34,7 +40,9 @@ class _RaisingFilter:
     def __init__(self) -> None:
         self.called = 0
 
-    def should_filter_detection(self, *_args: Any, **_kwargs: Any) -> tuple[bool, dict[str, float] | None]:
+    def should_filter_detection(
+        self, *_args: Any, **_kwargs: Any
+    ) -> tuple[bool, dict[str, float] | None]:
         self.called += 1
         raise AssertionError("Spam filter should not run when semantic mapping applies")
 
@@ -49,7 +57,9 @@ def _base_coordinator(
     coordinator.async_set_updated_data = lambda *_args, **_kwargs: None
     coordinator.push_updated = lambda *_args, **_kwargs: None
     coordinator._apply_report_type_cooldown = lambda *_args, **_kwargs: None
-    coordinator._should_preserve_precise_home_coordinates = lambda *_args, **_kwargs: False
+    coordinator._should_preserve_precise_home_coordinates = (
+        lambda *_args, **_kwargs: False
+    )
     coordinator._normalize_coords = lambda *_args, **_kwargs: True
     coordinator._is_significant_update = lambda *_args, **_kwargs: True
     coordinator.update_device_cache = lambda *_args, **_kwargs: None
@@ -192,7 +202,9 @@ async def test_poll_cycle_applies_mapping_before_spam_filter() -> None:
         }
     }
     google_filter = _RaisingFilter()
-    coordinator = _polling_coordinator(options, google_filter, {"semantic_name": "homehub"})
+    coordinator = _polling_coordinator(
+        options, google_filter, {"semantic_name": "homehub"}
+    )
 
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
 
@@ -247,7 +259,9 @@ def test_push_cache_applies_semantic_mapping() -> None:
     }
     coordinator = _push_coordinator(options)
 
-    coordinator.update_device_cache("dev-3", {"semantic_name": "lobby", "last_seen": 1234})
+    coordinator.update_device_cache(
+        "dev-3", {"semantic_name": "lobby", "last_seen": 1234}
+    )
 
     cached = coordinator._device_location_data["dev-3"]
     assert cached["latitude"] == pytest.approx(5.0)

@@ -483,13 +483,15 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
     coordinator._identity_key_to_devices = {}
     coordinator._propagating_location = False
 
-    encrypted_eik = b"\x66" * 60  # Wrapped 60-byte identity key payload (Moto Tag/Chipolo style)
-    decrypted_eik = b"\xAA" * 32
+    encrypted_eik = (
+        b"\x66" * 60
+    )  # Wrapped 60-byte identity key payload (Moto Tag/Chipolo style)
+    decrypted_eik = b"\xaa" * 32
 
     cache = TokenCache.__new__(TokenCache)
     cache._data = {
         "username": "user@example.com",
-        "owner_key_user@example.com": {"key": b"\xCC" * 32, "version": 7},
+        "owner_key_user@example.com": {"key": b"\xcc" * 32, "version": 7},
     }
     coordinator._cache = cache
 
@@ -533,7 +535,9 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
         lambda _registry, _entry_id: [registry_device],
     )
 
-    coordinator.update_device_cache("device-1", {"encrypted_identity_key": encrypted_eik})
+    coordinator.update_device_cache(
+        "device-1", {"encrypted_identity_key": encrypted_eik}
+    )
 
     identities = coordinator.get_active_device_identities()
 
@@ -545,7 +549,7 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
     assert identity.encrypted_identity_key == encrypted_eik
     assert identity.owner_key_version == 7
     assert unwrap_calls["ciphertext"] == encrypted_eik
-    assert unwrap_calls["owner_key"] == b"\xCC" * 32
+    assert unwrap_calls["owner_key"] == b"\xcc" * 32
 
 
 def test_coordinator_yields_identities_without_pair_date(

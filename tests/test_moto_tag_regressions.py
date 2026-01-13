@@ -120,7 +120,9 @@ def test_persistence_writes_moto_tag_material(monkeypatch: pytest.MonkeyPatch) -
     # Set up hass with eid_resolver in hass.data[DOMAIN][DATA_EID_RESOLVER]
     # (the correct location for the domain-level singleton)
     hass_data: dict[str, Any] = {DOMAIN: {DATA_EID_RESOLVER: mock_eid_resolver}}
-    coordinator.hass = SimpleNamespace(async_create_task=mock_create_task, data=hass_data)
+    coordinator.hass = SimpleNamespace(
+        async_create_task=mock_create_task, data=hass_data
+    )
 
     payload = {
         "identity_key": b"\xaa" * 32,
@@ -186,10 +188,14 @@ def test_hex_string_identity_key_normalization() -> None:
     assert len(normalized) == 32
 
     # Test that both formats produce identical results
-    assert coordinator._normalize_identity_key(raw_bytes) == coordinator._normalize_identity_key(hex_string)
+    assert coordinator._normalize_identity_key(
+        raw_bytes
+    ) == coordinator._normalize_identity_key(hex_string)
 
 
-def test_persistence_with_hex_string_identity_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_persistence_with_hex_string_identity_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Hex string identity_key from phones should trigger EID resolver refresh.
 
     Regression test: Ensures that identity_key provided as hex strings (common
@@ -215,7 +221,9 @@ def test_persistence_with_hex_string_identity_key(monkeypatch: pytest.MonkeyPatc
     coordinator._device_location_data = {}
 
     hass_data: dict[str, Any] = {DOMAIN: {DATA_EID_RESOLVER: mock_eid_resolver}}
-    coordinator.hass = SimpleNamespace(async_create_task=mock_create_task, data=hass_data)
+    coordinator.hass = SimpleNamespace(
+        async_create_task=mock_create_task, data=hass_data
+    )
 
     # Use hex string identity_key (as phones might provide)
     hex_identity_key = "bb" * 32  # 64 chars = 32 bytes
@@ -236,4 +244,6 @@ def test_persistence_with_hex_string_identity_key(monkeypatch: pytest.MonkeyPatc
     assert cached_data["secrets_creation_date"] == 1_700_000_456
 
     # Verify EID resolver refresh was triggered
-    assert len(created_tasks) == 1, "EID resolver refresh should be triggered for hex string identity_key"
+    assert len(created_tasks) == 1, (
+        "EID resolver refresh should be triggered for hex string identity_key"
+    )

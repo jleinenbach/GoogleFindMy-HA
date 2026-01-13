@@ -283,7 +283,9 @@ def test_mask_email_single_char_local() -> None:
 
 def test_looks_like_jwt_positive() -> None:
     """JWT-like strings should be detected."""
-    jwt_like = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
+    jwt_like = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature"
+    )
     assert aas_token_retrieval._looks_like_jwt(jwt_like) is True
 
 
@@ -292,7 +294,9 @@ def test_looks_like_jwt_negative() -> None:
     assert aas_token_retrieval._looks_like_jwt("aas_et/TOKEN") is False
     assert aas_token_retrieval._looks_like_jwt("no-dots") is False
     assert aas_token_retrieval._looks_like_jwt("one.dot") is False
-    assert aas_token_retrieval._looks_like_jwt("xy.z.abc") is False  # doesn't start with eyJ
+    assert (
+        aas_token_retrieval._looks_like_jwt("xy.z.abc") is False
+    )  # doesn't start with eyJ
 
 
 def test_disqualifies_oauth_for_exchange_jwt() -> None:
@@ -305,7 +309,9 @@ def test_disqualifies_oauth_for_exchange_jwt() -> None:
 
 def test_disqualifies_oauth_for_exchange_valid() -> None:
     """Valid OAuth tokens should not be disqualified."""
-    assert aas_token_retrieval._disqualifies_oauth_for_exchange("ya29.oauth_token") is None
+    assert (
+        aas_token_retrieval._disqualifies_oauth_for_exchange("ya29.oauth_token") is None
+    )
     assert aas_token_retrieval._disqualifies_oauth_for_exchange("aas_et/TOKEN") is None
 
 
@@ -323,7 +329,9 @@ def test_is_non_retryable_auth_invalid_grant() -> None:
 
 def test_is_non_retryable_auth_unauthorized_forbidden() -> None:
     """401/403-style errors should not be retryable."""
-    assert aas_token_retrieval._is_non_retryable_auth(RuntimeError("unauthorized")) is True
+    assert (
+        aas_token_retrieval._is_non_retryable_auth(RuntimeError("unauthorized")) is True
+    )
     assert aas_token_retrieval._is_non_retryable_auth(RuntimeError("forbidden")) is True
 
 

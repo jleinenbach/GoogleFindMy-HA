@@ -419,18 +419,12 @@ async def test_coordinator_propagates_visible_devices_to_registries() -> None:
         "ha-dev-1",
         "ha-dev-2",
     )
-    assert tuple(secondary_subentry.data.get("visible_device_ids", ())) == (
-        "ha-dev-2",
-    )
+    assert tuple(secondary_subentry.data.get("visible_device_ids", ())) == ("ha-dev-2",)
 
     assert entity_registry.by_subentry[core_subentry.subentry_id] == ("ha-dev-1",)
     assert device_registry.by_subentry[core_subentry.subentry_id] == ("ha-dev-1",)
-    assert entity_registry.by_subentry[secondary_subentry.subentry_id] == (
-        "ha-dev-2",
-    )
-    assert device_registry.by_subentry[secondary_subentry.subentry_id] == (
-        "ha-dev-2",
-    )
+    assert entity_registry.by_subentry[secondary_subentry.subentry_id] == ("ha-dev-2",)
+    assert device_registry.by_subentry[secondary_subentry.subentry_id] == ("ha-dev-2",)
 
     core_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     secondary_metadata = coordinator.get_subentry_metadata(key="secondary")
@@ -455,9 +449,7 @@ async def test_coordinator_default_features_map_to_core_group() -> None:
 
     tracker_metadata = coordinator.get_subentry_metadata(key=TRACKER_SUBENTRY_KEY)
     assert tracker_metadata is not None
-    expected_tracker_features = tuple(
-        sorted(dict.fromkeys(TRACKER_FEATURE_PLATFORMS))
-    )
+    expected_tracker_features = tuple(sorted(dict.fromkeys(TRACKER_FEATURE_PLATFORMS)))
     assert tracker_metadata.features == expected_tracker_features
 
 
@@ -523,9 +515,7 @@ async def test_options_settings_repairs_missing_service_subentry() -> None:  # n
     service_identifier = coordinator.stable_subentry_identifier(
         key=SERVICE_SUBENTRY_KEY
     )
-    binary_identifier = coordinator.stable_subentry_identifier(
-        feature="binary_sensor"
-    )
+    binary_identifier = coordinator.stable_subentry_identifier(feature="binary_sensor")
     assert binary_identifier == service_identifier
     tracker_identifier = coordinator.stable_subentry_identifier(
         feature="device_tracker"
@@ -551,9 +541,7 @@ async def test_options_settings_repairs_missing_service_subentry() -> None:  # n
 
     service_metadata = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
     assert service_metadata is not None
-    expected_service_features = tuple(
-        sorted(dict.fromkeys(SERVICE_FEATURE_PLATFORMS))
-    )
+    expected_service_features = tuple(sorted(dict.fromkeys(SERVICE_FEATURE_PLATFORMS)))
     assert service_metadata.features == expected_service_features
     overlapping = set(service_metadata.features) & set(TRACKER_FEATURE_PLATFORMS)
     for feature in overlapping:

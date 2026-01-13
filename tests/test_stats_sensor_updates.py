@@ -104,6 +104,7 @@ if device_registry_module is None:
     sys.modules["homeassistant.helpers.device_registry"] = device_registry_module
 
 if not hasattr(device_registry_module, "DeviceEntryType"):
+
     class DeviceEntryType:  # noqa: D401 - stub enum container
         SERVICE = "service"
 
@@ -158,6 +159,7 @@ if update_module is not None:
         data_coordinator.__init__ = _init  # type: ignore[assignment]
         data_coordinator.async_add_listener = _async_add_listener  # type: ignore[assignment]
         data_coordinator.async_update_listeners = _async_update_listeners  # type: ignore[assignment]
+
 
 class _StubHass:
     """Minimal Home Assistant stub exposing loop/create_task helpers."""
@@ -330,7 +332,9 @@ def test_history_fallback_increments_history_stat(
             "device_tracker.googlefindmy_device_1",
         )
         # Use object-based patching (er is imported in registry.py)
-        monkeypatch.setattr(coordinator_registry.er, "async_get", lambda _hass: registry)
+        monkeypatch.setattr(
+            coordinator_registry.er, "async_get", lambda _hass: registry
+        )
 
         # No live state available -> force history fallback.
         hass.states = SimpleNamespace(get=lambda _eid: None)
@@ -421,9 +425,7 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
         assert info.identifiers == expected
         assert getattr(info, "config_entry_id", None) is None
 
-        service_info = sensor.service_device_info(
-            include_subentry_identifier=True
-        )
+        service_info = sensor.service_device_info(include_subentry_identifier=True)
         assert getattr(service_info, "config_entry_id", None) is None
     finally:
         drain_loop(loop)
@@ -440,7 +442,9 @@ def test_semantic_label_sensor_exposes_observations() -> None:
         coordinator = GoogleFindMyCoordinator(hass, cache=_StubCache())
         coordinator.config_entry = _StubConfigEntry()
 
-        subentry_identifier = coordinator.stable_subentry_identifier(key=SERVICE_SUBENTRY_KEY)
+        subentry_identifier = coordinator.stable_subentry_identifier(
+            key=SERVICE_SUBENTRY_KEY
+        )
         sensor = GoogleFindMySemanticLabelSensor(
             coordinator,
             subentry_key=SERVICE_SUBENTRY_KEY,

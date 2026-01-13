@@ -57,7 +57,9 @@ class _StubEntityRegistry:
     def __init__(self, entries: list[_StubRegistryEntry]) -> None:
         self.entities = {entry.entity_id: entry for entry in entries}
 
-    def async_get_entity_id(self, domain: str, platform: str, unique_id: str) -> str | None:
+    def async_get_entity_id(
+        self, domain: str, platform: str, unique_id: str
+    ) -> str | None:
         for entry in self.entities.values():
             if (
                 entry.platform == platform
@@ -74,7 +76,9 @@ class _StubEntityRegistry:
 class _StubDeviceEntry:
     """Device registry entry stub with user-configurable labels."""
 
-    def __init__(self, *, name: str | None = None, name_by_user: str | None = None) -> None:
+    def __init__(
+        self, *, name: str | None = None, name_by_user: str | None = None
+    ) -> None:
         self.name = name
         self.name_by_user = name_by_user
 
@@ -83,7 +87,9 @@ class _StubDeviceRegistry:
     def __init__(self, devices: dict[str, _StubDeviceEntry]) -> None:
         self.devices = devices
 
-    def async_get(self, device_id: str) -> _StubDeviceEntry | None:  # pragma: no cover - passthrough
+    def async_get(
+        self, device_id: str
+    ) -> _StubDeviceEntry | None:  # pragma: no cover - passthrough
         return self.devices.get(device_id)
 
 
@@ -126,7 +132,9 @@ def _install_history_stub(
 ) -> None:
     history_module = ModuleType("homeassistant.components.recorder.history")
 
-    def _get_significant_states(_hass: Any, _start: Any, _end: Any, _entity_ids: list[str]) -> dict[str, list[_StubState]]:
+    def _get_significant_states(
+        _hass: Any, _start: Any, _end: Any, _entity_ids: list[str]
+    ) -> dict[str, list[_StubState]]:
         if calls is not None:
             calls.extend(_entity_ids)
         return {entity_id: [state]}
@@ -138,13 +146,19 @@ def _install_history_stub(
     components_module = ModuleType("homeassistant.components")
     components_module.recorder = recorder_module
 
-    monkeypatch.setitem(sys.modules, "homeassistant.components.recorder.history", history_module)
-    monkeypatch.setitem(sys.modules, "homeassistant.components.recorder", recorder_module)
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.recorder.history", history_module
+    )
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.recorder", recorder_module
+    )
     monkeypatch.setitem(sys.modules, "homeassistant.components", components_module)
 
 
 @pytest.mark.asyncio
-async def test_get_missing_token_returns_unauthorized(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_missing_token_returns_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Return 401 when no token is provided."""
 
     hass = _StubHass([])
@@ -156,14 +170,18 @@ async def test_get_missing_token_returns_unauthorized(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
-async def test_get_invalid_token_returns_unauthorized(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_invalid_token_returns_unauthorized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Return 401 when token does not match any entry."""
 
     entry = _StubEntry("entry-id", runtime_data=None)
     hass = _StubHass([entry])
     view = map_view.GoogleFindMyMapView(hass)
 
-    response = await view.get(SimpleNamespace(query={"token": "invalid"}), device_id="device123")
+    response = await view.get(
+        SimpleNamespace(query={"token": "invalid"}), device_id="device123"
+    )
 
     assert response.status == 401
 
@@ -207,7 +225,9 @@ async def test_get_authorized_includes_leaflet(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_get_skips_foreign_registry_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_skips_foreign_registry_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Do not leak history from a tracker bound to a different config entry."""
 
     device_id = "device456"
@@ -231,7 +251,9 @@ async def test_get_skips_foreign_registry_entries(monkeypatch: pytest.MonkeyPatc
     # Guard against history lookups when entity_id is rejected
     history_module = ModuleType("homeassistant.components.recorder.history")
 
-    def _get_significant_states(_hass: Any, _start: Any, _end: Any, _entity_ids: list[str]) -> dict[str, list[_StubState]]:
+    def _get_significant_states(
+        _hass: Any, _start: Any, _end: Any, _entity_ids: list[str]
+    ) -> dict[str, list[_StubState]]:
         raise AssertionError("history should not be queried for mismatched entries")
 
     history_module.get_significant_states = _get_significant_states  # type: ignore[attr-defined]
@@ -240,8 +262,12 @@ async def test_get_skips_foreign_registry_entries(monkeypatch: pytest.MonkeyPatc
     components_module = ModuleType("homeassistant.components")
     components_module.recorder = recorder_module
 
-    monkeypatch.setitem(sys.modules, "homeassistant.components.recorder.history", history_module)
-    monkeypatch.setitem(sys.modules, "homeassistant.components.recorder", recorder_module)
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.recorder.history", history_module
+    )
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.recorder", recorder_module
+    )
     monkeypatch.setitem(sys.modules, "homeassistant.components", components_module)
 
     ha_uuid = hass.data["core.uuid"]
@@ -258,7 +284,9 @@ async def test_get_skips_foreign_registry_entries(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
-async def test_get_prefers_matching_entry_over_foreign_match(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_prefers_matching_entry_over_foreign_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Use registry entries scoped to the token's config entry even with competing IDs."""
 
     device_id = "device789"
@@ -354,7 +382,9 @@ async def test_registry_labels_fill_blank_coordinator_names(
 
 
 @pytest.mark.asyncio
-async def test_missing_registry_and_coordinator_use_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_registry_and_coordinator_use_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Return a placeholder name when neither coordinator nor registry provides labels."""
 
     device_id = "device000"
@@ -396,4 +426,7 @@ async def test_redirect_uses_relative_location(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(map_view.web.HTTPFound) as ctx:
         await view.get(request, device_id="device123")
 
-    assert ctx.value.location == "/api/googlefindmy/map/device123?token=abc&start=2024-01-01T00%3A00%3A00Z"
+    assert (
+        ctx.value.location
+        == "/api/googlefindmy/map/device123?token=abc&start=2024-01-01T00%3A00%3A00Z"
+    )

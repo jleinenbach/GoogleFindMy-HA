@@ -224,7 +224,7 @@ async def test_async_decrypt_location_response_unwraps_60_byte_eik(
 
     async def fake_get_owner_key(*, cache):  # type: ignore[no-untyped-def]
         unwrap_calls["cache"] = cache
-        return OwnerKeyInfo(key=b"\xAA" * 32, version=3)
+        return OwnerKeyInfo(key=b"\xaa" * 32, version=3)
 
     async def fake_to_thread(func, *args, **kwargs):  # type: ignore[no-untyped-def]
         return func(*args, **kwargs)
@@ -234,9 +234,7 @@ async def test_async_decrypt_location_response_unwraps_60_byte_eik(
         unwrap_calls["encrypted"] = encrypted_identity_key
         return unwrapped_eik
 
-    async def fake_offload_aes(
-        identity_key: bytes, encrypted_location: bytes
-    ) -> bytes:
+    async def fake_offload_aes(identity_key: bytes, encrypted_location: bytes) -> bytes:
         offload_calls["identity_key"] = identity_key
         offload_calls["encrypted_location"] = encrypted_location
         return location_bytes
@@ -285,7 +283,7 @@ async def test_async_decrypt_location_response_unwraps_60_byte_eik(
     assert len(offload_calls["identity_key"]) == 32
     assert offload_calls["encrypted_location"] == b"ciphertext"
     assert unwrap_calls["cache"] is cache
-    assert unwrap_calls["owner_key"] == b"\xAA" * 32
+    assert unwrap_calls["owner_key"] == b"\xaa" * 32
     assert unwrap_calls["encrypted"] == encrypted_eik
     assert identity_key_calls["count"] == 0
     assert "[DIAG-ALERT] Key length" not in caplog.text

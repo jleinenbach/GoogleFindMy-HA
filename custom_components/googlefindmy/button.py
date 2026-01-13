@@ -1321,7 +1321,9 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
 # ----------------------------- Token Regeneration Buttons -----------------------------------
 
 
-class GoogleFindMyTokenRefreshButtonBase(GoogleFindMyEntity, ButtonEntity, RestoreEntityType):
+class GoogleFindMyTokenRefreshButtonBase(
+    GoogleFindMyEntity, ButtonEntity, RestoreEntityType
+):
     """Base class for token regeneration buttons with shared cooldown logic.
 
     Token regeneration buttons are disabled by default and share a cooldown

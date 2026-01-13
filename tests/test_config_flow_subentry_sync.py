@@ -269,7 +269,9 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
         context_map=context_map,
     )
     manager = flow.hass.config_entries  # type: ignore[assignment]
-    assert len(manager.created) == 2, "both service and tracker subentries should be created"
+    assert len(manager.created) == 2, (
+        "both service and tracker subentries should be created"
+    )
 
     def _record_for(key: str) -> dict[str, Any]:
         for record in manager.created:
@@ -502,7 +504,9 @@ async def test_device_selection_updates_existing_feature_group() -> None:
     manager = flow.hass.config_entries  # type: ignore[assignment]
     # Service subentry should have been created alongside updating the tracker
     created_service = next(
-        record for record in manager.created if record["subentry_type"] == SUBENTRY_TYPE_SERVICE
+        record
+        for record in manager.created
+        if record["subentry_type"] == SUBENTRY_TYPE_SERVICE
     )
     assert created_service["data"]["group_key"] == SERVICE_SUBENTRY_KEY
     assert created_service["unique_id"] == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
@@ -584,9 +588,7 @@ def test_service_device_binding_sets_add_config_entry_id(
         def __init__(self) -> None:
             self.updated: list[dict[str, Any]] = []
 
-        def async_get_device(
-            self, *args: Any, **kwargs: Any
-        ) -> SimpleNamespace | None:
+        def async_get_device(self, *args: Any, **kwargs: Any) -> SimpleNamespace | None:
             if args:
                 identifiers = args[0]
             else:
@@ -635,9 +637,7 @@ def test_service_device_binding_retries_with_legacy_keywords(
         def __init__(self) -> None:
             self.updated: list[dict[str, Any]] = []
 
-        def async_get_device(
-            self, *args: Any, **kwargs: Any
-        ) -> SimpleNamespace | None:
+        def async_get_device(self, *args: Any, **kwargs: Any) -> SimpleNamespace | None:
             if args:
                 identifiers = args[0]
             else:
@@ -738,7 +738,10 @@ async def test_subentry_manager_adopts_existing_owner_on_repeated_collision(
     assert dict(owner.data)["group_key"] == SERVICE_SUBENTRY_KEY
     assert owner.title == definition.title
     assert hass.config_entries.updated[-1]["unique_id"] is None
-    assert hass.config_entries.updated[-1]["data"]["features"] == definition.data["features"]
+    assert (
+        hass.config_entries.updated[-1]["data"]["features"]
+        == definition.data["features"]
+    )
 
 
 @pytest.mark.asyncio
@@ -864,14 +867,17 @@ async def test_async_step_migrate_creates_subentries_and_moves_options() -> None
     manager = flow.hass.config_entries  # type: ignore[assignment]
     assert len(manager.created) == EXPECTED_CREATED_SUBENTRIES
     assert any(
-        record["data"]["group_key"] == SERVICE_SUBENTRY_KEY for record in manager.created
+        record["data"]["group_key"] == SERVICE_SUBENTRY_KEY
+        for record in manager.created
     )
     assert any(
-        record["data"]["group_key"] == TRACKER_SUBENTRY_KEY for record in manager.created
+        record["data"]["group_key"] == TRACKER_SUBENTRY_KEY
+        for record in manager.created
     )
-    assert manager.entry_updates and manager.entry_updates[-1].get(
-        "version"
-    ) == config_flow.ConfigFlow.VERSION
+    assert (
+        manager.entry_updates
+        and manager.entry_updates[-1].get("version") == config_flow.ConfigFlow.VERSION
+    )
 
     placeholders = flow.context.get("title_placeholders", {})
     assert placeholders.get("email") == "legacy@example.com"

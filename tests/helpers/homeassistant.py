@@ -225,6 +225,7 @@ class GoogleFindMyConfigEntryStub:
         self._unload_callbacks.clear()
         return callbacks
 
+
 def _assign_if_present(target: Any, attribute: str, value: Any) -> None:
     """Assign ``value`` to ``attribute`` when the target exposes the field."""
 
@@ -257,14 +258,10 @@ class _TransientUnknownEntryConfig:
     setup_failures: int = 0
 
 
-TransientUnknownConfigInput = (
-    _TransientUnknownEntryConfig | Mapping[str, int] | int
-)
+TransientUnknownConfigInput = _TransientUnknownEntryConfig | Mapping[str, int] | int
 
 
-def resolve_config_entry_lookup(
-    entries: Iterable[Any], entry_id: str
-) -> Any | None:
+def resolve_config_entry_lookup(entries: Iterable[Any], entry_id: str) -> Any | None:
     """Return an entry or subentry matching ``entry_id``.
 
     This mirrors the lookup contract exercised by
@@ -286,10 +283,16 @@ def resolve_config_entry_lookup(
                 return candidate
             for subentry in managed.values():
                 candidate_entry_id = getattr(subentry, "entry_id", None)
-                if isinstance(candidate_entry_id, str) and candidate_entry_id == entry_id:
+                if (
+                    isinstance(candidate_entry_id, str)
+                    and candidate_entry_id == entry_id
+                ):
                     return subentry
                 candidate_subentry_id = getattr(subentry, "subentry_id", None)
-                if isinstance(candidate_subentry_id, str) and candidate_subentry_id == entry_id:
+                if (
+                    isinstance(candidate_subentry_id, str)
+                    and candidate_subentry_id == entry_id
+                ):
                     return subentry
 
     for entry in entries:
@@ -297,10 +300,16 @@ def resolve_config_entry_lookup(
         if isinstance(subentries, dict):
             for subentry in subentries.values():
                 candidate_entry_id = getattr(subentry, "entry_id", None)
-                if isinstance(candidate_entry_id, str) and candidate_entry_id == entry_id:
+                if (
+                    isinstance(candidate_entry_id, str)
+                    and candidate_entry_id == entry_id
+                ):
                     return subentry
                 candidate_subentry_id = getattr(subentry, "subentry_id", None)
-                if isinstance(candidate_subentry_id, str) and candidate_subentry_id == entry_id:
+                if (
+                    isinstance(candidate_subentry_id, str)
+                    and candidate_subentry_id == entry_id
+                ):
                     return subentry
 
     return None
@@ -319,7 +328,8 @@ class FakeConfigEntriesManager:
         *,
         migration_success: bool = True,
         supports_migrate: bool = True,
-        transient_unknown_entries: Mapping[str, TransientUnknownConfigInput] | None = None,
+        transient_unknown_entries: Mapping[str, TransientUnknownConfigInput]
+        | None = None,
     ) -> None:
         self._entries: list[FakeConfigEntry] = list(entries or [])
         self.reload_calls: list[str] = []
@@ -376,7 +386,6 @@ class FakeConfigEntriesManager:
         if setup_failures is not None:
             resolved.setup_failures = setup_failures
         self._transient_unknown[entry_id] = resolved
-
 
     @staticmethod
     def _coerce_transient_unknown_config(
@@ -481,9 +490,7 @@ class FakeConfigEntriesManager:
 class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
     """Simulate delayed registry publication when ``async_create_subentry`` is absent."""
 
-    def __init__(
-        self, parent_entry: FakeConfigEntry, resolved_child: Any
-    ) -> None:
+    def __init__(self, parent_entry: FakeConfigEntry, resolved_child: Any) -> None:
         super().__init__([parent_entry])
         self._resolved_child = resolved_child
         self.provisional_subentry: Any | None = None
@@ -491,9 +498,7 @@ class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
         # Mirror Home Assistant cores that do not expose async_create_subentry.
         self.async_create_subentry = None  # type: ignore[assignment]
 
-    def async_add_subentry(
-        self, entry: FakeConfigEntry, subentry: Any
-    ) -> None:
+    def async_add_subentry(self, entry: FakeConfigEntry, subentry: Any) -> None:
         """Stage a provisional subentry and defer registry visibility."""
 
         registered = getattr(entry, "_registered_subentry_ids", None)
@@ -523,9 +528,7 @@ class DeferredRegistryConfigEntriesManager(FakeConfigEntriesManager):
 
         provisional = self.provisional_subentry
         provisional_id = (
-            getattr(provisional, "entry_id", None)
-            if provisional is not None
-            else None
+            getattr(provisional, "entry_id", None) if provisional is not None else None
         )
         resolved_id = getattr(self._resolved_child, "entry_id", None)
         if (
@@ -774,7 +777,9 @@ class FakeDeviceRegistry:
             if entry_id in device.config_entries
         )
 
-    def async_remove_device(self, device_id: str) -> None:  # pragma: no cover - defensive
+    def async_remove_device(
+        self, device_id: str
+    ) -> None:  # pragma: no cover - defensive
         raise AssertionError(f"Unexpected device removal for {device_id}")
 
 
@@ -805,7 +810,9 @@ class FakeHass:
     data: dict[str, Any] = field(default_factory=dict)
     loop: asyncio.AbstractEventLoop | None = None
     loop_thread_id: int | None = None
-    async_create_task: Callable[[Awaitable[Any], str | None], asyncio.Task[Any]] | None = None
+    async_create_task: (
+        Callable[[Awaitable[Any], str | None], asyncio.Task[Any]] | None
+    ) = None
     dispatcher_send_hook: Callable[[str, tuple[Any, ...]], None] | None = None
     dispatcher_signals: list[tuple[str, tuple[Any, ...]]] = field(default_factory=list)
 
@@ -828,4 +835,3 @@ def capture_async_dispatcher_send(
 
     # Preserve default no-op behaviour for unrelated hass doubles
     return
-
