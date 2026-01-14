@@ -25,6 +25,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from ..const import DEFAULT_MIN_POLL_INTERVAL
 from ..SpotApi.spot_request import SpotAuthPermanentError
+from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
 if TYPE_CHECKING:
     from .main import GoogleFindMyCoordinator
@@ -113,16 +114,16 @@ class LocateOperations:
         payload["longitude"] = lon_f
 
         # Best-effort normalize accuracy (if present).
-        # GPS accuracy of <= 0 is physically impossible (real GPS: 3-50m typically).
+        # GPS accuracy < 1.0m is physically impossible for consumer hardware.
         # Such values indicate missing/corrupted data from the API; remove them.
         acc = payload.get("accuracy")
         if acc is not None:
             try:
                 acc_f = float(acc)
-                if math.isfinite(acc_f) and acc_f > 0:
+                if math.isfinite(acc_f) and acc_f >= MIN_PHYSICAL_ACCURACY_M:
                     payload["accuracy"] = acc_f
                 else:
-                    # Invalid accuracy (0.0, negative, NaN, Inf) - remove it
+                    # Invalid accuracy (< 1.0m, negative, NaN, Inf) - remove it
                     payload.pop("accuracy", None)
             except (TypeError, ValueError):
                 # Accuracy malformed; remove it

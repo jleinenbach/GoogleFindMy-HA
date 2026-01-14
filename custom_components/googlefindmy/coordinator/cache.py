@@ -23,7 +23,7 @@ from collections import deque
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from ..const import DATA_EID_RESOLVER, DEFAULT_FALLBACK_ACCURACY_M, DOMAIN
+from ..const import DATA_EID_RESOLVER, DOMAIN
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
 )
@@ -37,6 +37,8 @@ from .helpers.cache import (
     should_clear_metadata_only_flag as _should_clear_metadata_only_flag_impl,
 )
 from .helpers.geo import (
+    DEFAULT_ACCURACY_FALLBACK_M,
+    MIN_PHYSICAL_ACCURACY_M,
     coerce_float as _coerce_float_impl,
 )
 from .helpers.geo import (
@@ -605,10 +607,8 @@ class CacheOperations:
         Returns:
             ``True`` when the caller should accept the payload.
         """
-        # Minimum plausible GPS accuracy for consumer hardware (meters).
-        # Anything below this is noise or API artifact, not a real measurement.
-        # Even best-case differential GPS rarely achieves < 1m accuracy.
-        MIN_PLAUSIBLE_ACCURACY_M = 1.0
+        # Use centralized constant from helpers/geo.py
+        # MIN_PHYSICAL_ACCURACY_M = 1.0m (consumer GPS floor)
 
         # Maximum accepted future drift in seconds (2 hours)
         MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
@@ -624,13 +624,13 @@ class CacheOperations:
         if new_acc is not None:
             try:
                 acc_f = float(new_acc)
-                if not math.isfinite(acc_f) or acc_f < MIN_PLAUSIBLE_ACCURACY_M:
+                if not math.isfinite(acc_f) or acc_f < MIN_PHYSICAL_ACCURACY_M:
                     self.increment_stat("invalid_accuracy_drop_count")
                     _LOGGER.debug(
                         "Rejecting update for %s: physically impossible accuracy (%s < %sm)",
                         device_id,
                         new_acc,
-                        MIN_PLAUSIBLE_ACCURACY_M,
+                        MIN_PHYSICAL_ACCURACY_M,
                     )
                     return False
             except (TypeError, ValueError):
@@ -762,10 +762,10 @@ class CacheOperations:
         def _safe_accuracy(value: float | None) -> float:
             """Convert raw accuracy to a safe value for fusion calculations.
 
-            GPS accuracy of <= 0 is physically impossible (real GPS: 3-50m typically).
+            GPS accuracy < 1.0m is physically impossible for consumer hardware.
             Such values indicate missing/corrupted data and should use the fallback.
 
-            The fallback (DEFAULT_FALLBACK_ACCURACY_M = 50m) is based on:
+            The fallback (DEFAULT_ACCURACY_FALLBACK_M = 50m) is based on:
               - Bluetooth range: ~40-80m (tracker position uncertainty)
               - GPS error margin: ~10-30m (finder device uncertainty)
 
@@ -774,12 +774,16 @@ class CacheOperations:
             is comparable to 1/20² = 0.0025, so real GPS fixes can override it.
             With 1/10000² the poisoned value would have essentially zero weight
             but still persist in the cache.
+
+            SELF-HEALING: If the cache contains a poisoned value (< 1.0m),
+            treating it as 50m allows new valid data to properly override it.
             """
             if value is None or not math.isfinite(value):
-                return DEFAULT_FALLBACK_ACCURACY_M
-            # <= 0 is physically impossible for GPS accuracy
-            if value <= 0:
-                return DEFAULT_FALLBACK_ACCURACY_M
+                return DEFAULT_ACCURACY_FALLBACK_M
+            # < MIN_PHYSICAL_ACCURACY_M is physically impossible for GPS
+            # This also handles self-healing of corrupted cache entries
+            if value < MIN_PHYSICAL_ACCURACY_M:
+                return DEFAULT_ACCURACY_FALLBACK_M
             return value
 
         existing_acc = _safe_accuracy(existing_acc_raw)

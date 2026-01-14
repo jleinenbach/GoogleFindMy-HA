@@ -24,7 +24,18 @@ from typing import Any
 # Earth radius in meters (WGS84 mean radius)
 EARTH_RADIUS_M = 6371000.0
 
-# Default fallback for invalid/missing GPS accuracy
+# Minimum physically plausible GPS accuracy (meters).
+# Consumer GPS hardware cannot achieve sub-meter accuracy.
+# Even differential GPS rarely achieves < 1m in practice.
+# Values below this indicate API artifacts, not real measurements.
+MIN_PHYSICAL_ACCURACY_M = 1.0
+
+# Default fallback for invalid/missing GPS accuracy.
+# Based on Bluetooth range (~40-80m) + GPS error (~10-30m).
+# Using 50m prevents "Fusion Lock-in" while allowing real fixes to override.
+DEFAULT_ACCURACY_FALLBACK_M = 50.0
+
+# Legacy constant (10km) for truly unknown locations
 DEFAULT_ACCURACY_FALLBACK = 10000.0
 
 
@@ -98,31 +109,79 @@ def coerce_float(value: Any) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def safe_accuracy(value: float | None) -> float:
-    """Normalize GPS accuracy to a safe, finite value.
+def safe_accuracy(value: float | None, *, fallback: float | None = None) -> float:
+    """Normalize GPS accuracy to a safe, finite, physically plausible value.
 
-    Invalid, missing, or negative accuracy values are replaced with
-    a large fallback (10km) to indicate low confidence.
+    GPS accuracy of < 1.0m is physically impossible for consumer hardware.
+    Such values indicate API artifacts or missing data, not real measurements.
+
+    Invalid, missing, or sub-meter accuracy values are replaced with
+    a fallback (default: 50m for Bluetooth range estimation).
 
     Args:
         value: GPS accuracy in meters, or None.
+        fallback: Custom fallback value. Defaults to DEFAULT_ACCURACY_FALLBACK_M (50m).
 
     Returns:
-        A non-negative finite float representing accuracy in meters.
+        A finite float >= MIN_PHYSICAL_ACCURACY_M representing accuracy in meters.
 
     Example:
         >>> safe_accuracy(50.0)
         50.0
         >>> safe_accuracy(None)
-        10000.0
+        50.0
+        >>> safe_accuracy(0.0)
+        50.0
+        >>> safe_accuracy(0.5)
+        50.0
         >>> safe_accuracy(-5.0)
-        10000.0
+        50.0
     """
+    if fallback is None:
+        fallback = DEFAULT_ACCURACY_FALLBACK_M
+
     if value is None or not math.isfinite(value):
-        return DEFAULT_ACCURACY_FALLBACK
-    if value < 0:
-        return DEFAULT_ACCURACY_FALLBACK
+        return fallback
+
+    # Values below MIN_PHYSICAL_ACCURACY_M are physically impossible
+    # for consumer GPS/Bluetooth hardware
+    if value < MIN_PHYSICAL_ACCURACY_M:
+        return fallback
+
     return value
+
+
+def is_valid_accuracy(value: float | None) -> bool:
+    """Check if an accuracy value is physically plausible.
+
+    GPS accuracy must be:
+    - Not None
+    - Finite (not NaN or Inf)
+    - >= MIN_PHYSICAL_ACCURACY_M (1.0m)
+
+    Args:
+        value: GPS accuracy in meters, or None.
+
+    Returns:
+        True if the value represents a valid GPS measurement.
+
+    Example:
+        >>> is_valid_accuracy(20.0)
+        True
+        >>> is_valid_accuracy(0.0)
+        False
+        >>> is_valid_accuracy(0.5)
+        False
+        >>> is_valid_accuracy(None)
+        False
+    """
+    if value is None:
+        return False
+    try:
+        v = float(value)
+        return math.isfinite(v) and v >= MIN_PHYSICAL_ACCURACY_M
+    except (TypeError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
