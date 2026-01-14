@@ -28,6 +28,7 @@ import pytest
 
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
     _get_rank_tuple,
+    _merge_semantics_if_near_ts,
     _normalize_location_dict,
     _select_best_location,
 )
@@ -925,3 +926,338 @@ class TestIntegrationScenarios:
             f"Valid accuracy 25.0m should get rank -25.0 (got {acc_rank})"
         )
         assert not math.isinf(acc_rank), "Valid accuracy should not get -inf rank"
+
+
+# =============================================================================
+# SECTION 8: Timestamp Collision Identity Theft Protection
+# =============================================================================
+
+
+class TestTimestampCollisionIdentityTheft:
+    """Test that identical timestamps don't cause lower-ranked entries to win.
+
+    CONTEXT: Google sends batch updates where multiple reports have the exact
+    same timestamp. Without proper protection, "last-write-wins" semantics
+    could let a lower-ranked (crowdsourced) report overwrite coordinates
+    from a higher-ranked (own device) report.
+
+    INVARIANT: In _merge_semantics_if_near_ts, when timestamps are equal,
+    the first (higher-ranked) entry must preserve its coordinates.
+    This is achieved by using `>` instead of `>=` in the comparison.
+    """
+
+    def test_identical_timestamp_preserves_best_rank_coordinates(self) -> None:
+        """When timestamps collide, higher-ranked coordinates must NOT be overwritten.
+
+        SCENARIO:
+        - Candidate 1 (High Rank): is_own_report=True, coords=(48.1, 11.1), ts=1000
+        - Candidate 2 (Low Rank): is_own_report=False, coords=(50.0, 10.0), ts=1000
+
+        Since Candidate 1 is ranked higher (own_report), its coordinates must
+        be preserved even though Candidate 2 has the same timestamp.
+        """
+        # High-ranked candidate with coordinates
+        high_rank: dict[str, Any] = {
+            "latitude": 48.1,
+            "longitude": 11.1,
+            "accuracy": 20.0,
+            "last_seen": 1000,
+            "is_own_report": True,
+            "status": "LAST_KNOWN",
+            "status_code": 1,
+        }
+
+        # Low-ranked candidate with DIFFERENT coordinates, SAME timestamp
+        low_rank: dict[str, Any] = {
+            "latitude": 50.0,  # Different!
+            "longitude": 10.0,  # Different!
+            "accuracy": 15.0,
+            "last_seen": 1000,  # SAME timestamp
+            "is_own_report": False,
+            "status": "CROWDSOURCED",
+            "status_code": 2,
+        }
+
+        # Normalize candidates (simulating the decoder pipeline)
+        normed_high = _normalize_location_dict(high_rank)
+        normed_low = _normalize_location_dict(low_rank)
+
+        # Verify ranking: high_rank should come first
+        rank_high = _get_rank_tuple(normed_high)
+        rank_low = _get_rank_tuple(normed_low)
+        assert rank_high > rank_low, (
+            f"Own report should rank higher than crowdsourced.\n"
+            f"High rank: {rank_high}\n"
+            f"Low rank: {rank_low}"
+        )
+
+        # Simulate _merge_semantics_if_near_ts with high_rank as "best"
+        # The normed_cands list is sorted by rank (high first)
+        normed_cands = [normed_high, normed_low]
+        result = _merge_semantics_if_near_ts(dict(normed_high), normed_cands)
+
+        # CRITICAL: The coordinates must be from high_rank, not low_rank
+        assert result.get("latitude") == pytest.approx(48.1), (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"IDENTITY THEFT DETECTED!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"Lower-ranked report (crowdsourced) overwrote coordinates from\n"
+            f"higher-ranked report (own device) due to timestamp collision.\n"
+            f"\n"
+            f"Expected latitude: 48.1 (from own device report)\n"
+            f"Actual latitude: {result.get('latitude')} (from crowdsourced)\n"
+            f"\n"
+            f"ROOT CAUSE: _merge_semantics_if_near_ts uses >= instead of >\n"
+            f"for timestamp comparison, causing 'last-write-wins' behavior.\n"
+            f"\n"
+            f"FIX: Change 'if ts >= best_coordinate_ts' to 'if ts > best_coordinate_ts'\n"
+            f"in decoder.py :: _merge_semantics_if_near_ts()\n"
+            f"{'=' * 70}"
+        )
+        assert result.get("longitude") == pytest.approx(11.1), (
+            "Longitude must also be from the higher-ranked report"
+        )
+
+    def test_semantic_only_best_borrows_coords_from_any_timestamp(self) -> None:
+        """When best candidate has no coordinates, it can borrow from others.
+
+        This is EXPECTED behavior - a semantic-only "own report" should borrow
+        coordinates from a nearby crowdsourced report. The identity theft
+        protection only prevents OVERWRITING existing coordinates.
+        """
+        # High-ranked semantic-only report (no coordinates)
+        semantic_own: dict[str, Any] = {
+            "semantic_name": "Home",
+            "last_seen": 1000,
+            "is_own_report": True,
+            "status": "LAST_KNOWN",
+            "status_code": 1,
+            # No latitude/longitude!
+        }
+
+        # Low-ranked report with coordinates
+        coords_crowdsourced: dict[str, Any] = {
+            "latitude": 50.0,
+            "longitude": 10.0,
+            "accuracy": 15.0,
+            "last_seen": 1000,  # Same timestamp
+            "is_own_report": False,
+            "status": "CROWDSOURCED",
+            "status_code": 2,
+        }
+
+        normed_semantic = _normalize_location_dict(semantic_own)
+        normed_coords = _normalize_location_dict(coords_crowdsourced)
+        normed_cands = [normed_semantic, normed_coords]
+
+        result = _merge_semantics_if_near_ts(dict(normed_semantic), normed_cands)
+
+        # EXPECTED: semantic report borrows coordinates (this is OK)
+        # The key is that it ADDS coordinates, not OVERWRITES existing ones.
+        assert result.get("semantic_name") == "Home", (
+            "Semantic label should be preserved from the best candidate"
+        )
+        # Coordinates are borrowed - this is valid behavior
+        if "latitude" in result and "longitude" in result:
+            # Document that borrowing happened (not a failure)
+            assert result.get("latitude") == pytest.approx(50.0)
+            assert result.get("longitude") == pytest.approx(10.0)
+
+    def test_newer_timestamp_can_update_coordinates(self) -> None:
+        """A report with a STRICTLY newer timestamp CAN update coordinates.
+
+        This ensures the protection doesn't prevent legitimate updates.
+        Only EQUAL timestamps should preserve the first entry's coordinates.
+        """
+        # Older report
+        older: dict[str, Any] = {
+            "latitude": 48.1,
+            "longitude": 11.1,
+            "accuracy": 20.0,
+            "last_seen": 1000,
+            "is_own_report": True,
+        }
+
+        # Newer report with different coordinates
+        newer: dict[str, Any] = {
+            "latitude": 50.0,
+            "longitude": 10.0,
+            "accuracy": 15.0,
+            "last_seen": 2000,  # NEWER timestamp
+            "is_own_report": False,
+        }
+
+        normed_older = _normalize_location_dict(older)
+        normed_newer = _normalize_location_dict(newer)
+
+        # Even though older is "best" by ranking, we pass it as best
+        # and the newer timestamp should be able to update coordinates
+        normed_cands = [normed_older, normed_newer]
+        result = _merge_semantics_if_near_ts(dict(normed_older), normed_cands)
+
+        # The newer report's coordinates should be used (ts=2000 > ts=1000)
+        assert result.get("latitude") == pytest.approx(50.0), (
+            "Strictly newer timestamp should update coordinates"
+        )
+        assert result.get("longitude") == pytest.approx(10.0)
+
+
+# =============================================================================
+# SECTION 9: Zero-Accuracy Ghost Prevention
+# =============================================================================
+
+
+class TestZeroAccuracyGhostPrevention:
+    """Test that accuracy=0.0 is never stored or used for ranking.
+
+    CONTEXT: API errors can return accuracy=0.0, which is physically impossible.
+    Real GPS accuracy is typically 3-50m. A 0.0 value indicates missing data.
+
+    INVARIANT: The system must either:
+    1. Discard the accuracy (set to None), OR
+    2. Reject the update entirely
+    It must NEVER store accuracy=0.0 in any cache or ranking.
+    """
+
+    def test_zero_accuracy_is_discarded_by_decoder(self) -> None:
+        """decoder.py must remove accuracy=0.0 during normalization."""
+        ghost_report: dict[str, Any] = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 0.0,  # THE GHOST
+            "last_seen": 1700000100,
+            "is_own_report": True,
+        }
+
+        normalized = _normalize_location_dict(ghost_report)
+
+        assert "accuracy" not in normalized or normalized.get("accuracy") is None, (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"ZERO-ACCURACY GHOST DETECTED!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"accuracy=0.0 was NOT discarded during normalization.\n"
+            f"This value will cause ranking corruption (0.0 -> 'perfect precision').\n"
+            f"\n"
+            f"Stored accuracy: {normalized.get('accuracy')}\n"
+            f"Expected: None (discarded)\n"
+            f"\n"
+            f"FIX: decoder.py :: _normalize_location_dict()\n"
+            f"Add check: if num_key == 'accuracy' and f <= 0.0: out.pop(num_key, None)\n"
+            f"{'=' * 70}"
+        )
+
+    def test_zero_accuracy_gets_worst_ranking(self) -> None:
+        """_get_rank_tuple must assign -inf rank to accuracy=0.0."""
+        ghost_report: dict[str, Any] = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 0.0,  # THE GHOST
+            "last_seen": 1700000100,
+            "is_own_report": True,
+        }
+
+        rank = _get_rank_tuple(ghost_report)
+        acc_rank = rank[3]
+
+        assert math.isinf(acc_rank) and acc_rank < 0, (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"RANKING BUG: accuracy=0.0 got non-worst rank!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"accuracy=0.0 received acc_rank={acc_rank}\n"
+            f"Expected: -inf (worst possible rank)\n"
+            f"\n"
+            f"Without -inf, the formula '-float(0.0) = -0.0' causes\n"
+            f"the ghost to rank BETTER than valid entries like -20.0.\n"
+            f"\n"
+            f"FIX: decoder.py :: _get_rank_tuple()\n"
+            f"Add check: if acc <= 0: return -inf for acc_rank\n"
+            f"{'=' * 70}"
+        )
+
+    def test_zero_accuracy_never_wins_selection(self) -> None:
+        """_select_best_location must never choose a 0.0 accuracy report."""
+        ghost: dict[str, Any] = {
+            "latitude": 48.100,
+            "longitude": 11.100,
+            "accuracy": 0.0,  # GHOST - should lose
+            "last_seen": 1700000200,  # Even newer!
+            "is_own_report": True,  # Even with owner priority!
+        }
+
+        valid: dict[str, Any] = {
+            "latitude": 48.200,
+            "longitude": 11.200,
+            "accuracy": 50.0,  # Valid (even if poor)
+            "last_seen": 1700000100,
+            "is_own_report": False,
+        }
+
+        best, _rest = _select_best_location([ghost, valid])
+
+        assert best is not None
+        # The valid report should win despite being older/crowdsourced
+        # because the ghost's accuracy=0.0 is invalid
+        best_acc = best.get("accuracy")
+        assert best_acc is None or best_acc == pytest.approx(50.0), (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"ZERO-ACCURACY GHOST WON THE SELECTION!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"A report with accuracy=0.0m was selected as best.\n"
+            f"This is physically impossible and indicates a regression.\n"
+            f"\n"
+            f"Selected accuracy: {best_acc}\n"
+            f"Expected: 50.0 (from valid report) or None (filtered)\n"
+            f"\n"
+            f"The ghost had every advantage (newer timestamp, is_own_report)\n"
+            f"but must still lose because 0.0m is invalid data.\n"
+            f"{'=' * 70}"
+        )
+
+    def test_cache_gate_rejects_zero_accuracy(self) -> None:
+        """cache.py _is_significant_update must reject accuracy=0.0."""
+        from unittest.mock import MagicMock
+
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+
+        ghost_update = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 0.0,  # THE GHOST
+            "last_seen": 1700000100,
+        }
+
+        result = is_sig(mock_coord, "device-1", ghost_update)
+
+        assert result is False, (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"CACHE ACCEPTED ZERO-ACCURACY GHOST!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"The cache gatekeeper (_is_significant_update) accepted an\n"
+            f"update with accuracy=0.0m. This will poison the cache.\n"
+            f"\n"
+            f"Expected: False (rejected)\n"
+            f"Actual: True (accepted)\n"
+            f"\n"
+            f"FIX: cache.py :: _is_significant_update()\n"
+            f"Add: if acc_f < MIN_PHYSICAL_ACCURACY_M: return False\n"
+            f"{'=' * 70}"
+        )
+
+        # Verify the rejection was counted
+        mock_coord.increment_stat.assert_called_with("invalid_accuracy_drop_count")
