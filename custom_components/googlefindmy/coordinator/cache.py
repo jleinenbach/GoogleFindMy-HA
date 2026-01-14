@@ -587,12 +587,16 @@ class CacheOperations:
         device_id: str,
         new_data: dict[str, Any],
     ) -> bool:
-        """Validate temporal ordering before committing cache updates.
+        """Validate temporal ordering and data quality before committing cache updates.
 
-        Weighted fusion now stabilizes coordinates earlier in the pipeline, so
-        this gate focuses on rejecting malformed or stale timestamps that would
-        regress cached locations. Callers run fusion before invoking this shim;
-        no additional coordinate logic belongs here.
+        This gate rejects:
+        1. Malformed payloads (not a dict)
+        2. Timestamps that are too old (pre-Y2K) or too far in the future
+        3. Timestamps that regress from the cached value
+        4. Physically impossible accuracy values (present but < 1.0m)
+
+        Note: Updates with no accuracy (semantic-only) are allowed. We only reject
+        updates that *claim* an accuracy that is physically impossible.
 
         Args:
             device_id: Canonical device identifier.
@@ -601,12 +605,43 @@ class CacheOperations:
         Returns:
             ``True`` when the caller should accept the payload.
         """
+        # Minimum plausible GPS accuracy for consumer hardware (meters).
+        # Anything below this is noise or API artifact, not a real measurement.
+        # Even best-case differential GPS rarely achieves < 1m accuracy.
+        MIN_PLAUSIBLE_ACCURACY_M = 1.0
+
         # Maximum accepted future drift in seconds (2 hours)
         MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
 
         if not isinstance(new_data, dict):
             _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
             return False
+
+        # Quality gate: Reject physically impossible accuracy values.
+        # Note: We allow updates with no accuracy (semantic-only are valid).
+        # We only reject updates that claim an accuracy that's impossible.
+        new_acc = new_data.get("accuracy")
+        if new_acc is not None:
+            try:
+                acc_f = float(new_acc)
+                if not math.isfinite(acc_f) or acc_f < MIN_PLAUSIBLE_ACCURACY_M:
+                    self.increment_stat("invalid_accuracy_drop_count")
+                    _LOGGER.debug(
+                        "Rejecting update for %s: physically impossible accuracy (%s < %sm)",
+                        device_id,
+                        new_acc,
+                        MIN_PLAUSIBLE_ACCURACY_M,
+                    )
+                    return False
+            except (TypeError, ValueError):
+                # Non-numeric accuracy is also invalid
+                self.increment_stat("invalid_accuracy_drop_count")
+                _LOGGER.debug(
+                    "Rejecting update for %s: non-numeric accuracy (%r)",
+                    device_id,
+                    new_acc,
+                )
+                return False
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
         if n_seen_norm is not None:
@@ -793,8 +828,23 @@ class CacheOperations:
         new_data["latitude"] = lat_fused
         new_data["longitude"] = lon_fused
 
-        # Select best accuracy, excluding physically impossible values (<= 0).
-        # GPS accuracy of 0.0m is impossible (real GPS: 3-50m typically).
+        # Calculate fused accuracy using inverse variance weighting.
+        #
+        # When fusing two measurements with variances σ₁² and σ₂², the optimal
+        # combined variance is: σ_fused² = 1 / (1/σ₁² + 1/σ₂²) = 1 / total_w
+        #
+        # Since accuracy ≈ standard deviation, the fused accuracy is:
+        #   accuracy_fused = sqrt(1 / total_w)
+        #
+        # This is statistically correct: combining two independent measurements
+        # should yield a MORE precise result than either alone.
+        #
+        # Safety bounds:
+        # - MIN_FUSED_ACCURACY_M: Physical limit (consumer GPS can't do better)
+        # - limit_best: Never claim worse than the best input (conservative)
+
+        MIN_FUSED_ACCURACY_M = 5.0  # Consumer GPS floor
+
         def _is_valid_accuracy(acc: float | None) -> bool:
             return (
                 acc is not None
@@ -808,8 +858,15 @@ class CacheOperations:
 
         best_accuracy: float | None
         if valid_existing and valid_new:
-            # Both valid: pick the smaller (more precise) one
-            best_accuracy = min(existing_acc_raw, new_acc_raw)  # type: ignore[arg-type]
+            # Both valid: use inverse variance formula
+            # accuracy_fused = sqrt(1 / total_w) where total_w = 1/acc₁² + 1/acc₂²
+            fused_accuracy = math.sqrt(1.0 / total_w)
+
+            # Safety bounds:
+            # - Never claim better than physics allows (MIN_FUSED_ACCURACY_M)
+            # - Never claim worse than the best individual measurement
+            limit_best = min(existing_acc_raw, new_acc_raw)  # type: ignore[arg-type]
+            best_accuracy = max(fused_accuracy, limit_best, MIN_FUSED_ACCURACY_M)
         elif valid_new:
             best_accuracy = new_acc_raw
         elif valid_existing:

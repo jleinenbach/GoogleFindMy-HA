@@ -335,6 +335,8 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
         - NaN/Inf values are dropped for all numeric fields.
         - accuracy <= 0 is dropped: GPS accuracy of 0.0m is physically impossible
           (real GPS typically has 3-50m accuracy). Zero indicates missing data.
+        - "Null Island" coordinates (0.0, 0.0) are dropped: This location in the
+          Atlantic Ocean is a common API default when no real location is available.
     """
     out = dict(loc)
     for num_key in ("latitude", "longitude", "accuracy", "last_seen", "altitude"):
@@ -352,6 +354,18 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
                 out[num_key] = f
         except (TypeError, ValueError):
             out.pop(num_key, None)
+
+    # "Null Island" filter: Coordinates at (0.0, 0.0) are in the Atlantic Ocean
+    # and indicate a default/missing value from the API, not a real location.
+    lat = out.get("latitude")
+    lon = out.get("longitude")
+    if lat is not None and lon is not None:
+        # Use small epsilon for floating point comparison (covers 0.0 defaults)
+        if abs(lat) < 0.0001 and abs(lon) < 0.0001:
+            out.pop("latitude", None)
+            out.pop("longitude", None)
+            out.pop("accuracy", None)  # Without coordinates, accuracy is meaningless
+
     return out
 
 
