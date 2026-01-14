@@ -9,7 +9,7 @@ syntax = "proto3";
 
 package google.rpc;
 
-import "custom_components/googlefindmy/ProtoDecoders/Any.proto";
+import "ProtoDecoders/Any.proto";
 
 // The `Status` type defines a logical error model that is suitable for
 // different programming environments, including REST APIs and RPC APIs.
