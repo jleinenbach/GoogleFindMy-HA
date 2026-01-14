@@ -161,6 +161,17 @@ DEFAULT_SEMANTIC_DETECTION_RADIUS: float = (
     50.0  # meters; soft floor for semantic locations
 )
 
+# GPS accuracy fallback for invalid/missing values.
+# When accuracy is reported as 0.0m, negative, NaN, or Inf, it indicates missing
+# or corrupted data (0.0m GPS accuracy is physically impossible - real GPS: 3-50m).
+# This fallback represents a conservative estimate based on:
+#   - Bluetooth range: ~40-80m (tracker could be anywhere within BLE range)
+#   - GPS error margin: ~10-30m (finder device uncertainty)
+# Using 50m prevents the "Fusion Lock-in" effect where 0.0m gets extreme weight
+# in weighted averaging (1/0² vs 1/20² = infinite vs 0.0025), while still being
+# easily overridden by real GPS fixes.
+DEFAULT_FALLBACK_ACCURACY_M: float = 50.0
+
 # Location timestamp acceptance window
 MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S: float = 24 * 60 * 60  # 24 hours
 

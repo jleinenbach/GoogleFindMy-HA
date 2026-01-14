@@ -140,6 +140,7 @@ from ..const import (
     # Core / options
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
+    DEFAULT_SEMANTIC_DETECTION_RADIUS,
     DOMAIN,
     # Required symbols provided by const.py (5.1-A)
     EVENT_AUTH_ERROR,
@@ -1164,8 +1165,10 @@ class GoogleFindMyCoordinator(
                 continue
 
             accuracy = self._coerce_float(coords.get("accuracy"))
-            if accuracy is None:
-                accuracy = 0.0
+            if accuracy is None or accuracy <= 0:
+                # Use default radius for semantic zones without explicit accuracy.
+                # Never use 0.0 as it's physically impossible for GPS.
+                accuracy = DEFAULT_SEMANTIC_DETECTION_RADIUS
 
             normalized[name.casefold()] = {
                 "latitude": latitude,

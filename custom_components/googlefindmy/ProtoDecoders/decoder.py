@@ -53,8 +53,7 @@ class _DecryptLocationsCallable(Protocol):
         device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
         *,
         cache: TokenCache,
-    ) -> list[dict[str, Any]] | None:
-        ...
+    ) -> list[dict[str, Any]] | None: ...
 
 
 # --------------------------------------------------------------------------------------
@@ -148,9 +147,7 @@ def custom_message_formatter(
                 nested_message = custom_message_formatter(
                     value, f"{indent}  ", _as_one_line
                 )
-                lines.append(
-                    f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
-                )
+                lines.append(f"{indent}{field.name} {{\n{nested_message}\n{indent}}}")
         else:
             lines.append(f"{indent}{field.name}: {value}")
     return "\n".join(lines)
@@ -327,10 +324,24 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
 
 
 def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
-    """Coerce numeric fields to floats (when present) and drop NaN/Inf.
+    """Coerce numeric fields to floats (when present) and drop invalid values.
 
     Only mutates a shallow copy. Unknown keys are preserved (e.g., `_report_hint`).
+
+    Validation rules:
+        - NaN/Inf values are dropped for all numeric fields.
+        - accuracy < 0.001m is dropped: The Android Location API uses 0.0 as an error
+          code meaning "no accuracy available". Modern dual-frequency GNSS can achieve
+          sub-meter accuracy, so only the error code (0.0) is filtered. The REPORT is
+          kept, but accuracy is treated as unmeasured (acc_rank = -inf in ranking).
+        - "Null Island" coordinates (0.0, 0.0) are dropped: This location in the
+          Atlantic Ocean is a common API default when no real location is available.
     """
+    # Minimum valid accuracy threshold (1mm).
+    # Only the error code 0.0 (and negative values) are filtered.
+    # Modern dual-frequency GNSS can achieve sub-meter accuracy.
+    _MIN_VALID_ACCURACY = 0.001
+
     out = dict(loc)
     for num_key in ("latitude", "longitude", "accuracy", "last_seen", "altitude"):
         val = out.get(num_key)
@@ -340,10 +351,28 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
             f = float(val)
             if not math.isfinite(f):
                 out.pop(num_key, None)
+            # accuracy < 0.001m is the error code (0.0 = "no accuracy").
+            # We KEEP the report but REMOVE the accuracy key so it doesn't
+            # corrupt ranking (acc_rank = -inf when accuracy is None).
+            # Valid sub-meter values like 0.5m are preserved!
+            elif num_key == "accuracy" and f < _MIN_VALID_ACCURACY:
+                out.pop(num_key, None)
             else:
                 out[num_key] = f
         except (TypeError, ValueError):
             out.pop(num_key, None)
+
+    # "Null Island" filter: Coordinates at (0.0, 0.0) are in the Atlantic Ocean
+    # and indicate a default/missing value from the API, not a real location.
+    lat = out.get("latitude")
+    lon = out.get("longitude")
+    if lat is not None and lon is not None:
+        # Use small epsilon for floating point comparison (covers 0.0 defaults)
+        if abs(lat) < 0.0001 and abs(lon) < 0.0001:
+            out.pop("latitude", None)
+            out.pop("longitude", None)
+            out.pop("accuracy", None)  # Without coordinates, accuracy is meaningless
+
     return out
 
 
@@ -372,7 +401,9 @@ def _normalize_timestamp(value: Any) -> int | None:
     return seconds if seconds > 0 else None
 
 
-def _merge_dict_preserve_left(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+def _merge_dict_preserve_left(
+    left: dict[str, Any], right: dict[str, Any]
+) -> dict[str, Any]:
     """Merge two dicts without overwriting keys from the left dict."""
 
     merged = dict(left)
@@ -382,7 +413,9 @@ def _merge_dict_preserve_left(left: dict[str, Any], right: dict[str, Any]) -> di
     return merged
 
 
-def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[str, Any]:
+def _collect_anchor_metadata(
+    location_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Union anchor/metadata keys across *all* candidates.
 
     This protects metadata-only candidates from being dropped when a different
@@ -405,7 +438,9 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
 
         # boolean
         if "metadata_only" in cand:
-            union["metadata_only"] = bool(union.get("metadata_only")) or bool(cand.get("metadata_only"))
+            union["metadata_only"] = bool(union.get("metadata_only")) or bool(
+                cand.get("metadata_only")
+            )
 
         for ts_key in ("pair_date", "secrets_creation_date"):
             if ts_key in cand:
@@ -436,7 +471,10 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
                 union["owner_key_version"] = okv
 
         # list unions
-        for list_key in ("identity_key_candidates", "encrypted_identity_key_candidates"):
+        for list_key in (
+            "identity_key_candidates",
+            "encrypted_identity_key_candidates",
+        ):
             lst = cand.get(list_key)
             if not isinstance(lst, list) or not lst:
                 continue
@@ -454,7 +492,11 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
             union[list_key] = existing
 
         # dict blobs (diagnostics)
-        for dict_key in ("device_registration", "device_type_information", "encrypted_user_secrets"):
+        for dict_key in (
+            "device_registration",
+            "device_type_information",
+            "encrypted_user_secrets",
+        ):
             if union.get(dict_key) is None:
                 d_val = cand.get(dict_key)
                 if isinstance(d_val, dict) and d_val:
@@ -465,7 +507,9 @@ def _collect_anchor_metadata(location_candidates: list[dict[str, Any]]) -> dict[
         if isinstance(dbg, dict) and dbg:
             existing_dbg = union.get("time_anchors_debug")
             if isinstance(existing_dbg, dict) and existing_dbg:
-                union["time_anchors_debug"] = _merge_dict_preserve_left(existing_dbg, dbg)
+                union["time_anchors_debug"] = _merge_dict_preserve_left(
+                    existing_dbg, dbg
+                )
             else:
                 union["time_anchors_debug"] = dbg
 
@@ -478,12 +522,28 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     Priority (high to low):
       1. Newer ``last_seen`` timestamp
       2. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
+         (BUT: is_own_report only trusted if accuracy is valid)
       3. Presence of coordinates (tie-breaker when timestamps/status match)
       4. Better accuracy (smaller is better)
       5. Deterministic tie-breaker string
     """
-    # 1) Owner-Reports always take precedence
-    is_own = 1 if bool(n.get("is_own_report")) else 0
+    # Pre-compute accuracy validity for status ranking decisions.
+    # A report claiming is_own_report=True but with invalid/missing accuracy
+    # (after normalization strips accuracy <= 0) is suspicious and should NOT
+    # get the "own report" bonus. This prevents the January 2025 phantom bug.
+    acc = n.get("accuracy")
+    has_valid_accuracy = (
+        isinstance(acc, (int, float)) and math.isfinite(float(acc)) and float(acc) > 0
+    )
+
+    # 1) Owner-Reports take precedence ONLY if accuracy is trustworthy
+    is_own_flag = bool(n.get("is_own_report"))
+    # Own report bonus requires valid accuracy (or no coordinates = semantic only)
+    has_coords = isinstance(n.get("latitude"), (int, float)) and isinstance(
+        n.get("longitude"), (int, float)
+    )
+    # Trust is_own_report if: (1) accuracy is valid, OR (2) no coordinates (semantic)
+    is_own_trusted = is_own_flag and (has_valid_accuracy or not has_coords)
 
     # 2) Robustly determine status rank (String, Int, or via Hint)
     status_code = n.get("status_code")
@@ -509,7 +569,7 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     _MISSING = object()
     cs = getattr(Common_pb2.Status, "CROWDSOURCED", _MISSING)
     ag = getattr(Common_pb2.Status, "AGGREGATED", _MISSING)
-    if is_own:
+    if is_own_trusted:
         status_rank = 3
     elif (
         (cs is not _MISSING and status_code_int == cs)
@@ -528,24 +588,25 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     else:
         status_rank = 0  # SEMANTIC/Unknown/Default
 
-    has_coords = (
-        1
-        if isinstance(n.get("latitude"), (int, float))
-        and isinstance(n.get("longitude"), (int, float))
-        else 0
-    )
+    # has_coords already computed above as boolean; convert to int for tuple
+    has_coords_rank = 1 if has_coords else 0
+
     seen = n.get("last_seen")
     seen_rank = (
         float(seen)
         if isinstance(seen, (int, float)) and math.isfinite(float(seen))
         else float("-inf")
     )
-    acc = n.get("accuracy")
-    acc_rank = (
-        -float(acc)
-        if isinstance(acc, (int, float)) and math.isfinite(float(acc))
-        else float("-inf")
-    )
+
+    # accuracy <= 0 is physically impossible for GPS; treat as missing/worst rank.
+    # Defense in depth: even if _normalize_location_dict didn't filter it.
+    # (has_valid_accuracy already computed above; assert helps mypy)
+    if has_valid_accuracy:
+        assert acc is not None  # validated in has_valid_accuracy
+        acc_rank = -float(acc)
+    else:
+        acc_rank = float("-inf")
+
     # Deterministic final tiebreaker: canonical content key (string).
     stable_key = "|".join(
         str(x)
@@ -560,7 +621,7 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
             n.get("semantic_name", ""),
         )
     )
-    return (seen_rank, status_rank, has_coords, acc_rank, stable_key)
+    return (seen_rank, status_rank, has_coords_rank, acc_rank, stable_key)
 
 
 def _select_best_location(
@@ -626,10 +687,17 @@ def _merge_semantics_if_near_ts(
 
     out = dict(best)
 
+    # Extract best candidate's timestamp FIRST - used for identity protection.
+    t_best = _extract_ts(out.get("last_seen"))
+
     # Track the freshest coordinate-bearing candidate so semantic-only entries can
     # still expose stable position data after the merge step.
+    #
+    # IDENTITY PROTECTION: Initialize to t_best (not -inf) so that lower-ranked
+    # candidates with the SAME timestamp cannot "steal" coordinates from the best.
+    # A lower-ranked entry must be STRICTLY newer to update coordinates.
     best_coordinate: dict[str, Any] | None = None
-    best_coordinate_ts = float("-inf")
+    best_coordinate_ts = t_best  # Protects against timestamp collision identity theft
 
     # Track the semantic label currently attached to the outgoing payload.
     semantic_label: str | None = None
@@ -637,8 +705,6 @@ def _merge_semantics_if_near_ts(
     if out.get("semantic_name"):
         semantic_label = str(out["semantic_name"])
         semantic_ts = _extract_ts(out.get("last_seen"))
-
-    t_best = _extract_ts(out.get("last_seen"))
 
     # Historical behaviour: borrow a semantic label very close to the coordinate
     # fix timestamp when none is present yet.
@@ -670,10 +736,13 @@ def _merge_semantics_if_near_ts(
         ts = _extract_ts(n.get("last_seen"))
         latest_seen = max(latest_seen, ts)
 
+        # Use strict > to preserve sort order: when timestamps are equal,
+        # the first entry (already ranked higher by _get_rank_tuple) wins.
+        # Using >= would cause "last-write-wins" and prefer worse entries.
         if (
             isinstance(n.get("latitude"), (int, float))
             and isinstance(n.get("longitude"), (int, float))
-            and ts >= best_coordinate_ts
+            and ts > best_coordinate_ts
         ):
             best_coordinate = n
             best_coordinate_ts = ts
@@ -779,9 +848,7 @@ def get_devices_with_location(
                         f.name
                         for f, _ in device.information.locationInformation.ListFields()
                     ]
-                    _LOGGER.debug(
-                        "    -> locationInformation fields: %s", loc_fields
-                    )
+                    _LOGGER.debug("    -> locationInformation fields: %s", loc_fields)
 
             device_str = str(device)
             unknown_lines = [
@@ -903,7 +970,9 @@ def get_devices_with_location(
                         creation_date_obj, "seconds", None
                     )
             except (ValueError, AttributeError):
-                creation_date_obj = getattr(encrypted_user_secrets, "creationDate", None)
+                creation_date_obj = getattr(
+                    encrypted_user_secrets, "creationDate", None
+                )
                 raw_creation_date_seconds = (
                     getattr(creation_date_obj, "seconds", None)
                     if creation_date_obj is not None
@@ -1013,9 +1082,10 @@ def get_devices_with_location(
             if pair_date is not None:
                 dbg.setdefault("pair_date_source", "device_registration.proto")
             if secrets_creation_date is not None:
-                dbg.setdefault("secrets_creation_date_source", "encrypted_user_secrets.proto")
+                dbg.setdefault(
+                    "secrets_creation_date_source", "encrypted_user_secrets.proto"
+                )
             anchor_union["time_anchors_debug"] = dbg
-
 
         # Emit **exactly one** row per canonic ID.
         for canonic in canonic_ids:
@@ -1051,7 +1121,6 @@ def get_devices_with_location(
                 v = anchor_union.get(k)
                 if v is not None:
                     row[k] = v
-
 
             results.append(row)
 

@@ -37,6 +37,10 @@ from .helpers.cache import (
     should_clear_metadata_only_flag as _should_clear_metadata_only_flag_impl,
 )
 from .helpers.geo import (
+    DEFAULT_ACCURACY_FALLBACK_M,
+    MIN_PHYSICAL_ACCURACY_M,
+)
+from .helpers.geo import (
     coerce_float as _coerce_float_impl,
 )
 from .helpers.geo import (
@@ -587,12 +591,17 @@ class CacheOperations:
         device_id: str,
         new_data: dict[str, Any],
     ) -> bool:
-        """Validate temporal ordering before committing cache updates.
+        """Validate temporal ordering and data quality before committing cache updates.
 
-        Weighted fusion now stabilizes coordinates earlier in the pipeline, so
-        this gate focuses on rejecting malformed or stale timestamps that would
-        regress cached locations. Callers run fusion before invoking this shim;
-        no additional coordinate logic belongs here.
+        This gate rejects:
+        1. Malformed payloads (not a dict)
+        2. Timestamps that are too old (pre-Y2K) or too far in the future
+        3. Timestamps that regress from the cached value
+
+        Accuracy sanitization (not rejection):
+        - Values < 0.001m (error code 0.0) are REMOVED from dict, not rejected
+        - Valid sub-meter accuracy (e.g., 0.5m) is preserved
+        - The report continues processing without precision data
 
         Args:
             device_id: Canonical device identifier.
@@ -601,12 +610,55 @@ class CacheOperations:
         Returns:
             ``True`` when the caller should accept the payload.
         """
+        # Use centralized constant from helpers/geo.py
+        # MIN_PHYSICAL_ACCURACY_M = 0.001m (only error code 0.0 is filtered)
+
         # Maximum accepted future drift in seconds (2 hours)
         MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
 
         if not isinstance(new_data, dict):
             _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
             return False
+
+        # Sanitize error code accuracy values (0.0 in Android Location API).
+        # The API uses 0.0 as "no accuracy available", not "perfect precision".
+        # We ACCEPT the update and REPLACE invalid accuracy with a conservative fallback.
+        # This ensures Home Assistant always gets a valid numeric gps_accuracy attribute.
+        # Valid sub-meter values like 0.5m or 0.01m are preserved!
+        new_acc = new_data.get("accuracy")
+        if new_acc is None:
+            # Missing accuracy: set conservative fallback for HA state machine
+            new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+            self.increment_stat("accuracy_sanitized_count")
+            _LOGGER.debug(
+                "Setting fallback accuracy for %s: key was missing, using %sm",
+                device_id,
+                DEFAULT_ACCURACY_FALLBACK_M,
+            )
+        else:
+            try:
+                acc_f = float(new_acc)
+                if not math.isfinite(acc_f) or acc_f < MIN_PHYSICAL_ACCURACY_M:
+                    # Sanitize: replace error code with conservative fallback
+                    new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+                    self.increment_stat("accuracy_sanitized_count")
+                    _LOGGER.debug(
+                        "Sanitizing update for %s: error code accuracy (%s) -> %sm",
+                        device_id,
+                        new_acc,
+                        DEFAULT_ACCURACY_FALLBACK_M,
+                    )
+                    # Continue processing - the update is valid, with fallback precision
+            except (TypeError, ValueError):
+                # Non-numeric accuracy: replace with fallback
+                new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+                self.increment_stat("accuracy_sanitized_count")
+                _LOGGER.debug(
+                    "Sanitizing update for %s: non-numeric accuracy (%r) -> %sm",
+                    device_id,
+                    new_acc,
+                    DEFAULT_ACCURACY_FALLBACK_M,
+                )
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
         if n_seen_norm is not None:
@@ -725,10 +777,28 @@ class CacheOperations:
         new_acc_raw = _coerce_float_impl(new_data.get("accuracy"))
 
         def _safe_accuracy(value: float | None) -> float:
+            """Convert raw accuracy to a safe value for fusion calculations.
+
+            The Android Location API uses 0.0 as an error code meaning "no accuracy".
+            We treat values < MIN_VALID_ACCURACY (0.001m) as this error code.
+
+            Modern dual-frequency GNSS (L1+L5) can achieve sub-meter accuracy under
+            ideal conditions, so valid values like 0.5m or 0.01m are preserved.
+
+            The fallback (DEFAULT_ACCURACY_FALLBACK = 2000m) is conservative for
+            "unknown" accuracy. This ensures:
+              - Error codes get very low weight in fusion (1/2000² ≈ 0)
+              - Any real measurement easily overrides the error code
+
+            SELF-HEALING: If the cache contains a corrupted value (0.0),
+            treating it as 2000m allows new valid data to properly override it.
+            """
             if value is None or not math.isfinite(value):
-                return 10000.0
-            if value < 0:
-                return 10000.0
+                return DEFAULT_ACCURACY_FALLBACK_M
+            # < MIN_VALID_ACCURACY (0.001m) is the error code 0.0
+            # This also handles self-healing of corrupted cache entries
+            if value < MIN_PHYSICAL_ACCURACY_M:
+                return DEFAULT_ACCURACY_FALLBACK_M
             return value
 
         existing_acc = _safe_accuracy(existing_acc_raw)
@@ -765,8 +835,10 @@ class CacheOperations:
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting
-        w_old = 1 / (max(1.0, existing_acc) ** 2)
-        w_new = 1 / (max(1.0, new_acc) ** 2)
+        # Use MIN_PHYSICAL_ACCURACY_M (0.001m) as floor to preserve sub-meter weight
+        # and prevent division by zero. Valid sub-meter accuracy gets proper weight.
+        w_old = 1 / (max(MIN_PHYSICAL_ACCURACY_M, existing_acc) ** 2)
+        w_new = 1 / (max(MIN_PHYSICAL_ACCURACY_M, new_acc) ** 2)
         total_w = w_old + w_new
         if total_w == 0:
             return True
@@ -777,14 +849,59 @@ class CacheOperations:
         new_data["latitude"] = lat_fused
         new_data["longitude"] = lon_fused
 
-        best_accuracy: float | None
-        if existing_acc_raw is not None and new_acc_raw is not None:
-            best_accuracy = min(existing_acc_raw, new_acc_raw)
-        else:
-            best_accuracy = existing_acc_raw or new_acc_raw
+        # Calculate fused accuracy using inverse variance weighting.
+        #
+        # When fusing two measurements with variances σ₁² and σ₂², the optimal
+        # combined variance is: σ_fused² = 1 / (1/σ₁² + 1/σ₂²) = 1 / total_w
+        #
+        # Since accuracy ≈ standard deviation, the fused accuracy is:
+        #   accuracy_fused = sqrt(1 / total_w)
+        #
+        # This is statistically correct: combining two independent measurements
+        # should yield a MORE precise result than either alone.
+        #
+        # Safety bounds:
+        # - MIN_FUSED_ACCURACY_M: Physical limit (consumer GPS can't do better)
+        # - limit_best: Never claim worse than the best input (conservative)
 
-        if best_accuracy is not None:
-            new_data["accuracy"] = best_accuracy
+        MIN_FUSED_ACCURACY_M = 5.0  # Consumer GPS floor
+
+        def _is_valid_accuracy(acc: float | None) -> bool:
+            return (
+                acc is not None
+                and isinstance(acc, (int, float))
+                and math.isfinite(acc)
+                and acc > 0
+            )
+
+        valid_existing = _is_valid_accuracy(existing_acc_raw)
+        valid_new = _is_valid_accuracy(new_acc_raw)
+
+        best_accuracy: float | None
+        if valid_existing and valid_new:
+            # Both valid: use inverse variance formula
+            # accuracy_fused = sqrt(1 / total_w) where total_w = 1/acc₁² + 1/acc₂²
+            fused_accuracy = math.sqrt(1.0 / total_w)
+
+            # Safety bounds:
+            # - Never claim better than physics allows (MIN_FUSED_ACCURACY_M)
+            # - Never claim worse than the best individual measurement
+            # Note: assert helps mypy understand values are not None after validation
+            assert existing_acc_raw is not None and new_acc_raw is not None
+            limit_best = min(existing_acc_raw, new_acc_raw)
+            best_accuracy = max(fused_accuracy, limit_best, MIN_FUSED_ACCURACY_M)
+        elif valid_new:
+            best_accuracy = new_acc_raw
+        elif valid_existing:
+            best_accuracy = existing_acc_raw
+        else:
+            # Neither is valid - use conservative fallback
+            # This ensures Home Assistant always gets a valid gps_accuracy attribute
+            best_accuracy = DEFAULT_ACCURACY_FALLBACK_M
+
+        # ALWAYS write back a valid accuracy - never leave it as None or missing
+        # Home Assistant requires a numeric gps_accuracy for the state machine
+        new_data["accuracy"] = best_accuracy
 
         new_data["status"] = "Fused (Weighted)"
         new_data["_fused_applied"] = True

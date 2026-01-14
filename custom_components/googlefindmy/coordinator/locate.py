@@ -25,6 +25,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from ..const import DEFAULT_MIN_POLL_INTERVAL
 from ..SpotApi.spot_request import SpotAuthPermanentError
+from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
 if TYPE_CHECKING:
     from .main import GoogleFindMyCoordinator
@@ -112,16 +113,22 @@ class LocateOperations:
         payload["latitude"] = lat_f
         payload["longitude"] = lon_f
 
-        # Best-effort normalize accuracy (if present)
+        # Best-effort normalize accuracy (if present).
+        # The Android Location API uses 0.0 as an error code ("no accuracy").
+        # Modern dual-frequency GNSS can achieve sub-meter accuracy, so we only
+        # filter the error code (< 0.001m) and negative values.
         acc = payload.get("accuracy")
         if acc is not None:
             try:
                 acc_f = float(acc)
-                if math.isfinite(acc_f):
+                if math.isfinite(acc_f) and acc_f >= MIN_PHYSICAL_ACCURACY_M:
                     payload["accuracy"] = acc_f
+                else:
+                    # Error code (0.0), negative, NaN, Inf - remove it
+                    payload.pop("accuracy", None)
             except (TypeError, ValueError):
-                # Accuracy can be absent or malformed; not critical enough for a warning.
-                pass
+                # Accuracy malformed; remove it
+                payload.pop("accuracy", None)
 
         return True
 

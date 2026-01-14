@@ -28,6 +28,7 @@ Refactoring additions:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
@@ -709,13 +710,30 @@ def row_source_label(row: dict[str, Any]) -> tuple[int, str]:
     return 0, "semantic/unknown"
 
 
+def _is_invalid_accuracy(accuracy: Any) -> bool:
+    """Check if accuracy value is invalid (missing, non-positive, or non-finite).
+
+    GPS accuracy of <= 0 is physically impossible (real GPS: 3-50m typically).
+    Such values indicate missing/corrupted data from the API.
+    """
+    if accuracy is None:
+        return True
+    try:
+        f = float(accuracy)
+        # Non-finite (NaN/Inf) or non-positive values are invalid
+        return not (f > 0 and math.isfinite(f))
+    except (TypeError, ValueError):
+        return True
+
+
 def sanitize_decoder_row(row: dict[str, Any]) -> dict[str, Any]:
     """Enforce protocol invariants and prepare HA attributes.
 
     Notes:
         - Ensures timestamps are normalized and provides an ISO UTC mirror.
         - Derives a stable `source_label`/`source_rank` used for stats and UX.
-        - Zero-accuracy semantic entries are coerced to None to avoid noise.
+        - Detects and corrects spurious `is_own_report=True` flags from the API.
+        - Invalid accuracy (<=0, NaN, Inf) is coerced to None.
 
     Args:
         row: Raw decoder row dictionary.
@@ -724,11 +742,29 @@ def sanitize_decoder_row(row: dict[str, Any]) -> dict[str, Any]:
         Sanitized dictionary with normalized fields.
     """
     r = dict(row)
+
+    # --- Phase 1: Correct spurious is_own_report flags BEFORE label calculation ---
+    # Google's API sometimes returns is_own_report=True for reports that are clearly
+    # not from the owner's device. Detect and correct these cases:
+    #
+    # 1. accuracy <= 0 is physically impossible for real GPS (typical: 3-50m).
+    #    This indicates missing/corrupted data, not a precise fix.
+    # 2. No coordinates (lat/lon both None) means it's a semantic-only report
+    #    which cannot be an "own device" GPS report.
+    # 3. SEMANTIC status (status_code=0) is never an owner report by definition.
+    if r.get("is_own_report"):
+        has_invalid_accuracy = _is_invalid_accuracy(r.get("accuracy"))
+        has_no_coordinates = r.get("latitude") is None and r.get("longitude") is None
+        is_semantic_status = r.get("status_code") == 0
+
+        if has_invalid_accuracy or has_no_coordinates or is_semantic_status:
+            r["is_own_report"] = False
+
+    # --- Phase 2: Calculate source label/rank based on corrected data ---
     rank, label = row_source_label(r)
 
-    if label == "semantic/unknown" and r.get("is_own_report"):
-        r["is_own_report"] = False
-    if label == "semantic/unknown" and r.get("accuracy") in (0, 0.0):
+    # Coerce invalid accuracy to None for cleaner UX
+    if _is_invalid_accuracy(r.get("accuracy")):
         r["accuracy"] = None
 
     ts = normalize_epoch_seconds(r.get("last_seen"))
