@@ -330,14 +330,17 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
 
     Validation rules:
         - NaN/Inf values are dropped for all numeric fields.
-        - accuracy < 1.0m is dropped: Consumer GPS cannot achieve sub-meter accuracy.
-          Values like 0.0 indicate "privacy masked" or "unknown" - the REPORT is kept,
-          but accuracy is treated as unmeasured (acc_rank = -inf in ranking).
+        - accuracy < 0.001m is dropped: The Android Location API uses 0.0 as an error
+          code meaning "no accuracy available". Modern dual-frequency GNSS can achieve
+          sub-meter accuracy, so only the error code (0.0) is filtered. The REPORT is
+          kept, but accuracy is treated as unmeasured (acc_rank = -inf in ranking).
         - "Null Island" coordinates (0.0, 0.0) are dropped: This location in the
           Atlantic Ocean is a common API default when no real location is available.
     """
-    # Minimum physically plausible GPS accuracy (consumer hardware floor)
-    _MIN_PLAUSIBLE_ACCURACY_M = 1.0
+    # Minimum valid accuracy threshold (1mm).
+    # Only the error code 0.0 (and negative values) are filtered.
+    # Modern dual-frequency GNSS can achieve sub-meter accuracy.
+    _MIN_VALID_ACCURACY = 0.001
 
     out = dict(loc)
     for num_key in ("latitude", "longitude", "accuracy", "last_seen", "altitude"):
@@ -348,11 +351,11 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
             f = float(val)
             if not math.isfinite(f):
                 out.pop(num_key, None)
-            # accuracy < 1.0m is physically impossible for consumer GPS.
-            # Values like 0.0 mean "unknown/masked", not "perfect".
+            # accuracy < 0.001m is the error code (0.0 = "no accuracy").
             # We KEEP the report but REMOVE the accuracy key so it doesn't
             # corrupt ranking (acc_rank = -inf when accuracy is None).
-            elif num_key == "accuracy" and f < _MIN_PLAUSIBLE_ACCURACY_M:
+            # Valid sub-meter values like 0.5m are preserved!
+            elif num_key == "accuracy" and f < _MIN_VALID_ACCURACY:
                 out.pop(num_key, None)
             else:
                 out[num_key] = f

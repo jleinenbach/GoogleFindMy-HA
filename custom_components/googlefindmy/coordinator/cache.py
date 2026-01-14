@@ -597,10 +597,11 @@ class CacheOperations:
         1. Malformed payloads (not a dict)
         2. Timestamps that are too old (pre-Y2K) or too far in the future
         3. Timestamps that regress from the cached value
-        4. Physically impossible accuracy values (present but < 1.0m)
 
-        Note: Updates with no accuracy (semantic-only) are allowed. We only reject
-        updates that *claim* an accuracy that is physically impossible.
+        Accuracy sanitization (not rejection):
+        - Values < 0.001m (error code 0.0) are REMOVED from dict, not rejected
+        - Valid sub-meter accuracy (e.g., 0.5m) is preserved
+        - The report continues processing without precision data
 
         Args:
             device_id: Canonical device identifier.
@@ -610,7 +611,7 @@ class CacheOperations:
             ``True`` when the caller should accept the payload.
         """
         # Use centralized constant from helpers/geo.py
-        # MIN_PHYSICAL_ACCURACY_M = 1.0m (consumer GPS floor)
+        # MIN_PHYSICAL_ACCURACY_M = 0.001m (only error code 0.0 is filtered)
 
         # Maximum accepted future drift in seconds (2 hours)
         MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S = 7200
@@ -619,20 +620,20 @@ class CacheOperations:
             _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
             return False
 
-        # Sanitize physically impossible accuracy values.
-        # Values like 0.0 mean "privacy masked" or "unknown", not "perfect precision".
+        # Sanitize error code accuracy values (0.0 in Android Location API).
+        # The API uses 0.0 as "no accuracy available", not "perfect precision".
         # We ACCEPT the update but REMOVE the invalid accuracy to prevent ranking corruption.
-        # This allows reports with 0.0 accuracy to still provide location data.
+        # Valid sub-meter values like 0.5m or 0.01m are preserved!
         new_acc = new_data.get("accuracy")
         if new_acc is not None:
             try:
                 acc_f = float(new_acc)
                 if not math.isfinite(acc_f) or acc_f < MIN_PHYSICAL_ACCURACY_M:
-                    # Sanitize: remove invalid accuracy, keep the report
+                    # Sanitize: remove error code (0.0) or negative, keep the report
                     new_data.pop("accuracy", None)
                     self.increment_stat("accuracy_sanitized_count")
                     _LOGGER.debug(
-                        "Sanitizing update for %s: invalid accuracy (%s) removed (< %sm)",
+                        "Sanitizing update for %s: error code accuracy (%s) removed (< %sm)",
                         device_id,
                         new_acc,
                         MIN_PHYSICAL_ACCURACY_M,
@@ -767,25 +768,23 @@ class CacheOperations:
         def _safe_accuracy(value: float | None) -> float:
             """Convert raw accuracy to a safe value for fusion calculations.
 
-            GPS accuracy < 1.0m is physically impossible for consumer hardware.
-            Such values indicate missing/corrupted data and should use the fallback.
+            The Android Location API uses 0.0 as an error code meaning "no accuracy".
+            We treat values < MIN_VALID_ACCURACY (0.001m) as this error code.
 
-            The fallback (DEFAULT_ACCURACY_FALLBACK_M = 50m) is based on:
-              - Bluetooth range: ~40-80m (tracker position uncertainty)
-              - GPS error margin: ~10-30m (finder device uncertainty)
+            Modern dual-frequency GNSS (L1+L5) can achieve sub-meter accuracy under
+            ideal conditions, so valid values like 0.5m or 0.01m are preserved.
 
-            Using 50m instead of a huge value (e.g., 10000m) prevents the
-            "Fusion Lock-in" effect: with inverse-square weighting, 1/50² = 0.0004
-            is comparable to 1/20² = 0.0025, so real GPS fixes can override it.
-            With 1/10000² the poisoned value would have essentially zero weight
-            but still persist in the cache.
+            The fallback (DEFAULT_ACCURACY_FALLBACK = 2000m) is conservative for
+            "unknown" accuracy. This ensures:
+              - Error codes get very low weight in fusion (1/2000² ≈ 0)
+              - Any real measurement easily overrides the error code
 
-            SELF-HEALING: If the cache contains a poisoned value (< 1.0m),
-            treating it as 50m allows new valid data to properly override it.
+            SELF-HEALING: If the cache contains a corrupted value (0.0),
+            treating it as 2000m allows new valid data to properly override it.
             """
             if value is None or not math.isfinite(value):
                 return DEFAULT_ACCURACY_FALLBACK_M
-            # < MIN_PHYSICAL_ACCURACY_M is physically impossible for GPS
+            # < MIN_VALID_ACCURACY (0.001m) is the error code 0.0
             # This also handles self-healing of corrupted cache entries
             if value < MIN_PHYSICAL_ACCURACY_M:
                 return DEFAULT_ACCURACY_FALLBACK_M
@@ -825,8 +824,10 @@ class CacheOperations:
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting
-        w_old = 1 / (max(1.0, existing_acc) ** 2)
-        w_new = 1 / (max(1.0, new_acc) ** 2)
+        # Use MIN_PHYSICAL_ACCURACY_M (0.001m) as floor to preserve sub-meter weight
+        # and prevent division by zero. Valid sub-meter accuracy gets proper weight.
+        w_old = 1 / (max(MIN_PHYSICAL_ACCURACY_M, existing_acc) ** 2)
+        w_new = 1 / (max(MIN_PHYSICAL_ACCURACY_M, new_acc) ** 2)
         total_w = w_old + w_new
         if total_w == 0:
             return True

@@ -48,15 +48,18 @@ class TestAccuracyPhysicsValidation:
     @pytest.mark.parametrize(
         ("input_accuracy", "should_be_removed", "scenario"),
         [
-            # Valid accuracy values - should be preserved (>= 1.0m)
-            (1.0, False, "minimum_valid_accuracy"),
+            # Valid accuracy values - should be preserved (>= 0.001m)
+            # Modern dual-frequency GNSS can achieve sub-meter accuracy
+            (0.001, False, "minimum_valid_accuracy_1mm"),
+            (0.002, False, "micro_precision_2mm"),
+            (0.5, False, "sub_meter_valid"),
+            (1.0, False, "one_meter_valid"),
             (5.0, False, "typical_gps_accuracy"),
             (20.0, False, "moderate_gps_accuracy"),
             (100.0, False, "poor_gps_accuracy"),
-            # Invalid accuracy values - MUST be removed (< 1.0m is physically impossible)
-            (0.0, True, "zero_accuracy_means_unknown"),
-            (0.5, True, "sub_meter_accuracy_impossible"),
-            (0.99, True, "just_under_threshold_invalid"),
+            # Invalid accuracy values - MUST be removed (< 0.001m is error code)
+            (0.0, True, "zero_accuracy_error_code"),
+            (0.0001, True, "below_threshold_error_code"),
             (-1.0, True, "negative_accuracy_impossible"),
             (-100.0, True, "large_negative_impossible"),
             (float("nan"), True, "nan_is_invalid"),
@@ -71,11 +74,12 @@ class TestAccuracyPhysicsValidation:
         should_be_removed: bool,
         scenario: str,
     ) -> None:
-        """_normalize_location_dict must remove physically impossible accuracy values.
+        """_normalize_location_dict must filter error codes, preserve valid data.
 
-        GPS accuracy of <= 0 meters is physically impossible. Real GPS systems
-        report accuracy in the range of 3-50m (good conditions) to 100m+ (poor).
-        Values of 0.0, negative, NaN, or Inf indicate missing/corrupted data.
+        The Android Location API uses 0.0 as an error code meaning "no accuracy".
+        Modern dual-frequency GNSS can achieve sub-meter accuracy, so values like
+        0.5m or 0.01m are valid and must be preserved.
+        Only the error code (< 0.001m) and invalid values (negative, NaN, Inf) are filtered.
         """
         loc = {
             "latitude": 48.123,
@@ -90,18 +94,16 @@ class TestAccuracyPhysicsValidation:
             assert "accuracy" not in result, (
                 f"\n"
                 f"{'=' * 70}\n"
-                f"REGRESSION DETECTED: Invalid accuracy was NOT filtered!\n"
+                f"REGRESSION DETECTED: Error code accuracy was NOT filtered!\n"
                 f"{'=' * 70}\n"
                 f"Scenario: {scenario}\n"
                 f"Input accuracy: {input_accuracy}\n"
                 f"\n"
-                f"PHYSICS VIOLATION: GPS accuracy of {input_accuracy}m is invalid.\n"
-                f"Consumer GPS cannot achieve sub-meter accuracy (< 1.0m).\n"
-                f"Values < 1.0 indicate API artifacts or 'unknown', not precision.\n"
+                f"The Android Location API uses 0.0 as an error code.\n"
+                f"Values < 0.001m should be filtered as error codes.\n"
                 f"\n"
                 f"FIX LOCATION: decoder.py :: _normalize_location_dict()\n"
-                f"The function must filter out accuracy < 1.0m before returning.\n"
-                f"Look for: 'elif num_key == \"accuracy\" and f < _MIN_PLAUSIBLE_ACCURACY_M'\n"
+                f"Look for: 'elif num_key == \"accuracy\" and f < _MIN_VALID_ACCURACY'\n"
                 f"{'=' * 70}"
             )
         else:
@@ -655,12 +657,11 @@ class TestCacheFusionRobustness:
         # Verify sanitization was counted
         mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
 
-    def test_is_significant_update_sanitizes_sub_meter_accuracy(self) -> None:
-        """_is_significant_update must ACCEPT but SANITIZE accuracy < 1.0m.
+    def test_is_significant_update_preserves_sub_meter_accuracy(self) -> None:
+        """_is_significant_update must PRESERVE valid sub-meter accuracy.
 
-        Consumer GPS cannot achieve sub-meter accuracy. Values like 0.5m
-        indicate API artifacts, not real measurements. We ACCEPT the update
-        but REMOVE the invalid accuracy from the dict.
+        Modern dual-frequency GNSS (L1+L5) can achieve sub-meter accuracy.
+        Values like 0.5m are valid measurements and must be preserved.
         """
         from unittest.mock import MagicMock
 
@@ -672,31 +673,27 @@ class TestCacheFusionRobustness:
 
         is_sig = CacheOperations._is_significant_update
 
-        # 0.5m is positive but impossible for consumer GPS - will be sanitized
+        # 0.5m is valid sub-meter accuracy for modern GNSS
         update_with_sub_meter = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.5,  # Sub-meter = will be sanitized (removed)
+            "accuracy": 0.5,  # Valid sub-meter - MUST be preserved
             "last_seen": 1700000100,
         }
 
         result = is_sig(mock_coord, "device-1", update_with_sub_meter)
 
         # Update must be ACCEPTED
-        assert result is True, (
-            "Update with sub-meter accuracy should be ACCEPTED (sanitized)"
-        )
+        assert result is True, "Update with valid sub-meter accuracy should be ACCEPTED"
 
-        # Accuracy should have been removed
-        assert "accuracy" not in update_with_sub_meter, (
-            "Sub-meter accuracy should be removed from update dict"
+        # Accuracy must be PRESERVED (not sanitized)
+        assert update_with_sub_meter.get("accuracy") == 0.5, (
+            "Valid sub-meter accuracy (0.5m) should be PRESERVED, not removed.\n"
+            "Modern GNSS can achieve sub-meter accuracy."
         )
-
-        # Verify sanitization was counted
-        mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
 
     def test_is_significant_update_allows_valid_accuracy(self) -> None:
-        """_is_significant_update must allow valid accuracy values (>= 1.0m)."""
+        """_is_significant_update must allow valid accuracy values (>= 0.001m)."""
         from unittest.mock import MagicMock
 
         from custom_components.googlefindmy.coordinator.cache import CacheOperations

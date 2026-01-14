@@ -33,80 +33,106 @@ import pytest
 class TestGeoConstants:
     """Verify the central physics constants are correctly defined."""
 
-    def test_min_physical_accuracy_is_one_meter(self) -> None:
-        """MIN_PHYSICAL_ACCURACY_M must be 1.0m (consumer GPS floor)."""
+    def test_min_valid_accuracy_is_one_millimeter(self) -> None:
+        """MIN_VALID_ACCURACY must be 0.001m (1mm threshold for error code).
+
+        The Android Location API uses 0.0 as an error code meaning "no accuracy".
+        Modern dual-frequency GNSS can achieve sub-meter accuracy, so we use a
+        very low threshold (1mm) to only catch the error code.
+        """
         from custom_components.googlefindmy.coordinator.helpers.geo import (
-            MIN_PHYSICAL_ACCURACY_M,
+            MIN_VALID_ACCURACY,
         )
 
-        assert MIN_PHYSICAL_ACCURACY_M == 1.0, (
+        assert MIN_VALID_ACCURACY == 0.001, (
             f"\n"
             f"{'=' * 70}\n"
-            f"CRITICAL: MIN_PHYSICAL_ACCURACY_M is not 1.0m!\n"
+            f"CRITICAL: MIN_VALID_ACCURACY is not 0.001m!\n"
             f"{'=' * 70}\n"
-            f"Current value: {MIN_PHYSICAL_ACCURACY_M}\n"
-            f"Expected: 1.0 (consumer GPS cannot achieve sub-meter accuracy)\n"
+            f"Current value: {MIN_VALID_ACCURACY}\n"
+            f"Expected: 0.001 (1mm - only catch error code 0.0)\n"
             f"\n"
             f"FIX LOCATION: helpers/geo.py\n"
             f"{'=' * 70}"
         )
 
-    def test_default_fallback_is_fifty_meters(self) -> None:
-        """DEFAULT_ACCURACY_FALLBACK_M must be 50.0m (Bluetooth range)."""
+    def test_default_fallback_is_two_kilometers(self) -> None:
+        """DEFAULT_ACCURACY_FALLBACK must be 2000.0m (conservative unknown).
+
+        A high fallback ensures error codes (0.0) have minimal weight in
+        fusion calculations and lose to any real measurement.
+        """
         from custom_components.googlefindmy.coordinator.helpers.geo import (
-            DEFAULT_ACCURACY_FALLBACK_M,
+            DEFAULT_ACCURACY_FALLBACK,
         )
 
-        assert DEFAULT_ACCURACY_FALLBACK_M == 50.0, (
+        assert DEFAULT_ACCURACY_FALLBACK == 2000.0, (
             f"\n"
             f"{'=' * 70}\n"
-            f"CRITICAL: DEFAULT_ACCURACY_FALLBACK_M is not 50.0m!\n"
+            f"CRITICAL: DEFAULT_ACCURACY_FALLBACK is not 2000.0m!\n"
             f"{'=' * 70}\n"
-            f"Current value: {DEFAULT_ACCURACY_FALLBACK_M}\n"
-            f"Expected: 50.0 (based on Bluetooth range ~40-80m + GPS error)\n"
+            f"Current value: {DEFAULT_ACCURACY_FALLBACK}\n"
+            f"Expected: 2000.0 (conservative for unknown accuracy)\n"
             f"\n"
             f"FIX LOCATION: helpers/geo.py\n"
             f"{'=' * 70}"
         )
 
-    def test_safe_accuracy_rejects_zero(self) -> None:
-        """safe_accuracy() must reject 0.0m as invalid."""
+    def test_safe_accuracy_rejects_error_code(self) -> None:
+        """safe_accuracy() must reject 0.0m (error code) as invalid."""
         from custom_components.googlefindmy.coordinator.helpers.geo import (
-            DEFAULT_ACCURACY_FALLBACK_M,
+            DEFAULT_ACCURACY_FALLBACK,
             safe_accuracy,
         )
 
         result = safe_accuracy(0.0)
 
-        assert result == DEFAULT_ACCURACY_FALLBACK_M, (
+        assert result == DEFAULT_ACCURACY_FALLBACK, (
             f"\n"
             f"{'=' * 70}\n"
             f"CRITICAL: safe_accuracy(0.0) did not return fallback!\n"
             f"{'=' * 70}\n"
-            f"Input: 0.0m\n"
+            f"Input: 0.0m (Android API error code)\n"
             f"Output: {result}m\n"
-            f"Expected: {DEFAULT_ACCURACY_FALLBACK_M}m (fallback)\n"
+            f"Expected: {DEFAULT_ACCURACY_FALLBACK}m (fallback)\n"
             f"\n"
-            f"0.0m GPS accuracy is physically impossible.\n"
+            f"0.0 is the Android Location API error code for 'no accuracy'.\n"
             f"FIX LOCATION: helpers/geo.py :: safe_accuracy()\n"
             f"{'=' * 70}"
         )
 
-    def test_safe_accuracy_rejects_sub_meter(self) -> None:
-        """safe_accuracy() must reject values < 1.0m."""
+    def test_safe_accuracy_rejects_below_threshold(self) -> None:
+        """safe_accuracy() must reject values < 0.001m (error codes)."""
         from custom_components.googlefindmy.coordinator.helpers.geo import (
-            DEFAULT_ACCURACY_FALLBACK_M,
+            DEFAULT_ACCURACY_FALLBACK,
             safe_accuracy,
         )
 
-        for invalid in [0.0, 0.1, 0.5, 0.99, -1.0, -100.0]:
+        # Only error codes (< 0.001m) and negative should return fallback
+        for invalid in [0.0, 0.0001, 0.0009, -1.0, -100.0]:
             result = safe_accuracy(invalid)
-            assert result == DEFAULT_ACCURACY_FALLBACK_M, (
+            assert result == DEFAULT_ACCURACY_FALLBACK, (
                 f"safe_accuracy({invalid}) should return fallback, got {result}"
             )
 
-    def test_safe_accuracy_accepts_valid(self) -> None:
-        """safe_accuracy() must preserve valid accuracy values."""
+    def test_safe_accuracy_preserves_sub_meter(self) -> None:
+        """safe_accuracy() must PRESERVE valid sub-meter accuracy.
+
+        Modern dual-frequency GNSS can achieve sub-meter accuracy.
+        """
+        from custom_components.googlefindmy.coordinator.helpers.geo import (
+            safe_accuracy,
+        )
+
+        # Valid sub-meter values should be preserved
+        for valid in [0.001, 0.002, 0.1, 0.5, 0.99]:
+            result = safe_accuracy(valid)
+            assert result == valid, (
+                f"safe_accuracy({valid}) should preserve {valid}, got {result}"
+            )
+
+    def test_safe_accuracy_preserves_standard_accuracy(self) -> None:
+        """safe_accuracy() must preserve standard accuracy values."""
         from custom_components.googlefindmy.coordinator.helpers.geo import (
             safe_accuracy,
         )
@@ -123,15 +149,18 @@ class TestGeoConstants:
             is_valid_accuracy,
         )
 
-        # Invalid cases
+        # Invalid cases: error codes and invalid values
         assert is_valid_accuracy(None) is False
-        assert is_valid_accuracy(0.0) is False
-        assert is_valid_accuracy(0.5) is False
-        assert is_valid_accuracy(-1.0) is False
+        assert is_valid_accuracy(0.0) is False, "0.0 is error code"
+        assert is_valid_accuracy(0.0001) is False, "< 0.001 is error"
+        assert is_valid_accuracy(-1.0) is False, "Negative is invalid"
         assert is_valid_accuracy(float("nan")) is False
         assert is_valid_accuracy(float("inf")) is False
 
-        # Valid cases
+        # Valid cases: sub-meter is now valid for modern GNSS
+        assert is_valid_accuracy(0.001) is True, "1mm is valid threshold"
+        assert is_valid_accuracy(0.002) is True, "2mm is valid"
+        assert is_valid_accuracy(0.5) is True, "50cm is valid"
         assert is_valid_accuracy(1.0) is True
         assert is_valid_accuracy(20.0) is True
         assert is_valid_accuracy(100.0) is True
@@ -449,15 +478,15 @@ class TestManualLocateSanity:
     independently validate accuracy before writing to cache.
     """
 
-    def test_locate_uses_min_physical_accuracy(self) -> None:
-        """locate.py must import and use MIN_PHYSICAL_ACCURACY_M."""
+    def test_locate_uses_min_valid_accuracy(self) -> None:
+        """locate.py must import and use MIN_PHYSICAL_ACCURACY_M (0.001m)."""
         # Verify the import exists
         from custom_components.googlefindmy.coordinator.locate import (
             MIN_PHYSICAL_ACCURACY_M,
         )
 
-        assert MIN_PHYSICAL_ACCURACY_M == 1.0, (
-            "locate.py should use MIN_PHYSICAL_ACCURACY_M = 1.0m"
+        assert MIN_PHYSICAL_ACCURACY_M == 0.001, (
+            "locate.py should use MIN_PHYSICAL_ACCURACY_M = 0.001m (1mm threshold)"
         )
 
 
@@ -469,9 +498,9 @@ class TestManualLocateSanity:
 class TestCacheGatekeeper:
     """Test the cache gatekeeper (_is_significant_update) handles invalid data.
 
-    Invalid accuracy values (< 1.0m) are SANITIZED (removed from dict),
-    not rejected. This allows valid location data to pass through while
-    preventing invalid accuracy from corrupting rankings.
+    Error code accuracy values (< 0.001m) are SANITIZED (removed from dict),
+    not rejected. Valid sub-meter accuracy is preserved. This allows valid
+    location data to pass through while preventing error codes from corrupting rankings.
     """
 
     def test_gatekeeper_sanitizes_zero_accuracy(self) -> None:
@@ -505,11 +534,11 @@ class TestCacheGatekeeper:
 
         mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
 
-    def test_gatekeeper_sanitizes_sub_meter(self) -> None:
-        """_is_significant_update must SANITIZE accuracy < 1.0m (not reject).
+    def test_gatekeeper_sanitizes_error_codes(self) -> None:
+        """_is_significant_update must SANITIZE error codes (< 0.001m).
 
-        Sub-meter accuracy is physically impossible for consumer GPS.
-        We ACCEPT the update but REMOVE the invalid accuracy.
+        The Android Location API uses 0.0 as "no accuracy available".
+        We ACCEPT the update but REMOVE the error code accuracy.
         """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
 
@@ -519,21 +548,26 @@ class TestCacheGatekeeper:
 
         is_sig = CacheOperations._is_significant_update
 
-        for invalid_acc in [0.0, 0.1, 0.5, 0.99]:
+        # Only error codes (< 0.001m) should be sanitized
+        for error_code in [0.0, 0.0001, 0.0009]:
             update = {
                 "latitude": 48.123,
                 "longitude": 11.456,
-                "accuracy": invalid_acc,
+                "accuracy": error_code,
                 "last_seen": 1700000100,
             }
 
             result = is_sig(mock_coord, "device-1", update)
 
-            assert result is True, f"Update with accuracy={invalid_acc}m should be ACCEPTED"
-            assert "accuracy" not in update, f"accuracy={invalid_acc}m should be removed"
+            assert result is True, f"Update with accuracy={error_code}m should be ACCEPTED"
+            assert "accuracy" not in update, f"Error code {error_code}m should be removed"
 
-    def test_gatekeeper_accepts_valid_accuracy(self) -> None:
-        """_is_significant_update must accept accuracy >= 1.0m."""
+    def test_gatekeeper_preserves_sub_meter_accuracy(self) -> None:
+        """_is_significant_update must PRESERVE valid sub-meter accuracy.
+
+        Modern dual-frequency GNSS can achieve sub-meter accuracy.
+        Values like 0.5m or 0.01m are valid and must be preserved.
+        """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
 
         mock_coord = MagicMock(spec=CacheOperations)
@@ -542,16 +576,21 @@ class TestCacheGatekeeper:
 
         is_sig = CacheOperations._is_significant_update
 
-        good_update = {
-            "latitude": 48.123,
-            "longitude": 11.456,
-            "accuracy": 5.0,  # Valid
-            "last_seen": 1700000100,
-        }
+        # Valid sub-meter values (>= 0.001m) should be preserved
+        for valid_acc in [0.001, 0.002, 0.5, 0.99, 1.0, 5.0]:
+            update = {
+                "latitude": 48.123,
+                "longitude": 11.456,
+                "accuracy": valid_acc,
+                "last_seen": 1700000100,
+            }
 
-        result = is_sig(mock_coord, "device-1", good_update)
+            result = is_sig(mock_coord, "device-1", update)
 
-        assert result is True, "Gatekeeper should accept accuracy=5.0m"
+            assert result is True, f"Update with accuracy={valid_acc}m should be accepted"
+            assert update.get("accuracy") == valid_acc, (
+                f"Valid accuracy {valid_acc}m should be PRESERVED, not sanitized"
+            )
 
     def test_gatekeeper_allows_semantic_only(self) -> None:
         """_is_significant_update must allow updates without accuracy."""

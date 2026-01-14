@@ -177,7 +177,7 @@ class TestCoerceFloat:
 class TestSafeAccuracy:
     """Tests for safe_accuracy function."""
 
-    # Default fallback value used in the function (50m for Bluetooth range estimation)
+    # Default fallback value used in the function (2000m for unknown accuracy)
     DEFAULT_FALLBACK = DEFAULT_ACCURACY_FALLBACK_M
 
     def test_valid_positive_accuracy(self) -> None:
@@ -187,21 +187,29 @@ class TestSafeAccuracy:
         assert safe_accuracy(9999.0) == 9999.0
 
     def test_zero_accuracy_returns_fallback(self) -> None:
-        """Zero accuracy means 'unknown/masked', returns fallback.
+        """Zero accuracy is the Android API error code, returns fallback.
 
-        BACKGROUND: Google's API sometimes returns accuracy=0.0 as "privacy masking"
-        or "unknown precision", not as "perfect precision". We treat it as unmeasured.
+        BACKGROUND: The Android Location API uses 0.0 as an error code meaning
+        "no accuracy available", not "perfect precision". We treat it as unknown.
         """
         assert safe_accuracy(0.0) == self.DEFAULT_FALLBACK
 
-    def test_sub_meter_accuracy_returns_fallback(self) -> None:
-        """Sub-meter accuracy is physically implausible for consumer GPS, returns fallback.
+    def test_sub_meter_accuracy_is_valid(self) -> None:
+        """Sub-meter accuracy is valid for modern dual-frequency GNSS.
 
-        Consumer GPS hardware floor is ~1.0m. Values < 1.0 indicate data corruption
-        or API quirks, not actual precision.
+        Modern GNSS chips (L1+L5) can achieve sub-meter accuracy under ideal
+        conditions (Open Sky). Values like 0.5m or 0.01m are valid measurements.
         """
-        assert safe_accuracy(0.5) == self.DEFAULT_FALLBACK
-        assert safe_accuracy(0.99) == self.DEFAULT_FALLBACK
+        assert safe_accuracy(0.5) == 0.5
+        assert safe_accuracy(0.99) == 0.99
+        assert safe_accuracy(0.01) == 0.01
+        assert safe_accuracy(0.002) == 0.002  # 2mm - extreme but valid
+
+    def test_error_code_returns_fallback(self) -> None:
+        """Error codes (< 0.001m) return fallback."""
+        assert safe_accuracy(0.0) == self.DEFAULT_FALLBACK
+        assert safe_accuracy(0.0001) == self.DEFAULT_FALLBACK
+        assert safe_accuracy(0.0009) == self.DEFAULT_FALLBACK
 
     def test_none_returns_fallback(self) -> None:
         """None returns fallback value."""
@@ -222,13 +230,14 @@ class TestSafeAccuracy:
         assert safe_accuracy(float("-inf")) == self.DEFAULT_FALLBACK
 
     def test_boundary_accuracy_value(self) -> None:
-        """Boundary value: 1.0m is the minimum valid accuracy.
+        """Boundary value: 0.001m (1mm) is the minimum valid accuracy.
 
-        Consumer GPS cannot achieve sub-meter accuracy.
-        Exactly 1.0m is the threshold - valid and returned unchanged.
+        Modern GNSS can achieve sub-meter accuracy. The threshold is set at 1mm
+        to only catch the error code (0.0) and not valid high-precision data.
         """
-        assert safe_accuracy(1.0) == 1.0
-        assert safe_accuracy(1.001) == 1.001
+        assert safe_accuracy(0.001) == 0.001  # Exactly at threshold - valid
+        assert safe_accuracy(0.002) == 0.002  # Above threshold - valid
+        assert safe_accuracy(0.0009) == self.DEFAULT_FALLBACK  # Below - error
 
     def test_very_large_positive(self) -> None:
         """Very large positive values are valid."""

@@ -24,19 +24,21 @@ from typing import Any
 # Earth radius in meters (WGS84 mean radius)
 EARTH_RADIUS_M = 6371000.0
 
-# Minimum physically plausible GPS accuracy (meters).
-# Consumer GPS hardware cannot achieve sub-meter accuracy.
-# Even differential GPS rarely achieves < 1m in practice.
-# Values below this indicate API artifacts, not real measurements.
-MIN_PHYSICAL_ACCURACY_M = 1.0
+# Minimum valid accuracy threshold (meters).
+# The Android Location API uses 0.0 as an error code meaning "no accuracy available".
+# Modern dual-frequency GNSS chips (L1+L5) can achieve sub-meter accuracy under
+# ideal conditions (Open Sky), so we use 1mm as the floor to catch only the
+# error code (0.0) and negative values, NOT valid high-precision measurements.
+MIN_VALID_ACCURACY = 0.001  # 1 millimeter
 
 # Default fallback for invalid/missing GPS accuracy.
-# Based on Bluetooth range (~40-80m) + GPS error (~10-30m).
-# Using 50m prevents "Fusion Lock-in" while allowing real fixes to override.
-DEFAULT_ACCURACY_FALLBACK_M = 50.0
+# Conservative value for "unknown" - high enough to lose against any real measurement
+# in weighted fusion, but not so high as to cause map rendering issues.
+DEFAULT_ACCURACY_FALLBACK = 2000.0  # 2 kilometers
 
-# Legacy constant (10km) for truly unknown locations
-DEFAULT_ACCURACY_FALLBACK = 10000.0
+# Legacy aliases for backward compatibility
+MIN_PHYSICAL_ACCURACY_M = MIN_VALID_ACCURACY
+DEFAULT_ACCURACY_FALLBACK_M = DEFAULT_ACCURACY_FALLBACK
 
 
 # ---------------------------------------------------------------------------
@@ -110,54 +112,60 @@ def coerce_float(value: Any) -> float | None:
 
 
 def safe_accuracy(value: float | None, *, fallback: float | None = None) -> float:
-    """Normalize GPS accuracy to a safe, finite, physically plausible value.
+    """Normalize GPS accuracy to a safe, finite value.
 
-    GPS accuracy of < 1.0m is physically impossible for consumer hardware.
-    Such values indicate API artifacts or missing data, not real measurements.
+    The Android Location API uses 0.0 as an error code meaning "no accuracy".
+    We treat values < MIN_VALID_ACCURACY (0.001m) as this error code.
 
-    Invalid, missing, or sub-meter accuracy values are replaced with
-    a fallback (default: 50m for Bluetooth range estimation).
+    Modern dual-frequency GNSS can achieve sub-meter accuracy, so values like
+    0.01m (1cm) or 0.5m are valid and preserved unchanged.
 
     Args:
         value: GPS accuracy in meters, or None.
-        fallback: Custom fallback value. Defaults to DEFAULT_ACCURACY_FALLBACK_M (50m).
+        fallback: Custom fallback value. Defaults to DEFAULT_ACCURACY_FALLBACK (2000m).
 
     Returns:
-        A finite float >= MIN_PHYSICAL_ACCURACY_M representing accuracy in meters.
+        A finite float >= MIN_VALID_ACCURACY representing accuracy in meters,
+        or the fallback value if input is invalid.
 
     Example:
         >>> safe_accuracy(50.0)
         50.0
+        >>> safe_accuracy(0.5)  # Valid sub-meter accuracy
+        0.5
+        >>> safe_accuracy(0.01)  # Valid centimeter accuracy
+        0.01
         >>> safe_accuracy(None)
-        50.0
-        >>> safe_accuracy(0.0)
-        50.0
-        >>> safe_accuracy(0.5)
-        50.0
+        2000.0
+        >>> safe_accuracy(0.0)  # Error code
+        2000.0
         >>> safe_accuracy(-5.0)
-        50.0
+        2000.0
     """
     if fallback is None:
-        fallback = DEFAULT_ACCURACY_FALLBACK_M
+        fallback = DEFAULT_ACCURACY_FALLBACK
 
     if value is None or not math.isfinite(value):
         return fallback
 
-    # Values below MIN_PHYSICAL_ACCURACY_M are physically impossible
-    # for consumer GPS/Bluetooth hardware
-    if value < MIN_PHYSICAL_ACCURACY_M:
+    # Values below MIN_VALID_ACCURACY are the error code (0.0) or negative
+    # Modern GNSS can achieve sub-meter accuracy, so we only reject < 0.001m
+    if value < MIN_VALID_ACCURACY:
         return fallback
 
     return value
 
 
 def is_valid_accuracy(value: float | None) -> bool:
-    """Check if an accuracy value is physically plausible.
+    """Check if an accuracy value is valid (not an error code).
 
-    GPS accuracy must be:
+    Valid accuracy must be:
     - Not None
     - Finite (not NaN or Inf)
-    - >= MIN_PHYSICAL_ACCURACY_M (1.0m)
+    - >= MIN_VALID_ACCURACY (0.001m) - below this is the error code 0.0
+
+    Modern dual-frequency GNSS can achieve sub-meter accuracy, so values like
+    0.01m (1cm) or 0.5m are valid.
 
     Args:
         value: GPS accuracy in meters, or None.
@@ -168,9 +176,11 @@ def is_valid_accuracy(value: float | None) -> bool:
     Example:
         >>> is_valid_accuracy(20.0)
         True
-        >>> is_valid_accuracy(0.0)
-        False
-        >>> is_valid_accuracy(0.5)
+        >>> is_valid_accuracy(0.5)  # Valid sub-meter
+        True
+        >>> is_valid_accuracy(0.01)  # Valid centimeter
+        True
+        >>> is_valid_accuracy(0.0)  # Error code
         False
         >>> is_valid_accuracy(None)
         False
@@ -179,7 +189,7 @@ def is_valid_accuracy(value: float | None) -> bool:
         return False
     try:
         v = float(value)
-        return math.isfinite(v) and v >= MIN_PHYSICAL_ACCURACY_M
+        return math.isfinite(v) and v >= MIN_VALID_ACCURACY
     except (TypeError, ValueError):
         return False
 
