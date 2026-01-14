@@ -467,10 +467,19 @@ class TestManualLocateSanity:
 
 
 class TestCacheGatekeeper:
-    """Test the cache gatekeeper (_is_significant_update) rejects invalid data."""
+    """Test the cache gatekeeper (_is_significant_update) handles invalid data.
 
-    def test_gatekeeper_rejects_zero_accuracy(self) -> None:
-        """_is_significant_update must reject accuracy=0.0."""
+    Invalid accuracy values (< 1.0m) are SANITIZED (removed from dict),
+    not rejected. This allows valid location data to pass through while
+    preventing invalid accuracy from corrupting rankings.
+    """
+
+    def test_gatekeeper_sanitizes_zero_accuracy(self) -> None:
+        """_is_significant_update must SANITIZE accuracy=0.0 (not reject).
+
+        Zero accuracy means 'unknown/masked', not 'perfect precision'.
+        We ACCEPT the update but REMOVE the invalid accuracy.
+        """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
 
         mock_coord = MagicMock(spec=CacheOperations)
@@ -479,31 +488,29 @@ class TestCacheGatekeeper:
 
         is_sig = CacheOperations._is_significant_update
 
-        bad_update = {
+        update = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.0,
+            "accuracy": 0.0,  # Will be sanitized
             "last_seen": 1700000100,
         }
 
-        result = is_sig(mock_coord, "device-1", bad_update)
+        result = is_sig(mock_coord, "device-1", update)
 
-        assert result is False, (
-            f"\n"
-            f"{'=' * 70}\n"
-            f"CRITICAL: Cache gatekeeper accepted accuracy=0.0m!\n"
-            f"{'=' * 70}\n"
-            f"This allows poisoned data to enter the cache.\n"
-            f"\n"
-            f"FIX LOCATION: cache.py :: _is_significant_update()\n"
-            f"Add: if acc_f < MIN_PHYSICAL_ACCURACY_M: return False\n"
-            f"{'=' * 70}"
-        )
+        # Must be ACCEPTED
+        assert result is True, "Zero accuracy update should be ACCEPTED (sanitized)"
 
-        mock_coord.increment_stat.assert_called_with("invalid_accuracy_drop_count")
+        # Accuracy must be removed
+        assert "accuracy" not in update, "Zero accuracy should be removed from dict"
 
-    def test_gatekeeper_rejects_sub_meter(self) -> None:
-        """_is_significant_update must reject accuracy < 1.0m."""
+        mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
+
+    def test_gatekeeper_sanitizes_sub_meter(self) -> None:
+        """_is_significant_update must SANITIZE accuracy < 1.0m (not reject).
+
+        Sub-meter accuracy is physically impossible for consumer GPS.
+        We ACCEPT the update but REMOVE the invalid accuracy.
+        """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
 
         mock_coord = MagicMock(spec=CacheOperations)
@@ -513,16 +520,17 @@ class TestCacheGatekeeper:
         is_sig = CacheOperations._is_significant_update
 
         for invalid_acc in [0.0, 0.1, 0.5, 0.99]:
-            bad_update = {
+            update = {
                 "latitude": 48.123,
                 "longitude": 11.456,
                 "accuracy": invalid_acc,
                 "last_seen": 1700000100,
             }
 
-            result = is_sig(mock_coord, "device-1", bad_update)
+            result = is_sig(mock_coord, "device-1", update)
 
-            assert result is False, f"Gatekeeper should reject accuracy={invalid_acc}m"
+            assert result is True, f"Update with accuracy={invalid_acc}m should be ACCEPTED"
+            assert "accuracy" not in update, f"accuracy={invalid_acc}m should be removed"
 
     def test_gatekeeper_accepts_valid_accuracy(self) -> None:
         """_is_significant_update must accept accuracy >= 1.0m."""

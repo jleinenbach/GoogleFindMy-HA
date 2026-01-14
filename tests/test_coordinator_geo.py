@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 
 from custom_components.googlefindmy.coordinator.helpers.geo import (
+    DEFAULT_ACCURACY_FALLBACK_M,
     clamp,
     coerce_float,
     haversine_distance,
@@ -176,8 +177,8 @@ class TestCoerceFloat:
 class TestSafeAccuracy:
     """Tests for safe_accuracy function."""
 
-    # Default fallback value used in the function
-    DEFAULT_FALLBACK = 10000.0
+    # Default fallback value used in the function (50m for Bluetooth range estimation)
+    DEFAULT_FALLBACK = DEFAULT_ACCURACY_FALLBACK_M
 
     def test_valid_positive_accuracy(self) -> None:
         """Valid positive accuracy is returned unchanged."""
@@ -185,9 +186,22 @@ class TestSafeAccuracy:
         assert safe_accuracy(1.5) == 1.5
         assert safe_accuracy(9999.0) == 9999.0
 
-    def test_zero_accuracy(self) -> None:
-        """Zero is a valid accuracy."""
-        assert safe_accuracy(0.0) == 0.0
+    def test_zero_accuracy_returns_fallback(self) -> None:
+        """Zero accuracy means 'unknown/masked', returns fallback.
+
+        BACKGROUND: Google's API sometimes returns accuracy=0.0 as "privacy masking"
+        or "unknown precision", not as "perfect precision". We treat it as unmeasured.
+        """
+        assert safe_accuracy(0.0) == self.DEFAULT_FALLBACK
+
+    def test_sub_meter_accuracy_returns_fallback(self) -> None:
+        """Sub-meter accuracy is physically implausible for consumer GPS, returns fallback.
+
+        Consumer GPS hardware floor is ~1.0m. Values < 1.0 indicate data corruption
+        or API quirks, not actual precision.
+        """
+        assert safe_accuracy(0.5) == self.DEFAULT_FALLBACK
+        assert safe_accuracy(0.99) == self.DEFAULT_FALLBACK
 
     def test_none_returns_fallback(self) -> None:
         """None returns fallback value."""
@@ -207,10 +221,14 @@ class TestSafeAccuracy:
         assert safe_accuracy(float("inf")) == self.DEFAULT_FALLBACK
         assert safe_accuracy(float("-inf")) == self.DEFAULT_FALLBACK
 
-    def test_very_small_positive(self) -> None:
-        """Very small positive values are valid."""
-        assert safe_accuracy(0.001) == 0.001
-        assert safe_accuracy(1e-10) == 1e-10
+    def test_boundary_accuracy_value(self) -> None:
+        """Boundary value: 1.0m is the minimum valid accuracy.
+
+        Consumer GPS cannot achieve sub-meter accuracy.
+        Exactly 1.0m is the threshold - valid and returned unchanged.
+        """
+        assert safe_accuracy(1.0) == 1.0
+        assert safe_accuracy(1.001) == 1.001
 
     def test_very_large_positive(self) -> None:
         """Very large positive values are valid."""

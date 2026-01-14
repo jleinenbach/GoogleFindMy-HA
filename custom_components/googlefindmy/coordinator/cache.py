@@ -619,31 +619,34 @@ class CacheOperations:
             _LOGGER.debug("Rejecting update for %s: payload is not a dict", device_id)
             return False
 
-        # Quality gate: Reject physically impossible accuracy values.
-        # Note: We allow updates with no accuracy (semantic-only are valid).
-        # We only reject updates that claim an accuracy that's impossible.
+        # Sanitize physically impossible accuracy values.
+        # Values like 0.0 mean "privacy masked" or "unknown", not "perfect precision".
+        # We ACCEPT the update but REMOVE the invalid accuracy to prevent ranking corruption.
+        # This allows reports with 0.0 accuracy to still provide location data.
         new_acc = new_data.get("accuracy")
         if new_acc is not None:
             try:
                 acc_f = float(new_acc)
                 if not math.isfinite(acc_f) or acc_f < MIN_PHYSICAL_ACCURACY_M:
-                    self.increment_stat("invalid_accuracy_drop_count")
+                    # Sanitize: remove invalid accuracy, keep the report
+                    new_data.pop("accuracy", None)
+                    self.increment_stat("accuracy_sanitized_count")
                     _LOGGER.debug(
-                        "Rejecting update for %s: physically impossible accuracy (%s < %sm)",
+                        "Sanitizing update for %s: invalid accuracy (%s) removed (< %sm)",
                         device_id,
                         new_acc,
                         MIN_PHYSICAL_ACCURACY_M,
                     )
-                    return False
+                    # Continue processing - the update is valid, just without precision
             except (TypeError, ValueError):
-                # Non-numeric accuracy is also invalid
-                self.increment_stat("invalid_accuracy_drop_count")
+                # Non-numeric accuracy: remove it, keep the report
+                new_data.pop("accuracy", None)
+                self.increment_stat("accuracy_sanitized_count")
                 _LOGGER.debug(
-                    "Rejecting update for %s: non-numeric accuracy (%r)",
+                    "Sanitizing update for %s: non-numeric accuracy (%r) removed",
                     device_id,
                     new_acc,
                 )
-                return False
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
         if n_seen_norm is not None:

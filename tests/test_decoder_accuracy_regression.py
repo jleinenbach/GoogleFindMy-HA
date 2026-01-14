@@ -48,13 +48,15 @@ class TestAccuracyPhysicsValidation:
     @pytest.mark.parametrize(
         ("input_accuracy", "should_be_removed", "scenario"),
         [
-            # Valid accuracy values - should be preserved
+            # Valid accuracy values - should be preserved (>= 1.0m)
+            (1.0, False, "minimum_valid_accuracy"),
             (5.0, False, "typical_gps_accuracy"),
             (20.0, False, "moderate_gps_accuracy"),
             (100.0, False, "poor_gps_accuracy"),
-            (0.001, False, "very_precise_but_positive"),
-            # Invalid accuracy values - MUST be removed
-            (0.0, True, "zero_accuracy_impossible"),
+            # Invalid accuracy values - MUST be removed (< 1.0m is physically impossible)
+            (0.0, True, "zero_accuracy_means_unknown"),
+            (0.5, True, "sub_meter_accuracy_impossible"),
+            (0.99, True, "just_under_threshold_invalid"),
             (-1.0, True, "negative_accuracy_impossible"),
             (-100.0, True, "large_negative_impossible"),
             (float("nan"), True, "nan_is_invalid"),
@@ -93,12 +95,13 @@ class TestAccuracyPhysicsValidation:
                 f"Scenario: {scenario}\n"
                 f"Input accuracy: {input_accuracy}\n"
                 f"\n"
-                f"PHYSICS VIOLATION: GPS accuracy of {input_accuracy}m is impossible.\n"
-                f"Real GPS accuracy is typically 3-50m, never <= 0.\n"
+                f"PHYSICS VIOLATION: GPS accuracy of {input_accuracy}m is invalid.\n"
+                f"Consumer GPS cannot achieve sub-meter accuracy (< 1.0m).\n"
+                f"Values < 1.0 indicate API artifacts or 'unknown', not precision.\n"
                 f"\n"
                 f"FIX LOCATION: decoder.py :: _normalize_location_dict()\n"
-                f"The function must filter out accuracy <= 0 before returning.\n"
-                f"Look for: 'elif num_key == \"accuracy\" and f <= 0.0'\n"
+                f"The function must filter out accuracy < 1.0m before returning.\n"
+                f"Look for: 'elif num_key == \"accuracy\" and f < _MIN_PLAUSIBLE_ACCURACY_M'\n"
                 f"{'=' * 70}"
             )
         else:
@@ -603,8 +606,13 @@ class TestCacheFusionRobustness:
     quality gates correctly handle edge cases and malicious data.
     """
 
-    def test_is_significant_update_rejects_zero_accuracy(self) -> None:
-        """_is_significant_update must reject accuracy=0.0 as physically impossible."""
+    def test_is_significant_update_sanitizes_zero_accuracy(self) -> None:
+        """_is_significant_update must ACCEPT but SANITIZE accuracy=0.0.
+
+        BACKGROUND: 0.0 means 'unknown/masked', not 'perfect precision'.
+        The update contains valid location data - only accuracy is invalid.
+        We ACCEPT the update but REMOVE the invalid accuracy from the dict.
+        """
         from unittest.mock import MagicMock
 
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
@@ -617,34 +625,43 @@ class TestCacheFusionRobustness:
         # Bind the method to our mock
         is_sig = CacheOperations._is_significant_update
 
-        bad_update = {
+        update_with_zero_acc = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.0,  # INVALID
+            "accuracy": 0.0,  # Will be sanitized (removed)
             "last_seen": 1700000100,
         }
 
-        result = is_sig(mock_coord, "device-1", bad_update)
+        result = is_sig(mock_coord, "device-1", update_with_zero_acc)
 
-        assert result is False, (
+        # Update must be ACCEPTED (not rejected)
+        assert result is True, (
             f"\n"
             f"{'=' * 70}\n"
-            f"CRITICAL: Cache accepted update with accuracy=0.0m!\n"
+            f"CACHE REJECTED VALID UPDATE!\n"
             f"{'=' * 70}\n"
             f"\n"
-            f"The cache gatekeeper (_is_significant_update) must reject\n"
-            f"any update with accuracy < 1.0m as physically impossible.\n"
-            f"\n"
-            f"FIX LOCATION: cache.py :: _is_significant_update()\n"
-            f"Add check: if acc_f < MIN_PLAUSIBLE_ACCURACY_M: return False\n"
+            f"An update with accuracy=0.0 was REJECTED instead of SANITIZED.\n"
+            f"The report contains valid location data. Only the accuracy\n"
+            f"is invalid and should be removed, not the entire update.\n"
             f"{'=' * 70}"
         )
 
-        # Verify the stat was incremented
-        mock_coord.increment_stat.assert_called_with("invalid_accuracy_drop_count")
+        # Accuracy should have been removed from the update dict
+        assert "accuracy" not in update_with_zero_acc, (
+            "Invalid accuracy should be removed from update dict"
+        )
 
-    def test_is_significant_update_rejects_sub_meter_accuracy(self) -> None:
-        """_is_significant_update must reject accuracy < 1.0m (consumer GPS floor)."""
+        # Verify sanitization was counted
+        mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
+
+    def test_is_significant_update_sanitizes_sub_meter_accuracy(self) -> None:
+        """_is_significant_update must ACCEPT but SANITIZE accuracy < 1.0m.
+
+        Consumer GPS cannot achieve sub-meter accuracy. Values like 0.5m
+        indicate API artifacts, not real measurements. We ACCEPT the update
+        but REMOVE the invalid accuracy from the dict.
+        """
         from unittest.mock import MagicMock
 
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
@@ -655,34 +672,28 @@ class TestCacheFusionRobustness:
 
         is_sig = CacheOperations._is_significant_update
 
-        # 0.5m is positive but impossible for consumer GPS
-        bad_update = {
+        # 0.5m is positive but impossible for consumer GPS - will be sanitized
+        update_with_sub_meter = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.5,  # Sub-meter = INVALID for consumer GPS
+            "accuracy": 0.5,  # Sub-meter = will be sanitized (removed)
             "last_seen": 1700000100,
         }
 
-        result = is_sig(mock_coord, "device-1", bad_update)
+        result = is_sig(mock_coord, "device-1", update_with_sub_meter)
 
-        assert result is False, (
-            f"\n"
-            f"{'=' * 70}\n"
-            f"CRITICAL: Cache accepted sub-meter accuracy (0.5m)!\n"
-            f"{'=' * 70}\n"
-            f"\n"
-            f"Consumer GPS hardware cannot achieve sub-meter accuracy.\n"
-            f"Even differential GPS rarely achieves < 1m.\n"
-            f"Values like 0.5m indicate API artifacts, not real measurements.\n"
-            f"\n"
-            f"The cache MUST reject accuracy < 1.0m to prevent:\n"
-            f"- 'Fusion Lock-in' where bad data gets extreme weight\n"
-            f"- Incorrect 'Own Device' reports poisoning the cache\n"
-            f"\n"
-            f"FIX LOCATION: cache.py :: _is_significant_update()\n"
-            f"Ensure MIN_PLAUSIBLE_ACCURACY_M = 1.0 and check is enforced.\n"
-            f"{'=' * 70}"
+        # Update must be ACCEPTED
+        assert result is True, (
+            "Update with sub-meter accuracy should be ACCEPTED (sanitized)"
         )
+
+        # Accuracy should have been removed
+        assert "accuracy" not in update_with_sub_meter, (
+            "Sub-meter accuracy should be removed from update dict"
+        )
+
+        # Verify sanitization was counted
+        mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
 
     def test_is_significant_update_allows_valid_accuracy(self) -> None:
         """_is_significant_update must allow valid accuracy values (>= 1.0m)."""
@@ -1221,8 +1232,13 @@ class TestZeroAccuracyGhostPrevention:
             f"{'=' * 70}"
         )
 
-    def test_cache_gate_rejects_zero_accuracy(self) -> None:
-        """cache.py _is_significant_update must reject accuracy=0.0."""
+    def test_cache_gate_sanitizes_zero_accuracy(self) -> None:
+        """cache.py _is_significant_update must SANITIZE accuracy=0.0.
+
+        Zero accuracy means 'unknown/masked', not 'perfect precision'.
+        We ACCEPT the update but REMOVE the invalid accuracy to prevent
+        ranking corruption.
+        """
         from unittest.mock import MagicMock
 
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
@@ -1236,28 +1252,21 @@ class TestZeroAccuracyGhostPrevention:
         ghost_update = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.0,  # THE GHOST
+            "accuracy": 0.0,  # Will be sanitized (removed)
             "last_seen": 1700000100,
         }
 
         result = is_sig(mock_coord, "device-1", ghost_update)
 
-        assert result is False, (
-            f"\n"
-            f"{'=' * 70}\n"
-            f"CACHE ACCEPTED ZERO-ACCURACY GHOST!\n"
-            f"{'=' * 70}\n"
-            f"\n"
-            f"The cache gatekeeper (_is_significant_update) accepted an\n"
-            f"update with accuracy=0.0m. This will poison the cache.\n"
-            f"\n"
-            f"Expected: False (rejected)\n"
-            f"Actual: True (accepted)\n"
-            f"\n"
-            f"FIX: cache.py :: _is_significant_update()\n"
-            f"Add: if acc_f < MIN_PHYSICAL_ACCURACY_M: return False\n"
-            f"{'=' * 70}"
+        # Update must be ACCEPTED (sanitized, not rejected)
+        assert result is True, (
+            "Zero accuracy update should be ACCEPTED (with accuracy sanitized)"
         )
 
-        # Verify the rejection was counted
-        mock_coord.increment_stat.assert_called_with("invalid_accuracy_drop_count")
+        # Accuracy must have been removed
+        assert "accuracy" not in ghost_update, (
+            "Zero accuracy should be removed from update dict"
+        )
+
+        # Verify the sanitization was counted
+        mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")

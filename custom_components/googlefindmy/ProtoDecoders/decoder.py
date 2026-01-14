@@ -330,11 +330,15 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
 
     Validation rules:
         - NaN/Inf values are dropped for all numeric fields.
-        - accuracy <= 0 is dropped: GPS accuracy of 0.0m is physically impossible
-          (real GPS typically has 3-50m accuracy). Zero indicates missing data.
+        - accuracy < 1.0m is dropped: Consumer GPS cannot achieve sub-meter accuracy.
+          Values like 0.0 indicate "privacy masked" or "unknown" - the REPORT is kept,
+          but accuracy is treated as unmeasured (acc_rank = -inf in ranking).
         - "Null Island" coordinates (0.0, 0.0) are dropped: This location in the
           Atlantic Ocean is a common API default when no real location is available.
     """
+    # Minimum physically plausible GPS accuracy (consumer hardware floor)
+    _MIN_PLAUSIBLE_ACCURACY_M = 1.0
+
     out = dict(loc)
     for num_key in ("latitude", "longitude", "accuracy", "last_seen", "altitude"):
         val = out.get(num_key)
@@ -344,8 +348,11 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
             f = float(val)
             if not math.isfinite(f):
                 out.pop(num_key, None)
-            # accuracy <= 0 is physically impossible for GPS; treat as missing
-            elif num_key == "accuracy" and f <= 0.0:
+            # accuracy < 1.0m is physically impossible for consumer GPS.
+            # Values like 0.0 mean "unknown/masked", not "perfect".
+            # We KEEP the report but REMOVE the accuracy key so it doesn't
+            # corrupt ranking (acc_rank = -inf when accuracy is None).
+            elif num_key == "accuracy" and f < _MIN_PLAUSIBLE_ACCURACY_M:
                 out.pop(num_key, None)
             else:
                 out[num_key] = f
@@ -677,10 +684,17 @@ def _merge_semantics_if_near_ts(
 
     out = dict(best)
 
+    # Extract best candidate's timestamp FIRST - used for identity protection.
+    t_best = _extract_ts(out.get("last_seen"))
+
     # Track the freshest coordinate-bearing candidate so semantic-only entries can
     # still expose stable position data after the merge step.
+    #
+    # IDENTITY PROTECTION: Initialize to t_best (not -inf) so that lower-ranked
+    # candidates with the SAME timestamp cannot "steal" coordinates from the best.
+    # A lower-ranked entry must be STRICTLY newer to update coordinates.
     best_coordinate: dict[str, Any] | None = None
-    best_coordinate_ts = float("-inf")
+    best_coordinate_ts = t_best  # Protects against timestamp collision identity theft
 
     # Track the semantic label currently attached to the outgoing payload.
     semantic_label: str | None = None
@@ -688,8 +702,6 @@ def _merge_semantics_if_near_ts(
     if out.get("semantic_name"):
         semantic_label = str(out["semantic_name"])
         semantic_ts = _extract_ts(out.get("last_seen"))
-
-    t_best = _extract_ts(out.get("last_seen"))
 
     # Historical behaviour: borrow a semantic label very close to the coordinate
     # fix timestamp when none is present yet.
