@@ -725,9 +725,15 @@ class CacheOperations:
         new_acc_raw = _coerce_float_impl(new_data.get("accuracy"))
 
         def _safe_accuracy(value: float | None) -> float:
+            """Convert raw accuracy to a safe value for fusion calculations.
+
+            GPS accuracy of <= 0 is physically impossible (real GPS: 3-50m typically).
+            Such values indicate missing/corrupted data and should use fallback.
+            """
             if value is None or not math.isfinite(value):
                 return 10000.0
-            if value < 0:
+            # <= 0 is physically impossible for GPS accuracy
+            if value <= 0:
                 return 10000.0
             return value
 
@@ -777,14 +783,36 @@ class CacheOperations:
         new_data["latitude"] = lat_fused
         new_data["longitude"] = lon_fused
 
+        # Select best accuracy, excluding physically impossible values (<= 0).
+        # GPS accuracy of 0.0m is impossible (real GPS: 3-50m typically).
+        def _is_valid_accuracy(acc: float | None) -> bool:
+            return (
+                acc is not None
+                and isinstance(acc, (int, float))
+                and math.isfinite(acc)
+                and acc > 0
+            )
+
+        valid_existing = _is_valid_accuracy(existing_acc_raw)
+        valid_new = _is_valid_accuracy(new_acc_raw)
+
         best_accuracy: float | None
-        if existing_acc_raw is not None and new_acc_raw is not None:
-            best_accuracy = min(existing_acc_raw, new_acc_raw)
+        if valid_existing and valid_new:
+            # Both valid: pick the smaller (more precise) one
+            best_accuracy = min(existing_acc_raw, new_acc_raw)  # type: ignore[arg-type]
+        elif valid_new:
+            best_accuracy = new_acc_raw
+        elif valid_existing:
+            best_accuracy = existing_acc_raw
         else:
-            best_accuracy = existing_acc_raw or new_acc_raw
+            # Neither is valid - leave accuracy unset
+            best_accuracy = None
 
         if best_accuracy is not None:
             new_data["accuracy"] = best_accuracy
+        else:
+            # Ensure invalid accuracy doesn't propagate
+            new_data.pop("accuracy", None)
 
         new_data["status"] = "Fused (Weighted)"
         new_data["_fused_applied"] = True

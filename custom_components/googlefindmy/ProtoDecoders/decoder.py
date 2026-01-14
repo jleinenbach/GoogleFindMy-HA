@@ -327,9 +327,14 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
 
 
 def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
-    """Coerce numeric fields to floats (when present) and drop NaN/Inf.
+    """Coerce numeric fields to floats (when present) and drop invalid values.
 
     Only mutates a shallow copy. Unknown keys are preserved (e.g., `_report_hint`).
+
+    Validation rules:
+        - NaN/Inf values are dropped for all numeric fields.
+        - accuracy <= 0 is dropped: GPS accuracy of 0.0m is physically impossible
+          (real GPS typically has 3-50m accuracy). Zero indicates missing data.
     """
     out = dict(loc)
     for num_key in ("latitude", "longitude", "accuracy", "last_seen", "altitude"):
@@ -339,6 +344,9 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
         try:
             f = float(val)
             if not math.isfinite(f):
+                out.pop(num_key, None)
+            # accuracy <= 0 is physically impossible for GPS; treat as missing
+            elif num_key == "accuracy" and f <= 0.0:
                 out.pop(num_key, None)
             else:
                 out[num_key] = f
@@ -541,9 +549,11 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
         else float("-inf")
     )
     acc = n.get("accuracy")
+    # accuracy <= 0 is physically impossible for GPS; treat as missing/worst rank.
+    # Defense in depth: even if _normalize_location_dict didn't filter it.
     acc_rank = (
         -float(acc)
-        if isinstance(acc, (int, float)) and math.isfinite(float(acc))
+        if isinstance(acc, (int, float)) and math.isfinite(float(acc)) and float(acc) > 0
         else float("-inf")
     )
     # Deterministic final tiebreaker: canonical content key (string).
@@ -670,10 +680,13 @@ def _merge_semantics_if_near_ts(
         ts = _extract_ts(n.get("last_seen"))
         latest_seen = max(latest_seen, ts)
 
+        # Use strict > to preserve sort order: when timestamps are equal,
+        # the first entry (already ranked higher by _get_rank_tuple) wins.
+        # Using >= would cause "last-write-wins" and prefer worse entries.
         if (
             isinstance(n.get("latitude"), (int, float))
             and isinstance(n.get("longitude"), (int, float))
-            and ts >= best_coordinate_ts
+            and ts > best_coordinate_ts
         ):
             best_coordinate = n
             best_coordinate_ts = ts
