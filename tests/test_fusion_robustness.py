@@ -56,27 +56,36 @@ class TestGeoConstants:
             f"{'=' * 70}"
         )
 
-    def test_default_fallback_is_two_kilometers(self) -> None:
-        """DEFAULT_ACCURACY_FALLBACK must be 2000.0m (conservative unknown).
+    def test_default_fallback_is_two_hundred_meters(self) -> None:
+        """PRIVACY_ACCURACY_FALLBACK must be 200.0m (Bluetooth range + GPS error).
 
-        A high fallback ensures error codes (0.0) have minimal weight in
-        fusion calculations and lose to any real measurement.
+        The fallback is based on Bluetooth tracker physics:
+        - Max Bluetooth range: ~100m
+        - GPS error margin: ~100m
+        - Total: 200m
+
+        This ensures:
+        - Error codes (0.0) have lower weight in fusion than real GPS (20-50m)
+        - The fallback is still useful for finding a tracker (unlike 2km)
         """
         from custom_components.googlefindmy.coordinator.helpers.geo import (
             DEFAULT_ACCURACY_FALLBACK,
+            PRIVACY_ACCURACY_FALLBACK,
         )
 
-        assert DEFAULT_ACCURACY_FALLBACK == 2000.0, (
+        assert PRIVACY_ACCURACY_FALLBACK == 200.0, (
             f"\n"
             f"{'=' * 70}\n"
-            f"CRITICAL: DEFAULT_ACCURACY_FALLBACK is not 2000.0m!\n"
+            f"CRITICAL: PRIVACY_ACCURACY_FALLBACK is not 200.0m!\n"
             f"{'=' * 70}\n"
-            f"Current value: {DEFAULT_ACCURACY_FALLBACK}\n"
-            f"Expected: 2000.0 (conservative for unknown accuracy)\n"
+            f"Current value: {PRIVACY_ACCURACY_FALLBACK}\n"
+            f"Expected: 200.0 (Bluetooth range + GPS error margin)\n"
             f"\n"
             f"FIX LOCATION: helpers/geo.py\n"
             f"{'=' * 70}"
         )
+        # Ensure legacy alias is also correct
+        assert DEFAULT_ACCURACY_FALLBACK == PRIVACY_ACCURACY_FALLBACK
 
     def test_safe_accuracy_rejects_error_code(self) -> None:
         """safe_accuracy() must reject 0.0m (error code) as invalid."""

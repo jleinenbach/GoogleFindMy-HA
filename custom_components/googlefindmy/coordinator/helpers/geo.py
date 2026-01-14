@@ -32,9 +32,14 @@ EARTH_RADIUS_M = 6371000.0
 MIN_VALID_ACCURACY = 0.001  # 1 millimeter
 
 # Default fallback for invalid/missing GPS accuracy.
-# Conservative value for "unknown" - high enough to lose against any real measurement
-# in weighted fusion, but not so high as to cause map rendering issues.
-DEFAULT_ACCURACY_FALLBACK = 2000.0  # 2 kilometers
+# Based on Bluetooth tracker physics: max Bluetooth range (~100m) + GPS error margin.
+# 200m is large enough to lose against any real GPS measurement (typically 20-50m)
+# in weighted fusion (200²/20² = 100x lower weight), yet small enough to be
+# useful for actually finding a tracker on a map (unlike 2km which is useless).
+PRIVACY_ACCURACY_FALLBACK = 200.0  # 200 meters
+
+# Legacy alias for backward compatibility
+DEFAULT_ACCURACY_FALLBACK = PRIVACY_ACCURACY_FALLBACK
 
 # Legacy aliases for backward compatibility
 MIN_PHYSICAL_ACCURACY_M = MIN_VALID_ACCURACY
@@ -127,7 +132,7 @@ def safe_accuracy(value: Any, *, fallback: float | None = None) -> float:
     Args:
         value: Any value that might represent GPS accuracy. Handles None,
                strings, floats, ints, and any other type gracefully.
-        fallback: Custom fallback value. Defaults to DEFAULT_ACCURACY_FALLBACK (2000m).
+        fallback: Custom fallback value. Defaults to PRIVACY_ACCURACY_FALLBACK (200m).
 
     Returns:
         A finite float >= MIN_VALID_ACCURACY representing accuracy in meters,
@@ -141,13 +146,13 @@ def safe_accuracy(value: Any, *, fallback: float | None = None) -> float:
         >>> safe_accuracy(0.01)  # Valid centimeter accuracy
         0.01
         >>> safe_accuracy(None)
-        2000.0
+        200.0
         >>> safe_accuracy(0.0)  # Error code
-        2000.0
+        200.0
         >>> safe_accuracy(-5.0)
-        2000.0
+        200.0
         >>> safe_accuracy("invalid")  # Non-numeric
-        2000.0
+        200.0
     """
     if fallback is None:
         fallback = DEFAULT_ACCURACY_FALLBACK
