@@ -39,6 +39,8 @@ from .helpers.cache import (
 from .helpers.geo import (
     DEFAULT_ACCURACY_FALLBACK_M,
     MIN_PHYSICAL_ACCURACY_M,
+)
+from .helpers.geo import (
     coerce_float as _coerce_float_impl,
 )
 from .helpers.geo import (
@@ -869,7 +871,9 @@ class CacheOperations:
             # Safety bounds:
             # - Never claim better than physics allows (MIN_FUSED_ACCURACY_M)
             # - Never claim worse than the best individual measurement
-            limit_best = min(existing_acc_raw, new_acc_raw)  # type: ignore[arg-type]
+            # Note: assert helps mypy understand values are not None after validation
+            assert existing_acc_raw is not None and new_acc_raw is not None
+            limit_best = min(existing_acc_raw, new_acc_raw)
             best_accuracy = max(fused_accuracy, limit_best, MIN_FUSED_ACCURACY_M)
         elif valid_new:
             best_accuracy = new_acc_raw

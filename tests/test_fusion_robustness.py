@@ -25,7 +25,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-
 # =============================================================================
 # SECTION 1: Central Constants Tests (helpers/geo.py)
 # =============================================================================
@@ -394,8 +393,8 @@ class TestCacheSelfHealing:
 
         # New valid data has reasonable weight ratio against fallback
         new_acc = 25.0
-        w_cached = 1 / (cached_acc ** 2)  # 1/50² = 0.0004
-        w_new = 1 / (new_acc ** 2)  # 1/25² = 0.0016
+        w_cached = 1 / (cached_acc**2)  # 1/50² = 0.0004
+        w_new = 1 / (new_acc**2)  # 1/25² = 0.0016
 
         ratio = w_new / w_cached  # 4:1 - new data wins with 80% weight
 
@@ -408,15 +407,16 @@ class TestCacheSelfHealing:
     def test_fusion_weight_ratio_reasonable_after_healing(self) -> None:
         """After healing, fusion weights should allow valid data to dominate."""
         # Simulate the fusion weight calculation
-        poisoned_acc = 0.0  # Would be infinite weight without healing
-        healed_acc = 50.0  # What safe_accuracy returns
+        # poisoned_acc = 0.0 would cause infinite weight (1/0² = infinity)
+        # After healing via safe_accuracy(), it becomes:
+        healed_acc = 50.0  # What safe_accuracy(0.0) returns
 
         new_valid_acc = 25.0
 
         # Without healing: infinite weight ratio
         # With healing: reasonable ratio
-        w_healed = 1 / (healed_acc ** 2)
-        w_new = 1 / (new_valid_acc ** 2)
+        w_healed = 1 / (healed_acc**2)
+        w_new = 1 / (new_valid_acc**2)
 
         total_w = w_healed + w_new
         new_weight_fraction = w_new / total_w
@@ -457,7 +457,7 @@ class TestManualLocateSanity:
         )
 
         assert MIN_PHYSICAL_ACCURACY_M == 1.0, (
-            f"locate.py should use MIN_PHYSICAL_ACCURACY_M = 1.0m"
+            "locate.py should use MIN_PHYSICAL_ACCURACY_M = 1.0m"
         )
 
 
@@ -522,9 +522,7 @@ class TestCacheGatekeeper:
 
             result = is_sig(mock_coord, "device-1", bad_update)
 
-            assert result is False, (
-                f"Gatekeeper should reject accuracy={invalid_acc}m"
-            )
+            assert result is False, f"Gatekeeper should reject accuracy={invalid_acc}m"
 
     def test_gatekeeper_accepts_valid_accuracy(self) -> None:
         """_is_significant_update must accept accuracy >= 1.0m."""
@@ -585,8 +583,8 @@ class TestFusionMath:
         acc1 = 20.0
         acc2 = 30.0
 
-        w1 = 1 / (acc1 ** 2)
-        w2 = 1 / (acc2 ** 2)
+        w1 = 1 / (acc1**2)
+        w2 = 1 / (acc2**2)
         total_w = w1 + w2
 
         fused = math.sqrt(1 / total_w)  # ~16.6m
@@ -602,8 +600,8 @@ class TestFusionMath:
         acc1 = 5.0
         acc2 = 5.0
 
-        w1 = 1 / (acc1 ** 2)
-        w2 = 1 / (acc2 ** 2)
+        w1 = 1 / (acc1**2)
+        w2 = 1 / (acc2**2)
         total_w = w1 + w2
 
         raw_fused = math.sqrt(1 / total_w)  # ~3.5m

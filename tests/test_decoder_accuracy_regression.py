@@ -32,7 +32,6 @@ from custom_components.googlefindmy.ProtoDecoders.decoder import (
     _select_best_location,
 )
 
-
 # =============================================================================
 # SECTION 1: Physics Validation Tests (accuracy must be > 0)
 # =============================================================================
@@ -206,7 +205,9 @@ class TestSelectBestLocationRegression:
             "status_code": 2,
         }
 
-        best, _rest = _select_best_location([spurious_own_report, legitimate_crowdsourced])
+        best, _rest = _select_best_location(
+            [spurious_own_report, legitimate_crowdsourced]
+        )
 
         assert best is not None, "Should select a location"
 
@@ -353,34 +354,59 @@ class TestDirtyDataHandling:
     """Test handling of malformed or missing data."""
 
     def test_missing_coordinates_not_selected(self) -> None:
-        """Reports without coordinates should not be selected as best location."""
+        """Reports without coordinates should not beat reports WITH coordinates.
+
+        When timestamp and status are equal, coordinates become the tie-breaker.
+        The algorithm's priority is:
+          1. Newer timestamp
+          2. Status (owner > crowdsourced > aggregated)
+          3. Has coordinates (tie-breaker)
+          4. Better accuracy
+        """
+        # Semantic-only: no lat/lon - should lose as tie-breaker
         no_coords: dict[str, Any] = {
             "accuracy": 5.0,
-            "last_seen": 1700000200,
-            "is_own_report": True,
+            "last_seen": 1700000100,  # Same timestamp
+            "is_own_report": False,  # Same status
             "semantic_name": "Home",
+            "status": "CROWDSOURCED",
+            "status_code": 2,
         }
 
+        # Has coordinates - should win as tie-breaker
         with_coords: dict[str, Any] = {
             "latitude": 48.200,
             "longitude": 11.200,
-            "accuracy": 50.0,
-            "last_seen": 1700000100,
-            "is_own_report": False,
+            "accuracy": 50.0,  # Worse accuracy, but has coords
+            "last_seen": 1700000100,  # Same timestamp
+            "is_own_report": False,  # Same status
+            "status": "CROWDSOURCED",
+            "status_code": 2,
         }
 
         best, _rest = _select_best_location([no_coords, with_coords])
 
         assert best is not None
         assert "latitude" in best and "longitude" in best, (
-            "Should select the report with actual coordinates"
+            "When timestamps match, report with coordinates should win over "
+            "semantic-only report as a tie-breaker"
         )
 
     def test_all_invalid_returns_none_or_filters(self) -> None:
         """If all reports have invalid accuracy, result should be filtered/empty."""
         all_bad = [
-            {"latitude": 48.1, "longitude": 11.1, "accuracy": 0.0, "last_seen": 1700000100},
-            {"latitude": 48.2, "longitude": 11.2, "accuracy": -5.0, "last_seen": 1700000100},
+            {
+                "latitude": 48.1,
+                "longitude": 11.1,
+                "accuracy": 0.0,
+                "last_seen": 1700000100,
+            },
+            {
+                "latitude": 48.2,
+                "longitude": 11.2,
+                "accuracy": -5.0,
+                "last_seen": 1700000100,
+            },
         ]
 
         best, _rest = _select_best_location(all_bad)
@@ -547,14 +573,6 @@ class TestPerfectStormScenario:
             "latitude": 48.100,
             "longitude": 11.100,
             "accuracy": 0.001,  # Positive but unrealistic
-            "last_seen": 1700000100,
-            "is_own_report": False,
-        }
-
-        normal_accuracy: dict[str, Any] = {
-            "latitude": 48.200,
-            "longitude": 11.200,
-            "accuracy": 20.0,
             "last_seen": 1700000100,
             "is_own_report": False,
         }
@@ -744,20 +762,20 @@ class TestFusionLockInPrevention:
         With proper fallback (50m for invalid), the weight ratio between
         any two valid measurements should be reasonable (not > 100:1).
         """
-        import math
 
         # Worst realistic case: 5m vs 100m
         acc_good = 5.0
         acc_poor = 100.0
 
-        w_good = 1 / (acc_good ** 2)  # 1/25 = 0.04
-        w_poor = 1 / (acc_poor ** 2)  # 1/10000 = 0.0001
+        w_good = 1 / (acc_good**2)  # 1/25 = 0.04
+        w_poor = 1 / (acc_poor**2)  # 1/10000 = 0.0001
 
         ratio = w_good / w_poor  # 400:1 - this is acceptable
+        assert ratio < 1000, f"Normal weight ratio should be < 1000:1 (got {ratio}:1)"
 
         # But if bad data (0.1m) got through, the ratio would be insane
         acc_poison = 0.1
-        w_poison = 1 / (acc_poison ** 2)  # 1/0.01 = 100
+        w_poison = 1 / (acc_poison**2)  # 1/0.01 = 100
 
         poison_ratio = w_poison / w_poor  # 100 / 0.0001 = 1,000,000:1
 
@@ -784,8 +802,8 @@ class TestFusionLockInPrevention:
         )
 
         # With 50m fallback, ratio to a 20m fix is reasonable
-        w_fallback = 1 / (50.0 ** 2)  # 1/2500 = 0.0004
-        w_valid = 1 / (20.0 ** 2)  # 1/400 = 0.0025
+        w_fallback = 1 / (50.0**2)  # 1/2500 = 0.0004
+        w_valid = 1 / (20.0**2)  # 1/400 = 0.0025
 
         ratio = w_valid / w_fallback  # 6.25:1
 
@@ -810,8 +828,8 @@ class TestFusionLockInPrevention:
         acc1 = 20.0  # First measurement: 20m accuracy
         acc2 = 30.0  # Second measurement: 30m accuracy
 
-        w1 = 1 / (acc1 ** 2)  # 0.0025
-        w2 = 1 / (acc2 ** 2)  # 0.00111
+        w1 = 1 / (acc1**2)  # 0.0025
+        w2 = 1 / (acc2**2)  # 0.00111
         total_w = w1 + w2  # 0.00361
 
         fused_acc = math.sqrt(1 / total_w)  # ~16.6m
