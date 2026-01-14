@@ -482,12 +482,16 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         continue
 
                     _LOGGER.error(
-                        "ADM token: generation failed. No OAuth fallback available."
+                        "ADM token: generation failed. No OAuth fallback available. "
+                        "Error: %s",
+                        auth_err,
                     )
                     break
 
                 _LOGGER.error(
-                    "ADM token: generation failed. AAS token invalid and unrecoverable."
+                    "ADM token: generation failed. AAS token invalid and unrecoverable. "
+                    "Error: %s",
+                    auth_err,
                 )
                 break
 
@@ -502,12 +506,14 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
-                            "ADM token: generation failed (retry %d/%d). No more retries.",
+                            "ADM token: generation failed (retry %d/%d). No more retries. "
+                            "Error: %s",
                             retry_num,
                             max_retries,
+                            exc,
                         )
                     else:
-                        _LOGGER.error("ADM token: generation failed.")
+                        _LOGGER.error("ADM token: generation failed. Error: %s", exc)
                     break
 
                 # Retryable path: clear any stale cache value and back off
@@ -518,12 +524,16 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
 
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
-                    _LOGGER.warning("ADM token: generation failed. Retrying...")
+                    _LOGGER.warning(
+                        "ADM token: generation failed. Error: %s. Retrying...", exc
+                    )
                 else:
                     _LOGGER.warning(
-                        "ADM token: generation failed (retry %d/%d). Retrying in %.0fs...",
+                        "ADM token: generation failed (retry %d/%d). Error: %s. "
+                        "Retrying in %.0fs...",
                         retry_num,
                         max_retries,
+                        exc,
                         sleep_s,
                     )
                 await asyncio.sleep(sleep_s)

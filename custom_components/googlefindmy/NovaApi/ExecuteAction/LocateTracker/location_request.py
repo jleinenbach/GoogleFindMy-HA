@@ -621,7 +621,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 canonic_device_id, callback
             )
             if not fcm_token:
-                _LOGGER.error("Failed to get FCM token for %s", name)
+                _LOGGER.error(
+                    "Failed to get FCM token for %s: "
+                    "see previous warnings for details (client/token unavailable or no coordinator)",
+                    name,
+                )
                 return []
             registered = True
             _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))

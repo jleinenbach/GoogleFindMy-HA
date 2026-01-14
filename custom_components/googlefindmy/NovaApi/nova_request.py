@@ -1548,11 +1548,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 attempt, response.headers.get("Retry-After")
                             )
                             _LOGGER.warning(
-                                "Nova API request failed (Attempt %d/%d): HTTP %d for %s. Retrying in %.2f seconds...",
+                                "Nova API request failed (Attempt %d/%d): HTTP %d for %s. "
+                                "Server response: %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
                                 NOVA_MAX_RETRIES,
                                 status,
                                 api_scope,
+                                text_snippet,
                                 delay,
                             )
                             retries_used += 1
@@ -1560,18 +1562,22 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             continue
                         else:
                             _LOGGER.error(
-                                "Nova API async request to %s failed after %d attempts with status %d.",
+                                "Nova API async request to %s failed after %d attempts with status %d. "
+                                "Last server response: %s",
                                 api_scope,
                                 retries_used + 1,
                                 status,
+                                text_snippet,
                             )
                             if status == HTTP_TOO_MANY_REQUESTS:
                                 raise NovaRateLimitError(
-                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
+                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts. "
+                                    f"Server response: {text_snippet}"
                                 )
                             raise NovaHTTPError(
                                 status,
-                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
+                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts. "
+                                f"Server response: {text_snippet}",
                             )
 
                     # Non-retryable errors: distinguish between client (4xx) and server (5xx)
