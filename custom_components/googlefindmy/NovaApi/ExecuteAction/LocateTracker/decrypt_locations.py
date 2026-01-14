@@ -977,8 +977,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         try:
             ts = _parse_epoch_seconds(time_ts, now_wall)
             if ts is None:
-                _LOGGER.debug(
-                    "Dropping one location report due to invalid or missing timestamp."
+                _LOGGER.warning(
+                    "Dropping one location report due to invalid or missing timestamp (raw=%r).",
+                    time_ts,
                 )
                 continue
 
@@ -1014,8 +1015,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
             decrypted_location = _ensure_bytes(decrypted_location_raw)
             if decrypted_location is None:
-                _LOGGER.debug(
-                    "Decrypted location payload is not bytes; dropping one report"
+                _LOGGER.warning(
+                    "Decrypted location payload is not bytes (type=%s); dropping one report",
+                    type(decrypted_location_raw).__name__,
                 )
                 continue
 
@@ -1029,12 +1031,22 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     name="",
                 )
             )
-        except Exception as one_exc:
-            # Continue with other reports (per-item resilience; avoid warn spam)
-            _LOGGER.debug("Failed to process one location report: %s", one_exc)
+        except (AttributeError, KeyError, TypeError, ValueError) as expected_exc:
+            # Expected errors from malformed protobuf data - log at warning level
+            _LOGGER.warning(
+                "Failed to process one location report (malformed data): %s",
+                expected_exc,
+            )
+        except Exception as unexpected_exc:
+            # Unexpected errors indicate bugs or API changes - log with stack trace
+            _LOGGER.error(
+                "Unexpected error processing location report: %s",
+                unexpected_exc,
+                exc_info=True,
+            )
 
     if not wrapped:
-        _LOGGER.debug("[DecryptLocations] No locations found.")
+        _LOGGER.info("[DecryptLocations] No locations found.")
         # FIX: Merge metadata_update into the returned payload even when no locations.
         # This ensures encrypted_identity_key, secrets_creation_date, owner_key_version,
         # identity_key, etc. are returned for devices (like phones) that have these
@@ -1094,7 +1106,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     # Protobuf parsing is relatively cheap → inline
                     proto_loc.ParseFromString(loc.decrypted_location)
                 except DecodeError as de:
-                    _LOGGER.debug(
+                    _LOGGER.warning(
                         "Failed to parse Location protobuf; dropping one report: %s", de
                     )
                     continue
@@ -1105,7 +1117,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 longitude = proto_loc.longitude / 1e7
                 if not _is_valid_latlon(latitude, longitude):
                     # Keep the message non-sensitive: do not print raw coordinates.
-                    _LOGGER.debug(
+                    _LOGGER.warning(
                         "Dropping invalid/out-of-bounds coordinates from one report"
                     )
                     continue
