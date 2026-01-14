@@ -20,7 +20,6 @@ CONSTANTS:
 
 from __future__ import annotations
 
-import math
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -33,12 +32,10 @@ from custom_components.googlefindmy.coordinator.helpers.geo import (
     safe_accuracy,
 )
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
-    _get_rank_tuple,
     _merge_semantics_if_near_ts,
     _normalize_location_dict,
     _select_best_location,
 )
-
 
 # =============================================================================
 # SECTION 1: Micro-Precision Survival (Sub-Meter Accuracy)
@@ -60,16 +57,16 @@ class TestMicroPrecisionSurvival:
     @pytest.mark.parametrize(
         ("accuracy", "expected_preserved"),
         [
-            (0.002, True),    # 2mm - extreme precision, MUST be preserved
-            (0.01, True),     # 1cm - centimeter precision, valid
-            (0.1, True),      # 10cm - sub-meter, valid
-            (0.5, True),      # 50cm - common sub-meter, valid
-            (1.0, True),      # 1m - valid
-            (5.0, True),      # 5m - typical GPS, valid
-            (50.0, True),     # 50m - moderate GPS, valid
-            (0.0, False),     # Error code - MUST be removed
+            (0.002, True),  # 2mm - extreme precision, MUST be preserved
+            (0.01, True),  # 1cm - centimeter precision, valid
+            (0.1, True),  # 10cm - sub-meter, valid
+            (0.5, True),  # 50cm - common sub-meter, valid
+            (1.0, True),  # 1m - valid
+            (5.0, True),  # 5m - typical GPS, valid
+            (50.0, True),  # 50m - moderate GPS, valid
+            (0.0, False),  # Error code - MUST be removed
             (0.0001, False),  # Below threshold - error code
-            (-1.0, False),    # Negative - error code
+            (-1.0, False),  # Negative - error code
         ],
         ids=[
             "2mm_preserved",
@@ -125,7 +122,7 @@ class TestMicroPrecisionSurvival:
             "longitude": 11.200,
             "accuracy": 0.5,  # 500mm - moderate
             "last_seen": 1700000100,  # SAME timestamp
-            "is_own_report": False,   # SAME status
+            "is_own_report": False,  # SAME status
         }
 
         best, _rest = _select_best_location([micro_precision, moderate_accuracy])
@@ -205,7 +202,7 @@ class TestZeroAccuracyDowngrade:
             "longitude": 11.200,
             "accuracy": 50.0,  # Valid accuracy → acc_rank = -50.0
             "last_seen": 1700000100,  # SAME timestamp
-            "is_own_report": False,   # SAME status
+            "is_own_report": False,  # SAME status
         }
 
         best, _rest = _select_best_location([zero_acc_report, real_data_report])
@@ -276,7 +273,7 @@ class TestIdentityIntegrity:
             "longitude": 20.0,
             "accuracy": 20.0,
             "last_seen": 1700000100,  # SAME timestamp
-            "is_own_report": True,     # HIGHER status → WINNER
+            "is_own_report": True,  # HIGHER status → WINNER
         }
 
         crowdsourced: dict[str, Any] = {
@@ -284,7 +281,7 @@ class TestIdentityIntegrity:
             "longitude": 60.0,
             "accuracy": 15.0,  # Even better accuracy
             "last_seen": 1700000100,  # SAME timestamp
-            "is_own_report": False,    # Lower status
+            "is_own_report": False,  # Lower status
         }
 
         best, _rest = _select_best_location([own_device, crowdsourced])
@@ -452,8 +449,8 @@ class TestFusionSelfHealing:
         # 0.0 → fallback (2000m) → weight = 1/2000² = 0.00000025
         # 50m → weight = 1/50² = 0.0004
 
-        fallback_weight = 1 / (DEFAULT_ACCURACY_FALLBACK ** 2)
-        real_weight = 1 / (50.0 ** 2)
+        fallback_weight = 1 / (DEFAULT_ACCURACY_FALLBACK**2)
+        real_weight = 1 / (50.0**2)
 
         # Real data should have ~1600x more weight than fallback
         weight_ratio = real_weight / fallback_weight
@@ -605,7 +602,7 @@ class TestZeroAccuracyRetention:
             "longitude": 11.200,
             "accuracy": 20.0,  # Real GPS accuracy
             "last_seen": 1700000100,  # SAME timestamp
-            "is_own_report": False,   # SAME status
+            "is_own_report": False,  # SAME status
         }
 
         best, _rest = _select_best_location([downgraded_report, real_gps_report])

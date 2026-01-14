@@ -754,9 +754,7 @@ def sanitize_decoder_row(row: dict[str, Any]) -> dict[str, Any]:
     # 3. SEMANTIC status (status_code=0) is never an owner report by definition.
     if r.get("is_own_report"):
         has_invalid_accuracy = _is_invalid_accuracy(r.get("accuracy"))
-        has_no_coordinates = (
-            r.get("latitude") is None and r.get("longitude") is None
-        )
+        has_no_coordinates = r.get("latitude") is None and r.get("longitude") is None
         is_semantic_status = r.get("status_code") == 0
 
         if has_invalid_accuracy or has_no_coordinates or is_semantic_status:

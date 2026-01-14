@@ -569,7 +569,9 @@ class TestCacheGatekeeper:
 
             result = is_sig(mock_coord, "device-1", update)
 
-            assert result is True, f"Update with accuracy={error_code}m should be ACCEPTED"
+            assert result is True, (
+                f"Update with accuracy={error_code}m should be ACCEPTED"
+            )
             assert update.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
                 f"Error code {error_code}m should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m)"
             )
@@ -599,7 +601,9 @@ class TestCacheGatekeeper:
 
             result = is_sig(mock_coord, "device-1", update)
 
-            assert result is True, f"Update with accuracy={valid_acc}m should be accepted"
+            assert result is True, (
+                f"Update with accuracy={valid_acc}m should be accepted"
+            )
             assert update.get("accuracy") == valid_acc, (
                 f"Valid accuracy {valid_acc}m should be PRESERVED, not sanitized"
             )
