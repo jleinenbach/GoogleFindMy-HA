@@ -21,6 +21,7 @@ import time
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from ..const import DEFAULT_MIN_POLL_INTERVAL
@@ -562,9 +563,21 @@ class LocateOperations:
             except Exception:
                 pass
             return False
+        except (asyncio.TimeoutError, TimeoutError, ClientConnectionError, ClientError) as conn_err:
+            _LOGGER.warning(
+                "Connection failed during play_sound for %s: %s",
+                device_id,
+                conn_err,
+            )
+            self.note_error(conn_err, where="async_play_sound", device=device_id)
+            self._note_push_transport_problem()
+            return False
         except Exception as err:
-            _LOGGER.debug(
-                "async_play_sound raised for %s: %s; entering cooldown", device_id, err
+            _LOGGER.error(
+                "Unexpected error during play_sound for %s: %s",
+                device_id,
+                err,
+                exc_info=True,
             )
             self.note_error(err, where="async_play_sound", device=device_id)
             self._note_push_transport_problem()
@@ -633,9 +646,21 @@ class LocateOperations:
             except Exception:
                 pass
             return False
+        except (asyncio.TimeoutError, TimeoutError, ClientConnectionError, ClientError) as conn_err:
+            _LOGGER.warning(
+                "Connection failed during stop_sound for %s: %s",
+                device_id,
+                conn_err,
+            )
+            self.note_error(conn_err, where="async_stop_sound", device=device_id)
+            self._note_push_transport_problem()
+            return False
         except Exception as err:
-            _LOGGER.debug(
-                "async_stop_sound raised for %s: %s; entering cooldown", device_id, err
+            _LOGGER.error(
+                "Unexpected error during stop_sound for %s: %s",
+                device_id,
+                err,
+                exc_info=True,
             )
             self.note_error(err, where="async_stop_sound", device=device_id)
             self._note_push_transport_problem()
