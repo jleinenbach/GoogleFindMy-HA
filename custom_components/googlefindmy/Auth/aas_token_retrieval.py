@@ -457,37 +457,42 @@ async def async_get_aas_token(
     was_cached = existing_token is not None and isinstance(existing_token, str)
 
     async def _gen_with_retries() -> str:
+        _LOGGER.info("AAS token: generating new token via OAuth exchange.")
         last_exc: Exception | None = None
         attempts = max(1, retries + 1)
+        max_retries = attempts - 1  # = retries parameter
         for attempt in range(attempts):
             try:
-                return await _generate_aas_token(cache=cache)
+                token = await _generate_aas_token(cache=cache)
+                _LOGGER.info("AAS token: successfully generated.")
+                return token
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 retryable = not _is_non_retryable_auth(exc) and attempt < attempts - 1
+                # retry_num: first attempt (attempt=0) doesn't count
+                retry_num = attempt
+
                 if not retryable:
-                    _LOGGER.error(
-                        "AAS token generation failed.",
-                        exc_info=exc,
-                        extra={
-                            "attempt": attempt + 1,
-                            "attempts": attempts,
-                            "error_type": type(exc).__name__,
-                            "retryable": retryable,
-                        },
-                    )
+                    if retry_num > 0:
+                        _LOGGER.error(
+                            "AAS token: generation failed (retry %d/%d). No more retries.",
+                            retry_num,
+                            max_retries,
+                        )
+                    else:
+                        _LOGGER.error("AAS token: generation failed.")
                     break
+
                 sleep_s = backoff * (2**attempt)
-                _LOGGER.info(
-                    "AAS token generation failed; retry scheduled.",
-                    extra={
-                        "attempt": attempt + 1,
-                        "attempts": attempts,
-                        "error_type": type(exc).__name__,
-                        "retry_in_seconds": sleep_s,
-                    },
-                    exc_info=exc,
-                )
+                if retry_num == 0:
+                    _LOGGER.warning("AAS token: generation failed. Retrying...")
+                else:
+                    _LOGGER.warning(
+                        "AAS token: generation failed (retry %d/%d). Retrying in %.0fs...",
+                        retry_num,
+                        max_retries,
+                        sleep_s,
+                    )
                 await asyncio.sleep(sleep_s)
         assert last_exc is not None
         raise last_exc

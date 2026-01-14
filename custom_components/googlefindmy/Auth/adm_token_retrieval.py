@@ -260,35 +260,30 @@ async def _generate_adm_token(username: str, *, cache: TokenCache) -> str:
     aas_provider: Callable[[], Awaitable[str]] | None = None
 
     if use_oauth_provider:
-        _LOGGER.debug(
-            "ADM token refresh path: using OAuth→AAS provider (individual tokens)."
-        )
+        _LOGGER.info("ADM token: generating new token (will fetch fresh AAS token).")
         aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
     else:
-        _LOGGER.debug(
-            "ADM token refresh path: reusing cached AAS token (secrets.json / master)."
-        )
         aas_token_direct = await cache.get(DATA_AAS_TOKEN)
         if not isinstance(aas_token_direct, str) or not aas_token_direct:
-            _LOGGER.warning(
-                "Cached AAS token missing during ADM refresh; falling back to OAuth provider.",
-                extra={
-                    "account": _mask_email(username),
-                    "auth_method": auth_method or "<unknown>",
-                },
+            _LOGGER.info(
+                "ADM token: cached AAS token missing. Generating fresh AAS token."
             )
             aas_token_direct = None
             aas_provider = lambda: async_get_aas_token(cache=cache)  # noqa: E731
+        else:
+            _LOGGER.info("ADM token: generating new token using cached AAS token.")
 
     await _resolve_android_id_for_entry(username, cache=cache)
 
-    return await async_request_token(
+    token = await async_request_token(
         username,
         service,
         cache=cache,
         aas_token=aas_token_direct,
         aas_provider=aas_provider,
     )
+    _LOGGER.info("ADM token: successfully generated.")
+    return token
 
 
 # ---------------------------------------------------------------------------
@@ -434,12 +429,9 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
 
             except InvalidAasTokenError as auth_err:
                 last_exc = auth_err
-                _LOGGER.warning(
-                    "ADM token authentication failed (attempt %d/%d)",
-                    attempt + 1,
-                    attempts,
-                    exc_info=auth_err,
-                    extra={"account": _mask_email(user)},
+                _LOGGER.info(
+                    "ADM token: generation failed - AAS token invalid. "
+                    "Invalidating AAS token and retrying with fresh token."
                 )
 
                 try:
@@ -462,8 +454,7 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         and not oauth_token.startswith("aas_et/")
                     ):
                         _LOGGER.info(
-                            "ADM token AAS path failed; attempting one-time OAuth fallback.",
-                            extra={"account": _mask_email(user)},
+                            "ADM token: attempting OAuth fallback to generate fresh AAS token."
                         )
                         tried_oauth_fallback = True
                         try:
@@ -491,15 +482,12 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                         continue
 
                     _LOGGER.error(
-                        "ADM token authentication failed and no OAuth fallback token is available.",
-                        extra={"account": _mask_email(user)},
+                        "ADM token: generation failed. No OAuth fallback available."
                     )
                     break
 
                 _LOGGER.error(
-                    "ADM token authentication failed definitively",
-                    exc_info=auth_err,
-                    extra={"account": _mask_email(user)},
+                    "ADM token: generation failed. AAS token invalid and unrecoverable."
                 )
                 break
 
@@ -507,17 +495,19 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                 last_exc = exc
                 # Non-retryable? Log once and stop immediately.
                 retryable = not _is_non_retryable_auth(exc) and attempt < attempts - 1
+                # retry_num: first attempt (attempt=0) doesn't count, so retry 1 = attempt 1
+                retry_num = attempt
+                max_retries = attempts - 1  # = retries parameter
+
                 if not retryable:
-                    _LOGGER.error(
-                        "ADM token generation failed.",
-                        exc_info=exc,
-                        extra={
-                            "account": _mask_email(user),
-                            "attempt": attempt + 1,
-                            "attempts": attempts,
-                            "retryable": retryable,
-                        },
-                    )
+                    if retry_num > 0:
+                        _LOGGER.error(
+                            "ADM token: generation failed (retry %d/%d). No more retries.",
+                            retry_num,
+                            max_retries,
+                        )
+                    else:
+                        _LOGGER.error("ADM token: generation failed.")
                     break
 
                 # Retryable path: clear any stale cache value and back off
@@ -527,16 +517,15 @@ async def async_get_adm_token(  # noqa: PLR0912,PLR0915
                     pass  # best-effort
 
                 sleep_s = backoff * (2**attempt)
-                _LOGGER.info(
-                    "ADM token generation failed; retry scheduled.",
-                    exc_info=exc,
-                    extra={
-                        "account": _mask_email(user),
-                        "attempt": attempt + 1,
-                        "attempts": attempts,
-                        "retry_in_seconds": sleep_s,
-                    },
-                )
+                if retry_num == 0:
+                    _LOGGER.warning("ADM token: generation failed. Retrying...")
+                else:
+                    _LOGGER.warning(
+                        "ADM token: generation failed (retry %d/%d). Retrying in %.0fs...",
+                        retry_num,
+                        max_retries,
+                        sleep_s,
+                    )
                 await asyncio.sleep(sleep_s)
 
         if last_exc is not None:
