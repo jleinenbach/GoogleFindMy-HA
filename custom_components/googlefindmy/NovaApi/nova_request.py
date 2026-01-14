@@ -1416,7 +1416,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         _AUTH_STEP_ADM_REFRESH = 0
                         _AUTH_STEP_AAS_ADM_REFRESH = 1
                         _AUTH_STEP_LONG_COOLDOWN = 2
-                        max_auth_retries = 4
 
                         # --- Race condition guard ---
                         # Check if another request is already handling auth refresh.
