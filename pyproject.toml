@@ -144,6 +144,14 @@ ignore = ["E501"]
     "PLC0415",
     "PLR2004",
 ]
+# Protobuf decoder has complex parsing logic that justifies higher complexity limits
+"custom_components/googlefindmy/ProtoDecoders/decoder.py" = [
+    "PLR0912",  # Too many branches - complex protobuf parsing
+    "PLR0915",  # Too many statements - comprehensive device data extraction
+    "PLR2004",  # Magic values - floating point epsilon for coordinate validation
+    "PLC0415",  # Import not at top - lazy import for performance
+    "PLW0603",  # Global statement - lazy module caching pattern
+]
 "custom_components/googlefindmy/coordinator/polling.py" = [
     "PLR0911",
     "PLR0912",

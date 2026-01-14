@@ -57,6 +57,8 @@ from .NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
     NovaHTTPError,
+    NovaLogicError,
+    NovaProtobufDecodeError,
     NovaRateLimitError,
 )
 from .ProtoDecoders.decoder import (
@@ -1037,6 +1039,20 @@ class GoogleFindMyAPI:
             )
             raise ConfigEntryAuthFailed(_short_err(err)) from err
 
+        except NovaProtobufDecodeError as err:
+            # Protobuf decode failures indicate corrupted response or protocol mismatch
+            _LOGGER.error("Failed to decode device list response: %s", _short_err(err))
+            raise UpdateFailed(_short_err(err)) from err
+
+        except NovaLogicError as err:
+            # Logic errors from Google (e.g., invalid device ID, permission denied)
+            _LOGGER.error(
+                "Nova API Logic Error while listing devices: Code %s - %s",
+                err.code,
+                err.message or "Unknown",
+            )
+            raise UpdateFailed(_short_err(err)) from err
+
         # Normalize gpsoauth/ADM "BadAuthentication" style failures to ConfigEntryAuthFailed
         except (RuntimeError, ValueError) as err:
             msg = str(err)
@@ -1267,6 +1283,27 @@ class GoogleFindMyAPI:
                 device_name,
                 device_id,
                 _short_err(err),
+            )
+            return {}
+
+        except NovaProtobufDecodeError as err:
+            # Protobuf decode failures indicate corrupted response or protocol mismatch
+            _LOGGER.error(
+                "Failed to decode location response for %s (%s): %s",
+                device_name,
+                device_id,
+                _short_err(err),
+            )
+            return {}
+
+        except NovaLogicError as err:
+            # Logic errors from Google (e.g., invalid device ID, permission denied)
+            _LOGGER.error(
+                "Nova API Logic Error for %s (%s): Code %s - %s",
+                device_name,
+                device_id,
+                err.code,
+                err.message or "Unknown",
             )
             return {}
 

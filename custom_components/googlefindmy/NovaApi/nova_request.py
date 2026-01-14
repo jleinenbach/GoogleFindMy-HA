@@ -52,6 +52,19 @@ from custom_components.googlefindmy.Auth.username_provider import (
     username_string,
 )
 
+# Import vendored google.rpc.Status for decoding Google API error responses
+try:
+    from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import (
+        Status as RpcStatus,
+    )
+    from google.protobuf.message import DecodeError as ProtobufDecodeError
+
+    _RPC_STATUS_AVAILABLE = True
+except ImportError:
+    RpcStatus = None  # type: ignore[misc,assignment]
+    ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
+    _RPC_STATUS_AVAILABLE = False
+
 from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 if TYPE_CHECKING:
@@ -231,6 +244,66 @@ def _beautify_text(resp_text: str) -> str:
     return resp_text[:_ERROR_SNIPPET_MAX]
 
 
+def _decode_error_response(content: bytes, http_status: int) -> str:
+    """Decode a Google API error response using smart fallback.
+
+    Google's Nova API returns errors in google.rpc.Status Protobuf format,
+    not as HTML/text. This function attempts to decode the Protobuf first,
+    falling back to text/HTML parsing for load balancer errors.
+
+    Args:
+        content: Raw response body bytes.
+        http_status: HTTP status code for context.
+
+    Returns:
+        Human-readable error message for logging.
+
+    Strategy:
+        1. Try to parse as google.rpc.Status Protobuf (primary)
+        2. Fall back to text/HTML parsing (for load balancer errors, etc.)
+    """
+    if not content:
+        return f"HTTP {http_status} (empty response body)"
+
+    # --- Strategy 1: Try google.rpc.Status Protobuf decoding ---
+    if _RPC_STATUS_AVAILABLE and RpcStatus is not None:
+        try:
+            status = RpcStatus()
+            status.ParseFromString(content)
+
+            # Check if we got meaningful data (code or message present)
+            if status.code or status.message:
+                rpc_code = status.code if status.code else http_status
+                rpc_message = (
+                    status.message if status.message else "No message provided"
+                )
+
+                # Log details if present (for debugging)
+                if status.details:
+                    _LOGGER.debug(
+                        "RpcStatus contains %d detail message(s)", len(status.details)
+                    )
+
+                return f"HTTP {http_status} - RPC {rpc_code}: {rpc_message}"
+        except ProtobufDecodeError:
+            # Not a valid Protobuf - fall through to text/HTML parsing
+            _LOGGER.debug(
+                "Response body is not a valid google.rpc.Status Protobuf, "
+                "falling back to text parsing"
+            )
+        except Exception as exc:
+            # Unexpected error during Protobuf parsing - log and fall through
+            _LOGGER.debug("Unexpected error during RpcStatus decoding: %s", exc)
+
+    # --- Strategy 2: Fall back to text/HTML parsing ---
+    # This handles load balancer errors, maintenance pages, etc.
+    try:
+        text = content.decode(errors="ignore")
+        return _beautify_text(text) or f"HTTP {http_status} (non-decodable response)"
+    except Exception:
+        return f"HTTP {http_status} (failed to decode response body)"
+
+
 # --- Custom Exceptions ---
 class NovaError(Exception):
     """Base exception for Nova API errors."""
@@ -290,6 +363,40 @@ class NovaHTTPError(NovaError):
         super().__init__(f"HTTP Server Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
+
+
+class NovaLogicError(NovaError):
+    """Raised when Google returns a logical error in the Protobuf response.
+
+    This happens when the HTTP request succeeds (200 OK) but the response
+    payload contains an error code indicating the request could not be
+    processed (e.g., invalid device ID, permission denied at the API level).
+
+    Attributes:
+        code: The error code from the Protobuf response.
+        message: The error message from the Protobuf response (if available).
+    """
+
+    def __init__(self, code: int, message: str | None = None):
+        detail = f"Code {code}"
+        if message:
+            detail = f"{detail} - {message}"
+        super().__init__(f"Nova API Logic Error: {detail}")
+        self.code = code
+        self.message = message
+
+
+class NovaProtobufDecodeError(NovaError):
+    """Raised when a Protobuf response cannot be decoded.
+
+    This indicates either a malformed response from Google, a protocol
+    version mismatch, or network corruption.
+    """
+
+    def __init__(self, detail: str | None = None):
+        super().__init__(
+            f"Failed to decode Google Protobuf response: {detail or 'Unknown error'}"
+        )
 
 
 # ------------------------ Optional Home Assistant hooks ------------------------
@@ -1288,9 +1395,8 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     if status == HTTP_OK:
                         return cast(bytes, content).hex()
 
-                    text_snippet = _redact(
-                        _beautify_text(content.decode(errors="ignore"))
-                    )
+                    # Decode error response: try Protobuf first, then text/HTML
+                    text_snippet = _redact(_decode_error_response(content, status))
 
                     if status == HTTP_UNAUTHORIZED:
                         # 401 Retry Sequence (OAuth → AAS → ADM token chain):
@@ -1461,13 +1567,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
                             )
-                            _LOGGER.info(
-                                "Nova API async request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                api_scope,
-                                status,
-                                delay,
+                            _LOGGER.warning(
+                                "Nova API request failed (Attempt %d/%d): HTTP %d for %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
                                 NOVA_MAX_RETRIES,
+                                status,
+                                api_scope,
+                                delay,
                             )
                             retries_used += 1
                             await asyncio.sleep(delay)
@@ -1500,13 +1606,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             except (TimeoutError, aiohttp.ClientError) as e:
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
-                    _LOGGER.info(
-                        "Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                        api_scope,
-                        type(e).__name__,
-                        delay,
+                    _LOGGER.warning(
+                        "Nova API request failed (Attempt %d/%d): %s for %s. Retrying in %.2f seconds...",
                         retries_used + 1,
                         NOVA_MAX_RETRIES,
+                        type(e).__name__,
+                        api_scope,
+                        delay,
                     )
                     retries_used += 1
                     await asyncio.sleep(delay)

@@ -25,6 +25,13 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from ..const import DEFAULT_MIN_POLL_INTERVAL
+from ..NovaApi.nova_request import (
+    NovaAuthError,
+    NovaHTTPError,
+    NovaLogicError,
+    NovaProtobufDecodeError,
+    NovaRateLimitError,
+)
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
@@ -502,6 +509,55 @@ class LocateOperations:
                     await self.async_request_refresh()
                 except Exception:
                     pass
+                return {}
+            except NovaAuthError as auth_err:
+                # Expected: Authentication/permission issue from Nova API
+                _LOGGER.warning(
+                    "Manual locate for %s failed (authentication): HTTP %s - %s",
+                    name,
+                    getattr(auth_err, "status", "?"),
+                    auth_err,
+                )
+                self._set_auth_state(failed=True, reason=f"Nova auth error: {auth_err}")
+                self.note_error(auth_err, where="async_locate_device", device=name)
+                return {}
+            except NovaRateLimitError as rate_err:
+                # Expected: Rate limiting from Nova API (429 Too Many Requests)
+                _LOGGER.warning(
+                    "Manual locate for %s rate-limited by Google: %s",
+                    name,
+                    rate_err,
+                )
+                self.note_error(rate_err, where="async_locate_device", device=name)
+                return {}
+            except NovaHTTPError as http_err:
+                # Expected: Server errors from Nova API (5xx)
+                _LOGGER.warning(
+                    "Manual locate for %s failed (server error): HTTP %s - %s",
+                    name,
+                    getattr(http_err, "status", "?"),
+                    http_err,
+                )
+                self.note_error(http_err, where="async_locate_device", device=name)
+                return {}
+            except NovaLogicError as logic_err:
+                # Expected: Logic error from Protobuf response (e.g., invalid device ID)
+                _LOGGER.warning(
+                    "Manual locate for %s failed (API logic error): Code %s - %s",
+                    name,
+                    getattr(logic_err, "code", "?"),
+                    getattr(logic_err, "message", str(logic_err)),
+                )
+                self.note_error(logic_err, where="async_locate_device", device=name)
+                return {}
+            except NovaProtobufDecodeError as decode_err:
+                # Expected: Malformed Protobuf response
+                _LOGGER.warning(
+                    "Manual locate for %s failed (decode error): %s",
+                    name,
+                    decode_err,
+                )
+                self.note_error(decode_err, where="async_locate_device", device=name)
                 return {}
             except Exception as err:
                 short_err = self._short_error_message(err)
