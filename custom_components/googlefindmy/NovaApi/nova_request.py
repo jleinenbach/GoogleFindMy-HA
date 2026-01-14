@@ -1416,7 +1416,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         _AUTH_STEP_ADM_REFRESH = 0
                         _AUTH_STEP_AAS_ADM_REFRESH = 1
                         _AUTH_STEP_LONG_COOLDOWN = 2
-                        max_auth_retries = 4
 
                         # --- Race condition guard ---
                         # Check if another request is already handling auth refresh.
@@ -1453,16 +1452,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             except (ValueError, TypeError):
                                 pass  # Invalid deadline, proceed normally
 
-                        # Log all auth retries as WARNING for visibility.
-                        # Previously, attempt 1/4 was logged as INFO, making it invisible
-                        # in WARNING-level logs and causing confusion ("only 2/4 appears").
-                        _LOGGER.warning(
-                            "Nova API async request to %s: 401 Unauthorized (attempt %d/%d).",
-                            api_scope,
-                            auth_retries_used + 1,
-                            max_auth_retries,
-                        )
-
                         if auth_retries_used == _AUTH_STEP_ADM_REFRESH:
                             # Step 1: First 401 - refresh ADM token only, wait for propagation
                             # Set deadline to prevent parallel refresh storms
@@ -1471,7 +1460,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 time.time() + _PROPAGATION_DELAY_S + 2.0,
                             )
                             _LOGGER.info(
-                                "Nova API: refreshing ADM token (AAS unchanged)."
+                                "Nova API: 401 Unauthorized - token expired. Refreshing ADM token."
                             )
                             try:
                                 await policy.async_on_401()
@@ -1501,12 +1490,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 + _PROPAGATION_DELAY_S
                                 + 2.0,
                             )
-                            _LOGGER.warning(
-                                "Nova API: ADM refresh failed. Waiting %.0fs before "
-                                "refreshing entire token chain (AAS+ADM).",
+                            _LOGGER.info(
+                                "Nova API: 401 Unauthorized - ADM refresh unsuccessful. "
+                                "AAS token likely invalid. Waiting %.0fs before refreshing entire token chain.",
                                 _SHORT_COOLDOWN_S,
                             )
                             await asyncio.sleep(_SHORT_COOLDOWN_S)
+                            _LOGGER.info("Nova API: invalidating AAS token.")
                             await policy.async_invalidate_aas_token()
                             _LOGGER.info("Nova API: refreshing AAS+ADM token chain.")
                             try:
@@ -1532,8 +1522,8 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 ns_deadline_key, time.time() + _LONG_COOLDOWN_S + 2.0
                             )
                             _LOGGER.warning(
-                                "Nova API: AAS+ADM refresh failed. Waiting %.0fs "
-                                "(long cooldown) before final retry.",
+                                "Nova API: 401 Unauthorized - AAS+ADM refresh unsuccessful. "
+                                "Waiting %.0fs (long cooldown) before final retry.",
                                 _LONG_COOLDOWN_S,
                             )
                             await asyncio.sleep(_LONG_COOLDOWN_S)
@@ -1542,19 +1532,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             continue
 
                         # Step 4: Fourth 401 - all retries exhausted
-                        # Total wait: 6s + 61s + 6s + 501s = 574s (~9.5 min)
-                        total_wait = (
-                            _PROPAGATION_DELAY_S
-                            + _SHORT_COOLDOWN_S
-                            + _PROPAGATION_DELAY_S
-                            + _LONG_COOLDOWN_S
-                        )
                         _LOGGER.error(
-                            "Nova API async request to %s: 401 persists after %d retries "
-                            "(total wait: %.0fs). Authentication is invalid; re-auth required.",
-                            api_scope,
-                            max_auth_retries,
-                            total_wait,
+                            "Nova API: 401 Unauthorized persists. "
+                            "Authentication invalid; re-authentication required."
                         )
                         raise NovaAuthError(
                             status,

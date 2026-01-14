@@ -55,6 +55,7 @@ certifi = ">=2024.7.4"
 
 # Release automation
 python-semantic-release = ">=9.0.0"
+pytest-homeassistant-custom-component = "^0.13.306"
 
 [tool.poetry.group.test.dependencies]
 # Core testing framework
