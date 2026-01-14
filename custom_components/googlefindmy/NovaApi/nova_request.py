@@ -292,6 +292,40 @@ class NovaHTTPError(NovaError):
         self.detail = detail
 
 
+class NovaLogicError(NovaError):
+    """Raised when Google returns a logical error in the Protobuf response.
+
+    This happens when the HTTP request succeeds (200 OK) but the response
+    payload contains an error code indicating the request could not be
+    processed (e.g., invalid device ID, permission denied at the API level).
+
+    Attributes:
+        code: The error code from the Protobuf response.
+        message: The error message from the Protobuf response (if available).
+    """
+
+    def __init__(self, code: int, message: str | None = None):
+        detail = f"Code {code}"
+        if message:
+            detail = f"{detail} - {message}"
+        super().__init__(f"Nova API Logic Error: {detail}")
+        self.code = code
+        self.message = message
+
+
+class NovaProtobufDecodeError(NovaError):
+    """Raised when a Protobuf response cannot be decoded.
+
+    This indicates either a malformed response from Google, a protocol
+    version mismatch, or network corruption.
+    """
+
+    def __init__(self, detail: str | None = None):
+        super().__init__(
+            f"Failed to decode Google Protobuf response: {detail or 'Unknown error'}"
+        )
+
+
 # ------------------------ Optional Home Assistant hooks ------------------------
 # These hooks allow the integration to supply a shared aiohttp ClientSession.
 _STATE: dict[str, Any] = {
@@ -1461,13 +1495,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
                             )
-                            _LOGGER.info(
-                                "Nova API async request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                api_scope,
-                                status,
-                                delay,
+                            _LOGGER.warning(
+                                "Nova API request failed (Attempt %d/%d): HTTP %d for %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
                                 NOVA_MAX_RETRIES,
+                                status,
+                                api_scope,
+                                delay,
                             )
                             retries_used += 1
                             await asyncio.sleep(delay)
@@ -1500,13 +1534,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             except (TimeoutError, aiohttp.ClientError) as e:
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
-                    _LOGGER.info(
-                        "Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                        api_scope,
-                        type(e).__name__,
-                        delay,
+                    _LOGGER.warning(
+                        "Nova API request failed (Attempt %d/%d): %s for %s. Retrying in %.2f seconds...",
                         retries_used + 1,
                         NOVA_MAX_RETRIES,
+                        type(e).__name__,
+                        api_scope,
+                        delay,
                     )
                     retries_used += 1
                     await asyncio.sleep(delay)

@@ -15,7 +15,7 @@ import subprocess
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
-from google.protobuf.message import Message
+from google.protobuf.message import DecodeError, Message
 
 try:
     from zoneinfo import ZoneInfo  # stdlib, Python 3.9+
@@ -25,6 +25,9 @@ except ImportError:
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    NovaProtobufDecodeError,
+)
 from custom_components.googlefindmy.ProtoDecoders import (
     Common_pb2,
     DeviceUpdate_pb2,
@@ -161,27 +164,66 @@ def custom_message_formatter(
 def parse_location_report_upload_protobuf(
     hex_string: str,
 ) -> LocationReportsUpload_pb2.LocationReportsUpload:
-    """Parse LocationReportsUpload from a hex string."""
+    """Parse LocationReportsUpload from a hex string.
+
+    Raises:
+        NovaProtobufDecodeError: If the response cannot be decoded as a valid Protobuf.
+    """
     location_reports = LocationReportsUpload_pb2.LocationReportsUpload()
-    location_reports.ParseFromString(bytes.fromhex(hex_string))
+    try:
+        location_reports.ParseFromString(bytes.fromhex(hex_string))
+    except (DecodeError, ValueError, binascii.Error) as exc:
+        _LOGGER.error(
+            "Failed to decode Google Protobuf response (LocationReportsUpload): %s",
+            exc,
+        )
+        raise NovaProtobufDecodeError(
+            f"LocationReportsUpload decode failed: {exc}"
+        ) from exc
     return location_reports
 
 
 def parse_device_update_protobuf(
     hex_string: str,
 ) -> DeviceUpdate_pb2.DeviceUpdate:
-    """Parse DeviceUpdate from a hex string."""
+    """Parse DeviceUpdate from a hex string.
+
+    Raises:
+        NovaProtobufDecodeError: If the response cannot be decoded as a valid Protobuf.
+    """
     device_update = DeviceUpdate_pb2.DeviceUpdate()
-    device_update.ParseFromString(bytes.fromhex(hex_string))
+    try:
+        device_update.ParseFromString(bytes.fromhex(hex_string))
+    except (DecodeError, ValueError, binascii.Error) as exc:
+        _LOGGER.error(
+            "Failed to decode Google Protobuf response (DeviceUpdate): %s",
+            exc,
+        )
+        raise NovaProtobufDecodeError(
+            f"DeviceUpdate decode failed: {exc}"
+        ) from exc
     return device_update
 
 
 def parse_device_list_protobuf(
     hex_string: str,
 ) -> DeviceUpdate_pb2.DevicesList:
-    """Parse DevicesList from a hex string."""
+    """Parse DevicesList from a hex string.
+
+    Raises:
+        NovaProtobufDecodeError: If the response cannot be decoded as a valid Protobuf.
+    """
     device_list = DeviceUpdate_pb2.DevicesList()
-    device_list.ParseFromString(bytes.fromhex(hex_string))
+    try:
+        device_list.ParseFromString(bytes.fromhex(hex_string))
+    except (DecodeError, ValueError, binascii.Error) as exc:
+        _LOGGER.error(
+            "Failed to decode Google Protobuf response (DevicesList): %s",
+            exc,
+        )
+        raise NovaProtobufDecodeError(
+            f"DevicesList decode failed: {exc}"
+        ) from exc
     return device_list
 
 
