@@ -475,22 +475,28 @@ async def async_get_aas_token(
                 if not retryable:
                     if retry_num > 0:
                         _LOGGER.error(
-                            "AAS token: generation failed (retry %d/%d). No more retries.",
+                            "AAS token: generation failed (retry %d/%d). No more retries. "
+                            "Error: %s",
                             retry_num,
                             max_retries,
+                            exc,
                         )
                     else:
-                        _LOGGER.error("AAS token: generation failed.")
+                        _LOGGER.error("AAS token: generation failed. Error: %s", exc)
                     break
 
                 sleep_s = backoff * (2**attempt)
                 if retry_num == 0:
-                    _LOGGER.warning("AAS token: generation failed. Retrying...")
+                    _LOGGER.warning(
+                        "AAS token: generation failed. Error: %s. Retrying...", exc
+                    )
                 else:
                     _LOGGER.warning(
-                        "AAS token: generation failed (retry %d/%d). Retrying in %.0fs...",
+                        "AAS token: generation failed (retry %d/%d). Error: %s. "
+                        "Retrying in %.0fs...",
                         retry_num,
                         max_retries,
+                        exc,
                         sleep_s,
                     )
                 await asyncio.sleep(sleep_s)

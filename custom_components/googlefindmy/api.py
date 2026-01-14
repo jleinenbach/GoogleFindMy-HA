@@ -1530,7 +1530,11 @@ class GoogleFindMyAPI:
                 cache=cast("TokenCache | None", self._cache),
             )
             if result is None:
-                _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
+                _LOGGER.error(
+                    "Play Sound (async) submission failed for %s: "
+                    "empty response from server (no error details available)",
+                    device_id,
+                )
                 return (False, None)
 
             _response_hex, request_uuid = result
@@ -1629,7 +1633,11 @@ class GoogleFindMyAPI:
                     "Stop Sound (async) submitted successfully for %s", device_id
                 )
             else:
-                _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
+                _LOGGER.error(
+                    "Stop Sound (async) submission failed for %s: "
+                    "empty response from server (no error details available)",
+                    device_id,
+                )
             return bool(ok)
 
         except NovaAuthError as err:

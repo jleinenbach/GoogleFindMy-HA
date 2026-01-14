@@ -156,14 +156,20 @@ async def async_submit_stop_sound_request(  # noqa: PLR0913
             namespace=resolved_namespace,
             cache=cache,
         )
-    except (asyncio.CancelledError, NovaAuthPermanentError, NovaAuthError):
-        # CancelledError: Must propagate for proper task cancellation.
-        # NovaAuthPermanentError: Permanent auth failure - immediate reauth required.
-        # NovaAuthError: Transient auth error - let coordinator track consecutive failures.
+    except (
+        asyncio.CancelledError,
+        NovaAuthPermanentError,
+        NovaAuthError,
+        NovaRateLimitError,
+        NovaHTTPError,
+        aiohttp.ClientError,
+    ):
+        # Propagate all errors to caller for proper handling and logging.
+        # - CancelledError: Must propagate for proper task cancellation.
+        # - NovaAuthPermanentError: Permanent auth failure - immediate reauth required.
+        # - NovaAuthError: Transient auth error - let coordinator track consecutive failures.
+        # - NovaRateLimitError/NovaHTTPError/ClientError: Transient errors with details.
         raise
-    except (NovaRateLimitError, NovaHTTPError, aiohttp.ClientError):
-        # Transient errors - return None to signal soft failure to caller.
-        return None
 
 
 async def _async_cli_main(entry_id_hint: str | None = None) -> None:
