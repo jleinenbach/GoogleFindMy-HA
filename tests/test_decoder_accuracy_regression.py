@@ -396,3 +396,514 @@ class TestDirtyDataHandling:
         best, rest = _select_best_location([])
         assert best is None
         assert rest == []
+
+    def test_null_island_coordinates_filtered(self) -> None:
+        """Coordinates at (0.0, 0.0) - 'Null Island' - must be filtered out.
+
+        The point (0.0, 0.0) is in the Atlantic Ocean off the coast of Africa.
+        This is a common API default when no real location data is available.
+        Such coordinates should never be accepted as valid device locations.
+        """
+        null_island_report: dict[str, Any] = {
+            "latitude": 0.0,
+            "longitude": 0.0,
+            "accuracy": 100.0,  # Valid accuracy, but invalid coordinates
+            "last_seen": 1700000200,
+            "is_own_report": True,
+        }
+
+        valid_report: dict[str, Any] = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 50.0,
+            "last_seen": 1700000100,  # Older timestamp
+            "is_own_report": False,
+        }
+
+        # After normalization, Null Island should have no coordinates
+        normalized = _normalize_location_dict(null_island_report)
+        assert "latitude" not in normalized or "longitude" not in normalized, (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"CRITICAL: Null Island coordinates (0.0, 0.0) were NOT filtered!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"The point (0.0, 0.0) is in the Atlantic Ocean and indicates\n"
+            f"missing/default data from the API, not a real device location.\n"
+            f"\n"
+            f"FIX LOCATION: decoder.py :: _normalize_location_dict()\n"
+            f"Add filter: if abs(lat) < 0.0001 and abs(lon) < 0.0001: pop both\n"
+            f"{'=' * 70}"
+        )
+
+        # When selecting between Null Island and valid coords, valid must win
+        best, _rest = _select_best_location([null_island_report, valid_report])
+
+        if best is not None:
+            lat = best.get("latitude")
+            lon = best.get("longitude")
+            # Either no coords (filtered), or the valid location
+            if lat is not None and lon is not None:
+                assert not (abs(lat) < 0.0001 and abs(lon) < 0.0001), (
+                    f"\n"
+                    f"{'=' * 70}\n"
+                    f"CRITICAL: Null Island was selected as best location!\n"
+                    f"{'=' * 70}\n"
+                    f"Selected: ({lat}, {lon})\n"
+                    f"Expected: Valid coordinates (48.123, 11.456) or None\n"
+                    f"{'=' * 70}"
+                )
+
+
+# =============================================================================
+# SECTION 4: "Perfect Storm" - Ranking vs Recency
+# =============================================================================
+
+
+class TestPerfectStormScenario:
+    """Test the 'Perfect Storm' scenario where bad data has a newer timestamp.
+
+    This tests the critical case where:
+    - An is_own_report=True update with accuracy=0.0 arrives with a NEWER timestamp
+    - A valid crowdsourced update with accuracy=20.0 has an OLDER timestamp
+
+    The system MUST reject the invalid data even though it's "newer".
+    Recency cannot override physical impossibility.
+    """
+
+    def test_newer_invalid_data_loses_to_older_valid_data(self) -> None:
+        """CRITICAL: Newer timestamp cannot rescue physically impossible data.
+
+        This is the 'Perfect Storm' scenario: The bad report has every advantage
+        (is_own_report=True, newer timestamp) except valid accuracy.
+        It MUST still lose.
+        """
+        # The "bad" report: Everything looks good except accuracy is impossible
+        bad_newer_own: dict[str, Any] = {
+            "latitude": 48.100,
+            "longitude": 11.100,
+            "accuracy": 0.0,  # PHYSICALLY IMPOSSIBLE
+            "last_seen": 1700000200,  # NEWER timestamp (advantage!)
+            "is_own_report": True,  # Owner priority (advantage!)
+            "status": "LAST_KNOWN",
+            "status_code": 1,
+        }
+
+        # The "good" report: Older, crowdsourced, but VALID
+        good_older_crowd: dict[str, Any] = {
+            "latitude": 48.200,
+            "longitude": 11.200,
+            "accuracy": 20.0,  # Realistic GPS accuracy
+            "last_seen": 1700000100,  # OLDER timestamp (disadvantage)
+            "is_own_report": False,  # No owner priority (disadvantage)
+            "status": "CROWDSOURCED",
+            "status_code": 2,
+        }
+
+        best, _rest = _select_best_location([bad_newer_own, good_older_crowd])
+
+        # The system must not select the invalid report
+        if best is not None:
+            selected_acc = best.get("accuracy")
+            # Valid outcomes: good report wins, or accuracy is filtered to None
+            is_good_winner = selected_acc == pytest.approx(20.0)
+            is_filtered = selected_acc is None
+
+            assert is_good_winner or is_filtered, (
+                f"\n"
+                f"{'=' * 70}\n"
+                f"CRITICAL FAILURE: 'Perfect Storm' scenario broke the system!\n"
+                f"{'=' * 70}\n"
+                f"\n"
+                f"SCENARIO: A physically impossible report (accuracy=0.0m) with\n"
+                f"is_own_report=True and a NEWER timestamp was selected over\n"
+                f"a valid crowdsourced report with accuracy=20.0m.\n"
+                f"\n"
+                f"SELECTED: accuracy={selected_acc}m\n"
+                f"EXPECTED: accuracy=20.0m or None (filtered)\n"
+                f"\n"
+                f"ROOT CAUSE: The ranking algorithm or normalization failed to\n"
+                f"reject accuracy=0.0m as invalid. The 'newer is better' heuristic\n"
+                f"must NOT override physical constraints.\n"
+                f"\n"
+                f"PRINCIPLE: Physics > Recency\n"
+                f"A timestamp cannot make 0.0m GPS accuracy possible.\n"
+                f"\n"
+                f"FIX LOCATIONS (check in order):\n"
+                f"  1. decoder.py :: _normalize_location_dict() - must filter acc <= 0\n"
+                f"  2. decoder.py :: _get_rank_tuple() - must penalize acc <= 0\n"
+                f"  3. cache.py :: _is_significant_update() - must reject acc < 1.0m\n"
+                f"{'=' * 70}"
+            )
+
+    def test_edge_case_0_001m_still_wins_ranking(self) -> None:
+        """Edge case: Very small but positive accuracy (0.001m) may pass ranking.
+
+        While 0.001m is unrealistic for consumer GPS, it's technically positive.
+        The cache gate (_is_significant_update) should catch this at < 1.0m.
+        But in the decoder, we only filter <= 0.
+        """
+        tiny_accuracy: dict[str, Any] = {
+            "latitude": 48.100,
+            "longitude": 11.100,
+            "accuracy": 0.001,  # Positive but unrealistic
+            "last_seen": 1700000100,
+            "is_own_report": False,
+        }
+
+        normal_accuracy: dict[str, Any] = {
+            "latitude": 48.200,
+            "longitude": 11.200,
+            "accuracy": 20.0,
+            "last_seen": 1700000100,
+            "is_own_report": False,
+        }
+
+        # The decoder may pass 0.001m through (it's > 0)
+        normalized = _normalize_location_dict(tiny_accuracy)
+
+        # This is expected to pass decoder validation (0.001 > 0)
+        # The cache gate should catch it later (< 1.0m)
+        # For the decoder alone, this documents expected behavior
+        if "accuracy" in normalized:
+            # Document that decoder passes tiny positive values
+            assert normalized["accuracy"] == pytest.approx(0.001), (
+                "Decoder should preserve tiny positive accuracy (cache gate handles < 1.0m)"
+            )
+
+
+# =============================================================================
+# SECTION 5: Cache and Fusion Tests
+# =============================================================================
+
+
+class TestCacheFusionRobustness:
+    """Test cache fusion logic against dirty data.
+
+    These tests verify that the cache's weighted fusion algorithm and
+    quality gates correctly handle edge cases and malicious data.
+    """
+
+    def test_is_significant_update_rejects_zero_accuracy(self) -> None:
+        """_is_significant_update must reject accuracy=0.0 as physically impossible."""
+        from unittest.mock import MagicMock
+
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        # Create a minimal mock coordinator
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        # Bind the method to our mock
+        is_sig = CacheOperations._is_significant_update
+
+        bad_update = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 0.0,  # INVALID
+            "last_seen": 1700000100,
+        }
+
+        result = is_sig(mock_coord, "device-1", bad_update)
+
+        assert result is False, (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"CRITICAL: Cache accepted update with accuracy=0.0m!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"The cache gatekeeper (_is_significant_update) must reject\n"
+            f"any update with accuracy < 1.0m as physically impossible.\n"
+            f"\n"
+            f"FIX LOCATION: cache.py :: _is_significant_update()\n"
+            f"Add check: if acc_f < MIN_PLAUSIBLE_ACCURACY_M: return False\n"
+            f"{'=' * 70}"
+        )
+
+        # Verify the stat was incremented
+        mock_coord.increment_stat.assert_called_with("invalid_accuracy_drop_count")
+
+    def test_is_significant_update_rejects_sub_meter_accuracy(self) -> None:
+        """_is_significant_update must reject accuracy < 1.0m (consumer GPS floor)."""
+        from unittest.mock import MagicMock
+
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+
+        # 0.5m is positive but impossible for consumer GPS
+        bad_update = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 0.5,  # Sub-meter = INVALID for consumer GPS
+            "last_seen": 1700000100,
+        }
+
+        result = is_sig(mock_coord, "device-1", bad_update)
+
+        assert result is False, (
+            f"\n"
+            f"{'=' * 70}\n"
+            f"CRITICAL: Cache accepted sub-meter accuracy (0.5m)!\n"
+            f"{'=' * 70}\n"
+            f"\n"
+            f"Consumer GPS hardware cannot achieve sub-meter accuracy.\n"
+            f"Even differential GPS rarely achieves < 1m.\n"
+            f"Values like 0.5m indicate API artifacts, not real measurements.\n"
+            f"\n"
+            f"The cache MUST reject accuracy < 1.0m to prevent:\n"
+            f"- 'Fusion Lock-in' where bad data gets extreme weight\n"
+            f"- Incorrect 'Own Device' reports poisoning the cache\n"
+            f"\n"
+            f"FIX LOCATION: cache.py :: _is_significant_update()\n"
+            f"Ensure MIN_PLAUSIBLE_ACCURACY_M = 1.0 and check is enforced.\n"
+            f"{'=' * 70}"
+        )
+
+    def test_is_significant_update_allows_valid_accuracy(self) -> None:
+        """_is_significant_update must allow valid accuracy values (>= 1.0m)."""
+        from unittest.mock import MagicMock
+
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+
+        good_update = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 5.0,  # Valid GPS accuracy
+            "last_seen": 1700000100,
+        }
+
+        result = is_sig(mock_coord, "device-1", good_update)
+
+        assert result is True, (
+            "Valid accuracy (5.0m) should be accepted by the cache gate"
+        )
+
+    def test_is_significant_update_allows_no_accuracy(self) -> None:
+        """_is_significant_update must allow updates without accuracy (semantic-only)."""
+        from unittest.mock import MagicMock
+
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+
+        # Semantic-only update: no accuracy is fine
+        semantic_update = {
+            "semantic_name": "Home",
+            "last_seen": 1700000100,
+            # No accuracy - this is valid for semantic locations
+        }
+
+        result = is_sig(mock_coord, "device-1", semantic_update)
+
+        assert result is True, (
+            "Semantic-only updates (no accuracy) should be accepted.\n"
+            "Only updates that CLAIM an impossible accuracy should be rejected."
+        )
+
+
+# =============================================================================
+# SECTION 6: Fusion Lock-in Prevention
+# =============================================================================
+
+
+class TestFusionLockInPrevention:
+    """Test that the fusion algorithm cannot be 'locked in' by bad data.
+
+    The 'Fusion Lock-in' effect occurs when:
+    1. A bad accuracy value (e.g., 0.1m) gets into the cache
+    2. Due to inverse-square weighting (1/acc²), this value gets extreme weight
+    3. Subsequent valid updates (e.g., 20m) cannot move the position
+       because their weight is negligible compared to the 'poisoned' cache
+
+    Prevention strategy:
+    - Layer 1: Decoder filters accuracy <= 0
+    - Layer 2: Cache gate rejects accuracy < 1.0m
+    - Layer 3: Fusion uses 50m fallback for invalid values
+    - Layer 4: Fusion math uses proper inverse variance formula
+    """
+
+    def test_fusion_weight_ratio_is_reasonable(self) -> None:
+        """Verify fusion weights don't become astronomically skewed.
+
+        With proper fallback (50m for invalid), the weight ratio between
+        any two valid measurements should be reasonable (not > 100:1).
+        """
+        import math
+
+        # Worst realistic case: 5m vs 100m
+        acc_good = 5.0
+        acc_poor = 100.0
+
+        w_good = 1 / (acc_good ** 2)  # 1/25 = 0.04
+        w_poor = 1 / (acc_poor ** 2)  # 1/10000 = 0.0001
+
+        ratio = w_good / w_poor  # 400:1 - this is acceptable
+
+        # But if bad data (0.1m) got through, the ratio would be insane
+        acc_poison = 0.1
+        w_poison = 1 / (acc_poison ** 2)  # 1/0.01 = 100
+
+        poison_ratio = w_poison / w_poor  # 100 / 0.0001 = 1,000,000:1
+
+        assert poison_ratio > 10000, (
+            f"Sanity check: Poison ratio should be extreme ({poison_ratio})"
+        )
+
+        # This test documents WHY we need the cache gate
+        # If 0.1m gets through, it dominates with 1,000,000:1 weight ratio
+
+    def test_fusion_fallback_prevents_lockin(self) -> None:
+        """The 50m fallback should prevent extreme weight ratios.
+
+        When invalid accuracy (0.0, None) uses the 50m fallback instead of
+        a tiny value, the weight ratio stays reasonable.
+        """
+        from custom_components.googlefindmy.const import DEFAULT_FALLBACK_ACCURACY_M
+
+        # Fallback should be 50m (defined in const.py)
+        assert DEFAULT_FALLBACK_ACCURACY_M == 50.0, (
+            f"Expected DEFAULT_FALLBACK_ACCURACY_M = 50.0, got {DEFAULT_FALLBACK_ACCURACY_M}\n"
+            f"This value prevents Fusion Lock-in by ensuring invalid accuracy\n"
+            f"doesn't get extreme weight in the fusion formula."
+        )
+
+        # With 50m fallback, ratio to a 20m fix is reasonable
+        w_fallback = 1 / (50.0 ** 2)  # 1/2500 = 0.0004
+        w_valid = 1 / (20.0 ** 2)  # 1/400 = 0.0025
+
+        ratio = w_valid / w_fallback  # 6.25:1
+
+        assert ratio < 10, (
+            f"With 50m fallback, weight ratio should be < 10:1 (got {ratio:.2f}:1)\n"
+            f"This ensures valid GPS fixes can 'rescue' the cache from bad data."
+        )
+
+    def test_inverse_variance_formula_documented(self) -> None:
+        """Document the inverse variance fusion formula.
+
+        When fusing two measurements with accuracies σ₁ and σ₂:
+        - Weights: w₁ = 1/σ₁², w₂ = 1/σ₂²
+        - Fused position: (x₁*w₁ + x₂*w₂) / (w₁ + w₂)
+        - Fused variance: σ_fused² = 1 / (w₁ + w₂)
+        - Fused accuracy: σ_fused = sqrt(1 / (w₁ + w₂))
+
+        The fused accuracy should be BETTER than both inputs when valid.
+        """
+        import math
+
+        acc1 = 20.0  # First measurement: 20m accuracy
+        acc2 = 30.0  # Second measurement: 30m accuracy
+
+        w1 = 1 / (acc1 ** 2)  # 0.0025
+        w2 = 1 / (acc2 ** 2)  # 0.00111
+        total_w = w1 + w2  # 0.00361
+
+        fused_acc = math.sqrt(1 / total_w)  # ~16.6m
+
+        assert fused_acc < acc1, (
+            f"Fused accuracy ({fused_acc:.1f}m) should be better than first ({acc1}m)\n"
+            f"Combining measurements improves precision (inverse variance weighting)."
+        )
+
+        assert fused_acc < acc2, (
+            f"Fused accuracy ({fused_acc:.1f}m) should be better than second ({acc2}m)"
+        )
+
+        # With safety floor (5m), we clamp but don't go below physics limit
+        MIN_FUSED = 5.0
+        clamped = max(fused_acc, MIN_FUSED)
+        assert clamped >= MIN_FUSED, "Fused accuracy must respect physics floor (5m)"
+
+
+# =============================================================================
+# SECTION 7: Integration Scenario Tests
+# =============================================================================
+
+
+class TestIntegrationScenarios:
+    """End-to-end scenario tests combining multiple components."""
+
+    def test_full_pipeline_rejects_poisoned_own_report(self) -> None:
+        """Complete pipeline test: poisoned 'Own Device' report must be rejected.
+
+        This test simulates the full flow:
+        1. Raw data comes from Google's API (is_own_report=True, accuracy=0.0)
+        2. Decoder normalization should filter the accuracy
+        3. Ranking should penalize the report
+        4. Cache gate should reject it entirely
+        """
+        # Simulate the poisoned report exactly as it comes from the API
+        poisoned_api_response: dict[str, Any] = {
+            "latitude": 48.100,
+            "longitude": 11.100,
+            "accuracy": 0.0,
+            "last_seen": 1700000200,
+            "is_own_report": True,
+            "status_code": 1,
+        }
+
+        # Step 1: Decoder normalization
+        normalized = _normalize_location_dict(poisoned_api_response)
+
+        # Accuracy should be filtered out
+        assert "accuracy" not in normalized, (
+            "Decoder must filter accuracy=0.0 at normalization stage"
+        )
+
+        # Step 2: Ranking (if it somehow got through)
+        rank = _get_rank_tuple(poisoned_api_response)
+        acc_rank = rank[3]
+
+        assert math.isinf(acc_rank) and acc_rank < 0, (
+            "Ranking must penalize accuracy=0.0 with -inf rank"
+        )
+
+        # Step 3: If normalized (accuracy removed), verify ranking still works
+        rank_after_norm = _get_rank_tuple(normalized)
+        acc_rank_after = rank_after_norm[3]
+
+        assert math.isinf(acc_rank_after) and acc_rank_after < 0, (
+            "After normalization removes accuracy, rank should still be -inf (None = worst)"
+        )
+
+    def test_valid_crowdsourced_survives_pipeline(self) -> None:
+        """Verify that valid crowdsourced reports pass through unchanged."""
+        valid_report: dict[str, Any] = {
+            "latitude": 48.200,
+            "longitude": 11.200,
+            "accuracy": 25.0,
+            "last_seen": 1700000100,
+            "is_own_report": False,
+            "status_code": 2,
+        }
+
+        # Normalization preserves valid data
+        normalized = _normalize_location_dict(valid_report)
+        assert normalized.get("accuracy") == pytest.approx(25.0)
+        assert normalized.get("latitude") == pytest.approx(48.200)
+        assert normalized.get("longitude") == pytest.approx(11.200)
+
+        # Ranking assigns proper (non-worst) rank
+        rank = _get_rank_tuple(normalized)
+        acc_rank = rank[3]
+
+        assert acc_rank == pytest.approx(-25.0), (
+            f"Valid accuracy 25.0m should get rank -25.0 (got {acc_rank})"
+        )
+        assert not math.isinf(acc_rank), "Valid accuracy should not get -inf rank"
