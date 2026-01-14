@@ -649,9 +649,14 @@ class TestCacheFusionRobustness:
             f"{'=' * 70}"
         )
 
-        # Accuracy should have been removed from the update dict
-        assert "accuracy" not in update_with_zero_acc, (
-            "Invalid accuracy should be removed from update dict"
+        # Accuracy should have been SET to fallback (not removed)
+        # Home Assistant requires a numeric gps_accuracy attribute
+        from custom_components.googlefindmy.coordinator.helpers.geo import (
+            DEFAULT_ACCURACY_FALLBACK,
+        )
+
+        assert update_with_zero_acc.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
+            f"Invalid accuracy should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m)"
         )
 
         # Verify sanitization was counted
@@ -1260,9 +1265,14 @@ class TestZeroAccuracyGhostPrevention:
             "Zero accuracy update should be ACCEPTED (with accuracy sanitized)"
         )
 
-        # Accuracy must have been removed
-        assert "accuracy" not in ghost_update, (
-            "Zero accuracy should be removed from update dict"
+        # Accuracy must have been SET to fallback (not removed)
+        # Home Assistant requires a numeric gps_accuracy attribute
+        from custom_components.googlefindmy.coordinator.helpers.geo import (
+            DEFAULT_ACCURACY_FALLBACK,
+        )
+
+        assert ghost_update.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
+            f"Zero accuracy should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m)"
         )
 
         # Verify the sanitization was counted
