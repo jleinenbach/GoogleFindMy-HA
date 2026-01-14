@@ -52,6 +52,19 @@ from custom_components.googlefindmy.Auth.username_provider import (
     username_string,
 )
 
+# Import vendored google.rpc.Status for decoding Google API error responses
+try:
+    from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import (
+        Status as RpcStatus,
+    )
+    from google.protobuf.message import DecodeError as ProtobufDecodeError
+
+    _RPC_STATUS_AVAILABLE = True
+except ImportError:
+    RpcStatus = None  # type: ignore[misc,assignment]
+    ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
+    _RPC_STATUS_AVAILABLE = False
+
 from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 if TYPE_CHECKING:
@@ -229,6 +242,66 @@ def _beautify_text(resp_text: str) -> str:
                 return text[:_ERROR_SNIPPET_MAX]
 
     return resp_text[:_ERROR_SNIPPET_MAX]
+
+
+def _decode_error_response(content: bytes, http_status: int) -> str:
+    """Decode a Google API error response using smart fallback.
+
+    Google's Nova API returns errors in google.rpc.Status Protobuf format,
+    not as HTML/text. This function attempts to decode the Protobuf first,
+    falling back to text/HTML parsing for load balancer errors.
+
+    Args:
+        content: Raw response body bytes.
+        http_status: HTTP status code for context.
+
+    Returns:
+        Human-readable error message for logging.
+
+    Strategy:
+        1. Try to parse as google.rpc.Status Protobuf (primary)
+        2. Fall back to text/HTML parsing (for load balancer errors, etc.)
+    """
+    if not content:
+        return f"HTTP {http_status} (empty response body)"
+
+    # --- Strategy 1: Try google.rpc.Status Protobuf decoding ---
+    if _RPC_STATUS_AVAILABLE and RpcStatus is not None:
+        try:
+            status = RpcStatus()
+            status.ParseFromString(content)
+
+            # Check if we got meaningful data (code or message present)
+            if status.code or status.message:
+                rpc_code = status.code if status.code else http_status
+                rpc_message = status.message if status.message else "No message provided"
+
+                # Log details if present (for debugging)
+                if status.details:
+                    _LOGGER.debug(
+                        "RpcStatus contains %d detail message(s)", len(status.details)
+                    )
+
+                return f"HTTP {http_status} - RPC {rpc_code}: {rpc_message}"
+        except ProtobufDecodeError:
+            # Not a valid Protobuf - fall through to text/HTML parsing
+            _LOGGER.debug(
+                "Response body is not a valid google.rpc.Status Protobuf, "
+                "falling back to text parsing"
+            )
+        except Exception as exc:
+            # Unexpected error during Protobuf parsing - log and fall through
+            _LOGGER.debug(
+                "Unexpected error during RpcStatus decoding: %s", exc
+            )
+
+    # --- Strategy 2: Fall back to text/HTML parsing ---
+    # This handles load balancer errors, maintenance pages, etc.
+    try:
+        text = content.decode(errors="ignore")
+        return _beautify_text(text) or f"HTTP {http_status} (non-decodable response)"
+    except Exception:
+        return f"HTTP {http_status} (failed to decode response body)"
 
 
 # --- Custom Exceptions ---
@@ -1322,8 +1395,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     if status == HTTP_OK:
                         return cast(bytes, content).hex()
 
+                    # Decode error response: try Protobuf first, then text/HTML
                     text_snippet = _redact(
-                        _beautify_text(content.decode(errors="ignore"))
+                        _decode_error_response(content, status)
                     )
 
                     if status == HTTP_UNAUTHORIZED:
