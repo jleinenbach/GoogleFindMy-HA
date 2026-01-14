@@ -563,7 +563,7 @@ class LocateOperations:
             except Exception:
                 pass
             return False
-        except (asyncio.TimeoutError, TimeoutError, ClientConnectionError, ClientError) as conn_err:
+        except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during play_sound for %s: %s",
                 device_id,
@@ -646,7 +646,7 @@ class LocateOperations:
             except Exception:
                 pass
             return False
-        except (asyncio.TimeoutError, TimeoutError, ClientConnectionError, ClientError) as conn_err:
+        except (TimeoutError, ClientConnectionError, ClientError) as conn_err:
             _LOGGER.warning(
                 "Connection failed during stop_sound for %s: %s",
                 device_id,
