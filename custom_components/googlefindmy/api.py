@@ -1041,9 +1041,7 @@ class GoogleFindMyAPI:
 
         except NovaProtobufDecodeError as err:
             # Protobuf decode failures indicate corrupted response or protocol mismatch
-            _LOGGER.error(
-                "Failed to decode device list response: %s", _short_err(err)
-            )
+            _LOGGER.error("Failed to decode device list response: %s", _short_err(err))
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaLogicError as err:

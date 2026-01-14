@@ -274,7 +274,9 @@ def _decode_error_response(content: bytes, http_status: int) -> str:
             # Check if we got meaningful data (code or message present)
             if status.code or status.message:
                 rpc_code = status.code if status.code else http_status
-                rpc_message = status.message if status.message else "No message provided"
+                rpc_message = (
+                    status.message if status.message else "No message provided"
+                )
 
                 # Log details if present (for debugging)
                 if status.details:
@@ -291,9 +293,7 @@ def _decode_error_response(content: bytes, http_status: int) -> str:
             )
         except Exception as exc:
             # Unexpected error during Protobuf parsing - log and fall through
-            _LOGGER.debug(
-                "Unexpected error during RpcStatus decoding: %s", exc
-            )
+            _LOGGER.debug("Unexpected error during RpcStatus decoding: %s", exc)
 
     # --- Strategy 2: Fall back to text/HTML parsing ---
     # This handles load balancer errors, maintenance pages, etc.
@@ -1396,9 +1396,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         return cast(bytes, content).hex()
 
                     # Decode error response: try Protobuf first, then text/HTML
-                    text_snippet = _redact(
-                        _decode_error_response(content, status)
-                    )
+                    text_snippet = _redact(_decode_error_response(content, status))
 
                     if status == HTTP_UNAUTHORIZED:
                         # 401 Retry Sequence (OAuth → AAS → ADM token chain):

@@ -518,9 +518,7 @@ class LocateOperations:
                     getattr(auth_err, "status", "?"),
                     auth_err,
                 )
-                self._set_auth_state(
-                    failed=True, reason=f"Nova auth error: {auth_err}"
-                )
+                self._set_auth_state(failed=True, reason=f"Nova auth error: {auth_err}")
                 self.note_error(auth_err, where="async_locate_device", device=name)
                 return {}
             except NovaRateLimitError as rate_err:
