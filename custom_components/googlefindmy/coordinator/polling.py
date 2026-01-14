@@ -1118,7 +1118,7 @@ class PollingOperations:
                                 )
                             else:
                                 if should_filter:
-                                    _LOGGER.debug(
+                                    _LOGGER.warning(
                                         "Filtering out Google Home spam detection for %s",
                                         dev_name,
                                     )
@@ -1209,7 +1209,7 @@ class PollingOperations:
                         )
                         if not self._normalize_coords(location, device_label=dev_name):
                             if not location.get("semantic_name"):
-                                _LOGGER.debug(
+                                _LOGGER.warning(
                                     "No location data (coordinates or semantic name) available for %s in this update.",
                                     dev_name,
                                 )
