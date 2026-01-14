@@ -2097,7 +2097,7 @@ class GoogleFindMyEIDResolver:
             self._known_offsets[(match.device_id, anchor_basis)] = match.time_offset
             self._known_timebases[match.device_id] = anchor_basis
 
-        _LOGGER.info(
+        _LOGGER.debug(
             (
                 "HIT: device=%s canonical=%s reversed=%s offset=%s "
                 "candidate_prefix=%s raw_prefix=%s"

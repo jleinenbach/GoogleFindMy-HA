@@ -57,7 +57,7 @@ def test_match_triggers_info_log(
 
     assert resolver.resolve_eid(lookup_key) == match
     assert any(
-        "HIT: device=" in record.message and record.levelno == logging.INFO
+        "HIT: device=" in record.message and record.levelno == logging.DEBUG
         for record in caplog.records
     )
 
