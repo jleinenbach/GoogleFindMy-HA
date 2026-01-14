@@ -15,7 +15,7 @@ These tests verify three critical invariants:
 
 CONSTANTS:
 - MIN_VALID_ACCURACY = 0.001 (1mm threshold for error code detection)
-- DEFAULT_ACCURACY_FALLBACK = 2000.0 (conservative fallback for unknown)
+- PRIVACY_ACCURACY_FALLBACK = 200.0 (200m - Bluetooth range + GPS error margin)
 """
 
 from __future__ import annotations
@@ -444,19 +444,21 @@ class TestFusionSelfHealing:
         assert safe_accuracy(50.0) == 50.0
 
     def test_fusion_weight_calculation(self) -> None:
-        """Corrupted accuracy (0.0) should have near-zero weight in fusion."""
+        """Corrupted accuracy (0.0) should have much lower weight in fusion."""
         # Weight is 1/accuracy² - smaller accuracy = higher weight
-        # 0.0 → fallback (2000m) → weight = 1/2000² = 0.00000025
-        # 50m → weight = 1/50² = 0.0004
+        # 0.0 → fallback (200m) → weight = 1/200² = 0.000025
+        # 50m → weight = 1/50² = 0.0004 → 16x higher weight
+        # 20m → weight = 1/20² = 0.0025 → 100x higher weight
 
         fallback_weight = 1 / (DEFAULT_ACCURACY_FALLBACK**2)
         real_weight = 1 / (50.0**2)
 
-        # Real data should have ~1600x more weight than fallback
+        # Real data (50m) should have 16x more weight than fallback (200m)
+        # 200²/50² = 40000/2500 = 16
         weight_ratio = real_weight / fallback_weight
 
-        assert weight_ratio > 1000, (
-            f"Real data (50m) should have >1000x more weight than fallback.\n"
+        assert weight_ratio > 10, (
+            f"Real data (50m) should have >10x more weight than fallback.\n"
             f"Ratio: {weight_ratio:.1f}x\n"
             f"This ensures corrupted values (0.0) are quickly overwritten."
         )
@@ -548,7 +550,7 @@ class TestZeroAccuracyRetention:
 
         Chain:
         1. Decoder: Sees 0.0 -> removes key (for ranking purposes)
-        2. Cache: Sees missing key -> sets fallback 2000.0
+        2. Cache: Sees missing key -> sets fallback 200.0
         3. Result: Location preserved, marked as "inaccurate"
         """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
@@ -583,15 +585,15 @@ class TestZeroAccuracyRetention:
         assert final_acc is not None, "Accuracy must NOT be None"
 
     def test_downgraded_report_loses_to_real_gps(self) -> None:
-        """A downgraded report (2000m) must lose to real GPS (20m) in ranking.
+        """A downgraded report (200m) must lose to real GPS (20m) in ranking.
 
         This ensures the "honest uncertainty" marking actually works.
         """
-        # Downgraded report (was 0.0, now 2000.0)
+        # Downgraded report (was 0.0, now 200.0)
         downgraded_report: dict[str, Any] = {
             "latitude": 48.100,
             "longitude": 11.100,
-            "accuracy": DEFAULT_ACCURACY_FALLBACK,  # 2000m (was 0.0)
+            "accuracy": DEFAULT_ACCURACY_FALLBACK,  # 200m (was 0.0)
             "last_seen": 1700000100,
             "is_own_report": False,
         }
@@ -610,9 +612,9 @@ class TestZeroAccuracyRetention:
         assert best is not None
         best_acc = best.get("accuracy")
 
-        # Real GPS (20m) must win against downgraded (2000m)
+        # Real GPS (20m) must win against downgraded (200m)
         assert best_acc == 20.0, (
-            f"Real GPS (20m) should beat downgraded report (2000m).\n"
+            f"Real GPS (20m) should beat downgraded report (200m).\n"
             f"Got: {best_acc}m\n"
             f"Ranking: smaller accuracy = better precision = wins"
         )
@@ -624,7 +626,7 @@ class TestZeroAccuracyRetention:
         1. Input: accuracy=0.0
         2. Decoder: removes key (< MIN_VALID_ACCURACY)
         3. Cache: sets fallback
-        4. Output: valid location with 2000m accuracy
+        4. Output: valid location with 200m accuracy
         """
         # Step 1: Simulate decoder behavior
         from custom_components.googlefindmy.ProtoDecoders.decoder import (

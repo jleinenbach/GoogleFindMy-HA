@@ -177,7 +177,7 @@ class TestCoerceFloat:
 class TestSafeAccuracy:
     """Tests for safe_accuracy function."""
 
-    # Default fallback value used in the function (2000m for unknown accuracy)
+    # Default fallback value used in the function (200m for unknown accuracy)
     DEFAULT_FALLBACK = DEFAULT_ACCURACY_FALLBACK_M
 
     def test_valid_positive_accuracy(self) -> None:

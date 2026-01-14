@@ -785,13 +785,13 @@ class CacheOperations:
             Modern dual-frequency GNSS (L1+L5) can achieve sub-meter accuracy under
             ideal conditions, so valid values like 0.5m or 0.01m are preserved.
 
-            The fallback (DEFAULT_ACCURACY_FALLBACK = 2000m) is conservative for
-            "unknown" accuracy. This ensures:
-              - Error codes get very low weight in fusion (1/2000² ≈ 0)
-              - Any real measurement easily overrides the error code
+            The fallback (PRIVACY_ACCURACY_FALLBACK = 200m) is based on Bluetooth
+            tracker physics (max Bluetooth range + GPS error margin). This ensures:
+              - Error codes get lower weight in fusion than real GPS (200²/20² = 100x)
+              - The fallback is still useful for finding a tracker (unlike 2km)
 
             SELF-HEALING: If the cache contains a corrupted value (0.0),
-            treating it as 2000m allows new valid data to properly override it.
+            treating it as 200m allows new valid data to properly override it.
             """
             if value is None or not math.isfinite(value):
                 return DEFAULT_ACCURACY_FALLBACK_M
