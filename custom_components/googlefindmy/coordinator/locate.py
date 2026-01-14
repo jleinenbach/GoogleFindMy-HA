@@ -112,16 +112,21 @@ class LocateOperations:
         payload["latitude"] = lat_f
         payload["longitude"] = lon_f
 
-        # Best-effort normalize accuracy (if present)
+        # Best-effort normalize accuracy (if present).
+        # GPS accuracy of <= 0 is physically impossible (real GPS: 3-50m typically).
+        # Such values indicate missing/corrupted data from the API; remove them.
         acc = payload.get("accuracy")
         if acc is not None:
             try:
                 acc_f = float(acc)
-                if math.isfinite(acc_f):
+                if math.isfinite(acc_f) and acc_f > 0:
                     payload["accuracy"] = acc_f
+                else:
+                    # Invalid accuracy (0.0, negative, NaN, Inf) - remove it
+                    payload.pop("accuracy", None)
             except (TypeError, ValueError):
-                # Accuracy can be absent or malformed; not critical enough for a warning.
-                pass
+                # Accuracy malformed; remove it
+                payload.pop("accuracy", None)
 
         return True
 

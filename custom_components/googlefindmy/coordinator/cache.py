@@ -23,7 +23,7 @@ from collections import deque
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from ..const import DATA_EID_RESOLVER, DOMAIN
+from ..const import DATA_EID_RESOLVER, DEFAULT_FALLBACK_ACCURACY_M, DOMAIN
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
 )
@@ -728,13 +728,23 @@ class CacheOperations:
             """Convert raw accuracy to a safe value for fusion calculations.
 
             GPS accuracy of <= 0 is physically impossible (real GPS: 3-50m typically).
-            Such values indicate missing/corrupted data and should use fallback.
+            Such values indicate missing/corrupted data and should use the fallback.
+
+            The fallback (DEFAULT_FALLBACK_ACCURACY_M = 50m) is based on:
+              - Bluetooth range: ~40-80m (tracker position uncertainty)
+              - GPS error margin: ~10-30m (finder device uncertainty)
+
+            Using 50m instead of a huge value (e.g., 10000m) prevents the
+            "Fusion Lock-in" effect: with inverse-square weighting, 1/50² = 0.0004
+            is comparable to 1/20² = 0.0025, so real GPS fixes can override it.
+            With 1/10000² the poisoned value would have essentially zero weight
+            but still persist in the cache.
             """
             if value is None or not math.isfinite(value):
-                return 10000.0
+                return DEFAULT_FALLBACK_ACCURACY_M
             # <= 0 is physically impossible for GPS accuracy
             if value <= 0:
-                return 10000.0
+                return DEFAULT_FALLBACK_ACCURACY_M
             return value
 
         existing_acc = _safe_accuracy(existing_acc_raw)
