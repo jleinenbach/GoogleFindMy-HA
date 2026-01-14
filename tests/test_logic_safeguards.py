@@ -368,7 +368,7 @@ class TestCacheGatekeeper:
     """Test cache.py _is_significant_update with new thresholds."""
 
     def test_cache_sanitizes_zero_accuracy(self) -> None:
-        """_is_significant_update must SANITIZE 0.0, not reject."""
+        """_is_significant_update must SANITIZE 0.0 to fallback value."""
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
 
         mock_coord = MagicMock(spec=CacheOperations)
@@ -380,7 +380,7 @@ class TestCacheGatekeeper:
         update = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.0,  # Will be sanitized
+            "accuracy": 0.0,  # Will be sanitized to fallback
             "last_seen": 1700000100,
         }
 
@@ -389,8 +389,10 @@ class TestCacheGatekeeper:
         # Must be ACCEPTED
         assert result is True, "Update should be ACCEPTED (sanitized)"
 
-        # Accuracy must be removed
-        assert "accuracy" not in update, "0.0 accuracy should be removed"
+        # Accuracy must be SET to fallback (not None, not removed)
+        assert update.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
+            f"0.0 accuracy should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m)"
+        )
 
         # Stat must be incremented
         mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
@@ -461,3 +463,204 @@ class TestFusionSelfHealing:
             f"Ratio: {weight_ratio:.1f}x\n"
             f"This ensures corrupted values (0.0) are quickly overwritten."
         )
+
+
+# =============================================================================
+# SECTION 6: Missing Key Crash Test
+# =============================================================================
+
+
+class TestMissingKeyCrashPrevention:
+    """Test that missing accuracy key doesn't crash downstream code.
+
+    When the decoder strips the 'accuracy' key (because it was 0.0),
+    the cache must handle this gracefully and write back a fallback value.
+    Home Assistant requires a numeric gps_accuracy attribute.
+    """
+
+    def test_cache_handles_stripped_accuracy_gracefully(self) -> None:
+        """_is_significant_update must handle missing accuracy key without crash.
+
+        Scenario:
+        1. Decoder receives accuracy=0.0 and REMOVES the key
+        2. Cache receives dict WITHOUT accuracy key
+        3. Cache must NOT crash and must SET a fallback value
+        """
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+
+        # Dict WITHOUT accuracy key (simulating decoder stripping it)
+        update_without_accuracy = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            # NO "accuracy" key!
+            "last_seen": 1700000100,
+        }
+
+        # This must NOT raise an exception
+        result = is_sig(mock_coord, "device-1", update_without_accuracy)
+
+        # Must be accepted
+        assert result is True, "Update should be accepted even without accuracy key"
+
+        # CRITICAL: Accuracy must be set to fallback (not None, not missing)
+        assert "accuracy" in update_without_accuracy, (
+            "Cache must SET accuracy key when it was missing"
+        )
+        assert update_without_accuracy["accuracy"] == DEFAULT_ACCURACY_FALLBACK, (
+            f"Missing accuracy should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m), "
+            f"got {update_without_accuracy.get('accuracy')}"
+        )
+
+    def test_safe_accuracy_handles_any_input(self) -> None:
+        """safe_accuracy must handle ANY input type without crashing."""
+        # All of these must return fallback without exception
+        assert safe_accuracy(None) == DEFAULT_ACCURACY_FALLBACK
+        assert safe_accuracy("invalid") == DEFAULT_ACCURACY_FALLBACK
+        assert safe_accuracy([1, 2, 3]) == DEFAULT_ACCURACY_FALLBACK
+        assert safe_accuracy({"key": "value"}) == DEFAULT_ACCURACY_FALLBACK
+        assert safe_accuracy(object()) == DEFAULT_ACCURACY_FALLBACK
+
+        # Valid inputs should be preserved
+        assert safe_accuracy(50.0) == 50.0
+        assert safe_accuracy(0.5) == 0.5
+        assert safe_accuracy("20.0") == 20.0  # String that can be converted
+
+
+# =============================================================================
+# SECTION 7: Retention Test (Zero Accuracy Data Preservation)
+# =============================================================================
+
+
+class TestZeroAccuracyRetention:
+    """Test that data with accuracy=0.0 is KEPT but downgraded.
+
+    The "Sanitize-not-Reject" strategy means:
+    - Coordinates are preserved (no data loss)
+    - Accuracy is set to fallback (honest about uncertainty)
+    - Report loses to real GPS data in ranking (correct prioritization)
+    """
+
+    def test_zero_accuracy_is_kept_but_downgraded(self) -> None:
+        """Data with accuracy=0.0 must be retained with downgraded accuracy.
+
+        Chain:
+        1. Decoder: Sees 0.0 -> removes key (for ranking purposes)
+        2. Cache: Sees missing key -> sets fallback 2000.0
+        3. Result: Location preserved, marked as "inaccurate"
+        """
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+
+        # Simulate: decoder already stripped the accuracy (was 0.0)
+        update_with_stripped_accuracy = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            # accuracy was 0.0, decoder removed it
+            "last_seen": 1700000100,
+        }
+
+        result = is_sig(mock_coord, "device-1", update_with_stripped_accuracy)
+
+        # Assert 1: No data loss - coordinates are preserved
+        assert result is True, "Update must be accepted (no data loss)"
+        assert update_with_stripped_accuracy.get("latitude") == 48.123
+        assert update_with_stripped_accuracy.get("longitude") == 11.456
+
+        # Assert 2: Accuracy is set to fallback (not None, not 0.0)
+        final_acc = update_with_stripped_accuracy.get("accuracy")
+        assert final_acc == DEFAULT_ACCURACY_FALLBACK, (
+            f"Accuracy should be fallback ({DEFAULT_ACCURACY_FALLBACK}m), got {final_acc}"
+        )
+        assert final_acc != 0.0, "Accuracy must NOT be 0.0"
+        assert final_acc is not None, "Accuracy must NOT be None"
+
+    def test_downgraded_report_loses_to_real_gps(self) -> None:
+        """A downgraded report (2000m) must lose to real GPS (20m) in ranking.
+
+        This ensures the "honest uncertainty" marking actually works.
+        """
+        # Downgraded report (was 0.0, now 2000.0)
+        downgraded_report: dict[str, Any] = {
+            "latitude": 48.100,
+            "longitude": 11.100,
+            "accuracy": DEFAULT_ACCURACY_FALLBACK,  # 2000m (was 0.0)
+            "last_seen": 1700000100,
+            "is_own_report": False,
+        }
+
+        # Real GPS report with actual measurement
+        real_gps_report: dict[str, Any] = {
+            "latitude": 48.200,
+            "longitude": 11.200,
+            "accuracy": 20.0,  # Real GPS accuracy
+            "last_seen": 1700000100,  # SAME timestamp
+            "is_own_report": False,   # SAME status
+        }
+
+        best, _rest = _select_best_location([downgraded_report, real_gps_report])
+
+        assert best is not None
+        best_acc = best.get("accuracy")
+
+        # Real GPS (20m) must win against downgraded (2000m)
+        assert best_acc == 20.0, (
+            f"Real GPS (20m) should beat downgraded report (2000m).\n"
+            f"Got: {best_acc}m\n"
+            f"Ranking: smaller accuracy = better precision = wins"
+        )
+
+    def test_end_to_end_zero_accuracy_handling(self) -> None:
+        """End-to-end test: 0.0 accuracy through decoder and into cache.
+
+        Full chain verification:
+        1. Input: accuracy=0.0
+        2. Decoder: removes key (< MIN_VALID_ACCURACY)
+        3. Cache: sets fallback
+        4. Output: valid location with 2000m accuracy
+        """
+        # Step 1: Simulate decoder behavior
+        from custom_components.googlefindmy.ProtoDecoders.decoder import (
+            _normalize_location_dict,
+        )
+
+        raw_location = {
+            "latitude": 48.123,
+            "longitude": 11.456,
+            "accuracy": 0.0,  # Error code
+            "last_seen": 1700000100,
+        }
+
+        # Decoder strips the accuracy key
+        decoded = _normalize_location_dict(raw_location)
+        assert "accuracy" not in decoded, "Decoder should remove 0.0 accuracy"
+        assert decoded.get("latitude") == 48.123, "Coordinates preserved"
+
+        # Step 2: Cache receives decoded data
+        from custom_components.googlefindmy.coordinator.cache import CacheOperations
+
+        mock_coord = MagicMock(spec=CacheOperations)
+        mock_coord._device_location_data = {}
+        mock_coord.increment_stat = MagicMock()
+
+        is_sig = CacheOperations._is_significant_update
+        result = is_sig(mock_coord, "device-1", decoded)
+
+        assert result is True, "Cache should accept the update"
+
+        # Step 3: Verify final state
+        assert decoded.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
+            f"Final accuracy should be {DEFAULT_ACCURACY_FALLBACK}m"
+        )
+        assert decoded.get("latitude") == 48.123, "Latitude preserved"
+        assert decoded.get("longitude") == 11.456, "Longitude preserved"

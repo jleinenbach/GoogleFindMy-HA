@@ -622,31 +622,42 @@ class CacheOperations:
 
         # Sanitize error code accuracy values (0.0 in Android Location API).
         # The API uses 0.0 as "no accuracy available", not "perfect precision".
-        # We ACCEPT the update but REMOVE the invalid accuracy to prevent ranking corruption.
+        # We ACCEPT the update and REPLACE invalid accuracy with a conservative fallback.
+        # This ensures Home Assistant always gets a valid numeric gps_accuracy attribute.
         # Valid sub-meter values like 0.5m or 0.01m are preserved!
         new_acc = new_data.get("accuracy")
-        if new_acc is not None:
+        if new_acc is None:
+            # Missing accuracy: set conservative fallback for HA state machine
+            new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+            self.increment_stat("accuracy_sanitized_count")
+            _LOGGER.debug(
+                "Setting fallback accuracy for %s: key was missing, using %sm",
+                device_id,
+                DEFAULT_ACCURACY_FALLBACK_M,
+            )
+        else:
             try:
                 acc_f = float(new_acc)
                 if not math.isfinite(acc_f) or acc_f < MIN_PHYSICAL_ACCURACY_M:
-                    # Sanitize: remove error code (0.0) or negative, keep the report
-                    new_data.pop("accuracy", None)
+                    # Sanitize: replace error code with conservative fallback
+                    new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
                     self.increment_stat("accuracy_sanitized_count")
                     _LOGGER.debug(
-                        "Sanitizing update for %s: error code accuracy (%s) removed (< %sm)",
+                        "Sanitizing update for %s: error code accuracy (%s) -> %sm",
                         device_id,
                         new_acc,
-                        MIN_PHYSICAL_ACCURACY_M,
+                        DEFAULT_ACCURACY_FALLBACK_M,
                     )
-                    # Continue processing - the update is valid, just without precision
+                    # Continue processing - the update is valid, with fallback precision
             except (TypeError, ValueError):
-                # Non-numeric accuracy: remove it, keep the report
-                new_data.pop("accuracy", None)
+                # Non-numeric accuracy: replace with fallback
+                new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
                 self.increment_stat("accuracy_sanitized_count")
                 _LOGGER.debug(
-                    "Sanitizing update for %s: non-numeric accuracy (%r) removed",
+                    "Sanitizing update for %s: non-numeric accuracy (%r) -> %sm",
                     device_id,
                     new_acc,
+                    DEFAULT_ACCURACY_FALLBACK_M,
                 )
 
         n_seen_norm = _normalize_epoch_seconds(new_data.get("last_seen"))
@@ -884,14 +895,13 @@ class CacheOperations:
         elif valid_existing:
             best_accuracy = existing_acc_raw
         else:
-            # Neither is valid - leave accuracy unset
-            best_accuracy = None
+            # Neither is valid - use conservative fallback
+            # This ensures Home Assistant always gets a valid gps_accuracy attribute
+            best_accuracy = DEFAULT_ACCURACY_FALLBACK_M
 
-        if best_accuracy is not None:
-            new_data["accuracy"] = best_accuracy
-        else:
-            # Ensure invalid accuracy doesn't propagate
-            new_data.pop("accuracy", None)
+        # ALWAYS write back a valid accuracy - never leave it as None or missing
+        # Home Assistant requires a numeric gps_accuracy for the state machine
+        new_data["accuracy"] = best_accuracy
 
         new_data["status"] = "Fused (Weighted)"
         new_data["_fused_applied"] = True

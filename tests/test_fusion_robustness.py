@@ -504,12 +504,16 @@ class TestCacheGatekeeper:
     """
 
     def test_gatekeeper_sanitizes_zero_accuracy(self) -> None:
-        """_is_significant_update must SANITIZE accuracy=0.0 (not reject).
+        """_is_significant_update must SANITIZE accuracy=0.0 to fallback.
 
         Zero accuracy means 'unknown/masked', not 'perfect precision'.
-        We ACCEPT the update but REMOVE the invalid accuracy.
+        We ACCEPT the update and SET accuracy to conservative fallback.
+        Home Assistant requires a numeric gps_accuracy attribute.
         """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
+        from custom_components.googlefindmy.coordinator.helpers.geo import (
+            DEFAULT_ACCURACY_FALLBACK,
+        )
 
         mock_coord = MagicMock(spec=CacheOperations)
         mock_coord._device_location_data = {}
@@ -520,7 +524,7 @@ class TestCacheGatekeeper:
         update = {
             "latitude": 48.123,
             "longitude": 11.456,
-            "accuracy": 0.0,  # Will be sanitized
+            "accuracy": 0.0,  # Will be sanitized to fallback
             "last_seen": 1700000100,
         }
 
@@ -529,18 +533,24 @@ class TestCacheGatekeeper:
         # Must be ACCEPTED
         assert result is True, "Zero accuracy update should be ACCEPTED (sanitized)"
 
-        # Accuracy must be removed
-        assert "accuracy" not in update, "Zero accuracy should be removed from dict"
+        # Accuracy must be SET to fallback (not removed)
+        assert update.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
+            f"Zero accuracy should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m)"
+        )
 
         mock_coord.increment_stat.assert_called_with("accuracy_sanitized_count")
 
     def test_gatekeeper_sanitizes_error_codes(self) -> None:
-        """_is_significant_update must SANITIZE error codes (< 0.001m).
+        """_is_significant_update must SANITIZE error codes to fallback.
 
         The Android Location API uses 0.0 as "no accuracy available".
-        We ACCEPT the update but REMOVE the error code accuracy.
+        We ACCEPT the update and SET accuracy to conservative fallback.
+        Home Assistant requires a numeric gps_accuracy attribute.
         """
         from custom_components.googlefindmy.coordinator.cache import CacheOperations
+        from custom_components.googlefindmy.coordinator.helpers.geo import (
+            DEFAULT_ACCURACY_FALLBACK,
+        )
 
         mock_coord = MagicMock(spec=CacheOperations)
         mock_coord._device_location_data = {}
@@ -548,7 +558,7 @@ class TestCacheGatekeeper:
 
         is_sig = CacheOperations._is_significant_update
 
-        # Only error codes (< 0.001m) should be sanitized
+        # Error codes (< 0.001m) should be sanitized to fallback
         for error_code in [0.0, 0.0001, 0.0009]:
             update = {
                 "latitude": 48.123,
@@ -560,7 +570,9 @@ class TestCacheGatekeeper:
             result = is_sig(mock_coord, "device-1", update)
 
             assert result is True, f"Update with accuracy={error_code}m should be ACCEPTED"
-            assert "accuracy" not in update, f"Error code {error_code}m should be removed"
+            assert update.get("accuracy") == DEFAULT_ACCURACY_FALLBACK, (
+                f"Error code {error_code}m should be set to fallback ({DEFAULT_ACCURACY_FALLBACK}m)"
+            )
 
     def test_gatekeeper_preserves_sub_meter_accuracy(self) -> None:
         """_is_significant_update must PRESERVE valid sub-meter accuracy.

@@ -111,8 +111,12 @@ def coerce_float(value: Any) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def safe_accuracy(value: float | None, *, fallback: float | None = None) -> float:
+def safe_accuracy(value: Any, *, fallback: float | None = None) -> float:
     """Normalize GPS accuracy to a safe, finite value.
+
+    This function is EXTREMELY DEFENSIVE - it will never raise an exception
+    and always returns a valid numeric value suitable for Home Assistant's
+    gps_accuracy attribute.
 
     The Android Location API uses 0.0 as an error code meaning "no accuracy".
     We treat values < MIN_VALID_ACCURACY (0.001m) as this error code.
@@ -121,12 +125,13 @@ def safe_accuracy(value: float | None, *, fallback: float | None = None) -> floa
     0.01m (1cm) or 0.5m are valid and preserved unchanged.
 
     Args:
-        value: GPS accuracy in meters, or None.
+        value: Any value that might represent GPS accuracy. Handles None,
+               strings, floats, ints, and any other type gracefully.
         fallback: Custom fallback value. Defaults to DEFAULT_ACCURACY_FALLBACK (2000m).
 
     Returns:
         A finite float >= MIN_VALID_ACCURACY representing accuracy in meters,
-        or the fallback value if input is invalid.
+        or the fallback value if input is invalid. NEVER returns None.
 
     Example:
         >>> safe_accuracy(50.0)
@@ -141,19 +146,32 @@ def safe_accuracy(value: float | None, *, fallback: float | None = None) -> floa
         2000.0
         >>> safe_accuracy(-5.0)
         2000.0
+        >>> safe_accuracy("invalid")  # Non-numeric
+        2000.0
     """
     if fallback is None:
         fallback = DEFAULT_ACCURACY_FALLBACK
 
-    if value is None or not math.isfinite(value):
+    # Handle None explicitly
+    if value is None:
+        return fallback
+
+    # Try to convert to float - handle any type gracefully
+    try:
+        float_value = float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+    # Check for NaN/Inf
+    if not math.isfinite(float_value):
         return fallback
 
     # Values below MIN_VALID_ACCURACY are the error code (0.0) or negative
     # Modern GNSS can achieve sub-meter accuracy, so we only reject < 0.001m
-    if value < MIN_VALID_ACCURACY:
+    if float_value < MIN_VALID_ACCURACY:
         return fallback
 
-    return value
+    return float_value
 
 
 def is_valid_accuracy(value: float | None) -> bool:
