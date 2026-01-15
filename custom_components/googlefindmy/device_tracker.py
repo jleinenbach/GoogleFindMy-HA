@@ -1015,12 +1015,17 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """Return latitude value of the device (float, if known).
 
         Returns None if location data is stale (older than stale_threshold),
-        causing HA to show 'unknown' state.
+        causing HA to show 'unknown' state. Also returns None if accuracy
+        is missing, since HA's zone engine requires all three values
+        (latitude, longitude, accuracy) to be present together.
         """
         if self._is_location_stale():
             return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
+            return None
+        # Guard: accuracy must also be present for a valid GPS location
+        if data.get("accuracy") is None:
             return None
         return data.get("latitude")
 
@@ -1029,12 +1034,17 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """Return longitude value of the device (float, if known).
 
         Returns None if location data is stale (older than stale_threshold),
-        causing HA to show 'unknown' state.
+        causing HA to show 'unknown' state. Also returns None if accuracy
+        is missing, since HA's zone engine requires all three values
+        (latitude, longitude, accuracy) to be present together.
         """
         if self._is_location_stale():
             return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
+            return None
+        # Guard: accuracy must also be present for a valid GPS location
+        if data.get("accuracy") is None:
             return None
         return data.get("longitude")
 
@@ -1066,10 +1076,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """Return a human place label only when it should override zone logic.
 
         Rules:
+        - If location data is stale, return None for consistency with coordinates.
         - If we have valid coordinates, let HA compute the zone name.
         - If we don't have coordinates, fall back to Google's semantic label.
         - Never override zones with generic 'home' labels from Google.
         """
+        if self._is_location_stale():
+            return None
         data = self._current_row()
         if not data:
             return None
