@@ -1044,7 +1044,12 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         Coordinator stores accuracy as a float; HA's device_tracker expects
         an integer for the `gps_accuracy` attribute, so we coerce here.
+
+        Returns None if location data is stale (older than stale_threshold),
+        mirroring the behaviour of latitude/longitude for consistency.
         """
+        if self._is_location_stale():
+            return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
             return None
