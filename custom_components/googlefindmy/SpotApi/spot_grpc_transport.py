@@ -2,31 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import ssl
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import Final
 
-if TYPE_CHECKING:
-
-    class Channel:
-        """Stub channel for type checking."""
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
-
-        def close(self) -> None: ...
-
-    class CodecBase(Protocol):
-        """Stub codec base for type checking."""
-
-        __content_subtype__: str
-
-        @property
-        def content_type(self) -> str: ...
-
-        def encode(self, message: bytes, _message_type: type) -> bytes: ...
-
-        def decode(self, data: bytes, _message_type: type) -> bytes: ...
-else:
-    from grpclib.client import Channel
-    from grpclib.encoding.base import CodecBase
+from grpclib.client import Channel
+from grpclib.encoding.base import CodecBase
 
 __all__ = ["RawCodec", "SpotGrpcTransport", "SPOT_GRPC_TRANSPORT"]
 
