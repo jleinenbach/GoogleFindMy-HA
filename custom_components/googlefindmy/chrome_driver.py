@@ -13,6 +13,25 @@ from typing import Any, cast
 
 from selenium.webdriver.chrome.webdriver import WebDriver
 
+# Platform-specific import for Windows registry access
+if platform.system() == "Windows":
+    import winreg
+else:
+    winreg = None  # type: ignore[assignment]
+
+# Optional imports for webdriver-manager fallback
+try:
+    from selenium import webdriver as selenium_webdriver
+    from selenium.webdriver.chrome.service import Service as ChromeService
+    from webdriver_manager.chrome import ChromeDriverManager
+
+    _WEBDRIVER_MANAGER_AVAILABLE = True
+except ImportError:
+    selenium_webdriver = None  # type: ignore[assignment]
+    ChromeService = None  # type: ignore[assignment,misc]
+    ChromeDriverManager = None  # type: ignore[assignment,misc]
+    _WEBDRIVER_MANAGER_AVAILABLE = False
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -91,17 +110,16 @@ def get_chrome_version(chrome_path: str) -> int | None:
     try:
         if platform.system() == "Windows":
             # Try to get version from registry first
-            try:
-                import winreg
-
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon"
-                )
-                version, _ = winreg.QueryValueEx(key, "version")
-                winreg.CloseKey(key)
-                return int(version.split(".")[0])
-            except Exception:  # noqa: BLE001 - defensive fallback
-                pass
+            if winreg is not None:
+                try:
+                    key = winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon"
+                    )
+                    version, _ = winreg.QueryValueEx(key, "version")
+                    winreg.CloseKey(key)
+                    return int(version.split(".")[0])
+                except Exception:  # noqa: BLE001 - defensive fallback
+                    pass
             # Fallback: run chrome with --version
             result = subprocess.run(
                 [chrome_path, "--version"],
@@ -308,19 +326,19 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
     WebDriver | None
         A WebDriver instance if successful, otherwise None.
     """
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from webdriver_manager.chrome import ChromeDriverManager
+    if not _WEBDRIVER_MANAGER_AVAILABLE:
+        LOGGER.debug("webdriver-manager not available, skipping fallback")
+        return None
 
+    try:
         LOGGER.info("Attempting webdriver-manager fallback...")
-        service = Service(ChromeDriverManager().install())
-        options = webdriver.ChromeOptions()
+        service = ChromeService(ChromeDriverManager().install())
+        options = selenium_webdriver.ChromeOptions()
         options.add_argument("--start-maximized")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
 
-        driver = webdriver.Chrome(service=service, options=options)
+        driver = selenium_webdriver.Chrome(service=service, options=options)
         LOGGER.warning(
             "Started using webdriver-manager (standard Selenium). "
             "This uses standard Selenium without bot detection bypass!"

@@ -28,6 +28,10 @@ import asyncio
 import os
 import sys
 
+from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
+    _async_cli_main,
+)
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments."""
@@ -59,11 +63,6 @@ def list_devices(entry_id: str | None = None) -> None:
         entry_id: Optional config entry ID. If not provided, uses the
             GOOGLEFINDMY_ENTRY_ID environment variable.
     """
-    # Import here to avoid circular imports and heavy startup cost
-    from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
-        _async_cli_main,
-    )
-
     resolved_entry = entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
 
     try:
