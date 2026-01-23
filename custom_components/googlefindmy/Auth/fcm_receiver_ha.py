@@ -932,8 +932,17 @@ class FcmReceiverHA:
                 err,
             )
             return False
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
+        except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
+            # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
+            # are logged at info level; other exceptions at error level.
+            if isinstance(err, (TimeoutError, RuntimeError)):
+                _LOGGER.info(
+                    "[entry=%s] FCM registration failed (transient): %s - will retry",
+                    entry_id,
+                    err,
+                )
+            else:
+                _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
             return False
 
     # Public entrypoint kept for back-compat (starts supervisors lazily if needed)

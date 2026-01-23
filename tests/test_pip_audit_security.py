@@ -42,6 +42,10 @@ IGNORED_VULNERABILITIES: dict[str, str] = {
     # The vulnerable sign_digest() function is NOT used in this project.
     # ECDH operations use the 'cryptography' library instead.
     "CVE-2024-23342": "ecdsa timing attack - sign_digest() not used; only curve definitions imported",
+    # protobuf DoS via ParseDict() recursion bypass - this project only uses
+    # MessageToDict/MessageToJson (protobuf→dict/json), never ParseDict (dict→protobuf).
+    # The vulnerable json_format.ParseDict() function is NOT used anywhere.
+    "CVE-2026-0994": "protobuf ParseDict() DoS - ParseDict() not used; only MessageToDict/MessageToJson",
 }
 
 
