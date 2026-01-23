@@ -311,6 +311,8 @@ module = [
     "h2",
     "selenium",
     "selenium.*",
+    "webdriver_manager",
+    "webdriver_manager.*",
 ]
 ignore_missing_imports = true
 
