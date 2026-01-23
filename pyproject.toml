@@ -299,7 +299,8 @@ module = ["tests.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["homeassistant.*"]
+module = ["homeassistant", "homeassistant.*"]
+ignore_missing_imports = true
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
@@ -310,6 +311,8 @@ module = [
     "h2",
     "selenium",
     "selenium.*",
+    "webdriver_manager",
+    "webdriver_manager.*",
 ]
 ignore_missing_imports = true
 

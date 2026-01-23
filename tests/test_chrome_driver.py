@@ -98,8 +98,12 @@ def test_create_driver_headless_passes_options_to_uc(
 
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
+    # Mock find_chrome to return None (no Chrome found)
+    monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
 
-    def fake_chrome(*, options: object, version_main: int | None = None) -> object:
+    def fake_chrome(
+        *, options: object, version_main: int | None = None, **kwargs: object
+    ) -> object:
         captured["options"] = options
         captured["version_main"] = version_main
         return fake_driver
@@ -125,9 +129,13 @@ def test_create_driver_headless_passes_options_to_uc(
 def test_create_driver_fallback_logs_and_raises_runtime_error(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The driver falls back to the system Chrome binary and raises a runtime error when startup fails.
+    """The driver falls back through multiple strategies and raises a runtime error when all fail.
 
-    When headless=True is already set, only 2 attempts are made (no additional headless fallback).
+    With the new 5-strategy approach (headless=True skips strategy 4):
+    1. Standard with version_main
+    2. browser_executable_path parameter
+    3. Without specifying version
+    5. webdriver-manager fallback (skipped if not available)
     """
 
     caplog.set_level(logging.WARNING)
@@ -136,9 +144,13 @@ def test_create_driver_fallback_logs_and_raises_runtime_error(
 
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
+    # Mock get_chrome_version to return None (can't detect version)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _: None)
+    # Disable webdriver-manager fallback
+    monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
     def chrome_stub(
-        *, options: FakeChromeOptions, version_main: int | None = None
+        *, options: FakeChromeOptions, version_main: int | None = None, **kwargs: object
     ) -> object:
         chrome_calls.append(options)
         raise SentinelError("driver start failed")
@@ -151,20 +163,33 @@ def test_create_driver_fallback_logs_and_raises_runtime_error(
     with pytest.raises(RuntimeError):
         chrome_driver.create_driver(headless=True)
 
-    # When headless=True, no additional headless fallback is attempted
-    assert len(chrome_calls) == 2, (
-        "Both bundled and fallback Chrome invocations should be attempted"
+    # With headless=True: strategies 1, 2, 3 are attempted (strategy 4 skipped, 5 disabled)
+    assert len(chrome_calls) == 3, (
+        "Strategies 1, 2, and 3 should be attempted (headless skips strategy 4)"
     )
-    assert chrome_calls[0].binary_location is None
-    assert chrome_calls[1].binary_location == "/opt/chrome"
-    assert "Default ChromeDriver startup failed" in " ".join(caplog.messages)
-    assert "ChromeDriver failed using system binary" in " ".join(caplog.messages)
+    # All calls should have binary_location set since find_chrome returns a path
+    assert chrome_calls[0].binary_location == "/opt/chrome"
+    assert (
+        chrome_calls[1].binary_location is None
+    )  # Strategy 2 uses browser_executable_path param
+    assert chrome_calls[2].binary_location == "/opt/chrome"
+    assert "Strategy 1 (default) failed" in " ".join(caplog.messages)
+    assert "Strategy 2 (explicit path) failed" in " ".join(caplog.messages)
+    assert "Strategy 3 (no version) failed" in " ".join(caplog.messages)
 
 
 def test_create_driver_headless_fallback_on_non_headless_mode(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """When non-headless mode fails, the driver tries headless as a last resort."""
+    """When non-headless mode fails, the driver tries headless as strategy 4.
+
+    With the new 5-strategy approach (headless=False includes strategy 4):
+    1. Standard with version_main
+    2. browser_executable_path parameter
+    3. Without specifying version
+    4. Headless mode fallback
+    5. webdriver-manager fallback (skipped if not available)
+    """
 
     caplog.set_level(logging.WARNING)
 
@@ -172,9 +197,13 @@ def test_create_driver_headless_fallback_on_non_headless_mode(
 
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
+    # Mock get_chrome_version to return None (can't detect version)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _: None)
+    # Disable webdriver-manager fallback
+    monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
     def chrome_stub(
-        *, options: FakeChromeOptions, version_main: int | None = None
+        *, options: FakeChromeOptions, version_main: int | None = None, **kwargs: object
     ) -> object:
         chrome_calls.append(options)
         raise SentinelError("driver start failed")
@@ -187,12 +216,16 @@ def test_create_driver_headless_fallback_on_non_headless_mode(
     with pytest.raises(RuntimeError):
         chrome_driver.create_driver(headless=False)
 
-    # When headless=False, 3 attempts are made: normal, fallback path, then headless fallback
-    assert len(chrome_calls) == 3, (
-        "Bundled, fallback, and headless fallback should be attempted"
+    # With headless=False: strategies 1, 2, 3, 4 are attempted (5 disabled)
+    assert len(chrome_calls) == 4, (
+        "Strategies 1, 2, 3, and 4 (headless) should be attempted"
     )
-    assert chrome_calls[0].binary_location is None
-    assert chrome_calls[1].binary_location == "/opt/chrome"
+    # All calls with options should have binary_location set
+    assert chrome_calls[0].binary_location == "/opt/chrome"
+    assert (
+        chrome_calls[1].binary_location is None
+    )  # Strategy 2 uses browser_executable_path param
     assert chrome_calls[2].binary_location == "/opt/chrome"
-    assert "--headless" in chrome_calls[2].arguments
-    assert "ChromeDriver headless fallback also failed" in " ".join(caplog.messages)
+    assert chrome_calls[3].binary_location == "/opt/chrome"
+    assert "--headless" in chrome_calls[3].arguments
+    assert "Strategy 4 (headless) failed" in " ".join(caplog.messages)
