@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -43,7 +44,9 @@ from . import EntityRecoveryManager, _extract_email_from_entry
 from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
+    DEFAULT_STALE_THRESHOLD,
     DOMAIN,
+    OPT_STALE_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -104,6 +107,7 @@ def _normalize_identifier_set(candidate: Iterable[Any] | None) -> list[str]:
         if isinstance(item, str) and item:
             normalized.add(item)
     return sorted(normalized)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -170,7 +174,9 @@ async def async_setup_entry(
 
                 stable_identifier = getattr(meta, "stable_identifier", None)
                 identifier = (
-                    stable_identifier() if callable(stable_identifier) else None
+                    stable_identifier()
+                    if callable(stable_identifier)
+                    else None
                     or getattr(meta, "config_subentry_id", None)
                     or coordinator.stable_subentry_identifier(key=key)
                 )
@@ -194,9 +200,8 @@ async def async_setup_entry(
                 if "device_tracker" not in subentry_features:
                     continue
 
-                config_id = (
-                    getattr(subentry, "subentry_id", None)
-                    or getattr(subentry, "entry_id", None)
+                config_id = getattr(subentry, "subentry_id", None) or getattr(
+                    subentry, "entry_id", None
                 )
                 identifier = (
                     config_id
@@ -206,7 +211,9 @@ async def async_setup_entry(
                 scope_key = (group_key, identifier)
                 scopes.setdefault(
                     scope_key,
-                    _TrackerScope(group_key or TRACKER_SUBENTRY_KEY, config_id, identifier),
+                    _TrackerScope(
+                        group_key or TRACKER_SUBENTRY_KEY, config_id, identifier
+                    ),
                 )
 
         if hint_subentry_id:
@@ -223,7 +230,9 @@ async def async_setup_entry(
         if scopes:
             return list(scopes.values())
 
-        fallback_identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
+        fallback_identifier = coordinator.stable_subentry_identifier(
+            key=TRACKER_SUBENTRY_KEY
+        )
         return [
             _TrackerScope(
                 TRACKER_SUBENTRY_KEY,
@@ -246,7 +255,9 @@ async def async_setup_entry(
         the scope (when available).
         """
 
-        scope_identifier = scope.identifier or scope.config_subentry_id or scope.subentry_key
+        scope_identifier = (
+            scope.identifier or scope.config_subentry_id or scope.subentry_key
+        )
         if scope_identifier in scope_states:
             scope_states[scope_identifier]["scan"]()
             return
@@ -286,7 +297,9 @@ async def async_setup_entry(
             tracker_config_subentry_id or tracker_identifier
         )
 
-        expected_config_subentry_id = scope.config_subentry_id or tracker_config_subentry_id
+        expected_config_subentry_id = (
+            scope.config_subentry_id or tracker_config_subentry_id
+        )
 
         _LOGGER.debug(
             "Device tracker setup: subentry_key=%s, config_subentry_id=%s",
@@ -355,7 +368,7 @@ async def async_setup_entry(
             )
 
         def _build_entities(
-            snapshot: Sequence[Mapping[str, Any]]
+            snapshot: Sequence[Mapping[str, Any]],
         ) -> list[GoogleFindMyDeviceTracker]:
             to_add: list[GoogleFindMyDeviceTracker] = []
             for device in snapshot:
@@ -393,9 +406,7 @@ async def async_setup_entry(
                 )
                 snapshot_map = getattr(coordinator, "_subentry_snapshots", {})
                 snapshot_keys = _normalize_identifier_set(snapshot_map.keys())
-                reconfigure_marker = getattr(
-                    coordinator, "recent_reconfigure_at", None
-                )
+                reconfigure_marker = getattr(coordinator, "recent_reconfigure_at", None)
                 _LOGGER.debug(
                     (
                         "Device tracker setup: no coordinator snapshot for subentry %s "
@@ -417,10 +428,14 @@ async def async_setup_entry(
 
             to_add = _build_entities(snapshot)
             if to_add:
-                _LOGGER.info("Adding %d newly discovered Find My tracker(s)", len(to_add))
+                _LOGGER.info(
+                    "Adding %d newly discovered Find My tracker(s)", len(to_add)
+                )
                 _schedule_tracker_entities(to_add, True)
 
-                registry_lookup = getattr(coordinator, "find_tracker_entity_entry", None)
+                registry_lookup = getattr(
+                    coordinator, "find_tracker_entity_entry", None
+                )
                 if callable(registry_lookup):
                     all_registered = True
 
@@ -431,7 +446,9 @@ async def async_setup_entry(
                             if not dev_id or registry_lookup(dev_id) is None:
                                 all_registered = False
                                 break
-                        except Exception:  # pragma: no cover - best effort registry probe
+                        except (
+                            Exception
+                        ):  # pragma: no cover - best effort registry probe
                             _LOGGER.debug(
                                 "Registry lookup failed for tracker %s", dev_id
                             )
@@ -459,7 +476,11 @@ async def async_setup_entry(
                 else:
                     secrets_bundle = None
 
-                discovery_ns = f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}" if config_entry.entry_id else CLOUD_DISCOVERY_NAMESPACE
+                discovery_ns = (
+                    f"{CLOUD_DISCOVERY_NAMESPACE}.{config_entry.entry_id}"
+                    if config_entry.entry_id
+                    else CLOUD_DISCOVERY_NAMESPACE
+                )
                 stable_key = _cloud_discovery_stable_key(
                     email,
                     token_value,
@@ -486,7 +507,8 @@ async def async_setup_entry(
                         )
                     else:
                         _LOGGER.debug(
-                            "Cloud tracker scanner deduplicated discovery for %s", account_ref
+                            "Cloud tracker scanner deduplicated discovery for %s",
+                            account_ref,
                         )
 
                 hass_async_create_task = getattr(hass, "async_create_task", None)
@@ -522,10 +544,11 @@ async def async_setup_entry(
                     return bool(
                         device_id
                         and tracker_meta
-                        and device_id
-                        in getattr(tracker_meta, "visible_device_ids", [])
+                        and device_id in getattr(tracker_meta, "visible_device_ids", [])
                     )
-                except TypeError:  # pragma: no cover - fallback for misconfigured metadata
+                except (
+                    TypeError
+                ):  # pragma: no cover - fallback for misconfigured metadata
                     return False
 
             def _is_enabled(device_id: str) -> bool:
@@ -533,10 +556,11 @@ async def async_setup_entry(
                     return bool(
                         device_id
                         and tracker_meta
-                        and device_id
-                        in getattr(tracker_meta, "enabled_device_ids", [])
+                        and device_id in getattr(tracker_meta, "enabled_device_ids", [])
                     )
-                except TypeError:  # pragma: no cover - fallback for misconfigured metadata
+                except (
+                    TypeError
+                ):  # pragma: no cover - fallback for misconfigured metadata
                     return False
 
             def _expected_unique_ids() -> set[str]:
@@ -568,9 +592,7 @@ async def async_setup_entry(
                 built: list[GoogleFindMyDeviceTracker] = []
                 if not isinstance(entry_id, str) or not entry_id:
                     return built
-                for device in coordinator.get_subentry_snapshot(
-                    tracker_subentry_key
-                ):
+                for device in coordinator.get_subentry_snapshot(tracker_subentry_key):
                     if not isinstance(device, Mapping):
                         continue
                     dev_id = device.get("id")
@@ -607,7 +629,9 @@ async def async_setup_entry(
                 add_entities=_schedule_tracker_entities,
             )
 
-        scope_states[scope_identifier] = {"scan": _scan_available_trackers_from_coordinator}
+        scope_states[scope_identifier] = {
+            "scan": _scan_available_trackers_from_coordinator
+        }
 
     seen_subentries: set[str | None] = set()
     seen_subentry_keys: set[str] = set()
@@ -669,9 +693,7 @@ async def async_setup_entry(
             )
             return
 
-        has_full_context = hasattr(subentry, "subentry_id") or hasattr(
-            subentry, "data"
-        )
+        has_full_context = hasattr(subentry, "subentry_id") or hasattr(subentry, "data")
         if subentry_identifier in seen_subentries or subentry_key in seen_subentry_keys:
             if has_full_context and (
                 subentry_identifier in placeholder_subentries
@@ -745,7 +767,6 @@ async def async_setup_entry(
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Entity
 # ---------------------------------------------------------------------------
@@ -758,7 +779,9 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     # should not have a suffix and will track the device name.
     _attr_has_entity_name = False
     _attr_source_type = SourceType.GPS
-    _attr_entity_category: EntityCategory | None = None  # ensure tracker is not diagnostic
+    _attr_entity_category: EntityCategory | None = (
+        None  # ensure tracker is not diagnostic
+    )
     # Default to enabled in the registry for per-device trackers
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
@@ -900,9 +923,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             self.subentry_key, self.device_id
         ):
             if not self._logged_visibility_block:
-                meta = self.coordinator.get_subentry_metadata(
-                    key=self.subentry_key
-                )
+                meta = self.coordinator.get_subentry_metadata(key=self.subentry_key)
                 visible_ids = _normalize_identifier_set(
                     getattr(meta, "visible_device_ids", None)
                 )
@@ -940,19 +961,90 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 return True
         return self._last_good_accuracy_data is not None
 
-    @property
-    def latitude(self) -> float | None:
-        """Return latitude value of the device (float, if known)."""
+    def _get_stale_threshold(self) -> int:
+        """Return the configured stale threshold in seconds."""
+        entry = getattr(self.coordinator, "config_entry", None)
+        if entry is None:
+            return DEFAULT_STALE_THRESHOLD
+        options = getattr(entry, "options", {})
+        if not isinstance(options, Mapping):
+            return DEFAULT_STALE_THRESHOLD
+        threshold = options.get(OPT_STALE_THRESHOLD, DEFAULT_STALE_THRESHOLD)
+        try:
+            return int(threshold)
+        except (TypeError, ValueError):
+            return DEFAULT_STALE_THRESHOLD
+
+    def _get_location_age(self) -> float | None:
+        """Return the age of the location data in seconds, or None if unknown."""
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
+            return None
+        last_seen = data.get("last_seen")
+        if last_seen is None:
+            return None
+        try:
+            last_seen_epoch = float(last_seen)
+            return time.time() - last_seen_epoch
+        except (TypeError, ValueError):
+            return None
+
+    def _is_location_stale(self) -> bool:
+        """Return True if the location data is considered stale."""
+        age = self._get_location_age()
+        if age is None:
+            return False  # No age information, assume not stale
+        threshold = self._get_stale_threshold()
+        return age > threshold
+
+    def _get_location_status(self) -> str:
+        """Return the location status string based on data age."""
+        age = self._get_location_age()
+        if age is None:
+            return "unknown"
+        threshold = self._get_stale_threshold()
+        if age > threshold:
+            return "stale"
+        elif age > threshold / 2:
+            return "aging"
+        else:
+            return "current"
+
+    @property
+    def latitude(self) -> float | None:
+        """Return latitude value of the device (float, if known).
+
+        Returns None if location data is stale (older than stale_threshold),
+        causing HA to show 'unknown' state. Also returns None if accuracy
+        is missing, since HA's zone engine requires all three values
+        (latitude, longitude, accuracy) to be present together.
+        """
+        if self._is_location_stale():
+            return None
+        data = self._current_row() or self._last_good_accuracy_data
+        if not data:
+            return None
+        # Guard: accuracy must also be present for a valid GPS location
+        if data.get("accuracy") is None:
             return None
         return data.get("latitude")
 
     @property
     def longitude(self) -> float | None:
-        """Return longitude value of the device (float, if known)."""
+        """Return longitude value of the device (float, if known).
+
+        Returns None if location data is stale (older than stale_threshold),
+        causing HA to show 'unknown' state. Also returns None if accuracy
+        is missing, since HA's zone engine requires all three values
+        (latitude, longitude, accuracy) to be present together.
+        """
+        if self._is_location_stale():
+            return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
+            return None
+        # Guard: accuracy must also be present for a valid GPS location
+        if data.get("accuracy") is None:
             return None
         return data.get("longitude")
 
@@ -962,7 +1054,12 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         Coordinator stores accuracy as a float; HA's device_tracker expects
         an integer for the `gps_accuracy` attribute, so we coerce here.
+
+        Returns None if location data is stale (older than stale_threshold),
+        mirroring the behaviour of latitude/longitude for consistency.
         """
+        if self._is_location_stale():
+            return None
         data = self._current_row() or self._last_good_accuracy_data
         if not data:
             return None
@@ -979,10 +1076,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """Return a human place label only when it should override zone logic.
 
         Rules:
+        - If location data is stale, return None for consistency with coordinates.
         - If we have valid coordinates, let HA compute the zone name.
         - If we don't have coordinates, fall back to Google's semantic label.
         - Never override zones with generic 'home' labels from Google.
         """
+        if self._is_location_stale():
+            return None
         data = self._current_row()
         if not data:
             return None
@@ -1007,10 +1107,38 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         - Adds a normalized UTC timestamp mirror (`last_seen_utc`).
         - Uses `accuracy_m` (float meters) rather than `gps_accuracy` for stability.
         - Includes source labeling (`source_label`/`source_rank`) for transparency.
+
+        Additionally exposes staleness information:
+        - `location_age`: Seconds since last location update.
+        - `location_status`: 'current', 'aging', 'stale', or 'unknown'.
+        - `last_latitude`/`last_longitude`: Last known coordinates when stale.
         """
         row = self._current_row()
-        attributes = _as_ha_attributes(row)
-        return attributes if attributes is not None else {}
+        attributes = _as_ha_attributes(row) or {}
+
+        # Expose the stable tracker identifier for interoperability with
+        # third-party integrations that cannot rely on rotating MAC addresses.
+        attributes["google_device_id"] = self.device_id
+
+        # Add staleness information
+        location_age = self._get_location_age()
+        if location_age is not None:
+            attributes["location_age"] = round(location_age)
+        attributes["location_status"] = self._get_location_status()
+
+        # When location is stale, expose last known coordinates in attributes
+        # so they remain available for map views and history
+        if self._is_location_stale():
+            data = self._current_row() or self._last_good_accuracy_data
+            if data:
+                last_lat = data.get("latitude")
+                last_lon = data.get("longitude")
+                if last_lat is not None:
+                    attributes["last_latitude"] = last_lat
+                if last_lon is not None:
+                    attributes["last_longitude"] = last_lon
+
+        return attributes
 
     @callback
     def _handle_coordinator_update(self) -> None:

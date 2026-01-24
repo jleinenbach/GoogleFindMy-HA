@@ -49,7 +49,9 @@ def test_semantic_location_steps_and_errors_present() -> None:
 
         edit_block = steps["semantic_location_edit"]
         edit_data = edit_block.get("data")
-        assert isinstance(edit_data, dict), f"{path} missing data for semantic edit step"
+        assert isinstance(edit_data, dict), (
+            f"{path} missing data for semantic edit step"
+        )
         for field in required_fields:
             value = edit_data.get(field)
             assert isinstance(value, str) and value.strip(), (

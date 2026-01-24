@@ -96,13 +96,17 @@ async def test_entity_registry_subentry_alignment(
 ) -> None:
     """Platforms should register entities with the correct subentry identifiers."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     loop = asyncio.get_running_loop()
     hass = HomeAssistant()
     hass.loop = loop
     hass.data = {"core.uuid": "test-instance"}
-    hass.async_create_task = lambda coro, *, name=None: loop.create_task(coro, name=name)
+    hass.async_create_task = lambda coro, *, name=None: loop.create_task(
+        coro, name=name
+    )
     hass.bus = SimpleNamespace(
         async_listen=lambda *_args, **_kwargs: (lambda: None),
         async_listen_once=lambda *_args, **_kwargs: (lambda: None),
@@ -177,7 +181,9 @@ async def test_entity_registry_subentry_alignment(
         item
         for item in entries
         if item.platform == "binary_sensor"
-        or (item.platform == "sensor" and not str(item.unique_id).endswith("_last_seen"))
+        or (
+            item.platform == "sensor" and not str(item.unique_id).endswith("_last_seen")
+        )
     ]
     tracker_entries = [
         item
@@ -190,11 +196,11 @@ async def test_entity_registry_subentry_alignment(
     assert tracker_entries, "tracker entities must be present for validation"
 
     for entry_record in service_entries:
-        assert (
-            entry_record.config_entry_subentry_id == service_identifier
-        ), f"service entity {entry_record.entity_id} lost its subentry mapping"
+        assert entry_record.config_entry_subentry_id == service_identifier, (
+            f"service entity {entry_record.entity_id} lost its subentry mapping"
+        )
 
     for entry_record in tracker_entries:
-        assert (
-            entry_record.config_entry_subentry_id == tracker_identifier
-        ), f"tracker entity {entry_record.entity_id} should map to tracker subentry"
+        assert entry_record.config_entry_subentry_id == tracker_identifier, (
+            f"tracker entity {entry_record.entity_id} should map to tracker subentry"
+        )

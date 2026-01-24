@@ -10,7 +10,8 @@ import time
 from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
-    generate_eid,
+    EidVariant,
+    generate_eid_variant,
 )
 from custom_components.googlefindmy.FMDNCrypto.key_derivation import FMDNOwnerOperations
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import encrypt_aes_gcm
@@ -35,7 +36,7 @@ def register_esp32() -> None:
     owner_key: bytes = get_owner_key()
 
     eik: bytes = secrets.token_bytes(32)
-    eid: bytes = generate_eid(eik, 0)
+    eid: bytes = generate_eid_variant(eik, 0, EidVariant.LEGACY_SECP160R1_X20_BE)
     pair_date: int = int(time.time())
 
     register_request: RegisterBleDeviceRequest = RegisterBleDeviceRequest()

@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Intervalo(s) de pesquisa de localização",
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
-          "min_accuracy_threshold": "Precisão mínima (m)",
-          "movement_threshold": "Limiar de movimento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
@@ -258,24 +256,24 @@
       },
       "settings": {
         "title": "Opções",
-        "description": "Ajuste as configurações de localização:\n",
+        "description": "Ajustar definições de localização:\n• Intervalo de sondagem de localização: frequência de consulta das localizações (60–3600 segundos)\n• Atraso entre sondagens de dispositivos: intervalo entre pedidos por dispositivo (1–60 segundos)\n\nFiltro Google Home:\n• Ativar para associar deteções de dispositivos Google Home à zona Casa\n• As palavras-chave suportam correspondências parciais (separadas por vírgulas)\n• Exemplo: “nest” corresponde a “Kitchen Nest Mini”",
         "data": {
           "location_poll_interval": "Intervalo(s) de pesquisa de localização",
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
-          "min_accuracy_threshold": "Precisão mínima (m)",
-          "movement_threshold": "Limiar de movimento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
+          "stale_threshold": "Limite de obsolescência (s)",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (áreas de alto tráfego por padrão ou todas as áreas para relatórios de crowdsourcing).",
+          "stale_threshold": "Quando uma localização é mais antiga do que este limite (em segundos), o estado do dispositivo muda para 'desconhecido'. Defina como 0 para desativar esta funcionalidade.",
           "subentry": "Armazene essas opções no grupo de recursos selecionado. "
         }
       },
@@ -424,6 +422,28 @@
       },
       "reset_statistics": {
         "name": "Redefinir estatísticas"
+      },
+      "regenerate_aas_token": {
+        "name": "Regenerar token AAS",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Período de espera (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Tempo restante de espera (s)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "Regenerar token ADM",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Período de espera (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Tempo restante de espera (s)"
+          }
+        }
       }
     },
     "binary_sensor": {
@@ -513,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Idade da localização (s)"
+          },
+          "location_status": {
+            "name": "Estado da localização"
+          },
+          "last_latitude": {
+            "name": "Última latitude conhecida"
+          },
+          "last_longitude": {
+            "name": "Última longitude conhecida"
           }
         }
       }
@@ -586,11 +618,8 @@
       "stat_invalid_coords": {
         "name": "Coordenadas inválidas"
       },
-      "stat_low_quality_dropped": {
-        "name": "Baixa precisão descartada"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Atualizações não significativas foram descartadas"
+      "stat_fused_updates": {
+        "name": "Atualizações de localização combinadas"
       }
     }
   },
@@ -598,6 +627,10 @@
     "auth_expired": {
       "title": "Reautenticação necessária",
       "description": "A autenticação do Google Find My Device é inválida ou expirou para esta entrada.\n\n**Entrada:** {entry_title}\n**Conta:** {email}\n\nSelecione **Reconfigurar** no cartão da integração para entrar novamente. Se você alterou recentemente sua senha do Google ou revogou tokens, é necessário se autenticar novamente aqui para restaurar a funcionalidade."
+    },
+    "fcm_connection_stuck": {
+      "title": "Falha na conexão push do FCM",
+      "description": "A conexão em segundo plano com o Google está bloqueada.\n\n1. A saída pelo **porta TCP 5228** está liberada no firewall?\n2. Se a rede estiver ok, tente gerar novamente o seu `secrets.json` (as credenciais podem estar fragmentadas/revocadas)."
     },
     "multiple_config_entries": {
       "title": "Várias entradas de configuração detectadas",

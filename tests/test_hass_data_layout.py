@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import importlib
+import inspect
 import json
 import logging
 import sys
@@ -204,6 +205,25 @@ class _StubConfigEntries:
     ) -> bool:
         return True
 
+    def async_forward_entry_unload(
+        self, entry: _StubConfigEntry, platforms: object
+    ) -> bool:
+        del platforms
+        runtime = getattr(entry, "runtime_data", None)
+        manager = getattr(runtime, "subentry_manager", None)
+        if manager is not None:
+            removal_result = manager.async_remove_all()
+            if inspect.isawaitable(removal_result):
+                return removal_result  # type: ignore[return-value]
+            managed = getattr(manager, "managed_subentries", None)
+            if isinstance(managed, dict):
+                managed.clear()
+
+        for subentry_id in list(entry.subentries):
+            self.async_remove_subentry(entry, subentry_id)
+
+        return True
+
     def async_add_subentry(
         self, entry: _StubConfigEntry, subentry: ConfigSubentry
     ) -> bool:
@@ -391,17 +411,11 @@ def _prepare_async_setup_entry_harness(
     )
     button_module = importlib.import_module("custom_components.googlefindmy.button")
     sys.modules.pop("custom_components.googlefindmy.map_view", None)
-    map_view_module = importlib.import_module(
-        "custom_components.googlefindmy.map_view"
-    )
-    services_module = importlib.import_module(
-        "custom_components.googlefindmy.services"
-    )
+    map_view_module = importlib.import_module("custom_components.googlefindmy.map_view")
+    services_module = importlib.import_module("custom_components.googlefindmy.services")
 
     cache = _StubCache()
-    monkeypatch.setattr(
-        integration.TokenCache, "create", AsyncMock(return_value=cache)
-    )
+    monkeypatch.setattr(integration.TokenCache, "create", AsyncMock(return_value=cache))
     monkeypatch.setattr(integration, "_register_instance", lambda *_: None)
     monkeypatch.setattr(integration, "_unregister_instance", lambda *_: cache)
 
@@ -636,9 +650,9 @@ def test_service_stats_unique_id_migration_prefers_service_subentry(
                         None,
                     )
                     entry_obj.unique_id = new_unique_id
-                    self._by_key[(entry_obj.domain, entry_obj.platform, new_unique_id)] = (
-                        entity_id
-                    )
+                    self._by_key[
+                        (entry_obj.domain, entry_obj.platform, new_unique_id)
+                    ] = entity_id
                 self.updated.append(entity_id)
 
         class _DeviceRegistryStub:
@@ -661,16 +675,10 @@ def test_service_stats_unique_id_migration_prefers_service_subentry(
         )
         device_registry = _DeviceRegistryStub()
 
-        monkeypatch.setattr(
-            integration.er, "async_get", lambda _hass: entity_registry
-        )
-        monkeypatch.setattr(
-            integration.dr, "async_get", lambda _hass: device_registry
-        )
+        monkeypatch.setattr(integration.er, "async_get", lambda _hass: entity_registry)
+        monkeypatch.setattr(integration.dr, "async_get", lambda _hass: device_registry)
 
-        loop.run_until_complete(
-            integration._async_migrate_unique_ids(hass, entry)
-        )
+        loop.run_until_complete(integration._async_migrate_unique_ids(hass, entry))
 
         migrated = entity_registry.entities["sensor.googlefindmy_api_updates"]
         assert migrated.unique_id == (
@@ -754,9 +762,9 @@ def test_unique_id_migration_rewrites_legacy_tracker_entities(
                         None,
                     )
                     entry_obj.unique_id = new_unique_id
-                    self._by_key[(entry_obj.domain, entry_obj.platform, new_unique_id)] = (
-                        entity_id
-                    )
+                    self._by_key[
+                        (entry_obj.domain, entry_obj.platform, new_unique_id)
+                    ] = entity_id
                 self.updated.append(entity_id)
 
         class _DeviceRegistryStub:
@@ -783,9 +791,7 @@ def test_unique_id_migration_rewrites_legacy_tracker_entities(
         )
         device_registry = _DeviceRegistryStub()
 
-        monkeypatch.setattr(
-            integration.er, "async_get", lambda _hass: entity_registry
-        )
+        monkeypatch.setattr(integration.er, "async_get", lambda _hass: entity_registry)
         monkeypatch.setattr(integration.dr, "async_get", lambda _hass: device_registry)
 
         loop.run_until_complete(integration._async_migrate_unique_ids(hass, entry))
@@ -796,21 +802,23 @@ def test_unique_id_migration_rewrites_legacy_tracker_entities(
         migrated_two = entity_registry.entities[
             "device_tracker.googlefindmy_device_two"
         ]
-        expected_one = (
-            f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1"
-        )
-        expected_two = (
-            f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-2"
-        )
+        expected_one = f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1"
+        expected_two = f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-2"
 
         assert migrated_one.unique_id == expected_one
         assert migrated_two.unique_id == expected_two
-        assert entity_registry.async_get_entity_id(
-            "device_tracker", integration.DOMAIN, expected_one
-        ) == "device_tracker.googlefindmy_device_one"
-        assert entity_registry.async_get_entity_id(
-            "device_tracker", integration.DOMAIN, expected_two
-        ) == "device_tracker.googlefindmy_device_two"
+        assert (
+            entity_registry.async_get_entity_id(
+                "device_tracker", integration.DOMAIN, expected_one
+            )
+            == "device_tracker.googlefindmy_device_one"
+        )
+        assert (
+            entity_registry.async_get_entity_id(
+                "device_tracker", integration.DOMAIN, expected_two
+            )
+            == "device_tracker.googlefindmy_device_two"
+        )
 
         assert entry.options["unique_id_migrated"] is True
         assert entry.options["unique_id_subentry_migrated"] is True
@@ -827,9 +835,7 @@ def test_unique_id_migration_rewrites_legacy_tracker_entities(
             msg = "Migration helpers should not run once options flags are set"
             raise AssertionError(msg)
 
-        monkeypatch.setattr(
-            integration, "_migrate_legacy_unique_ids", _fail_migration
-        )
+        monkeypatch.setattr(integration, "_migrate_legacy_unique_ids", _fail_migration)
         monkeypatch.setattr(
             integration, "_migrate_unique_ids_to_subentry", _fail_migration
         )
@@ -1120,7 +1126,9 @@ def test_hass_data_layout(
             assert all(feature == feature.lower() for feature in service_features)
             assert service_subentry.data["fcm_push_enabled"] is True
             assert service_subentry.data["has_google_home_filter"] is False
-            assert service_subentry.unique_id == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+            assert (
+                service_subentry.unique_id == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
+            )
 
             added_entities: list[Any] = []
 
@@ -1428,13 +1436,15 @@ async def test_programmatic_subentry_creation_triggers_setup_and_entities(
 
     def _metadata(
         self: Any, *, key: str | None = None, feature: str | None = None
-        ) -> Any:
-            resolved_key = key or feature or getattr(self, "_subentry_key", TRACKER_SUBENTRY_KEY)
-            device_ids = tuple(device.get("id") for device in getattr(self, "data", ()))
-            return SimpleNamespace(
-                key=resolved_key,
-                config_subentry_id=None,
-                features=(feature,) if feature else ("device_tracker",),
+    ) -> Any:
+        resolved_key = (
+            key or feature or getattr(self, "_subentry_key", TRACKER_SUBENTRY_KEY)
+        )
+        device_ids = tuple(device.get("id") for device in getattr(self, "data", ()))
+        return SimpleNamespace(
+            key=resolved_key,
+            config_subentry_id=None,
+            features=(feature,) if feature else ("device_tracker",),
             stable_identifier=lambda: resolved_key,
             title=None,
             poll_intervals={},
@@ -1534,7 +1544,9 @@ async def test_programmatic_subentry_creation_triggers_setup_and_entities(
             )
             self._device_info = SimpleNamespace(
                 id=f"{coordinator.config_entry.entry_id}:{device_id}",
-                identifiers={(DOMAIN, f"{coordinator.config_entry.entry_id}:{device_id}")},
+                identifiers={
+                    (DOMAIN, f"{coordinator.config_entry.entry_id}:{device_id}")
+                },
                 config_entries={coordinator.config_entry.entry_id},
                 config_subentry_id=subentry_identifier,
             )
@@ -1818,9 +1830,7 @@ def test_duplicate_account_issue_cleanup_on_success(
 
         delete_calls: list[tuple[Any, str, str]] = []
 
-        def _delete_issue(
-            hass_arg: Any, domain: str, issue_id: str, **_: Any
-        ) -> None:
+        def _delete_issue(hass_arg: Any, domain: str, issue_id: str, **_: Any) -> None:
             delete_calls.append((hass_arg, domain, issue_id))
 
         monkeypatch.setattr(
@@ -1829,9 +1839,7 @@ def test_duplicate_account_issue_cleanup_on_success(
 
         create_calls: list[tuple[Any, str, str]] = []
 
-        def _record_create(
-            hass_arg: Any, domain: str, issue_id: str, **_: Any
-        ) -> None:
+        def _record_create(hass_arg: Any, domain: str, issue_id: str, **_: Any) -> None:
             create_calls.append((hass_arg, domain, issue_id))
 
         monkeypatch.setattr(
@@ -1847,9 +1855,9 @@ def test_duplicate_account_issue_cleanup_on_success(
             loop.run_until_complete(integration.async_setup_entry(hass, entry))
 
         issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
-        assert (
-            f"duplicate_account_{entry.entry_id}" in issue_ids
-        ), "Expected duplicate-account cleanup to delete stale issue"
+        assert f"duplicate_account_{entry.entry_id}" in issue_ids, (
+            "Expected duplicate-account cleanup to delete stale issue"
+        )
         cleanup_index = issue_ids.index(f"duplicate_account_{entry.entry_id}")
         cleanup_call = delete_calls[cleanup_index]
         assert cleanup_call[0] is hass
@@ -1928,12 +1936,12 @@ def test_duplicate_account_mixed_states_prefer_loaded(
             loop.run_until_complete(asyncio.gather(*hass_loaded._tasks))
 
         delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
-        assert (
-            f"duplicate_account_{loaded_entry.entry_id}" in delete_issue_ids
-        ), "Authoritative entry should clear its repair issue"
-        assert (
-            f"duplicate_account_{retry_entry.entry_id}" in delete_issue_ids
-        ), "Duplicate entry repair issue should be cleared after auto-disable"
+        assert f"duplicate_account_{loaded_entry.entry_id}" in delete_issue_ids, (
+            "Authoritative entry should clear its repair issue"
+        )
+        assert f"duplicate_account_{retry_entry.entry_id}" in delete_issue_ids, (
+            "Duplicate entry repair issue should be cleared after auto-disable"
+        )
 
         assert (
             hass_loaded.config_entries.unload_calls.count(retry_entry.entry_id) >= 1
@@ -1962,9 +1970,9 @@ def test_duplicate_account_mixed_states_prefer_loaded(
             loop.run_until_complete(asyncio.gather(*hass_retry._tasks))
 
         delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
-        assert (
-            f"duplicate_account_{retry_entry.entry_id}" in delete_issue_ids
-        ), "Duplicate entry issues should stay cleared"
+        assert f"duplicate_account_{retry_entry.entry_id}" in delete_issue_ids, (
+            "Duplicate entry issues should stay cleared"
+        )
     finally:
         loop.close()
         asyncio.set_event_loop(None)
@@ -2052,23 +2060,15 @@ def test_duplicate_account_auto_disables_duplicates(
         assert "user" in str(duplicate_user.disabled_by).lower()
 
         for duplicate in (duplicate_loaded, duplicate_error, duplicate_user):
-            assert (
-                hass.config_entries.unload_calls.count(duplicate.entry_id) >= 1
-            ), "Every duplicate should be unloaded"
+            assert hass.config_entries.unload_calls.count(duplicate.entry_id) >= 1, (
+                "Every duplicate should be unloaded"
+            )
 
         delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
-        assert (
-            f"duplicate_account_{duplicate_loaded.entry_id}" in delete_issue_ids
-        )
-        assert (
-            f"duplicate_account_{duplicate_error.entry_id}" in delete_issue_ids
-        )
-        assert (
-            f"duplicate_account_{duplicate_user.entry_id}" in delete_issue_ids
-        )
-        assert (
-            f"duplicate_account_{authoritative.entry_id}" in delete_issue_ids
-        )
+        assert f"duplicate_account_{duplicate_loaded.entry_id}" in delete_issue_ids
+        assert f"duplicate_account_{duplicate_error.entry_id}" in delete_issue_ids
+        assert f"duplicate_account_{duplicate_user.entry_id}" in delete_issue_ids
+        assert f"duplicate_account_{authoritative.entry_id}" in delete_issue_ids
 
         assert not create_calls
     finally:
@@ -2170,10 +2170,12 @@ def test_duplicate_account_legacy_core_disable_fallback(
             for message in info_messages
         ), "Manual action list should log the legacy duplicate entry"
 
-        create_issue_ids = [issue_id for *_hass, _domain, issue_id, _kwargs in create_calls]
-        assert (
-            f"duplicate_account_{duplicate_legacy.entry_id}" in create_issue_ids
-        ), "Repair issue should be created for the legacy duplicate"
+        create_issue_ids = [
+            issue_id for *_hass, _domain, issue_id, _kwargs in create_calls
+        ]
+        assert f"duplicate_account_{duplicate_legacy.entry_id}" in create_issue_ids, (
+            "Repair issue should be created for the legacy duplicate"
+        )
 
         delete_issue_ids = [issue_id for *_hass, _domain, issue_id in delete_calls]
         assert (
@@ -2611,7 +2613,9 @@ def test_service_no_active_entry_placeholders(
             services_module, "ServiceValidationError", _StrictServiceValidationError
         )
         monkeypatch.setattr(
-            sys.modules[__name__], "ServiceValidationError", _StrictServiceValidationError
+            sys.modules[__name__],
+            "ServiceValidationError",
+            _StrictServiceValidationError,
         )
 
         entries = [
@@ -2677,6 +2681,8 @@ def test_service_no_active_entry_placeholders(
     finally:
         loop.close()
         asyncio.set_event_loop(None)
+
+
 def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
     """Return normalized platform names for recorded calls."""
 

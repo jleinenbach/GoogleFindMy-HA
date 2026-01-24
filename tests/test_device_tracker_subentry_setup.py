@@ -42,10 +42,12 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
         async_listen=lambda *_args, **_kwargs: (lambda: None),
         async_listen_once=lambda *_args, **_kwargs: (lambda: None),
     )
-    hass.async_create_task = lambda coro, *, name=None: loop.create_task(coro, name=name)
-    hass.async_run_hass_job = lambda job, *args: getattr(job, "target", lambda *_: None)(
-        *args
+    hass.async_create_task = lambda coro, *, name=None: loop.create_task(
+        coro, name=name
     )
+    hass.async_run_hass_job = lambda job, *args: getattr(
+        job, "target", lambda *_: None
+    )(*args)
     hass.verify_event_loop_thread = lambda *_args, **_kwargs: None
     return hass
 
@@ -149,7 +151,9 @@ async def test_placeholder_scopes_preserve_multiple_subentries(
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_adds_new_tracker_subentries(stub_coordinator_factory: Any) -> None:
+async def test_dispatcher_adds_new_tracker_subentries(
+    stub_coordinator_factory: Any,
+) -> None:
     """Dispatcher callbacks should attach trackers for new subentries without duplicates."""
 
     loop = asyncio.get_running_loop()

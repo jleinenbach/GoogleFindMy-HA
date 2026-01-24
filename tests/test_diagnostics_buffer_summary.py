@@ -18,8 +18,6 @@ from custom_components.googlefindmy.const import (
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MOVEMENT_THRESHOLD,
 )
 from tests.helpers import drain_loop
 
@@ -187,12 +185,10 @@ def test_diagnostics_merge_entry_data_and_options(
         data={
             OPT_LOCATION_POLL_INTERVAL: 600,
             OPT_DEVICE_POLL_DELAY: 10,
-            OPT_MOVEMENT_THRESHOLD: 75,
             OPT_ENABLE_STATS_ENTITIES: True,
             OPT_GOOGLE_HOME_FILTER_ENABLED: False,
             OPT_GOOGLE_HOME_FILTER_KEYWORDS: "legacy",
             OPT_IGNORED_DEVICES: ["legacy-id"],
-            OPT_MIN_ACCURACY_THRESHOLD: 123,
             CONF_OAUTH_TOKEN: "secret-token",
         },
         options={
@@ -209,7 +205,9 @@ def test_diagnostics_merge_entry_data_and_options(
         return SimpleNamespace(name="Test Integration", version="1.2.3")
 
     monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
-    monkeypatch.setattr(diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={}))
+    monkeypatch.setattr(
+        diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={})
+    )
     monkeypatch.setattr(
         diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
     )
@@ -219,7 +217,6 @@ def test_diagnostics_merge_entry_data_and_options(
     effective_config = payload["effective_config"]
     assert effective_config[OPT_LOCATION_POLL_INTERVAL] == "45"
     assert effective_config[OPT_DEVICE_POLL_DELAY] == 10
-    assert effective_config[OPT_MOVEMENT_THRESHOLD] == 75
     assert effective_config[OPT_GOOGLE_HOME_FILTER_KEYWORDS] == [
         diagnostics.REDACTED,
         diagnostics.REDACTED,
@@ -231,9 +228,8 @@ def test_diagnostics_merge_entry_data_and_options(
     config_summary = payload["config"]
     assert config_summary["location_poll_interval"] == 45
     assert config_summary["device_poll_delay"] == 10
-    assert config_summary["min_accuracy_threshold"] == 123
-    assert config_summary["movement_threshold"] == 75
     assert config_summary["google_home_filter_enabled"] is True
     assert config_summary["enable_stats_entities"] is False
     assert config_summary["google_home_filter_keywords_count"] == 3
     assert config_summary["ignored_devices_count"] == 2
+    assert "movement_threshold" not in config_summary

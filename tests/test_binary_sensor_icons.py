@@ -68,6 +68,7 @@ if device_registry_module is None:
     sys.modules["homeassistant.helpers.device_registry"] = device_registry_module
 
 if not hasattr(device_registry_module, "DeviceEntryType"):
+
     class DeviceEntryType:  # noqa: D401 - stub enum container
         SERVICE = "service"
 
@@ -171,7 +172,7 @@ def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
     assert attrs["nova_api_status_changed_at"] == "2023-11-14T22:13:20Z"
     assert attrs["nova_fcm_status"] == "connected"
     assert "nova_fcm_status_reason" not in attrs
-    assert attrs["nova_fcm_status_changed_at"] == "2023-11-14T22:15:00.500000Z"
+    assert attrs["nova_fcm_status_changed_at"] == "2023-11-14T22:15:00Z"
 
 
 def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:

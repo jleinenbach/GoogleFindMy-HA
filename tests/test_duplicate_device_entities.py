@@ -20,7 +20,9 @@ def test_duplicate_devices_seed_only_once(
 ) -> None:
     """Duplicate IDs in the coordinator snapshot create a single entity per platform."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     device_tracker = importlib.import_module(
         "custom_components.googlefindmy.device_tracker"

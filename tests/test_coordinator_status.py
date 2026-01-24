@@ -136,7 +136,7 @@ def dummy_api(monkeypatch: pytest.MonkeyPatch) -> _DummyAPI:
         return api
 
     monkeypatch.setattr(
-        "custom_components.googlefindmy.coordinator.GoogleFindMyAPI",
+        "custom_components.googlefindmy.coordinator.main.GoogleFindMyAPI",
         _factory,
     )
     return api
@@ -212,16 +212,13 @@ def test_fatal_fcm_registration_triggers_reauth(
 
     assert coordinator.auth_error_active is True
     assert coordinator._auth_error_message == fatal_error
-    assert (
-        coordinator.hass.bus.fired[-1]
-        == (
-            EVENT_AUTH_ERROR,
-            {
-                "entry_id": coordinator.config_entry.entry_id,
-                "email": coordinator._get_account_email(),
-                "message": fatal_error,
-            },
-        )
+    assert coordinator.hass.bus.fired[-1] == (
+        EVENT_AUTH_ERROR,
+        {
+            "entry_id": coordinator.config_entry.entry_id,
+            "email": coordinator._get_account_email(),
+            "message": fatal_error,
+        },
     )
 
 
@@ -409,9 +406,10 @@ def test_device_tracker_respects_coordinator_unavailability(
     """Availability should mirror coordinator health before device checks."""
 
     coordinator.is_device_visible_in_subentry = lambda *_args, **_kwargs: True
-    coordinator.get_device_location_data_for_subentry = (
-        lambda *_args, **_kwargs: {"latitude": 0.0, "longitude": 0.0}
-    )
+    coordinator.get_device_location_data_for_subentry = lambda *_args, **_kwargs: {
+        "latitude": 0.0,
+        "longitude": 0.0,
+    }
     coordinator.is_device_present = lambda _dev_id: True
 
     subentry_identifier = coordinator.stable_subentry_identifier(

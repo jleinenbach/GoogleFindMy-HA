@@ -8,10 +8,11 @@ import time
 from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
-    generate_eid,
+    EidVariant,
+    generate_eid_variant,
 )
+from custom_components.googlefindmy.FMDNCrypto.mcu_utils import is_mcu_tracker
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-    is_mcu_tracker,
     retrieve_identity_key,
 )
 from custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2 import (
@@ -44,7 +45,7 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
             )
 
             try:
-                identity_key = retrieve_identity_key(
+                identity_keys = retrieve_identity_key(
                     device.information.deviceRegistration
                 )
             except RuntimeError as exc:
@@ -54,10 +55,16 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
                     f"{exc}"
                 )
                 return
+            if not identity_keys:
+                print(
+                    "[UploadPrecomputedPublicKeyIds] No identity key candidates derived; "
+                    "skipping upload."
+                )
+                continue
             start_timestamp = int(time.time() - hours_to_seconds(3))
 
             next_eids = get_next_eids(
-                identity_key,
+                identity_keys[0],
                 new_truncated_ids.pairDate,
                 start_timestamp,
                 duration_seconds=max_truncated_eid_seconds_server,
@@ -91,7 +98,7 @@ def get_next_eids(
     start_offset = start_date - pair_date
     current_time_offset = start_offset - (start_offset % ROTATION_PERIOD)
 
-    static_eid = generate_eid(eik, 0)
+    static_eid = generate_eid_variant(eik, 0, EidVariant.LEGACY_SECP160R1_X20_BE)
 
     while current_time_offset <= start_offset + duration_seconds:
         timestamp = pair_date + current_time_offset

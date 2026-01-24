@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+import inspect
+from collections.abc import Awaitable, Sequence
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.config_entries import ConfigSubentry
@@ -16,6 +18,8 @@ from homeassistant.helpers import entity_registry as er
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy.const import DOMAIN, SUBENTRY_TYPE_TRACKER
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
+
+pytestmark = pytest.mark.asyncio
 
 
 def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:
@@ -93,6 +97,7 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.unload_platform_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
         self.forward_setup_calls: list[tuple[_EntryStub, tuple[object, ...]]] = []
         self.parent_unload_invocations = 0
+        self._subentries_removed = False
 
     def async_entries(self, domain: str | None = None) -> list[_EntryStub]:
         if domain is not None and domain != DOMAIN:
@@ -111,17 +116,21 @@ class _ConfigEntriesHelper(ConfigEntriesDomainUniqueIdLookupMixin):
         self.unload_platform_calls.append((entry, tuple(platforms)))
         return True
 
-    async def async_forward_entry_unload(
+    def async_forward_entry_unload(
         self,
         entry: _EntryStub,
         platforms: object,
-    ) -> bool:
+    ) -> bool | Awaitable[bool]:
         assert entry is self._entry
-        if isinstance(platforms, (list, tuple, set)):
-            payload = tuple(platforms)
-        else:
-            payload = (platforms,)
-        self.forward_unload_calls.append((entry, payload))
+        if not self._subentries_removed:
+            runtime = getattr(self._entry, "runtime_data", None)
+            manager = getattr(runtime, "subentry_manager", None)
+            if manager is not None:
+                removal_result = manager.async_remove_all()
+                if inspect.isawaitable(removal_result):
+                    self._subentries_removed = True
+                    return removal_result
+            self._subentries_removed = True
         return True
 
     async def async_forward_entry_setups(
@@ -226,9 +235,7 @@ class _SubentryConfigEntriesHelper:
         self.unload_platform_calls: list[tuple[Any, tuple[object, ...]]] = []
         self.forward_unload_calls: list[tuple[Any, tuple[object, ...]]] = []
 
-    async def async_unload_platforms(
-        self, entry: Any, platforms: list[object]
-    ) -> bool:  # noqa: FBT001 - Home Assistant signature
+    async def async_unload_platforms(self, entry: Any, platforms: list[object]) -> bool:  # noqa: FBT001 - Home Assistant signature
         self.unload_platform_calls.append((entry, tuple(platforms)))
         return True
 
@@ -245,7 +252,6 @@ class _SubentryConfigEntriesHelper:
         return True
 
 
-@pytest.mark.asyncio
 async def test_async_purge_unloaded_subentry_registrations_removes_registries() -> None:
     """Purge helper should drop orphaned registry entries for missing platforms."""
 
@@ -288,13 +294,14 @@ async def test_async_purge_unloaded_subentry_registrations_removes_registries() 
         config_subentry_id="other-subentry",
     )
 
-    removed_entities, removed_devices = (
-        await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
-            hass,
-            parent_entry_id=parent_entry_id,
-            config_subentry_id=config_subentry_id,
-            entry_type=SUBENTRY_TYPE_TRACKER,
-        )
+    (
+        removed_entities,
+        removed_devices,
+    ) = await integration._async_purge_unloaded_subentry_registrations(  # type: ignore[arg-type]
+        hass,
+        parent_entry_id=parent_entry_id,
+        config_subentry_id=config_subentry_id,
+        entry_type=SUBENTRY_TYPE_TRACKER,
     )
 
     assert removed_entities == 1
@@ -307,7 +314,6 @@ async def test_async_purge_unloaded_subentry_registrations_removes_registries() 
     assert remaining_devices[0].config_subentry_id == "other-subentry"
 
 
-@pytest.mark.asyncio
 async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
     """Subentry unload should purge registry links when platforms never load."""
 
@@ -338,7 +344,9 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
         def __init__(self) -> None:
             self.unload_calls: list[tuple[Any, tuple[object, ...]]] = []
 
-        async def async_unload_platforms(self, entry: Any, platforms: tuple[object, ...]) -> bool:  # noqa: FBT001
+        async def async_unload_platforms(
+            self, entry: Any, platforms: tuple[object, ...]
+        ) -> bool:  # noqa: FBT001
             self.unload_calls.append((entry, platforms))
             raise ValueError("never loaded")
 
@@ -363,8 +371,9 @@ async def test_async_unload_subentry_purges_never_loaded_platforms() -> None:
     assert hass.config_entries.unload_calls == [(subentry, integration.PLATFORMS)]
 
 
-@pytest.mark.asyncio
-async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_cache() -> None:
+async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_cache() -> (
+    None
+):
     """Subentry unload should clear runtime data without touching the parent cache."""
 
     runtime_data = integration.RuntimeData(
@@ -405,7 +414,7 @@ async def test_async_unload_subentry_clears_runtime_data_and_preserves_parent_ca
     )
 
 
-def test_async_unload_entry_removes_subentries_and_registries(
+async def test_async_unload_entry_removes_subentries_and_registries(
     monkeypatch: Any,
 ) -> None:
     """Unload should drop subentries and clear registry assignments."""
@@ -444,7 +453,7 @@ def test_async_unload_entry_removes_subentries_and_registries(
     monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
     monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
 
-    result = asyncio.run(integration.async_unload_entry(hass, entry))
+    result = await integration.async_unload_entry(hass, entry)
 
     assert result is True
     assert coordinator.shutdown_called is True
@@ -462,7 +471,9 @@ def test_async_unload_entry_removes_subentries_and_registries(
     assert hass.config_entries.removed_subentries == []
 
 
-def test_async_unload_entry_defaults_parent_forward_flag(monkeypatch: Any) -> None:
+async def test_async_unload_entry_defaults_parent_forward_flag(
+    monkeypatch: Any,
+) -> None:
     """Unload should assume parent platforms forwarded when flag is missing."""
 
     entry = _EntryStub()
@@ -495,7 +506,7 @@ def test_async_unload_entry_defaults_parent_forward_flag(monkeypatch: Any) -> No
     monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
     monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
 
-    result = asyncio.run(integration.async_unload_entry(hass, entry))
+    result = await integration.async_unload_entry(hass, entry)
 
     assert result is True
     assert hass.config_entries.parent_unload_invocations == 1
@@ -505,7 +516,123 @@ def test_async_unload_entry_defaults_parent_forward_flag(monkeypatch: Any) -> No
     assert hass.config_entries.removed_subentries == []
 
 
-def test_async_unload_entry_passes_entry_to_fcm_release(monkeypatch: Any) -> None:
+async def test_async_unload_entry_preserves_registry_and_user_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reload/unload must not drop registry entries or user-defined labels."""
+
+    class _DeviceStub:
+        def __init__(
+            self,
+            *,
+            device_id: str,
+            config_entry_id: str,
+            identifiers: set[tuple[str, str]],
+            manufacturer: str,
+            model: str,
+            name: str,
+            config_subentry_id: str,
+        ) -> None:
+            self.id = device_id
+            self.config_entry_id = config_entry_id
+            self.identifiers = identifiers
+            self.manufacturer = manufacturer
+            self.model = model
+            self.name = name
+            self.config_subentry_id = config_subentry_id
+            self.name_by_user: str | None = None
+
+    class _DeviceRegistryStub:
+        def __init__(self) -> None:
+            self.devices: dict[str, _DeviceStub] = {}
+
+        def async_get_or_create(
+            self,
+            *,
+            config_entry_id: str,
+            identifiers: set[tuple[str, str]],
+            manufacturer: str,
+            model: str,
+            name: str,
+            config_subentry_id: str,
+        ) -> _DeviceStub:
+            device_id = f"device-{len(self.devices)}"
+            device = _DeviceStub(
+                device_id=device_id,
+                config_entry_id=config_entry_id,
+                identifiers=identifiers,
+                manufacturer=manufacturer,
+                model=model,
+                name=name,
+                config_subentry_id=config_subentry_id,
+            )
+            self.devices[device_id] = device
+            return device
+
+        def async_get(self, device_id: str) -> _DeviceStub | None:
+            return self.devices.get(device_id)
+
+    entry = _EntryStub()
+    subentry = entry.add_subentry("core", ("dev-1",))
+    entry._gfm_parent_platforms_forwarded = True
+
+    coordinator = AsyncMock()
+    coordinator.async_shutdown = AsyncMock()
+    token_cache = AsyncMock()
+    token_cache.close = AsyncMock()
+    subentry_manager = AsyncMock()
+
+    runtime_data = integration.RuntimeData(
+        coordinator=coordinator,
+        token_cache=token_cache,
+        subentry_manager=subentry_manager,
+        fcm_receiver=None,
+    )
+    entry.runtime_data = runtime_data
+
+    hass = _HassStub(entry, runtime_data, _RegistryTracker(), _RegistryTracker())
+    hass.config_entries.async_forward_entry_unload = AsyncMock(return_value=True)
+
+    async def _noop_purge(*_: object, **__: object) -> tuple[int, int]:
+        return (0, 0)
+
+    monkeypatch.setattr(
+        integration,
+        "_async_purge_unloaded_subentry_registrations",
+        _noop_purge,
+    )
+
+    device_registry = _DeviceRegistryStub()
+    with patch(
+        "homeassistant.helpers.device_registry.async_get", return_value=device_registry
+    ):
+        device = device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, "device-to-keep")},
+            manufacturer="Google",
+            model="Find My Device",
+            name="API Name",
+            config_subentry_id=subentry.subentry_id,
+        )
+        device.name_by_user = "Custom Label"
+
+        result = await integration.async_unload_entry(hass, entry)
+
+    assert result is True
+    assert entry.subentries == {subentry.subentry_id: subentry}
+    subentry_manager.async_remove_all.assert_not_called()
+    coordinator.async_shutdown.assert_awaited_once()
+    token_cache.close.assert_awaited_once()
+
+    refreshed = device_registry.async_get(device.id)
+    assert refreshed is not None
+    assert refreshed.name_by_user == "Custom Label"
+    assert refreshed.name == "API Name"
+
+
+async def test_async_unload_entry_passes_entry_to_fcm_release(
+    monkeypatch: Any,
+) -> None:
     """Unload should release FCM with the active entry context."""
 
     entry = _EntryStub()
@@ -541,13 +668,15 @@ def test_async_unload_entry_passes_entry_to_fcm_release(monkeypatch: Any) -> Non
     monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
     monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
 
-    result = asyncio.run(integration.async_unload_entry(hass, entry))
+    result = await integration.async_unload_entry(hass, entry)
 
     assert result is True
     assert release_calls == [(hass, entry)]
 
 
-def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -> None:
+async def test_async_unload_entry_handles_legacy_forward_signature(
+    monkeypatch: Any,
+) -> None:
     """Unload should skip fallback when Home Assistant lacks subentry keyword support."""
 
     entry = _EntryStub()
@@ -603,7 +732,7 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
         _record_purge,
     )
 
-    result = asyncio.run(integration.async_unload_entry(hass, entry))
+    result = await integration.async_unload_entry(hass, entry)
 
     assert result is True
     assert legacy_calls == [
@@ -620,7 +749,7 @@ def test_async_unload_entry_handles_legacy_forward_signature(monkeypatch: Any) -
     assert purge_calls == []
 
 
-def test_async_unload_entry_rolls_back_when_parent_unload_fails(
+async def test_async_unload_entry_rolls_back_when_parent_unload_fails(
     monkeypatch: Any,
 ) -> None:
     """Parent platform unload failure should keep subentries online."""
@@ -665,7 +794,7 @@ def test_async_unload_entry_rolls_back_when_parent_unload_fails(
     monkeypatch.setattr(integration, "loc_unregister_fcm_provider", lambda: None)
     monkeypatch.setattr(integration, "api_unregister_fcm_provider", lambda: None)
 
-    result = asyncio.run(integration.async_unload_entry(hass, entry))
+    result = await integration.async_unload_entry(hass, entry)
 
     assert result is False or hass.config_entries.parent_unload_invocations == 0
     # Subentries and registries should remain untouched because the unload aborted.

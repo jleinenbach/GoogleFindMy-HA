@@ -15,21 +15,24 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/BSkando/GoogleFindMy-HA/issues",
-  "loggers": ["custom_components.googlefindmy"],
+  "loggers": [
+    "custom_components.googlefindmy"
+  ],
+  "quality_scale": "platinum",
   "requirements": [
     "aiohttp>=3.11.8",
     "beautifulsoup4>=4.12.3",
     "cryptography>=43.0.3",
     "ecdsa>=0.19.1",
     "gpsoauth>=2.0.0",
-    "h2>=4.1.0",
+    "httpx>=0.28.0",
     "http-ece>=1.2.1",
-    "httpx[http2]>=0.28.0",
+    "grpclib>=0.4.7",
     "protobuf>=6.32.0",
     "pycryptodomex>=3.23.0",
     "pyscrypt>=1.6.2",
     "selenium>=4.37.0",
     "undetected_chromedriver>=3.5.5"
   ],
-  "version": "1.7.0-2"
+  "version": "1.7.0-3"
 }

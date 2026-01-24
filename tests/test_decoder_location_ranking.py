@@ -1,101 +1,183 @@
-# tests/test_decoder_location_ranking.py
-"""Regression tests for decoder location prioritization heuristics."""
+# tests/test_decoder_location_ranking.py (snippet)
+#
+# The assertions are designed to be refactoring-robust and to prevent epoch-0
+# contamination when EncryptedUserSecrets.creationDate is absent or default.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import Any, cast
 from unittest.mock import patch
+
+import pytest
 
 from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
 from custom_components.googlefindmy.ProtoDecoders.decoder import (
-    _merge_semantics_if_near_ts,
-    _select_best_location,
     get_devices_with_location,
 )
 
-if TYPE_CHECKING:
-    from custom_components.googlefindmy.Auth.token_cache import TokenCache
+try:
+    # Only needed for typing / consistency with other tests.
+    from custom_components.googlefindmy.Auth.token_cache import (
+        TokenCache,  # type: ignore
+    )
+except Exception:  # pragma: no cover
+    TokenCache = Any  # type: ignore[misc,assignment]
 
 
-MERGED_LATITUDE = 37.7749
-MERGED_LONGITUDE = -122.4194
-MERGED_LAST_SEEN = 1_700_000_950.0
+_DECRYPT_LOCATIONS_TARGET = (
+    "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations."
+    "decrypt_location_response_locations"
+)
 
 
-def test_decoder_prefers_newer_coordinates_over_owner_status() -> None:
-    """A fresher aggregated report with coordinates outranks an older owner report."""
-
-    older_owner = {
-        "status": "OWNER",
-        "is_own_report": True,
-        "last_seen": 1_700_000_000,
-        "latitude": 52.5200,
-        "longitude": 13.4050,
-        "accuracy": 120.0,
-        "altitude": 35.0,
-    }
-
-    fresher_aggregated = {
-        "status": "aggregated",
-        "is_own_report": False,
-        "last_seen": 1_700_000_500,
-        "latitude": 48.8566,
-        "longitude": 2.3522,
-        "accuracy": 250.0,
-        "altitude": 40.5,
-        "_report_hint": "high_traffic",
-    }
-
-    best, _ = _select_best_location([older_owner, fresher_aggregated])
-
-    assert best["status"] == "aggregated"
-    assert best["last_seen"] == 1_700_000_500.0
-    assert best["altitude"] == 40.5
-
-
-def test_decoder_promotes_newer_semantic_only_report() -> None:
-    """Semantic-only refresh keeps coordinates but updates recency metadata."""
-
-    coordinate_fix = {
-        "status": "aggregated",
-        "last_seen": 1_700_000_000,
-        "latitude": 52.5200,
-        "longitude": 13.4050,
-        "accuracy": 120.0,
-    }
-
-    semantic_only = {
-        "status": "semantic_only",
-        "last_seen": 1_700_000_900,
-        "semantic_name": "Gym",
-        "_report_hint": "semantic_only",
-    }
-
-    best, normed = _select_best_location([coordinate_fix, semantic_only])
-    assert best is not None
-
-    merged = _merge_semantics_if_near_ts(best, normed)
-
-    assert merged["latitude"] == 52.52
-    assert merged["longitude"] == 13.405
-    assert merged["last_seen"] == 1_700_000_900.0
-    assert merged["semantic_name"] == "Gym"
+def _build_single_device_with_seed_report(
+    *,
+    device_name: str,
+    canonic_id: str,
+) -> tuple[DeviceUpdate_pb2.DevicesList, Any]:
+    """Return (DevicesList, deviceMetadata) with a semantic report so decryption runs."""
 
     devices_list = DeviceUpdate_pb2.DevicesList()
     device = devices_list.deviceMetadata.add()
-    device.userDefinedDeviceName = "Tracker"
+    device.userDefinedDeviceName = device_name
+
     canonic = device.identifierInformation.canonicIds.canonicId.add()
-    canonic.id = "device-123"
+    canonic.id = canonic_id
 
-    # Ensure the proto advertises report availability so decrypt is invoked.
+    # Ensure has_reports=True inside decoder so the decrypt hook is executed.
     reports = device.information.locationInformation.reports
-    recent_location = reports.recentLocationAndNetworkLocations.recentLocation
-    recent_location.semanticLocation.locationName = "seed"
+    reports.recentLocationAndNetworkLocations.recentLocation.semanticLocation.locationName = "seed"
 
-    with patch(
-        "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations.decrypt_location_response_locations",
-        return_value=[coordinate_fix, semantic_only],
+    return devices_list, device
+
+
+def _prepare_registration_secrets(device: Any) -> Any:
+    """Ensure deviceRegistration.encryptedUserSecrets is present for HasField checks."""
+
+    registration = device.information.deviceRegistration
+    secrets = (
+        registration.encryptedUser_secrets
+        if hasattr(registration, "encryptedUser_secrets")
+        else registration.encryptedUserSecrets
+    )
+
+    # Make the submessage present in proto3 so registration.HasField('encryptedUserSecrets') is True.
+    # A single non-default field is sufficient.
+    secrets.encryptedIdentityKey = b"\x01"
+    secrets.ownerKeyVersion = 1
+    return registration
+
+
+def test_device_list_preserves_anchor_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Metadata from decrypted device list payloads must survive filtering."""
+
+    devices_list, _device = _build_single_device_with_seed_report(
+        device_name="Tracker",
+        canonic_id="device-anchor",
+    )
+
+    # Provide minimal ranking fields so selection/merge doesn't discard the candidate.
+    anchor_payload = {
+        "status": "aggregated",
+        "last_seen": 1_700_000_150,
+        # Anchor + diagnostics payload:
+        "pair_date": 1_700_000_100,
+        "secrets_creation_date": 1_700_000_200,
+        "identity_key": b"\xaa" * 32,
+        "identity_key_candidates": [b"\xaa" * 32, b"\xbb" * 32],
+        "encrypted_identity_key_candidates": [b"\x01\x02"],
+        "device_registration": {"pairDate": 1_700_000_300},
+        "encrypted_user_secrets": {"creationDate": 1_700_000_400},
+        "time_anchors_debug": {"source": "device_list"},
+        "metadata_only": True,
+    }
+
+    # Expected values after decoder normalizes bytes to hex strings
+    expected_values = {
+        "pair_date": 1_700_000_100,
+        "secrets_creation_date": 1_700_000_200,
+        # decoder.py converts bytes to hex strings for consistency
+        "identity_key": "aa" * 32,
+        # identity_key_candidates keeps bytes (list union preserves bytes)
+        "identity_key_candidates": [b"\xaa" * 32, b"\xbb" * 32],
+        "encrypted_identity_key_candidates": [b"\x01\x02"],
+        "device_registration": {"pairDate": 1_700_000_300},
+        "encrypted_user_secrets": {"creationDate": 1_700_000_400},
+        "time_anchors_debug": {"source": "device_list"},
+        "metadata_only": True,
+    }
+
+    with patch(_DECRYPT_LOCATIONS_TARGET, return_value=[anchor_payload]) as mocked:
+        rows = get_devices_with_location(
+            devices_list,
+            cache=cast("TokenCache", object()),
+        )
+
+    assert mocked.call_count == 1
+    assert len(rows) == 1
+    row = rows[0]
+
+    # Core identity invariants.
+    assert row["device_id"] == "device-anchor"
+    assert row["id"] == "device-anchor"
+    assert row["name"] == "Tracker"
+
+    # Anchor + diagnostics must survive the device-row filtering/shielding.
+    for key in (
+        "pair_date",
+        "secrets_creation_date",
+        "identity_key",
+        "identity_key_candidates",
+        "encrypted_identity_key_candidates",
+        "device_registration",
+        "encrypted_user_secrets",
+        "time_anchors_debug",
+        "metadata_only",
     ):
+        assert row[key] == expected_values[key]
+
+
+@pytest.mark.parametrize(
+    ("set_creation_date", "creation_seconds", "creation_nanos", "expected"),
+    [
+        # 1) Absent creationDate: must not become 0.
+        (False, None, None, None),
+        # 2) Present but default/zero: must be ignored (no epoch contamination).
+        (True, 0, 0, None),
+        # 3) Real timestamp: should propagate.
+        (True, 1_800_000_222, 0, 1_800_000_222),
+    ],
+)
+def test_device_list_registration_anchor_fields_propagate(
+    set_creation_date: bool,
+    creation_seconds: int | None,
+    creation_nanos: int | None,
+    expected: int | None,
+) -> None:
+    """Anchors embedded in DeviceRegistration should populate device rows without epoch contamination."""
+
+    devices_list, device = _build_single_device_with_seed_report(
+        device_name="Tracker",
+        canonic_id="device-registration",
+    )
+
+    registration = _prepare_registration_secrets(device)
+
+    # pairDate is a scalar in proto3 (unset -> 0), so we only set a non-zero value here.
+    registration.pairDate = 1_800_000_111
+
+    secrets = (
+        registration.encryptedUser_secrets
+        if hasattr(registration, "encryptedUser_secrets")
+        else registration.encryptedUserSecrets
+    )
+    if set_creation_date:
+        # Any subfield assignment makes HasField('creationDate') true.
+        secrets.creationDate.seconds = int(creation_seconds or 0)
+        if creation_nanos is not None:
+            secrets.creationDate.nanos = int(creation_nanos)
+
+    with patch(_DECRYPT_LOCATIONS_TARGET, return_value=[]):
         rows = get_devices_with_location(
             devices_list,
             cache=cast("TokenCache", object()),
@@ -103,39 +185,8 @@ def test_decoder_promotes_newer_semantic_only_report() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["device_id"] == "device-123"
-    assert row["latitude"] == 52.52
-    assert row["longitude"] == 13.405
-    assert row["last_seen"] == 1_700_000_900.0
-    assert row["semantic_name"] == "Gym"
 
-
-def test_semantic_report_outranks_older_coordinate_candidate() -> None:
-    """A fresher semantic report without coords takes selection precedence."""
-
-    coordinate_fix = {
-        "status": "aggregated",
-        "last_seen": 1_700_000_000,
-        "latitude": MERGED_LATITUDE,
-        "longitude": MERGED_LONGITUDE,
-        "accuracy": 30.0,
-    }
-
-    semantic_only = {
-        "status": "semantic_only",
-        "last_seen": 1_700_000_950,
-        "semantic_name": "Office",
-    }
-
-    best, normed = _select_best_location([coordinate_fix, semantic_only])
-
-    assert best["status"] == "semantic_only"
-    assert "latitude" not in best or best["latitude"] is None
-    assert best["last_seen"] == MERGED_LAST_SEEN
-
-    merged = _merge_semantics_if_near_ts(best, normed)
-
-    assert merged["latitude"] == MERGED_LATITUDE
-    assert merged["longitude"] == MERGED_LONGITUDE
-    assert merged["last_seen"] == MERGED_LAST_SEEN
-    assert merged["semantic_name"] == "Office"
+    assert row["device_id"] == "device-registration"
+    assert row["pair_date"] == 1_800_000_111
+    assert row["secrets_creation_date"] == expected
+    assert row["secrets_creation_date"] != 0

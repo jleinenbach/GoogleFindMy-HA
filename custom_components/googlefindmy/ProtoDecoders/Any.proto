@@ -1,0 +1,21 @@
+// custom_components/googlefindmy/ProtoDecoders/Any.proto
+//
+// Vendored google.protobuf.Any definition.
+// Reference: https://github.com/protocolbuffers/protobuf/blob/master/src/google/protobuf/any.proto
+//
+// This is a local copy to avoid depending on googleapis-common-protos.
+
+syntax = "proto3";
+
+package google.protobuf;
+
+// `Any` contains an arbitrary serialized protocol buffer message along with a
+// URL that describes the type of the serialized message.
+message Any {
+  // A URL/resource name that uniquely identifies the type of the serialized
+  // protocol buffer message. E.g., "type.googleapis.com/google.rpc.DebugInfo"
+  string type_url = 1;
+
+  // Must be a valid serialized protocol buffer of the above specified type.
+  bytes value = 2;
+}

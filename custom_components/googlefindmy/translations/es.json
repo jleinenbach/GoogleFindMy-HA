@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
-          "min_accuracy_threshold": "Precisión mínima (m)",
-          "movement_threshold": "Umbral de movimiento (m)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Palabras clave del filtro (separadas por comas)",
           "enable_stats_entities": "Crear entidades de estadísticas",
@@ -250,33 +248,33 @@
           "new_secrets_json": "Nuevo secrets.json (contenido completo)",
           "new_oauth_token": "Nuevo token OAuth",
           "new_google_email": "Correo de Google",
-          "subentry": "Feature group"
+          "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la sección [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver los flujos disponibles."
+          "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la sección [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver los flujos disponibles."
         }
       },
       "settings": {
         "title": "Opciones",
-        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Precisión mínima: ignorar ubicaciones peores que este valor (25–500 metros)\n• Umbral de movimiento: movimiento mínimo necesario para activar una actualización de ubicación (10–200 metros)\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
+        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Umbral de obsolescencia: tras este tiempo sin actualizaciones, el estado del rastreador pasa a desconocido\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
         "data": {
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
-          "min_accuracy_threshold": "Precisión mínima (m)",
-          "movement_threshold": "Umbral de movimiento (m)",
+          "stale_threshold": "Umbral de obsolescencia (s)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Palabras clave del filtro (separadas por comas)",
           "enable_stats_entities": "Crear entidades de estadísticas",
           "delete_caches_on_remove": "Borrar cachés al eliminar la entrada",
           "map_view_token_expiration": "Activar caducidad del token de la vista de mapa",
           "contributor_mode": "Modo de contribución de ubicaciones",
-          "subentry": "Feature group"
+          "subentry": "Grupo de funciones"
         },
         "data_description": {
+          "stale_threshold": "Tras este número de segundos sin una actualización de ubicación, el estado del rastreador pasa a desconocido. Las últimas coordenadas conocidas siguen disponibles en los atributos. Por defecto: 1800 (30 minutos).",
           "delete_caches_on_remove": "Borra los tokens almacenados en caché y los metadatos de los dispositivos cuando se elimina esta entrada.",
           "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan.",
           "contributor_mode": "Elige cómo contribuye tu dispositivo a la red de Google (Zonas de alto tránsito por defecto o Todas las zonas para aportes colaborativos).",
-          "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
+          "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
         }
       },
       "visibility": {
@@ -284,10 +282,10 @@
         "description": "Restaura dispositivos previamente ignorados para que vuelvan a ser visibles. Selecciona uno o varios dispositivos y guarda.",
         "data": {
           "unignore_devices": "Restaurar dispositivos",
-          "subentry": "Feature group"
+          "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "subentry": "Los dispositivos restaurados se asignan al grupo de funciones elegido. Consulta [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para obtener orientación."
+          "subentry": "Los dispositivos restaurados se asignan al grupo de funciones elegido. Consulta [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para obtener orientación."
         }
       },
       "repairs": {
@@ -424,6 +422,28 @@
       },
       "reset_statistics": {
         "name": "Restablecer estadísticas"
+      },
+      "regenerate_aas_token": {
+        "name": "Regenerar token AAS",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Período de espera (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Espera restante (s)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "Regenerar token ADM",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Período de espera (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Espera restante (s)"
+          }
+        }
       }
     },
     "binary_sensor": {
@@ -513,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Altitud (m)"
+          },
+          "location_age": {
+            "name": "Antigüedad de la ubicación (s)"
+          },
+          "location_status": {
+            "name": "Estado de la ubicación"
+          },
+          "last_latitude": {
+            "name": "Última latitud conocida"
+          },
+          "last_longitude": {
+            "name": "Última longitud conocida"
           }
         }
       }
@@ -586,18 +618,19 @@
       "stat_invalid_coords": {
         "name": "Coordenadas no válidas"
       },
-      "stat_low_quality_dropped": {
-        "name": "Lecturas de baja precisión descartadas"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Actualizaciones no significativas descartadas"
-      }
+        "stat_fused_updates": {
+            "name": "Actualizaciones de ubicación fusionadas"
+        }
     }
   },
   "issues": {
     "auth_expired": {
       "title": "Se requiere volver a iniciar sesión",
       "description": "La autenticación de Google Find My Device no es válida o ha caducado.\n\n**Entrada:** {entry_title}\n**Cuenta:** {email}\n\nEn la tarjeta de la integración, elige **Reconfigurar** para volver a autenticarte. Si recientemente cambiaste tu contraseña de Google o revocaste tokens, tendrás que iniciar sesión aquí para restablecer la funcionalidad."
+    },
+    "fcm_connection_stuck": {
+      "title": "Conexión push de FCM fallida",
+      "description": "La conexión en segundo plano con Google está bloqueada.\n\n1. ¿El **puerto TCP 5228** saliente está permitido en tu firewall?\n2. Si la red está bien, intenta regenerar tu `secrets.json` (las credenciales podrían estar divididas/revocadas)."
     },
     "multiple_config_entries": {
       "title": "Se detectaron varias entradas de configuración",

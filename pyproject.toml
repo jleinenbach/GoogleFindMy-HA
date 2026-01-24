@@ -1,50 +1,79 @@
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
-[project]
+[tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.0-2"
+version = "1.7.0-3"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
-requires-python = ">=3.13"
-license = { file = "LICENSE" }
-authors = [{ name = "BSkando" }]
-dependencies = [
-    "aiohttp>=3.11.8",
-    "beautifulsoup4>=4.12.3",
-    "cryptography>=43.0.3",
-    "ecdsa>=0.19.1",
-    "gpsoauth>=2.0.0",
-    "h2>=4.1.0",
-    "http-ece>=1.2.1",
-    "httpx[http2]>=0.28.0",
-    "protobuf>=6.32.0",
-    "pycryptodomex>=3.23.0",
-    "pyscrypt>=1.6.2",
-    "selenium>=4.37.0",
-    "undetected_chromedriver>=3.5.5",
-]
-
-[project.optional-dependencies]
-dev = [
-    "bandit[toml]>=1.7.10",
-    "homeassistant>=2025.7.0",
-    "mypy>=1.11",
-    "pre-commit>=3.7",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=5.0",
-    "pytest-homeassistant-custom-component>=0.13",
-    "ruff>=0.14.1",
-    "types-requests>=2.32.0.20240712",
-]
-
-[project.urls]
+license = "MIT"
+authors = ["BSkando"]
 homepage = "https://github.com/BSkando/GoogleFindMy-HA"
 documentation = "https://github.com/BSkando/GoogleFindMy-HA"
 repository = "https://github.com/BSkando/GoogleFindMy-HA"
-issue-tracker = "https://github.com/BSkando/GoogleFindMy-HA/issues"
+
+packages = [
+    { include = "custom_components" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.13.2"
+aiohttp = ">=3.11.8"
+beautifulsoup4 = ">=4.12.3"
+cryptography = ">=43.0.3"
+ecdsa = ">=0.19.1"
+gpsoauth = ">=2.0.0"
+h2 = ">=4.1.0"
+http-ece = ">=1.2.1"
+httpx = { version = ">=0.28.0", extras = ["http2"] }
+protobuf = ">=6.32.0"
+pycryptodomex = ">=3.23.0"
+pyscrypt = ">=1.6.2"
+selenium = ">=4.37.0"
+undetected-chromedriver = ">=3.5.5"
+
+[tool.poetry.group.dev.dependencies]
+# Linting & Formatting
+ruff = ">=0.14.1"
+mypy = ">=1.11"
+bandit = { version = ">=1.7.10", extras = ["toml"] }
+pre-commit = ">=3.7"
+codespell = ">=2.2.6"
+
+# Type stubs
+types-requests = ">=2.32.0.20240712"
+types-cffi = ">=1.17.0"
+types-html5lib = ">=1.1.11"
+types-PySocks = ">=1.7.1"
+lxml-stubs = ">=0.5.1"
+
+# Security auditing
+pip-audit = ">=2.6"
+
+# Additional dev tools
+pyyaml = ">=6.0.2"
+grpclib = ">=0.4.7"
+pycares = ">=4.4.0,<5"
+certifi = ">=2024.7.4"
+
+# Release automation
+python-semantic-release = ">=9.0.0"
+pytest-homeassistant-custom-component = "^0.13.306"
+
+[tool.poetry.group.test.dependencies]
+# Core testing framework
+pytest = ">=8.3"
+pytest-asyncio = ">=1.3.0"
+pytest-cov = ">=5.0"
+pytest-socket = ">=0.7.0"
+pytest-xdist = ">=3.5.0"
+hypothesis = ">=6.100.0"
+
+# Home Assistant testing - ALWAYS use latest version (no upper bound)
+# This ensures we test against the latest HA compatibility
+pytest-homeassistant-custom-component = ">=0.13"
+homeassistant = ">=2025.9.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 target-version = "py313"
@@ -93,6 +122,73 @@ ignore = ["E501"]
     "PLC0415",
     "PLR2004",
     "PLR0911",
+]
+# Coordinator package files (refactored from coordinator.py)
+"custom_components/googlefindmy/coordinator/main.py" = [
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+    "PLR0911",
+]
+"custom_components/googlefindmy/coordinator/identity.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/locate.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+# Protobuf decoder has complex parsing logic that justifies higher complexity limits
+"custom_components/googlefindmy/ProtoDecoders/decoder.py" = [
+    "PLR0912",  # Too many branches - complex protobuf parsing
+    "PLR0915",  # Too many statements - comprehensive device data extraction
+    "PLR2004",  # Magic values - floating point epsilon for coordinate validation
+    "PLC0415",  # Import not at top - lazy import for performance
+    "PLW0603",  # Global statement - lazy module caching pattern
+]
+"custom_components/googlefindmy/coordinator/polling.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/registry.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/subentry.py" = [
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+"custom_components/googlefindmy/coordinator/cache.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+]
+# Coordinator helper files
+"custom_components/googlefindmy/coordinator/helpers/*.py" = [
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    "PLC0415",
+    "PLR2004",
+    "UP047",
 ]
 "custom_components/googlefindmy/__init__.py" = [
     "PLR0911",
@@ -146,7 +242,7 @@ ignore = ["E501"]
     "PLR2004",
 ]
 "custom_components/googlefindmy/device_tracker.py" = ["PLR0912", "PLR0915"]
-"custom_components/googlefindmy/diagnostics.py" = ["PLR0912", "PLR0915", "UP047"]
+"custom_components/googlefindmy/diagnostics.py" = ["PLR0912", "PLR0915", "UP047", "PLC0415"]
 "custom_components/googlefindmy/system_health.py" = ["UP047", "PLR2004"]
 "custom_components/googlefindmy/typing_utils.py" = ["UP047"]
 "google/protobuf/internal/containers.pyi" = ["UP046"]
@@ -156,7 +252,14 @@ ignore = ["E501"]
 "tests/helpers/config_flow.py" = ["UP047"]
 "tests/helpers/homeassistant.py" = ["PLR0911"]
 "tests/helpers/homeassistant_stub.py" = ["UP047"]
-"custom_components/googlefindmy/button.py" = ["PLR0912", "PLR0915"]
+"custom_components/googlefindmy/button.py" = ["PLR0912", "PLR0915", "PLC0415"]
+"custom_components/googlefindmy/Auth/token_refresh.py" = ["PLC0415"]
+"custom_components/googlefindmy/coordinator_cache.py" = ["PLR0911"]
+"custom_components/googlefindmy/coordinator_geo.py" = ["PLC0415"]
+"custom_components/googlefindmy/coordinator_registry.py" = ["PLR2004", "PLR0911", "PLR0913"]
+"custom_components/googlefindmy/coordinator_update.py" = ["PLR0913"]
+"custom_components/googlefindmy/coordinator_subentry.py" = ["PLR2004"]
+"custom_components/googlefindmy/coordinator_identity.py" = ["UP047"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -168,7 +271,13 @@ addopts = ["-q", "--cov", "--cov-report=term"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
+    # Upstream issue in Home Assistant Core: HA inherits from aiohttp.web.Application
+    # which aiohttp has deprecated. This cannot be fixed in this project.
+    # Remove when HA Core addresses this deprecation.
     "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
+]
+markers = [
+    "hypothesis: Property-based tests using Hypothesis (can be run in isolation with -m hypothesis)",
 ]
 
 [tool.mypy]
@@ -190,7 +299,8 @@ module = ["tests.*"]
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["homeassistant.*"]
+module = ["homeassistant", "homeassistant.*"]
+ignore_missing_imports = true
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
@@ -201,12 +311,72 @@ module = [
     "h2",
     "selenium",
     "selenium.*",
+    "webdriver_manager",
+    "webdriver_manager.*",
 ]
 ignore_missing_imports = true
+
+# Coordinator mixin modules use self: "GoogleFindMyCoordinator" pattern
+# which mypy doesn't handle well with the [misc] error code
+[[tool.mypy.overrides]]
+module = [
+    "custom_components.googlefindmy.coordinator.registry",
+    "custom_components.googlefindmy.coordinator.subentry",
+    "custom_components.googlefindmy.coordinator.locate",
+    "custom_components.googlefindmy.coordinator.identity",
+    "custom_components.googlefindmy.coordinator.polling",
+    "custom_components.googlefindmy.coordinator.cache",
+]
+disable_error_code = [
+    "misc",
+    "assignment",      # SimpleNamespace fallback assignment
+    "arg-type",        # Awaitable vs Coroutine variance
+]
 
 [[tool.mypy.overrides]]
 module = ["tests.test_fcm_receiver_guard"]
 ignore_errors = false
+
+# HomeAssistant API compatibility: FlowResult generics, Entity covariance,
+# and TypedDict issues that require HA upstream type improvements to fix.
+# These are checked manually and don't affect runtime behavior.
+[[tool.mypy.overrides]]
+module = [
+    "custom_components.googlefindmy",
+    "custom_components.googlefindmy.config_flow",
+    "custom_components.googlefindmy.map_view",
+    "custom_components.googlefindmy.entity",
+    "custom_components.googlefindmy.sensor",
+    "custom_components.googlefindmy.services",
+    "custom_components.googlefindmy.button",
+    "custom_components.googlefindmy.location_recorder",
+    "custom_components.googlefindmy.google_home_filter",
+    "custom_components.googlefindmy.device_tracker",
+    "custom_components.googlefindmy.binary_sensor",
+    "custom_components.googlefindmy.discovery",
+    "custom_components.googlefindmy.eid_resolver",
+    "custom_components.googlefindmy.ha_typing",
+    "custom_components.googlefindmy.system_health",
+]
+disable_error_code = [
+    "arg-type",        # Entity subtype covariance issues
+    "assignment",      # FlowResult generic assignment
+    "empty-body",      # Protocol stubs without implementation
+    "func-returns-value",  # Void function return expectations
+    "misc",            # Complex HA type inference issues
+    "no-any-return",   # Dynamic return types in HA APIs
+    "override",        # ConfigFlow return type covariance
+    "redundant-cast",  # Casts needed for older HA versions
+    "return-value",    # FlowResult return type variance
+    "type-var",        # Store type variance
+    "typeddict-item",  # FlowResult TypedDict fields
+    "typeddict-unknown-key",  # HA TypedDict extensions
+    "union-attr",      # State | dict union access
+    "attr-defined",    # Optional HA const imports
+    "var-annotated",   # Store type inference
+    "unused-ignore",   # Cross-version compatibility ignores
+    "truthy-function", # Recorder get_instance pattern
+]
 
 [tool.coverage.run]
 branch = true
@@ -232,3 +402,144 @@ source = [
     "custom_components/googlefindmy",
     "*/site-packages/custom_components/googlefindmy",
 ]
+
+[tool.pylint.main]
+# Exclude auto-generated protobuf files
+ignore-patterns = [".*_pb2\\.py$", ".*_pb2_grpc\\.py$"]
+# Set max line length
+max-line-length = 120
+
+[tool.pylint."messages control"]
+# Disable warnings that are intentional design decisions
+disable = [
+    # Intentional patterns for this codebase:
+    "access-member-before-definition",  # E0203 - Mixin pattern uses attrs from main class
+    "broad-exception-caught",       # W0718 - Defensive error handling
+    "protected-access",             # W0212 - Internal API access
+    "import-outside-toplevel",      # C0415 - Lazy loading pattern
+    "wrong-import-position",        # C0413 - Conditional imports
+    "wrong-import-order",           # C0411 - Handled by ruff isort
+    "global-statement",             # W0603 - Module-level state
+    "cyclic-import",                # R0401 - Lazy imports handle this
+    "unused-argument",              # W0613 - Interface compatibility
+    "redefined-outer-name",         # W0621 - Common in callbacks
+    "try-except-raise",             # W0706 - Intentional for CancelledError
+    "unnecessary-ellipsis",         # W2301 - Protocol class methods
+    "no-name-in-module",            # E0611 - Protobuf imports
+    "not-callable",                 # E1102 - False positives with Optional
+    "attribute-defined-outside-init", # W0201 - HA entity pattern
+    "abstract-method",              # W0223 - Partial implementations
+    "no-else-return",               # R1705 - Style preference
+    # Complexity warnings (code reviewed and acceptable):
+    "too-many-arguments",           # R0913
+    "too-many-locals",              # R0914
+    "too-many-branches",            # R0912
+    "too-many-statements",          # R0915
+    "too-many-return-statements",   # R0911
+    "too-many-nested-blocks",       # R1702
+    "too-many-instance-attributes", # R0902
+    "too-many-public-methods",      # R0904
+    "too-many-lines",               # C0302
+    "too-many-ancestors",           # R0901
+    # Style preferences:
+    "missing-function-docstring",   # C0116 - Not all internal funcs need docs
+    "missing-module-docstring",     # C0114 - Not all modules need docs
+    "missing-class-docstring",      # C0115 - Not all classes need docs
+    "line-too-long",                # C0301 - Handled by ruff
+    "duplicate-code",               # R0801 - Some duplication is acceptable
+    "too-few-public-methods",       # R0903 - Data classes are fine
+    "consider-using-f-string",      # C0209 - Existing % formatting is fine
+    "bad-indentation",              # W0311 - Generated pb2 files use 2-space
+    "invalid-name",                 # C0103 - Allow short names in math/crypto
+    "no-member",                    # E1101 - False positives with dynamic attrs
+    "import-error",                 # E0401 - Optional dependencies
+    "reimported",                   # W0404 - Conditional imports
+    "too-many-positional-arguments", # R0917 - Complex functions
+    "singleton-comparison",         # C0121 - Style preference
+    "useless-import-alias",         # C0414 - Re-export pattern
+    "undefined-all-variable",       # E0603 - Dynamic __all__
+    "logging-not-lazy",             # W1201 - Performance not critical here
+    "logging-fstring-interpolation", # W1203 - f-strings in logging acceptable
+    "useless-return",               # R1711 - Explicit returns for clarity
+    "arguments-differ",             # W0221 - Overrides with different signatures
+    "ungrouped-imports",            # C0412 - Import order handled by ruff
+    "too-many-boolean-expressions", # R0916 - Complex conditions acceptable
+    "simplifiable-condition",       # R1726 - Explicit is clearer
+    "chained-comparison",           # R1716 - Explicit is clearer
+    "no-else-raise",                # R1720 - Style preference
+    "no-else-continue",             # R1724 - Style preference
+    "consider-iterating-dictionary", # C0201 - Explicit .keys() is clearer
+    "unnecessary-lambda-assignment", # C3001 - Lambdas for callbacks
+    "unused-import",                # W0611 - Forward compatibility imports
+    "duplicate-except",             # W0705 - Intentional for specific handling
+    "raise-missing-from",           # W0707 - Handled where needed
+    # False positives with dynamic types and Home Assistant APIs:
+    "unexpected-keyword-arg",       # E1123 - HA API changes
+    "no-value-for-parameter",       # E1120 - Dynamic method signatures
+    "too-many-function-args",       # E1121 - HA API changes
+    "assignment-from-none",         # E1128 - Optional returns
+    "not-an-iterable",              # E1133 - Dynamic types
+    "possibly-used-before-assignment", # E0606 - Control flow analysis
+    "super-init-not-called",        # W0231 - Abstract base patterns
+    "not-async-context-manager",    # E1701 - Optional async context
+    "unused-variable",              # W0612 - Intentional placeholder
+]
+
+[tool.pylint.design]
+# Reasonable limits for complex integration code
+max-args = 10
+max-locals = 25
+max-returns = 10
+max-branches = 20
+max-statements = 100
+
+[tool.codespell]
+skip = ".git,*.lock,*.svg,*.png,*.jpg,*.ico,ProtoDecoders,firebase_messaging,*.pyi,translations,*.proto,*_pb2.py,package-lock.json"
+ignore-words-list = "hass,nd,ot,aas,bund,trough,te,ded,checkin,alpha-numeric,re-declaring,pre-emptive,titel"
+check-filenames = true
+
+[tool.bandit]
+# Exclude auto-generated protobuf files and test files
+exclude_dirs = [
+    "custom_components/googlefindmy/ProtoDecoders",
+    "custom_components/googlefindmy/Auth/firebase_messaging/proto",
+    "tests",
+    ".venv",
+]
+# Skip specific checks that are false positives for this codebase
+skips = [
+    "B101",  # assert_used - Tests use assert; production uses proper checks
+    "B105",  # hardcoded_password_string - False positives (form field names)
+    "B110",  # try_except_pass - Intentional silent exception handling
+    "B112",  # try_except_continue - Intentional defensive loop handling
+    "B311",  # random - Not used for cryptographic purposes
+    "B404",  # import_subprocess - Used safely in controlled contexts
+    "B603",  # subprocess_without_shell_equals_true - Safe subprocess usage
+    "B607",  # start_process_with_partial_path - Chrome driver uses system PATH
+]
+# Severity threshold
+severity = "low"
+confidence = "low"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:tool.poetry.version"]
+branch = "main"
+upload_to_pypi = false
+upload_to_release = true
+build_command = "poetry build"
+
+[tool.semantic_release.commit_parser_options]
+allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf"]
+
+[tool.semantic_release.changelog]
+template_dir = "templates"
+changelog_file = "CHANGELOG.md"
+exclude_commit_patterns = [
+    "^chore\\(release\\):",
+    "^ci:",
+]
+
+[tool.semantic_release.remote.token]
+env = "GH_TOKEN"

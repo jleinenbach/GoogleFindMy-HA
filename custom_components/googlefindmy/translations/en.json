@@ -35,8 +35,6 @@
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
-          "min_accuracy_threshold": "Minimum accuracy (m)",
-          "movement_threshold": "Movement threshold (m)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
@@ -258,12 +256,11 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Minimum accuracy: Ignore locations with an accuracy worse than this value (25–500 meters)\n• Movement threshold: Minimum movement required to trigger a location update (10–200 meters)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
+        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Stale threshold: After this time without updates, tracker state becomes unknown\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: nest matches Kitchen Nest Mini",
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
-          "min_accuracy_threshold": "Minimum accuracy (m)",
-          "movement_threshold": "Movement threshold (m)",
+          "stale_threshold": "Stale threshold (s)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
@@ -273,6 +270,7 @@
           "subentry": "Feature group"
         },
         "data_description": {
+          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Last known coordinates remain available in attributes. Default: 1800 (30 minutes).",
           "delete_caches_on_remove": "Remove cached tokens and device metadata when this entry is deleted.",
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
           "contributor_mode": "Choose how your device contributes to Google's network (High-traffic areas by default, or All areas for crowdsourced reporting).",
@@ -424,6 +422,28 @@
       },
       "reset_statistics": {
         "name": "Reset Statistics"
+      },
+      "regenerate_aas_token": {
+        "name": "Regenerate AAS Token",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Cooldown period (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Cooldown remaining (s)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "Regenerate ADM Token",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Cooldown period (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Cooldown remaining (s)"
+          }
+        }
       }
     },
     "binary_sensor": {
@@ -513,6 +533,18 @@
           },
           "altitude_m": {
             "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Location age (s)"
+          },
+          "location_status": {
+            "name": "Location status"
+          },
+          "last_latitude": {
+            "name": "Last known latitude"
+          },
+          "last_longitude": {
+            "name": "Last known longitude"
           }
         }
       }
@@ -560,11 +592,11 @@
           "accuracy_m": {
             "name": "Accuracy (m)"
           },
-        "altitude_m": {
-          "name": "Altitude (m)"
+          "altitude_m": {
+            "name": "Altitude (m)"
+          }
         }
-      }
-    },
+      },
       "semantic_labels": {
         "name": "Semantic labels"
       },
@@ -586,11 +618,8 @@
       "stat_invalid_coords": {
         "name": "Invalid coordinates"
       },
-      "stat_low_quality_dropped": {
-        "name": "Low-accuracy dropped"
-      },
-      "stat_non_significant_dropped": {
-        "name": "Non-significant updates dropped"
+      "stat_fused_updates": {
+        "name": "Fused location updates"
       }
     }
   },
@@ -598,6 +627,10 @@
     "auth_expired": {
       "title": "Reauthentication required",
       "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
+    },
+    "fcm_connection_stuck": {
+      "title": "FCM Push Connection Failed",
+      "description": "The background connection to Google is blocked.\n\n1. Is outgoing **TCP Port 5228** allowed in your firewall?\n2. If network is fine, try regenerating your `secrets.json` (credentials might be split/revoked)."
     },
     "multiple_config_entries": {
       "title": "Multiple configuration entries detected",

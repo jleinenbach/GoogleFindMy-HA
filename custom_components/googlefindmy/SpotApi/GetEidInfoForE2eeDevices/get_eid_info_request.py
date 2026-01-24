@@ -32,7 +32,10 @@ from typing import TYPE_CHECKING, cast
 
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
 from custom_components.googlefindmy.SpotApi import spot_request as spot_request_module
-from custom_components.googlefindmy.SpotApi.spot_request import SpotTrailersOnlyError
+from custom_components.googlefindmy.SpotApi.spot_request import (
+    SpotAuthPermanentError,
+    SpotTrailersOnlyError,
+)
 from google.protobuf.message import DecodeError  # parse-time error type for protobufs
 
 if TYPE_CHECKING:
@@ -98,6 +101,9 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
 
     try:
         response_bytes = await loop.run_in_executor(None, _call_sync)
+    except SpotAuthPermanentError:
+        # Re-raise auth errors so they propagate to trigger reauth flow
+        raise
     except SpotTrailersOnlyError as e:
         raise SpotApiEmptyResponseError(
             "Empty gRPC body (trailers-only) for GetEidInfoForE2eeDevices"

@@ -12,6 +12,14 @@ child directory overrides it.
 | Runtime lifecycle patterns, platform forwarding, and subentry helpers (**entity lifecycle requirements live here**) | [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md) |
 | Typing reminders, stub imports, and strict mypy expectations | [`agents/typing_guidance/AGENTS.md`](agents/typing_guidance/AGENTS.md) |
 
+### FHNA frame slicing reminder
+
+BLE FHNA service data places the frame type at octet 7 (0x40 legacy / 0x41 modern) with the EID starting at octet 8. Resolver updates must keep these offsets authoritative and only fall back to the 1-byte header layout when the service-data pattern does not apply.
+
+### SPOT/gRPC client reminder
+
+When reusing the shared grpclib transport (`SpotGrpcTransport`), keep SSL context creation lazy and ensure ALPN includes `h2`. The transport helper already sets the protocol list and should be closed on unload so new channels negotiate HTTP/2 cleanly.
+
 ## Cross-reference index
 
 * [`tests/AGENTS.md`](../../tests/AGENTS.md) — Discovery and reconfigure test stubs, including the lightweight `ConfigEntry` doubles referenced across the topical guides above.
@@ -34,6 +42,14 @@ notification from reappearing after restarts when no new hardware has been added
 [`agents/runtime_patterns/AGENTS.md`](agents/runtime_patterns/AGENTS.md#tracker-registry-gating)
 tracks the canonical post-scheduling gate that platform guides should mirror.
 
+### Async test execution contract
+
+Within `tests/`, **never** call `asyncio.run()` to drive coroutines. Home Assistant’s
+test harness already provides a managed event loop via `pytest-asyncio`; starting a
+new loop inside a test causes fixture clashes and resource leaks. Mark coroutine tests
+with `@pytest.mark.asyncio` (or set `pytestmark = pytest.mark.asyncio` in the module)
+and `await` the coroutine directly.
+
 ### Nova API cache provider registration
 
 When decrypting FCM background location payloads, **always** register the active entry cache with
@@ -42,6 +58,10 @@ unregister it in a `finally` block. The decryptor resolves credentials via this 
 running decryption in an executor without the surrounding context will cause multi-account setups to fail silently.
 Handle `StaleOwnerKeyError` from the decryptor by logging and skipping the update instead of crashing the pipeline so key
 rotation can proceed without interrupting other accounts.
+
+Normalize FCM canonic IDs before validation (for example, compare `response_canonic_id.lower()` to
+`canonic_device_id.lower()` and store the lowercase string on decrypted payloads) so tracker updates are not discarded due
+to server-provided hex casing differences.
 
 ### Hybrid Low-Accuracy Polling
 
@@ -66,3 +86,14 @@ the import in a small getter and call it only from the executor-backed runtime p
 When adding a lazy import helper, **keep the corresponding `import_module` (or other loader) imported in the module** so static
 analysis tools like `ruff` retain full visibility into the call site. Dropping the import and relying solely on dynamic
 resolution causes undefined-name lint failures the next time the file is checked.
+
+### Network Status Codes & Privacy Mapping
+
+Use the proto/network label mapping below when interpreting report provenance or introducing new UI strings so contributor
+privacy semantics remain aligned with Google's contribution settings.
+
+| Proto Enum | Integration Label | Real-world Meaning |
+| --- | --- | --- |
+| `Status.CROWDSOURCED = 2` | `'crowdsourced'` | Location report from a finder contributing with network in **all areas** ("Contribution Settings: With network in all areas"). |
+| `Status.AGGREGATED = 3` | `'aggregated'` | Location report from a finder contributing with network in **high-traffic areas only** ("Contribution Settings: With network in high-traffic areas only"). |
+| `EncryptedReport.isOwnReport = true` or `Status.LAST_KNOWN = 1` | `'owner'` | Owner-sourced location report from the device itself. |

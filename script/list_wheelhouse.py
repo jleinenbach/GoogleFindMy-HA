@@ -113,7 +113,9 @@ def summarize(records: Sequence[WheelRecord]) -> None:
                 ),
             ):
                 size_kib = record.path.stat().st_size / 1024
-                build_suffix = f" (build {record.build_tag})" if record.build_tag else ""
+                build_suffix = (
+                    f" (build {record.build_tag})" if record.build_tag else ""
+                )
                 print(
                     "    • "
                     f"{record.formatted_tag}{build_suffix}"
@@ -204,7 +206,9 @@ def main() -> int:
     wheel_paths = sorted(wheelhouse.iterdir())
     records = list(iter_wheel_records(wheel_paths))
 
-    print(f"Wheelhouse: {wheelhouse} ({len(records)} wheel{'s' if len(records) != 1 else ''})\n")
+    print(
+        f"Wheelhouse: {wheelhouse} ({len(records)} wheel{'s' if len(records) != 1 else ''})\n"
+    )
     summarize(records)
 
     patterns = load_manifest_patterns(manifest)

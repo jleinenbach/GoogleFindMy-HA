@@ -35,6 +35,12 @@
       },
       "reset_statistics": {
         "default": "mdi:restart"
+      },
+      "regenerate_aas_token": {
+        "default": "mdi:key-chain"
+      },
+      "regenerate_adm_token": {
+        "default": "mdi:key-change"
       }
     },
     "sensor": {
@@ -62,11 +68,8 @@
       "stat_invalid_coords": {
         "default": "mdi:map-marker-alert"
       },
-      "stat_low_quality_dropped": {
-        "default": "mdi:target"
-      },
-      "stat_non_significant_dropped": {
-        "default": "mdi:filter-variant-remove"
+      "stat_fused_updates": {
+        "default": "mdi:map-marker-path"
       }
     },
     "device_tracker": {

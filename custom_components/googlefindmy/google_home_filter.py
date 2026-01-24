@@ -40,7 +40,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from collections.abc import Callable as TypingCallable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
@@ -61,12 +61,7 @@ _LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_registry import EntityRegistry
-    from homeassistant.helpers.event import (
-        CALLBACK_TYPE as _CallbackType,
-    )
-    from homeassistant.helpers.event import (
-        async_track_state_change_event as _AsyncTrackStateChangeEvent,
-    )
+    from homeassistant.helpers.event import CALLBACK_TYPE as _CallbackType
 else:
     _CallbackType = Callable[[], None]
 
@@ -81,8 +76,7 @@ def _async_track_state_change_event(*args: Any, **kwargs: Any) -> _CallbackType:
 
     from homeassistant.helpers import event as ha_event
 
-    helper = cast("_AsyncTrackStateChangeEvent", ha_event.async_track_state_change_event)
-    return cast("_CallbackType", helper(*args, **kwargs))
+    return ha_event.async_track_state_change_event(*args, **kwargs)
 
 
 def callback(
@@ -90,10 +84,7 @@ def callback(
 ) -> TypingCallable[[GoogleHomeFilter, Event | None], None]:
     """Typed wrapper around Home Assistant's callback decorator."""
 
-    return cast(
-        TypingCallable[["GoogleHomeFilter", Event | None], None],
-        ha_callback(func),
-    )
+    return ha_callback(func)  # type: ignore[return-value]
 
 
 # Keep local names for zone attributes to avoid fragile imports.

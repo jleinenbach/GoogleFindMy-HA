@@ -38,7 +38,7 @@ class _ConfigEntryStub:
 
 @pytest.mark.asyncio
 async def test_sensor_setup_propagates_service_config_subentry_id(
-    stub_coordinator_factory: Callable[..., type[Any]]
+    stub_coordinator_factory: Callable[..., type[Any]],
 ) -> None:
     """Service-only setup should reuse the forwarded identifier when metadata is empty."""
 
@@ -74,7 +74,7 @@ async def test_sensor_setup_propagates_service_config_subentry_id(
 
 @pytest.mark.asyncio
 async def test_sensor_setup_propagates_tracker_config_subentry_id(
-    stub_coordinator_factory: Callable[..., type[Any]]
+    stub_coordinator_factory: Callable[..., type[Any]],
 ) -> None:
     """Tracker-scoped setup should fall back to the forwarded identifier."""
 

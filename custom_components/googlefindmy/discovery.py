@@ -59,9 +59,7 @@ _DEFAULT_DISCOVERY_SOURCE: str = getattr(cf, "SOURCE_DISCOVERY", "discovery")
 def _home_assistant_discovery_sources() -> set[str]:
     """Return the set of discovery sources supported by Home Assistant."""
 
-    cached: set[str] | None = getattr(
-        _home_assistant_discovery_sources, "_cache", None
-    )
+    cached: set[str] | None = getattr(_home_assistant_discovery_sources, "_cache", None)
     if cached is not None:
         return cached
 
@@ -126,6 +124,8 @@ def _log_task_exception(task: asyncio.Future[Any]) -> None:
 CLOUD_DISCOVERY_NAMESPACE = f"{DOMAIN}.cloud_scan"
 SECRETS_DISCOVERY_NAMESPACE = f"{DOMAIN}.secrets_file"
 _DEFAULT_SECRETS_SCAN_INTERVAL = timedelta(seconds=30)
+
+
 class _CloudDiscoveryResults(list[dict[str, Any]]):
     """Results container that triggers config flows on append."""
 
@@ -384,7 +384,6 @@ def _assemble_cloud_discovery_payload(
     return payload
 
 
-
 @dataclass(slots=True)
 class _DiscoveryKeyCandidate:
     """Fallback discovery-key representation when helpers are unavailable."""
@@ -455,9 +454,7 @@ async def _trigger_cloud_discovery(
         try:
             discovery_key = cf.DiscoveryKey(domain=DOMAIN, key=(ns, stable_key))
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "DiscoveryKey instantiation failed (%s); using fallback", err
-            )
+            _LOGGER.debug("DiscoveryKey instantiation failed (%s); using fallback", err)
             discovery_key = _DiscoveryKeyCandidate(
                 domain=DOMAIN,
                 namespace=ns,
@@ -674,9 +671,7 @@ class SecretsJSONWatcher:
             _LOGGER.debug(
                 "Queued secrets discovery",
                 extra={
-                    "account": _redact_account_for_log(
-                        result.email, result.stable_key
-                    ),
+                    "account": _redact_account_for_log(result.email, result.stable_key),
                     "reason": reason,
                 },
             )

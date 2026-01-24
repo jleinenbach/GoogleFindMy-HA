@@ -399,7 +399,9 @@ class _FrozenDeviceEntry:
     translation_key: str | None = None
     translation_placeholders: Mapping[str, str] | None = None
     config_subentry_id: str | None = None
-    config_entries_subentries: Mapping[str, frozenset[str | None]] = MappingProxyType({})
+    config_entries_subentries: Mapping[str, frozenset[str | None]] = MappingProxyType(
+        {}
+    )
 
 
 class _FrozenDeviceRegistry:
@@ -427,7 +429,7 @@ class _FrozenDeviceRegistry:
 
     @staticmethod
     def _normalize_subentries(
-        mapping: Mapping[str, set[str | None]]
+        mapping: Mapping[str, set[str | None]],
     ) -> Mapping[str, frozenset[str | None]]:
         normalized: dict[str, frozenset[str | None]] = {}
         for entry_id, items in mapping.items():
@@ -441,7 +443,7 @@ class _FrozenDeviceRegistry:
 
     @staticmethod
     def _canonical_config_subentry(
-        mapping: Mapping[str, set[str | None]]
+        mapping: Mapping[str, set[str | None]],
     ) -> str | None:
         non_null = [
             candidate
@@ -562,7 +564,13 @@ class _FrozenDeviceRegistry:
             replace_kwargs["translation_key"] = translation_key
         if translation_placeholders is not None:
             replace_kwargs["translation_placeholders"] = dict(translation_placeholders)
-        for field in ("manufacturer", "model", "sw_version", "entry_type", "configuration_url"):
+        for field in (
+            "manufacturer",
+            "model",
+            "sw_version",
+            "entry_type",
+            "configuration_url",
+        ):
             if field in kwargs:
                 replace_kwargs[field] = kwargs[field]
 
@@ -582,7 +590,11 @@ class _FrozenDeviceRegistry:
                 )
             seen_entries: set[str] = set()
             for entry_id in target_entries:
-                if not isinstance(entry_id, str) or not entry_id or entry_id in seen_entries:
+                if (
+                    not isinstance(entry_id, str)
+                    or not entry_id
+                    or entry_id in seen_entries
+                ):
                     continue
                 seen_entries.add(entry_id)
                 bucket = mapping.setdefault(entry_id, set())
@@ -616,7 +628,9 @@ class _FrozenDeviceRegistry:
                     config_entries.discard(remove_config_entry_id)
 
         replace_kwargs["config_entries"] = frozenset(config_entries)
-        replace_kwargs["config_entries_subentries"] = self._normalize_subentries(mapping)
+        replace_kwargs["config_entries_subentries"] = self._normalize_subentries(
+            mapping
+        )
         replace_kwargs["config_subentry_id"] = self._canonical_config_subentry(mapping)
 
         recorded_subentry = (
@@ -792,7 +806,9 @@ def _build_entry_with_subentries(entry_id: str) -> SimpleNamespace:
         subentry_id=_stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY),
     )
     tracker_subentry = ConfigSubentry(
-        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        data=MappingProxyType(
+            {"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}
+        ),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Trackers",
         unique_id=f"{entry_id}-tracker",
@@ -824,8 +840,6 @@ def _prepare_coordinator_for_registry(
     coordinator.data = []
     coordinator._enabled_poll_device_ids = set()
     coordinator.allow_history_fallback = False
-    coordinator._min_accuracy_threshold = 50
-    coordinator._movement_threshold = 10
     coordinator.device_poll_delay = 5
     coordinator.min_poll_interval = 60
     coordinator.location_poll_interval = 120
@@ -957,7 +971,10 @@ def test_tracker_subentry_falls_back_to_metadata_when_entry_empty(
     assert tracker_meta is not None
     assert tracker_meta.config_subentry_id is not None
     assert created == 1
-    assert fake_registry.created[0]["config_subentry_id"] == tracker_meta.config_subentry_id
+    assert (
+        fake_registry.created[0]["config_subentry_id"]
+        == tracker_meta.config_subentry_id
+    )
 
 
 def test_service_device_records_fallback_subentry_id(
@@ -984,7 +1001,10 @@ def test_service_device_records_fallback_subentry_id(
 
     assert service_meta is not None
     assert service_meta.config_subentry_id is not None
-    assert fake_registry.created[0]["config_subentry_id"] == service_meta.config_subentry_id
+    assert (
+        fake_registry.created[0]["config_subentry_id"]
+        == service_meta.config_subentry_id
+    )
 
 
 def test_legacy_device_migrates_without_service_parent(
@@ -1023,7 +1043,10 @@ def test_legacy_device_migrates_without_service_parent(
     )
     assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
+        entry.tracker_subentry_id,
+        None,
+    )
     assert legacy.name == "Pixel"
     assert legacy.config_subentry_id == entry.tracker_subentry_id
 
@@ -1122,7 +1145,11 @@ def test_frozen_registry_removes_hub_link_with_frozenset(
 
     assert created == 1
     assert frozen_registry.updated
-    removal_payload = frozen_registry.updated[-1]
+    removal_payload = next(
+        payload
+        for payload in frozen_registry.updated
+        if payload["remove_config_entry_id"] == entry.entry_id
+    )
     assert removal_payload["remove_config_entry_id"] == entry.entry_id
     assert removal_payload["remove_config_subentry_id"] is None
 
@@ -1166,7 +1193,10 @@ def test_existing_device_remains_standalone(
     assert fake_registry.updated[0]["add_config_subentry_id"] is None
     assert fake_registry.updated[0]["add_config_entry_id"] == entry.entry_id
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
+        entry.tracker_subentry_id,
+        None,
+    )
     assert existing.config_subentry_id == entry.tracker_subentry_id
 
 
@@ -1206,7 +1236,10 @@ def test_existing_device_backfills_config_subentry(
     assert payload["add_config_entry_id"] == entry.entry_id
     assert payload["via_device_id"] is None
     assert fake_registry.updated[-1]["remove_config_entry_id"] in (entry.entry_id, None)
-    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (entry.tracker_subentry_id, None)
+    assert fake_registry.updated[-1]["remove_config_subentry_id"] in (
+        entry.tracker_subentry_id,
+        None,
+    )
     assert existing.config_subentry_id == entry.tracker_subentry_id
     assert existing.via_device_id is None
 
@@ -1290,6 +1323,50 @@ def test_existing_device_name_refresh_does_not_readd_hub_link(
     assert payload["remove_config_entry_id"] is None
     assert existing.via_device_id is None
     assert existing.config_subentry_id == entry.tracker_subentry_id
+
+
+def test_device_registry_info_is_updated(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
+    """Tracker devices update manufacturer/model from decoded metadata."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    entry = _build_entry_with_subentries("entry-meta")
+    _prepare_coordinator_for_registry(coordinator, entry)
+    coordinator._service_device_id = "svc-device-1"
+
+    existing = _FakeDeviceEntry(
+        identifiers={(DOMAIN, f"{entry.entry_id}:tracker-1")},
+        config_entry_id=entry.entry_id,
+        name="Tracker One",
+        manufacturer="Google",
+        model="Find My Device",
+        config_subentry_id=entry.tracker_subentry_id,
+    )
+    fake_registry.devices.append(existing)
+
+    devices = [
+        {
+            "id": "tracker-1",
+            "name": "Tracker One",
+            "manufacturer": "Acme Corp",
+            "model": "Road Runner 1",
+        }
+    ]
+    coordinator.data = devices
+
+    created = coordinator._ensure_registry_for_devices(devices=devices, ignored=set())
+
+    assert created == 1
+    assert fake_registry.updated
+    payload = fake_registry.updated[-1]
+    assert payload["manufacturer"] == "Acme Corp"
+    assert payload["model"] == "Road Runner 1"
+
+    refreshed = fake_registry.async_get(existing.id)
+    assert refreshed is not None
+    assert refreshed.manufacturer == "Acme Corp"
+    assert refreshed.model == "Road Runner 1"
 
 
 def test_stub_registry_tracks_mapping_view(stub_registry: Any) -> None:
@@ -1503,7 +1580,9 @@ def test_hub_name_collision_does_not_reuse_hub_device(
     assert hub.config_subentry_id == entry.service_subentry_id
     assert hub.config_entries_subentries[entry.entry_id] == {entry.service_subentry_id}
     assert not any("Reusing hub device" in record.message for record in caplog.records)
-    assert any("Disambiguated device name" in record.message for record in caplog.records)
+    assert any(
+        "Disambiguated device name" in record.message for record in caplog.records
+    )
 
 
 def test_hub_name_collision_disambiguates_multiple_new_devices(
@@ -1584,7 +1663,9 @@ def test_hub_name_collision_disambiguates_foreign_device(
     created_payload = registry.created[-1]
     suffix = entry.tracker_subentry_id[-6:]
     assert created_payload["name"] == f"Pixel ({suffix})"
-    assert any("Disambiguated device name" in record.message for record in caplog.records)
+    assert any(
+        "Disambiguated device name" in record.message for record in caplog.records
+    )
 
 
 def test_existing_device_parent_clear_keeps_subentry(
@@ -1793,7 +1874,9 @@ def test_service_device_missing_subentry(fake_registry: _FakeDeviceRegistry) -> 
 
     service_meta = coordinator.get_subentry_metadata(key=SERVICE_SUBENTRY_KEY)
 
-    assert fake_registry.created, "Service device should be created without subentry metadata"
+    assert fake_registry.created, (
+        "Service device should be created without subentry metadata"
+    )
     assert service_meta is not None
     assert service_meta.config_subentry_id is not None
     create_payload = fake_registry.created[-1]
@@ -1805,7 +1888,9 @@ def test_service_device_missing_subentry(fake_registry: _FakeDeviceRegistry) -> 
     assert create_payload["identifiers"] == {service_ident, service_subentry_ident}
 
     service_entry = next(
-        device for device in fake_registry.devices if service_ident in device.identifiers
+        device
+        for device in fake_registry.devices
+        if service_ident in device.identifiers
     )
     assert service_entry.identifiers == {service_ident, service_subentry_ident}
     assert service_entry.config_subentry_id == service_meta.config_subentry_id
@@ -1839,8 +1924,6 @@ def test_service_device_defers_unknown_config_subentry(
             "location": coordinator.location_poll_interval,
             "minimum": coordinator.min_poll_interval,
             "device": coordinator.device_poll_delay,
-            "min_accuracy": coordinator._min_accuracy_threshold,
-            "movement": coordinator._movement_threshold,
         }
     )
     coordinator._subentry_metadata = {
@@ -1850,10 +1933,12 @@ def test_service_device_defers_unknown_config_subentry(
             features=("core",),
             title="Service",
             poll_intervals=poll_intervals,
-            filters=MappingProxyType({
-                "ignored_device_ids": (),
-                "allow_history_fallback": bool(coordinator.allow_history_fallback),
-            }),
+            filters=MappingProxyType(
+                {
+                    "ignored_device_ids": (),
+                    "allow_history_fallback": bool(coordinator.allow_history_fallback),
+                }
+            ),
             feature_flags=MappingProxyType({}),
             visible_device_ids=(),
             enabled_device_ids=(),
@@ -1866,13 +1951,17 @@ def test_service_device_defers_unknown_config_subentry(
 
     coordinator._ensure_service_device_exists()
 
-    assert fake_registry.created, "Expected service device creation without subentry link"
+    assert fake_registry.created, (
+        "Expected service device creation without subentry link"
+    )
     payload = fake_registry.created[-1]
     assert payload["config_subentry_id"] is None
     assert payload["identifiers"] == {service_device_identifier(entry.entry_id)}
 
 
-def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry) -> None:
+def test_service_device_heals_config_subentry(
+    fake_registry: _FakeDeviceRegistry,
+) -> None:
     """Service device healing should backfill its config_subentry_id."""
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
@@ -1883,7 +1972,9 @@ def test_service_device_heals_config_subentry(fake_registry: _FakeDeviceRegistry
 
     service_ident = service_device_identifier(entry.entry_id)
     service_entry = next(
-        device for device in fake_registry.devices if service_ident in device.identifiers
+        device
+        for device in fake_registry.devices
+        if service_ident in device.identifiers
     )
     service_entry.config_subentry_id = None
     service_entry.config_entries_subentries[entry.entry_id] = {None}
@@ -1923,7 +2014,9 @@ def test_service_device_clears_missing_service_link(
     assert service_subentry_id is not None
 
     service_entry = next(
-        device for device in fake_registry.devices if service_ident in device.identifiers
+        device
+        for device in fake_registry.devices
+        if service_ident in device.identifiers
     )
     assert service_entry.config_subentry_id == service_subentry_id
     service_subentry_ident = _service_subentry_identifier(entry)
@@ -1962,7 +2055,9 @@ def test_service_device_skips_provisional_identifier(
     entry_id = "entry-provisional"
     provisional_service_id = f"{entry_id}-{SERVICE_SUBENTRY_KEY}-provisional"
     tracker_subentry = ConfigSubentry(
-        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        data=MappingProxyType(
+            {"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}
+        ),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Trackers",
         unique_id=f"{entry_id}-tracker",
@@ -1995,7 +2090,9 @@ def test_service_device_skips_provisional_identifier(
 
     service_ident = service_device_identifier(entry_id)
     service_entry = next(
-        device for device in fake_registry.devices if service_ident in device.identifiers
+        device
+        for device in fake_registry.devices
+        if service_ident in device.identifiers
     )
 
     assert service_entry.config_subentry_id is None
@@ -2022,7 +2119,9 @@ def test_tracker_device_skips_provisional_identifier(
         subentry_id=_stable_subentry_id(entry_id, SERVICE_SUBENTRY_KEY),
     )
     tracker_subentry = ConfigSubentry(
-        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        data=MappingProxyType(
+            {"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}
+        ),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Trackers",
         unique_id=f"{entry_id}-tracker",
@@ -2072,7 +2171,9 @@ def test_refresh_subentry_index_discards_provisional_ids(
         subentry_id=provisional_service_id,
     )
     tracker_subentry = ConfigSubentry(
-        data=MappingProxyType({"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}),
+        data=MappingProxyType(
+            {"group_key": TRACKER_SUBENTRY_KEY, "visible_device_ids": []}
+        ),
         subentry_type=SUBENTRY_TYPE_TRACKER,
         title="Trackers",
         unique_id=f"{entry_id}-tracker",
@@ -2226,7 +2327,9 @@ def test_service_device_detaches_hub_link_when_service_subentry_active(
         translation_placeholders=None,
         config_subentry_id=None,
     )
-    legacy_service.config_entries_subentries[entry.entry_id].add(entry.service_subentry_id)
+    legacy_service.config_entries_subentries[entry.entry_id].add(
+        entry.service_subentry_id
+    )
     fake_registry.devices.append(legacy_service)
 
     coordinator._ensure_service_device_exists()
@@ -2307,9 +2410,7 @@ async def test_relink_subentry_entities_repairs_mislinked_devices(
         def async_get(self, device_id: str) -> Any | None:
             return self.devices.get(device_id)
 
-        def async_get_device(
-            self, *, identifiers: set[tuple[str, str]]
-        ) -> Any | None:
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]) -> Any | None:
             for device in self.devices.values():
                 device_idents = getattr(device, "identifiers", set())
                 if identifiers & set(device_idents):
@@ -2360,9 +2461,7 @@ async def test_relink_subentry_entities_repairs_mislinked_devices(
         entity_id="sensor.googlefindmy_legacy_last_seen",
         domain="sensor",
         platform=DOMAIN,
-        unique_id=(
-            f"{DOMAIN}_{entry.tracker_subentry_id}_abc123_last_seen"
-        ),
+        unique_id=(f"{DOMAIN}_{entry.tracker_subentry_id}_abc123_last_seen"),
         config_entry_id=entry.entry_id,
         device_id=service_device.id,
     )
@@ -2454,9 +2553,7 @@ async def test_relink_helper_reassigns_buttons_and_trackers(
         def async_get(self, device_id: str) -> Any | None:
             return self.devices.get(device_id)
 
-        def async_get_device(
-            self, *, identifiers: set[tuple[str, str]]
-        ) -> Any | None:
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]) -> Any | None:
             for device in self.devices.values():
                 device_idents = getattr(device, "identifiers", set())
                 if identifiers & set(device_idents):

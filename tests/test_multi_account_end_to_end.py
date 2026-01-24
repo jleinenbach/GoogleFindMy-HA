@@ -56,7 +56,6 @@ class _StubTokenCache:
         return None
 
 
-
 class _StubFcm:
     """Shared FCM receiver stub tracking coordinator registrations."""
 
@@ -152,6 +151,7 @@ class _StubConfigEntries:
 
     See ``tests/AGENTS.md`` for the shared alignment reminders.
     """
+
     def __init__(self, entries: list[_StubConfigEntry]) -> None:
         self._entries: list[_StubConfigEntry] = entries
         self.forward_calls: list[tuple[str, tuple[str, ...]]] = []

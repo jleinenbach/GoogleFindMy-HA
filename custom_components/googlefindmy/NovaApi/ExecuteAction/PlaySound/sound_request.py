@@ -24,7 +24,9 @@ if TYPE_CHECKING:
 def _load_proto_module() -> Any:
     """Return the protobuf module without import-time side effects."""
 
-    return import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2")
+    return import_module(
+        "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"
+    )
 
 
 def _load_uuid_factory() -> Callable[[], str]:

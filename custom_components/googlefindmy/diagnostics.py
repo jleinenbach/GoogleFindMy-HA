@@ -44,8 +44,7 @@ from .const import (
     DEFAULT_GOOGLE_HOME_FILTER_KEYWORDS,
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
-    DEFAULT_MOVEMENT_THRESHOLD,
+    DEFAULT_MIN_POLL_INTERVAL,
     DOMAIN,
     OPT_DEVICE_POLL_DELAY,
     OPT_ENABLE_STATS_ENTITIES,
@@ -55,8 +54,7 @@ from .const import (
     # user-facing options (non-secret)
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MOVEMENT_THRESHOLD,
+    OPT_MIN_POLL_INTERVAL,
 )
 from .ha_typing import callback
 
@@ -357,9 +355,7 @@ def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
                 "run_state": snap.get("run_state"),
                 "do_listen": bool(snap.get("do_listen")),
                 "last_activity_monotonic": snap.get("last_activity_monotonic"),
-                "seconds_since_last_activity": snap.get(
-                    "seconds_since_last_activity"
-                ),
+                "seconds_since_last_activity": snap.get("seconds_since_last_activity"),
                 "activity_stale": bool(snap.get("activity_stale")),
             }
         )
@@ -498,6 +494,7 @@ async def async_get_config_entry_diagnostics(
     ignored_raw = effective_config.get(OPT_IGNORED_DEVICES) or {}
 
     effective_config_for_diag = dict(effective_config)
+    effective_config_for_diag.pop("min_accuracy_threshold", None)
 
     # Coerce to handle legacy list[str] format gracefully
     if isinstance(ignored_raw, list):
@@ -529,19 +526,13 @@ async def async_get_config_entry_diagnostics(
             ),
             DEFAULT_LOCATION_POLL_INTERVAL,
         ),
+        "min_poll_interval": _coerce_pos_int(
+            effective_config.get(OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
+            DEFAULT_MIN_POLL_INTERVAL,
+        ),
         "device_poll_delay": _coerce_pos_int(
             effective_config.get(OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
             DEFAULT_DEVICE_POLL_DELAY,
-        ),
-        "min_accuracy_threshold": _coerce_pos_int(
-            effective_config.get(
-                OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-            ),
-            DEFAULT_MIN_ACCURACY_THRESHOLD,
-        ),
-        "movement_threshold": _coerce_pos_int(
-            effective_config.get(OPT_MOVEMENT_THRESHOLD, DEFAULT_MOVEMENT_THRESHOLD),
-            DEFAULT_MOVEMENT_THRESHOLD,
         ),
         # Feature toggles
         "google_home_filter_enabled": bool(
@@ -550,7 +541,9 @@ async def async_get_config_entry_diagnostics(
             )
         ),
         "enable_stats_entities": bool(
-            effective_config.get(OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES)
+            effective_config.get(
+                OPT_ENABLE_STATS_ENTITIES, DEFAULT_ENABLE_STATS_ENTITIES
+            )
         ),
         # Token lifetime: store boolean value
         "map_view_token_expiration": bool(
@@ -670,6 +663,14 @@ async def async_get_config_entry_diagnostics(
     concurrency = _concurrency_block(hass)
     fcm_state = _fcm_receiver_state(hass)
 
+    # EIK cache statistics (performance optimization metrics)
+    # Import lazily to avoid circular import (diagnostics <- decrypt_locations <- __init__ <- diagnostics)
+    from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+        get_eik_cache_stats,
+    )
+
+    eik_cache_stats = get_eik_cache_stats()
+
     # --- Assemble payload (without secrets) ---
     payload: dict[str, Any] = {
         "integration": integration_meta,
@@ -686,6 +687,7 @@ async def async_get_config_entry_diagnostics(
             "entity": entity_registry_counts,
         },
         "concurrency": concurrency,
+        "eik_cache": eik_cache_stats,
     }
     if coordinator_block:
         payload["coordinator"] = coordinator_block
@@ -695,6 +697,8 @@ async def async_get_config_entry_diagnostics(
     # --- Final safety net: redact known secret-like keys anywhere in the payload ---
     # (We already avoided including secrets, but this keeps us safe against future extensions.)
     return async_redact_data(payload, TO_REDACT)
+
+
 # Consistent placeholder used when redacting fields.
 REDACTED = "**REDACTED**"
 

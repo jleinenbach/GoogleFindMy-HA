@@ -53,7 +53,14 @@ from .NovaApi.ExecuteAction.PlaySound.stop_sound_request import (
     async_submit_stop_sound_request,
 )
 from .NovaApi.ListDevices.nbe_list_devices import async_request_device_list
-from .NovaApi.nova_request import NovaAuthError, NovaHTTPError, NovaRateLimitError
+from .NovaApi.nova_request import (
+    NovaAuthError,
+    NovaAuthPermanentError,
+    NovaHTTPError,
+    NovaLogicError,
+    NovaProtobufDecodeError,
+    NovaRateLimitError,
+)
 from .ProtoDecoders.decoder import (
     _select_best_location as _decoder_select_best_location,
 )
@@ -64,6 +71,7 @@ from .ProtoDecoders.decoder import (
     get_devices_with_location,
     parse_device_list_protobuf,
 )
+from .SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,6 +150,105 @@ class CacheProtocol(Protocol):
 
     async def async_get_cached_value(self, key: str) -> Any: ...
     async def async_set_cached_value(self, key: str, value: Any) -> None: ...
+
+
+@runtime_checkable
+class GoogleFindMyAPIProtocol(Protocol):  # pylint: disable=unnecessary-ellipsis
+    """Protocol defining the public interface for Google Find My Device API.
+
+    This abstraction layer enables:
+    - Consistent API contract for the coordinator and other consumers
+    - Easy mocking in tests without depending on concrete implementation
+    - Future extensibility for alternative backend implementations
+
+    All methods that interact with Google's servers are available in both
+    sync and async variants where applicable.
+    """
+
+    async def close(self) -> None:
+        """Release resources held by the API instance."""
+        ...
+
+    def set_contributor_mode(
+        self, mode: str | None, *, switch_epoch: int | None = None
+    ) -> None:
+        """Update the contributor mode used for Nova requests."""
+        ...
+
+    async def async_get_basic_device_list(
+        self,
+        *,
+        contributor_mode: str | None = None,
+        switch_epoch: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch the device list from Google Find My Device (async).
+
+        Returns a list of device dictionaries with basic info and capabilities.
+        """
+        ...
+
+    def get_basic_device_list(self) -> list[dict[str, Any]]:
+        """Fetch the device list from Google Find My Device (sync wrapper)."""
+        ...
+
+    def get_devices(self) -> list[dict[str, Any]]:
+        """Legacy alias for get_basic_device_list()."""
+        ...
+
+    async def async_get_device_location(
+        self,
+        device_id: str,
+        device_name: str,
+        *,
+        contributor_mode: str | None = None,
+        switch_epoch: int | None = None,
+    ) -> dict[str, Any]:
+        """Request location for a specific device (async).
+
+        Returns location data dict or empty dict on failure.
+        """
+        ...
+
+    def get_device_location(self, device_id: str, device_name: str) -> dict[str, Any]:
+        """Request location for a specific device (sync wrapper)."""
+        ...
+
+    def locate_device(self, device_id: str) -> dict[str, Any]:
+        """Legacy alias for get_device_location()."""
+        ...
+
+    def is_push_ready(self) -> bool:
+        """Check if push infrastructure is available for actions."""
+        ...
+
+    def push_ready(self) -> bool:
+        """Alias for is_push_ready()."""
+        ...
+
+    def can_play_sound(self, device_id: str) -> bool | None:
+        """Check if a device supports the play sound action."""
+        ...
+
+    def play_sound(self, device_id: str) -> bool:
+        """Play a sound on the device (sync wrapper)."""
+        ...
+
+    def stop_sound(self, device_id: str, request_uuid: str | None = None) -> bool:
+        """Stop playing sound on the device (sync wrapper)."""
+        ...
+
+    async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
+        """Play a sound on the device (async).
+
+        Returns (success, request_uuid) tuple.
+        """
+        ...
+
+    async def async_stop_sound(
+        self, device_id: str, request_uuid: str | None = None
+    ) -> bool:
+        """Stop playing sound on the device (async)."""
+        ...
 
 
 # Module-local FCM provider getter; installed by the integration at setup time.
@@ -413,6 +520,13 @@ class GoogleFindMyAPI:
         # Key: canonical device id, Value: can_ring (bool)
         self._device_capabilities: dict[str, bool] = {}
 
+    async def close(self) -> None:
+        """Cleanup local references."""
+
+        # [FIX] Do not close the shared Home Assistant session.
+        self._session = None
+        _LOGGER.debug("API session unreferenced (shared session preserved)")
+
     @staticmethod
     def _normalize_contributor_mode(mode: str | None) -> str:
         """Normalize a contributor mode value."""
@@ -573,12 +687,16 @@ class GoogleFindMyAPI:
                     seconds = last_seen.get("seconds")
                     nanos = last_seen.get("nanos", 0)
                     if isinstance(seconds, (int, float)):
-                        normalized["last_seen"] = float(seconds) + float(nanos or 0) / 1e9
+                        normalized["last_seen"] = (
+                            float(seconds) + float(nanos or 0) / 1e9
+                        )
                 elif hasattr(last_seen, "seconds"):
                     seconds = getattr(last_seen, "seconds", None)
                     nanos = getattr(last_seen, "nanos", 0)
                     if isinstance(seconds, (int, float)):
-                        normalized["last_seen"] = float(seconds) + float(nanos or 0) / 1e9
+                        normalized["last_seen"] = (
+                            float(seconds) + float(nanos or 0) / 1e9
+                        )
 
                 accuracy = normalized.get("accuracy")
                 if accuracy is None:
@@ -702,7 +820,9 @@ class GoogleFindMyAPI:
                 "FCM receiver provider does not accept entry context; retrying without entry_id."
             )
             try:
-                receiver = cast(Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter)()
+                receiver = cast(
+                    Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter
+                )()
             except Exception as err:
                 _LOGGER.error(
                     "Cannot obtain FCM token: provider callable failed (legacy path)",
@@ -736,9 +856,7 @@ class GoogleFindMyAPI:
                 )
                 return None
         except Exception as err:
-            _LOGGER.error(
-                "Cannot obtain FCM token from shared receiver", exc_info=err
-            )
+            _LOGGER.error("Cannot obtain FCM token from shared receiver", exc_info=err)
             return None
         if not token or not isinstance(token, str) or len(token) < 10:
             _LOGGER.error("FCM token not available or invalid (via shared receiver).")
@@ -773,7 +891,9 @@ class GoogleFindMyAPI:
                 "FCM readiness probe: provider does not accept entry context; retrying without entry_id."
             )
             try:
-                receiver = cast(Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter)()
+                receiver = cast(
+                    Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter
+                )()
             except Exception as err:
                 _LOGGER.debug(
                     "FCM readiness probe: provider callable failed (legacy path)",
@@ -919,6 +1039,20 @@ class GoogleFindMyAPI:
             )
             raise ConfigEntryAuthFailed(_short_err(err)) from err
 
+        except NovaProtobufDecodeError as err:
+            # Protobuf decode failures indicate corrupted response or protocol mismatch
+            _LOGGER.error("Failed to decode device list response: %s", _short_err(err))
+            raise UpdateFailed(_short_err(err)) from err
+
+        except NovaLogicError as err:
+            # Logic errors from Google (e.g., invalid device ID, permission denied)
+            _LOGGER.error(
+                "Nova API Logic Error while listing devices: Code %s - %s",
+                err.code,
+                err.message or "Unknown",
+            )
+            raise UpdateFailed(_short_err(err)) from err
+
         # Normalize gpsoauth/ADM "BadAuthentication" style failures to ConfigEntryAuthFailed
         except (RuntimeError, ValueError) as err:
             msg = str(err)
@@ -929,6 +1063,18 @@ class GoogleFindMyAPI:
             ):
                 _LOGGER.error("Authentication failed (gpsoauth): %s", _short_err(msg))
                 raise ConfigEntryAuthFailed(_short_err(msg)) from err
+
+            # TokenCache closed indicates the integration is in an invalid state
+            # (e.g., after a failed reload or during shutdown). Trigger re-auth
+            # to force a clean re-initialization of the entry.
+            if "TokenCache is closed" in msg:
+                _LOGGER.error(
+                    "TokenCache is closed; integration state is invalid. "
+                    "Triggering re-authentication to reinitialize."
+                )
+                raise ConfigEntryAuthFailed(
+                    "Integration state invalid (cache closed); please re-authenticate"
+                ) from err
 
             # Detect and tame the multi-entry guard (INFO once, DEBUG thereafter)
             if _is_multi_entry_guard_message(msg):
@@ -1019,6 +1165,7 @@ class GoogleFindMyAPI:
             A dictionary containing the best available location data for the device.
             Returns an empty dictionary on failure.
         """
+
         # Register cache provider for multi-entry support
         def _cache_provider() -> CacheProtocol | None:
             return self._cache
@@ -1076,15 +1223,39 @@ class GoogleFindMyAPI:
             _LOGGER.debug("API v3.0 Async: No location data for %s", device_name)
             return {}
 
-        except NovaAuthError as err:
-            # Explicit mapping for upstream auth failure (token expired/invalid)
+        except SpotAuthPermanentError:
+            raise
+
+        except NovaAuthPermanentError as err:
+            # Permanent auth failure (AAS token invalid) - immediate reauth required
             _LOGGER.error(
-                "Authentication failed while getting location for %s (%s): %s",
+                "Permanent authentication failure for %s (%s): %s. Re-authentication required.",
                 device_name,
                 device_id,
                 _short_err(err),
             )
             raise ConfigEntryAuthFailed(_short_err(err)) from err
+
+        except NovaAuthError as err:
+            # Transient auth failure - may self-heal in subsequent poll cycles.
+            # Re-raise so coordinator can track consecutive failures before triggering reauth.
+            if err.is_permanent:
+                _LOGGER.error(
+                    "Permanent authentication failure for %s (%s): %s",
+                    device_name,
+                    device_id,
+                    _short_err(err),
+                )
+                raise ConfigEntryAuthFailed(_short_err(err)) from err
+
+            _LOGGER.warning(
+                "Transient authentication error for %s (%s): %s. May resolve in next poll cycle.",
+                device_name,
+                device_id,
+                _short_err(err),
+            )
+            # Re-raise to let coordinator track consecutive failures
+            raise
 
         except NovaHTTPError as err:
             # Map 401/403 to ConfigEntryAuthFailed; other HTTP errors are transient here.
@@ -1112,6 +1283,27 @@ class GoogleFindMyAPI:
                 device_name,
                 device_id,
                 _short_err(err),
+            )
+            return {}
+
+        except NovaProtobufDecodeError as err:
+            # Protobuf decode failures indicate corrupted response or protocol mismatch
+            _LOGGER.error(
+                "Failed to decode location response for %s (%s): %s",
+                device_name,
+                device_id,
+                _short_err(err),
+            )
+            return {}
+
+        except NovaLogicError as err:
+            # Logic errors from Google (e.g., invalid device ID, permission denied)
+            _LOGGER.error(
+                "Nova API Logic Error for %s (%s): Code %s - %s",
+                device_name,
+                device_id,
+                err.code,
+                err.message or "Unknown",
             )
             return {}
 
@@ -1214,7 +1406,9 @@ class GoogleFindMyAPI:
             )(entry_id)
         except TypeError:
             try:
-                receiver = cast(Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter)()
+                receiver = cast(
+                    Callable[[], FcmReceiverProtocol], _FCM_ReceiverGetter
+                )()
             except Exception:
                 return False
         except Exception:
@@ -1336,7 +1530,11 @@ class GoogleFindMyAPI:
                 cache=cast("TokenCache | None", self._cache),
             )
             if result is None:
-                _LOGGER.error("Play Sound (async) submission failed for %s", device_id)
+                _LOGGER.error(
+                    "Play Sound (async) submission failed for %s: "
+                    "empty response from server (no error details available)",
+                    device_id,
+                )
                 return (False, None)
 
             _response_hex, request_uuid = result
@@ -1411,9 +1609,16 @@ class GoogleFindMyAPI:
             return False
         try:
             if request_uuid:
-                _LOGGER.info("Submitting Stop Sound (async) for %s (UUID: %s)", device_id, request_uuid[:8])
+                _LOGGER.info(
+                    "Submitting Stop Sound (async) for %s (UUID: %s)",
+                    device_id,
+                    request_uuid[:8],
+                )
             else:
-                _LOGGER.warning("Submitting Stop Sound (async) for %s without UUID (may not cancel properly)", device_id)
+                _LOGGER.warning(
+                    "Submitting Stop Sound (async) for %s without UUID (may not cancel properly)",
+                    device_id,
+                )
             result_hex = await async_submit_stop_sound_request(
                 device_id,
                 token,
@@ -1428,7 +1633,11 @@ class GoogleFindMyAPI:
                     "Stop Sound (async) submitted successfully for %s", device_id
                 )
             else:
-                _LOGGER.error("Stop Sound (async) submission failed for %s", device_id)
+                _LOGGER.error(
+                    "Stop Sound (async) submission failed for %s: "
+                    "empty response from server (no error details available)",
+                    device_id,
+                )
             return bool(ok)
 
         except NovaAuthError as err:

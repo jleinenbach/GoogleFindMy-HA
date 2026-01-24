@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import sys
 import time
@@ -12,7 +11,11 @@ from pathlib import Path
 from types import MethodType, ModuleType, SimpleNamespace
 from typing import Any
 
+import pytest
+
 from tests.helpers import compile_class_method_from_module
+
+pytestmark = pytest.mark.asyncio
 
 
 def _ensure_button_dependencies() -> None:
@@ -189,28 +192,30 @@ def _ensure_button_dependencies() -> None:
 def _load_can_request_location_impl() -> Any:
     """Return the coordinator's can_request_location method for isolated testing."""
 
-    coordinator_path = (
-        Path(__file__)
-        .resolve()
-        .parent.parent
+    # Method moved to locate.py (LocateOperations mixin) during refactoring
+    locate_path = (
+        Path(__file__).resolve().parent.parent
         / "custom_components"
         / "googlefindmy"
-        / "coordinator.py"
+        / "coordinator"
+        / "locate.py"
     )
     return compile_class_method_from_module(
-        module_path=coordinator_path,
-        class_name="GoogleFindMyCoordinator",
+        module_path=locate_path,
+        class_name="LocateOperations",
         method_name="can_request_location",
         global_overrides={"time": time},
     )
 
 
-def test_blank_device_name_populates_buttons(
+async def test_blank_device_name_populates_buttons(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Buttons are added even when the device label is blank or missing."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     _ensure_button_dependencies()
     button_module = importlib.import_module("custom_components.googlefindmy.button")
@@ -274,9 +279,7 @@ def test_blank_device_name_populates_buttons(
         added.append(list(entities))
         assert update_before_add is True
 
-    asyncio.run(
-        button_module.async_setup_entry(SimpleNamespace(), config_entry, _capture)
-    )
+    await button_module.async_setup_entry(SimpleNamespace(), config_entry, _capture)
 
     assert len(added) == 1
     assert len(added[0]) == 3
@@ -299,7 +302,7 @@ def test_blank_device_name_populates_buttons(
         assert f"{button_module.TRACKER_SUBENTRY_KEY}-identifier" in entity.unique_id
 
 
-def test_locate_button_available_when_push_unready() -> None:
+async def test_locate_button_available_when_push_unready() -> None:
     """Locate button stays available even when push transport is not ready."""
 
     _ensure_button_dependencies()
@@ -353,7 +356,7 @@ def test_locate_button_available_when_push_unready() -> None:
     assert locate_button.subentry_key == button_module.TRACKER_SUBENTRY_KEY
 
 
-def test_locate_button_unavailable_on_gate_error() -> None:
+async def test_locate_button_unavailable_on_gate_error() -> None:
     """Locate button marks itself unavailable when gating fails unexpectedly."""
 
     _ensure_button_dependencies()

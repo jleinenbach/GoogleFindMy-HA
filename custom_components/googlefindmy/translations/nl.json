@@ -1,0 +1,684 @@
+{
+  "title": "Google Find My Device",
+  "device": {
+    "google_find_hub_service": {
+      "name": "Google Find Hub-service"
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Google Find My Device – Aanmelding",
+        "description": "Kies je aanmeldingsmethode. Methode 1 wordt aanbevolen als je GoogleFindMyTools met Chrome kunt uitvoeren op een computer.",
+        "data": {
+          "auth_method": "Aanmeldingsmethode"
+        }
+      },
+      "secrets_json": {
+        "title": "Methode 1: GoogleFindMyTools secrets.json",
+        "description": "Voer GoogleFindMyTools (Chrome) uit om authenticatietokens te genereren en plak vervolgens de volledige inhoud van het Auth/secrets.json-bestand hieronder.",
+        "data": {
+          "secrets_json": "Inhoud van secrets.json-bestand"
+        }
+      },
+      "individual_tokens": {
+        "title": "Methode 2: Individuele OAuth-token",
+        "description": "Voer je OAuth-token en Google-e-mailadres in die je hebt verkregen via een handmatige authenticatieprocedure.",
+        "data": {
+          "oauth_token": "OAuth-token",
+          "google_email": "Google-e-mailadres"
+        }
+      },
+      "device_selection": {
+        "title": "Polling-instellingen",
+        "description": "Nieuw ontdekte apparaten verschijnen uitgeschakeld en kunnen worden ingeschakeld in de apparaatinstellingen. Configureer hier de algemene pollingparameters:\n• Locatie-pollinginterval: Hoe vaak een nieuwe pollingcyclus wordt gestart (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen het pollen van individuele apparaten binnen een cyclus (1–60 seconden)\n\nGoogle Home-filter: Standaard ingeschakeld met trefwoorden nest/google/home/mini/hub/display/chromecast/speaker. Voor Google/Nest/Chromecast-detecties worden de coördinaten van de Thuiszone ingevuld en worden herhaalde \"thuis\"-meldingen 15 minuten lang onderdrukt. Pas de trefwoorden hier aan als je apparaten andere namen gebruiken.",
+        "data": {
+          "location_poll_interval": "Locatie-pollinginterval (s)",
+          "device_poll_delay": "Apparaat-pollingvertraging (s)",
+          "google_home_filter_enabled": "Google Home-apparaten filteren",
+          "google_home_filter_keywords": "Filtertrefwoorden (kommagescheiden)",
+          "enable_stats_entities": "Statistiekentiteiten aanmaken",
+          "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen"
+        }
+      },
+      "select_hub_for_visibility": {
+        "title": "Hub selecteren",
+        "description": "Kies welke Google Find My-hub je wilt beheren voordat je het dialoogvenster voor apparaatzichtbaarheid opent.",
+        "data": {
+          "hub": "Hub"
+        }
+      },
+      "reconfigure": {
+        "title": "Google Find My Device opnieuw configureren",
+        "description": "Controleer de huidige configuratie voor **{email}**. Ga verder om inloggegevens bij te werken of pollingopties aan te passen."
+      },
+      "reauth_confirm": {
+        "title": "Opnieuw authenticeren",
+        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nJe kunt de volledige inhoud van een nieuwe **secrets.json** plakken **of** een nieuwe **OAuth-token** invoeren.\n\nOpmerking: Het account-e-mailadres staat vast voor deze herauthenticatie en kan hier niet worden gewijzigd.",
+        "data": {
+          "secrets_json": "Nieuwe secrets.json (volledige inhoud)",
+          "new_oauth_token": "Nieuwe OAuth-token"
+        }
+      },
+      "migrate_complete": {
+        "title": "Migratie voltooid",
+        "description": "Google Find My Device voor **{email}** is gemigreerd naar de nieuwe functiegroepstructuur. Controleer je apparaten en herlaad de integratie als entiteiten offline blijven."
+      }
+    },
+    "error": {
+      "auth_failed": "Authenticatie mislukt. Probeer het opnieuw.",
+      "invalid_auth": "Ongeldige authenticatie. Geef een nieuwe token op en/of meld je opnieuw aan.",
+      "invalid_token": "Ongeldige token/e-mail opgegeven of verplichte velden ontbreken.",
+      "invalid_json": "Ongeldig JSON-formaat in secrets.json-inhoud.",
+      "no_devices": "Geen apparaten gevonden. Zorg ervoor dat Vind mijn apparaat is ingeschakeld in je Google-account.",
+      "cannot_connect": "Kan geen verbinding maken met de Google API. Dit kan tijdelijk zijn – probeer het later opnieuw.",
+      "dependency_not_ready": "Vereiste integratie-afhankelijkheden ontbreken. Installeer de Google Find My Device-vereisten en herstart Home Assistant.",
+      "import_failed": "Kan de authenticatiehelper niet importeren. Installeer de Google Find My Device-vereisten (Selenium + Chrome-driver) en probeer het opnieuw.",
+      "choose_one": "Geef precies één inlogmethode op.",
+      "required": "Dit veld is verplicht.",
+      "unknown": "Er is een onverwachte fout opgetreden.",
+      "email_mismatch": "De opgegeven inloggegevens behoren tot een ander Google-account. Om dat account toe te voegen, maak een nieuwe integratie aan; herauthenticatie kan het account voor dit item niet wijzigen."
+    },
+    "abort": {
+      "already_configured": "Google Find My Device is al geconfigureerd.",
+      "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
+      "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
+      "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",
+      "reauth_successful": "Herauthenticatie geslaagd.",
+      "migration_successful": "Migratie voltooid.",
+      "migration_failed": "Migratie mislukt. Verwijder de integratie en voeg deze opnieuw toe.",
+      "reconfigure_successful": "Herconfiguratie geslaagd.",
+      "no_hubs_configured": "Er zijn nog geen Google Find My-hubs geconfigureerd."
+    },
+    "progress": {
+      "discovery_secrets_new": "Auth/secrets.json gedetecteerd voor {email}",
+      "discovery_secrets_update": "Nieuwe inloggegevens gedetecteerd voor {email}"
+    }
+  },
+  "config_subentries": {
+    "hub": {
+      "title": "Google Find My Device Hub",
+      "entry_type": "Hub feature group",
+      "initiate_flow": {
+        "user": "Add hub feature group"
+      },
+      "step": {
+        "user": {
+          "title": "Hub-functiegroep toevoegen",
+          "description": "Maak of vernieuw de hub-functiegroep zodat Home Assistant gedeelde services voor deze integratie kan beschikbaar stellen."
+        },
+        "reconfigure": {
+          "title": "Hub-functiegroep bijwerken",
+          "description": "Vernieuw de hub-functiegroep om ervoor te zorgen dat de nieuwste functieset beschikbaar is."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "service": {
+      "title": "Google Find Hub-service",
+      "entry_type": "Service feature group",
+      "initiate_flow": {
+        "user": "Add service feature group"
+      },
+      "step": {
+        "user": {
+          "title": "Service-functiegroep toevoegen",
+          "description": "Voorzie de service-functiegroep zodat Home Assistant diagnostiek en hulpservices voor dit account kan beschikbaar stellen."
+        },
+        "reconfigure": {
+          "title": "Service-functiegroep bijwerken",
+          "description": "Vernieuw de service-functiegroep om diagnostiek en hulpservices te synchroniseren met de nieuwste configuratie."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "core_tracking": {
+      "title": "Google Find My-apparaten",
+      "entry_type": "Device feature group",
+      "initiate_flow": {
+        "user": "Add device feature group"
+      },
+      "step": {
+        "user": {
+          "title": "Apparaat-functiegroep toevoegen",
+          "description": "Maak de apparaat-functiegroep aan om Google Find My-trackers te beheren die voor dit account zijn ontdekt."
+        },
+        "reconfigure": {
+          "title": "Apparaat-functiegroep bijwerken",
+          "description": "Werk de apparaat-functiegroep bij om trackerzichtbaarheid en metadata te vernieuwen."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configuratie",
+        "description": "Wat wil je configureren?",
+        "menu_options": {
+          "credentials": "Inloggegevens bijwerken",
+          "settings": "Instellingen wijzigen",
+          "visibility": "Apparaatzichtbaarheid",
+          "semantic_locations": "Semantische locaties",
+          "repairs": "Subentry-reparaties"
+        }
+      },
+      "semantic_locations_menu": {
+        "title": "Semantische locaties",
+        "description": "Beheer semantische locatie-overschrijvingen. Bestaande toewijzingen:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Semantische locatie toevoegen",
+          "semantic_location_edit": "Semantische locatie bewerken",
+          "semantic_locations_delete": "Semantische locatie verwijderen"
+        }
+      },
+      "semantic_locations": {
+        "title": "Semantische locaties",
+        "description": "Beheer semantische locatie-overschrijvingen. Bestaande toewijzingen:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "Semantische locatie toevoegen",
+          "semantic_locations_edit": "Semantische locatie bewerken",
+          "semantic_locations_delete": "Semantische locatie verwijderen"
+        }
+      },
+      "semantic_locations_add": {
+        "title": "Semantische locatie toevoegen",
+        "description": "Definieer een semantische locatie-overschrijving met coördinaten en nauwkeurigheid.",
+        "data": {
+          "semantic_name": "Semantische naam",
+          "latitude": "Breedtegraad",
+          "longitude": "Lengtegraad",
+          "accuracy": "Detectieradius (m)"
+        },
+        "data_description": {
+          "accuracy": "Schat het verbindingsbereik van het apparaat (bijv. 15-20 m voor Bluetooth)."
+        }
+      },
+      "semantic_locations_edit": {
+        "title": "Semantische locatie kiezen",
+        "description": "Selecteer een semantische locatie om te bewerken.",
+        "data": {
+          "semantic_location": "Semantische locatie"
+        }
+      },
+      "semantic_location_edit": {
+        "title": "Semantische locatie bewerken",
+        "description": "Werk coördinaten en nauwkeurigheid bij voor de geselecteerde semantische locatie.",
+        "data": {
+          "semantic_name": "Semantische naam",
+          "latitude": "Breedtegraad",
+          "longitude": "Lengtegraad",
+          "accuracy": "Detectieradius (m)"
+        },
+        "data_description": {
+          "accuracy": "Schat het verbindingsbereik van het apparaat (bijv. 15-20 m voor Bluetooth)."
+        }
+      },
+      "semantic_locations_edit_form": {
+        "title": "Semantische locatie bewerken",
+        "description": "Werk coördinaten en nauwkeurigheid bij voor de geselecteerde semantische locatie.",
+        "data": {
+          "semantic_name": "Semantische naam",
+          "latitude": "Breedtegraad",
+          "longitude": "Lengtegraad",
+          "accuracy": "Detectieradius (m)"
+        },
+        "data_description": {
+          "accuracy": "Schat het verbindingsbereik van het apparaat (bijv. 15-20 m voor Bluetooth)."
+        }
+      },
+      "semantic_locations_delete": {
+        "title": "Semantische locaties verwijderen",
+        "description": "Selecteer semantische locaties om te verwijderen.",
+        "data": {
+          "semantic_locations": "Semantische locaties"
+        }
+      },
+      "credentials": {
+        "title": "Inloggegevens bijwerken (optioneel)",
+        "description": "Werk inloggegevens bij zonder bestaande waarden bloot te stellen. Geef precies één methode op:\n\n• Plak de volledige inhoud van een nieuwe **secrets.json**\n**of**\n• Voer een nieuwe **OAuth-token** en **Google-e-mail** in.\n\nIndien opgegeven, worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
+        "data": {
+          "secrets_json": "Nieuwe secrets.json (volledige inhoud)",
+          "oauth_token": "Nieuwe OAuth-token",
+          "google_email": "Google-e-mail",
+          "new_secrets_json": "Nieuwe secrets.json (volledige inhoud)",
+          "new_oauth_token": "Nieuwe OAuth-token",
+          "new_google_email": "Google-e-mail",
+          "subentry": "Functiegroep"
+        },
+        "data_description": {
+          "subentry": "Pas inloggegevensupdates toe op de geselecteerde functiegroep. Bekijk de [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) handleiding voor workflow-details."
+        }
+      },
+      "settings": {
+        "title": "Opties",
+        "description": "Locatie-instellingen aanpassen:\n• Locatie-pollinginterval: Hoe vaak locaties worden gepolld (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen apparaat-polls (1–60 seconden)\n\nGoogle Home-filter:\n• Schakel in om detecties van Google Home-apparaten te koppelen aan de Thuiszone\n• Trefwoorden ondersteunen gedeeltelijke overeenkomsten (kommagescheiden)\n• Voorbeeld: \"nest\" komt overeen met \"Keuken Nest Mini\"",
+        "data": {
+          "location_poll_interval": "Locatie-pollinginterval (s)",
+          "device_poll_delay": "Apparaat-pollingvertraging (s)",
+          "google_home_filter_enabled": "Google Home-apparaten filteren",
+          "google_home_filter_keywords": "Filtertrefwoorden (kommagescheiden)",
+          "enable_stats_entities": "Statistiekentiteiten aanmaken",
+          "delete_caches_on_remove": "Caches verwijderen bij verwijderen item",
+          "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen",
+          "contributor_mode": "Locatiebijdragermodus",
+          "stale_threshold": "Verouderingsdrempel (s)",
+          "subentry": "Functiegroep"
+        },
+        "data_description": {
+          "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
+          "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
+          "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard drukbezochte gebieden, of Alle gebieden voor crowdsourced rapportage).",
+          "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de apparaatstatus 'onbekend'. Stel in op 0 om deze functie uit te schakelen.",
+          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor voorbeelden."
+        }
+      },
+      "visibility": {
+        "title": "Apparaatzichtbaarheid",
+        "description": "Herstel eerder genegeerde apparaten om ze weer zichtbaar te maken. Selecteer een of meer apparaten om te herstellen en op te slaan.",
+        "data": {
+          "unignore_devices": "Apparaten om te herstellen",
+          "subentry": "Functiegroep"
+        },
+        "data_description": {
+          "subentry": "Herstelde apparaten worden toegevoegd aan de functiegroep die je kiest. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor toewijzingsadvies."
+        }
+      },
+      "repairs": {
+        "title": "Subentry-reparaties",
+        "description": "Kies een reparatieactie voor je functiegroepen.",
+        "menu_options": {
+          "repairs_move": "Apparaten verplaatsen",
+          "repairs_delete": "Subentry verwijderen"
+        }
+      },
+      "repairs_move": {
+        "title": "Apparaten verplaatsen tussen subentries",
+        "description": "Verplaats apparaten naar een geselecteerde functiegroep. Apparaten die uit andere groepen worden verwijderd, blijven verschijnen onder de gekozen groep.",
+        "data": {
+          "target_subentry": "Doelfunctiegroep",
+          "device_ids": "Toe te wijzen apparaten"
+        }
+      },
+      "repairs_delete": {
+        "title": "Een subentry verwijderen",
+        "description": "Verwijder een functiegroep en verplaats de apparaten naar een andere groep.",
+        "data": {
+          "delete_subentry": "Te verwijderen subentry",
+          "fallback_subentry": "Uitwijkfunctiegroep"
+        }
+      }
+    },
+    "error": {
+      "invalid_json": "Ongeldig JSON-formaat in secrets.json-inhoud.",
+      "invalid": "Validatie mislukt. Controleer je invoer.",
+      "invalid_auth": "Ongeldige authenticatie. Geef een nieuwe token op en/of meld je opnieuw aan.",
+      "cannot_connect": "Kan geen verbinding maken met de Google API.",
+      "dependency_not_ready": "Vereiste integratie-afhankelijkheden ontbreken. Installeer de Google Find My Device-vereisten en herstart Home Assistant.",
+      "choose_one": "Geef precies één inlogmethode op.",
+      "required": "Dit veld is verplicht.",
+      "invalid_token": "Ongeldige inloggegevens (token/e-mail). Controleer formaat en inhoud.",
+      "duplicate_name": "Semantische naam bestaat al. Kies een andere naam.",
+      "duplicate_semantic_location": "Semantische naam bestaat al. Kies een andere naam.",
+      "unknown": "Er is een onverwachte fout opgetreden.",
+      "invalid_subentry": "Kies een geldige functiegroep."
+    },
+    "abort": {
+      "reconfigure_successful": "Herconfiguratie geslaagd.",
+      "no_ignored_devices": "Er zijn geen genegeerde apparaten om te herstellen.",
+      "no_semantic_locations": "Er zijn geen semantische locaties geconfigureerd.",
+      "repairs_no_subentries": "Er zijn geen subentries om te repareren.",
+      "repair_no_devices": "Selecteer ten minste één apparaat om te verplaatsen.",
+      "subentry_move_success": "Apparaten toegewezen aan **{subentry}** ({count} bijgewerkt).",
+      "subentry_delete_success": "**{subentry}** verwijderd en {count} apparaten verplaatst naar **{fallback}**.",
+      "subentry_delete_invalid": "Een tweede functiegroep is vereist voordat er een kan worden verwijderd.",
+      "subentry_remove_failed": "Verwijderen van de geselecteerde functiegroep is mislukt. Probeer het opnieuw."
+    }
+  },
+  "services": {
+    "locate_device": {
+      "name": "Apparaat lokaliseren",
+      "description": "Verkrijg de huidige locatie van een Google Find My-apparaat.",
+      "fields": {
+        "device_id": {
+          "name": "Apparaat",
+          "description": "Selecteer een Google Find My-apparaat (of geef een canoniek ID door via Ontwikkelaarstools)."
+        }
+      }
+    },
+    "play_sound": {
+      "name": "Geluid afspelen",
+      "description": "Speel een geluid af op een Google Find My-apparaat.",
+      "fields": {
+        "device_id": {
+          "name": "Apparaat",
+          "description": "Selecteer een Google Find My-apparaat (of geef een canoniek ID door via Ontwikkelaarstools)."
+        }
+      }
+    },
+    "stop_sound": {
+      "name": "Geluid stoppen",
+      "description": "Stop het geluid op een Google Find My-apparaat.",
+      "fields": {
+        "device_id": {
+          "name": "Apparaat",
+          "description": "Selecteer een Google Find My-apparaat (of geef een canoniek ID door via Ontwikkelaarstools)."
+        }
+      }
+    },
+    "refresh_device_urls": {
+      "name": "Apparaat-URL's vernieuwen",
+      "description": "Vernieuw de configuratie-URL's voor Google Find My-apparaten zodat ze naar de geïntegreerde kaartweergave verwijzen.",
+      "fields": {}
+    },
+    "rebuild_device_registry": {
+      "name": "Apparaatregister opnieuw opbouwen",
+      "description": "Onderhoud: bouwt apparaatregisterkoppelingen voor Google Find My-hubs opnieuw op en verwijdert trackerapparaten die onjuist aan het bovenliggende item zijn gekoppeld.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "Apparaat lokaliseren (extern)",
+      "description": "Lokaliseer een apparaat met de externe helper; delegeert naar de normale lokaliseeroperatie.",
+      "fields": {
+        "device_id": {
+          "name": "Apparaat",
+          "description": "Selecteer een Google Find My-apparaat (of geef een canoniek ID door via Ontwikkelaarstools)."
+        },
+        "device_name": {
+          "name": "Apparaatnaam (optioneel)",
+          "description": "Een optionele menselijk leesbare naam voor logging."
+        }
+      }
+    },
+    "rebuild_registry": {
+      "name": "Register opnieuw opbouwen/migreren",
+      "description": "Onderhoud: Voer een zachte data→opties-migratie uit of bouw entiteiten/apparaten voor deze integratie opnieuw op.",
+      "fields": {
+        "mode": {
+          "name": "Modus",
+          "description": "Kies 'Opnieuw opbouwen' om entiteiten/apparaten te verwijderen en opnieuw te laden; 'Migreren' past alleen de zachte data→opties-migratie opnieuw toe."
+        },
+        "device_ids": {
+          "name": "Apparaten (optioneel)",
+          "description": "Beperk de operatie tot specifieke apparaten. Laat leeg om alle Google Find My-apparaten te targeten."
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "play_sound": {
+        "name": "Geluid afspelen"
+      },
+      "stop_sound": {
+        "name": "Geluid stoppen"
+      },
+      "locate_device": {
+        "name": "Nu lokaliseren"
+      },
+      "reset_statistics": {
+        "name": "Statistieken resetten"
+      },
+      "regenerate_aas_token": {
+        "name": "AAS-token opnieuw genereren",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Afkoelperiode (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Resterende afkoeltijd (s)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "ADM-token opnieuw genereren",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Afkoelperiode (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Resterende afkoeltijd (s)"
+          }
+        }
+      }
+    },
+    "binary_sensor": {
+      "polling": {
+        "name": "Polling"
+      },
+      "connectivity": {
+        "name": "Verbindingsstatus",
+        "state_attributes": {
+          "last_poll_result": {
+            "name": "Laatste pollresultaat"
+          },
+          "consecutive_timeouts": {
+            "name": "Opeenvolgende time-outs"
+          },
+          "fcm_connected_at": {
+            "name": "FCM verbonden op"
+          }
+        }
+      },
+      "nova_auth_status": {
+        "name": "Nova API-authenticatiestatus",
+        "state_attributes": {
+          "nova_api_status": {
+            "name": "Nova API-status"
+          },
+          "nova_api_status_reason": {
+            "name": "Nova API-statusreden"
+          },
+          "nova_api_status_changed_at": {
+            "name": "Nova API-status gewijzigd op"
+          },
+          "nova_fcm_status": {
+            "name": "Nova FCM-status"
+          },
+          "nova_fcm_status_reason": {
+            "name": "Nova FCM-statusreden"
+          },
+          "nova_fcm_status_changed_at": {
+            "name": "Nova FCM-status gewijzigd op"
+          }
+        }
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "name": "Apparaat",
+        "state_attributes": {
+          "device_name": {
+            "name": "Apparaatnaam"
+          },
+          "device_id": {
+            "name": "Apparaat-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantisch label"
+          },
+          "battery_level": {
+            "name": "Batterijniveau"
+          },
+          "last_seen": {
+            "name": "Laatst gezien (gerapporteerd)"
+          },
+          "last_seen_utc": {
+            "name": "Laatst gezien (UTC)"
+          },
+          "source_label": {
+            "name": "Bronlabel"
+          },
+          "source_rank": {
+            "name": "Bronrang"
+          },
+          "is_own_report": {
+            "name": "Eigen apparaatrapport"
+          },
+          "latitude": {
+            "name": "Breedtegraad"
+          },
+          "longitude": {
+            "name": "Lengtegraad"
+          },
+          "accuracy_m": {
+            "name": "Nauwkeurigheid (m)"
+          },
+          "altitude_m": {
+            "name": "Hoogte (m)"
+          },
+          "location_age": {
+            "name": "Locatieleeftijd (s)"
+          },
+          "location_status": {
+            "name": "Locatiestatus"
+          },
+          "last_latitude": {
+            "name": "Laatst bekende breedtegraad"
+          },
+          "last_longitude": {
+            "name": "Laatst bekende lengtegraad"
+          }
+        }
+      }
+    },
+    "sensor": {
+      "last_seen": {
+        "name": "Laatst gezien",
+        "state_attributes": {
+          "device_name": {
+            "name": "Apparaatnaam"
+          },
+          "device_id": {
+            "name": "Apparaat-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantisch label"
+          },
+          "battery_level": {
+            "name": "Batterijniveau"
+          },
+          "last_seen": {
+            "name": "Laatst gezien (gerapporteerd)"
+          },
+          "last_seen_utc": {
+            "name": "Laatst gezien (UTC)"
+          },
+          "source_label": {
+            "name": "Bronlabel"
+          },
+          "source_rank": {
+            "name": "Bronrang"
+          },
+          "is_own_report": {
+            "name": "Eigen apparaatrapport"
+          },
+          "latitude": {
+            "name": "Breedtegraad"
+          },
+          "longitude": {
+            "name": "Lengtegraad"
+          },
+          "accuracy_m": {
+            "name": "Nauwkeurigheid (m)"
+          },
+          "altitude_m": {
+            "name": "Hoogte (m)"
+          }
+        }
+      },
+      "semantic_labels": {
+        "name": "Semantische labels"
+      },
+      "stat_background_updates": {
+        "name": "Achtergrondupdates"
+      },
+      "stat_polled_updates": {
+        "name": "Gepolde updates"
+      },
+      "stat_crowd_sourced_updates": {
+        "name": "Crowdsourced updates"
+      },
+      "stat_history_fallback_used": {
+        "name": "Historische fallbacks"
+      },
+      "stat_timeouts": {
+        "name": "Time-outs"
+      },
+      "stat_invalid_coords": {
+        "name": "Ongeldige coördinaten"
+      },
+      "stat_fused_updates": {
+        "name": "Gefuseerde locatie-updates"
+      }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "Herauthenticatie vereist",
+      "description": "Authenticatie voor Google Find My Device is ongeldig of verlopen voor dit item.\n\n**Item:** {entry_title}\n**Account:** {email}\n\nSelecteer **Opnieuw configureren** op de integratiekaart om opnieuw aan te melden. Als je onlangs je Google-wachtwoord hebt gewijzigd of tokens hebt ingetrokken, moet je hier opnieuw authenticeren om de functionaliteit te herstellen."
+    },
+    "fcm_connection_stuck": {
+      "title": "FCM push-verbinding mislukt",
+      "description": "De achtergrondverbinding met Google is geblokkeerd.\n\n1. Is uitgaande **TCP-poort 5228** toegestaan in je firewall?\n2. Als het netwerk in orde is, probeer dan je `secrets.json` opnieuw te genereren (inloggegevens zijn mogelijk gesplitst/ingetrokken)."
+    },
+    "multiple_config_entries": {
+      "title": "Meerdere configuratie-items gedetecteerd",
+      "description": "Google Find My Device ondersteunt nu meerdere configuratie-items, één per Google-account. Als elk item een ander account target, is geen actie vereist. Wanneer hetzelfde account tweemaal wordt toegevoegd, maakt Home Assistant een reparatieprobleem **Dubbele accountitems** aan voor het nieuwe item, zodat je het juiste kunt verwijderen of opnieuw inschakelen."
+    },
+    "unique_id_collision": {
+      "title": "Entiteit unieke ID-botsing gedetecteerd",
+      "description": "Sommige entiteiten voor **{entry}** gebruiken al het nieuwe unieke ID-formaat en conflicteren met de migratie.\n\n**Aantal:** {count}\n**Voorbeelden:** {entities}\n\nOm op te lossen:\n1) Open **Instellingen → Apparaten & Services → Entiteiten** en zoek naar de vermelde entiteiten.\n2) Verwijder of hernoem conflicterende entiteiten, of verwijder verlaten items van andere integraties.\n3) Herlaad de integratie (of herstart Home Assistant). De migratie zal automatisch opnieuw proberen."
+    },
+    "duplicate_account": {
+      "title": "Dubbel Google Find My-account",
+      "description": "Home Assistant heeft meerdere Google Find My-items gedetecteerd voor hetzelfde account ({email}). Er kan slechts één item actief blijven. Verwijder of schakel het dubbele item \"{entry_title}\" uit of herauthenticeer het bedoelde account. Oorzaak: {cause}."
+    },
+    "duplicate_account_entries": {
+      "title": "Dubbele accountitems gedetecteerd",
+      "description": "Dit Google-account (**{email}**) is al geconfigureerd door een ander item:\n\n{entries}\n\nSchakel het dubbele item uit of verwijder het zodat er slechts één item per account actief blijft, en herlaad vervolgens de integratie (of herstart Home Assistant)."
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "Apparaat {device_id} kon niet worden gevonden of maakt geen deel uit van deze integratie."
+    },
+    "no_active_entry": {
+      "message": "Geen actief Google Find My Device-item beschikbaar. Actieve items: {active_count}/{total_count}. Schakel een van de geconfigureerde items ({entries}) in of voeg een nieuw account toe en probeer het opnieuw."
+    },
+    "locate_failed": {
+      "message": "Kan apparaat {device_id} niet lokaliseren: {error}"
+    },
+    "play_sound_failed": {
+      "message": "Kan geluid niet afspelen op {device_id}: {error}"
+    },
+    "stop_sound_failed": {
+      "message": "Kan geluid niet stoppen op {device_id}: {error}"
+    },
+    "missing_token_cache": {
+      "message": "Tokencache ontbreekt. Geef de item-specifieke TokenCache op (bijvoorbeeld entry.runtime_data.token_cache)."
+    },
+    "missing_namespace": {
+      "message": "Namespace ontbreekt. Geef de item-specifieke namespace of ConfigEntry-ID door om gecachete metadata geïsoleerd te houden."
+    }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": "Integratieversie",
+      "loaded_entries": "Geladen items",
+      "entries": "Configuratie-items",
+      "fcm": "FCM-ontvanger",
+      "fcm_lock_contention_count": "FCM lock-contentieteller"
+    }
+  }
+}

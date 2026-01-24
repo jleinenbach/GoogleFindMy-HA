@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import identity as coordinator_identity
 
 
 class _Recorder:
@@ -228,6 +231,9 @@ def test_device_registry_wrapper_retries_with_legacy_config_subentry_kwarg(
     ]
 
 
+# fmt: off
+
+
 def test_device_registry_wrapper_retries_with_legacy_remove_config_subentry_kwarg() -> None:
     """The wrapper retries without ``remove_config_subentry_id`` on legacy cores."""
 
@@ -257,3 +263,489 @@ def test_device_registry_wrapper_retries_with_legacy_remove_config_subentry_kwar
             "remove_config_entry_id": "entry-id",
         },
     ]
+
+# fmt: on
+
+
+def test_coordinator_propagates_timestamps_to_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Metadata-only updates should populate resolver identities with timestamps."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
+    metadata_only_payload = {
+        "identity_key": b"\x01\x02\x03\x04",
+        "pair_date": 1_700_000_000,
+        "metadata_only": True,
+    }
+
+    coordinator.update_device_cache("device-1", metadata_only_payload)
+
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    registry = _StubRegistry(registry_device)
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.pair_date == metadata_only_payload["pair_date"]
+    assert identity.identity_key == metadata_only_payload["identity_key"]
+
+
+def test_coordinator_persists_camelCase_identity_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CamelCase identity metadata should persist and feed resolver identities."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
+    camel_payload = {
+        "identityKey": b"\x05\x06\x07\x08",
+        "pairDate": 1_800_000_000,
+        "metadata_only": True,
+    }
+
+    coordinator.update_device_cache("device-1", camel_payload)
+
+    assert (
+        coordinator._device_location_data["device-1"]["identity_key"]
+        == (camel_payload["identityKey"])
+    )
+    assert (
+        coordinator._device_location_data["device-1"]["pair_date"]
+        == camel_payload["pairDate"]
+    )
+
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    registry = _StubRegistry(registry_device)
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.pair_date == camel_payload["pairDate"]
+    assert identity.identity_key == camel_payload["identityKey"]
+
+
+def test_coordinator_yields_encrypted_only_identities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow encrypted identity keys to flow to the resolver."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
+    encrypted_payload = {
+        "pair_date": 1_700_000_000,
+        "encrypted_identity_key": b"\x01\x02\x03\x04",
+    }
+
+    coordinator.update_device_cache("device-1", encrypted_payload)
+
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    registry = _StubRegistry(registry_device)
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.identity_key is None
+    assert (
+        identity.encrypted_identity_key == encrypted_payload["encrypted_identity_key"]
+    )
+    assert identity.pair_date == encrypted_payload["pair_date"]
+
+
+def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure wrapped 60-byte encrypted keys are unwrapped to 32 bytes before reaching the resolver."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
+    encrypted_eik = (
+        b"\x66" * 60
+    )  # Wrapped 60-byte identity key payload (Moto Tag/Chipolo style)
+    decrypted_eik = b"\xaa" * 32
+
+    cache = TokenCache.__new__(TokenCache)
+    cache._data = {
+        "username": "user@example.com",
+        "owner_key_user@example.com": {"key": b"\xcc" * 32, "version": 7},
+    }
+    coordinator._cache = cache
+
+    unwrap_calls: dict[str, bytes] = {}
+
+    def fake_decrypt(owner_key: bytes, ciphertext: bytes) -> bytes:
+        unwrap_calls["owner_key"] = owner_key
+        unwrap_calls["ciphertext"] = ciphertext
+        return decrypted_eik
+
+    # decrypt_eik is imported at module level in identity.py, patch both locations
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.KeyBackup.cloud_key_decryptor.decrypt_eik",
+        fake_decrypt,
+    )
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator.identity.decrypt_eik",
+        fake_decrypt,
+    )
+
+    class _StubRegistry:
+        def __init__(self, device: SimpleNamespace) -> None:
+            self._device = device
+
+        def async_get_device(self, *, identifiers: set[tuple[str, str]]):  # type: ignore[no-untyped-def]
+            return self._device if identifiers else None
+
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    registry = _StubRegistry(registry_device)
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    coordinator.update_device_cache(
+        "device-1", {"encrypted_identity_key": encrypted_eik}
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.identity_key == decrypted_eik
+    assert len(identity.identity_key) == 32
+    assert identity.identity_key != encrypted_eik
+    assert identity.encrypted_identity_key == encrypted_eik
+    assert identity.owner_key_version == 7
+    assert unwrap_calls["ciphertext"] == encrypted_eik
+    assert unwrap_calls["owner_key"] == b"\xcc" * 32
+
+
+def test_coordinator_yields_identities_without_pair_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Permit identities without pairing timestamps to reach the resolver."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+    coordinator._identity_key_to_devices = {}
+    coordinator._propagating_location = False
+
+    identity_only_payload = {
+        "identity_key": b"\x09\x0a\x0b\x0c",
+    }
+
+    coordinator.update_device_cache("device-1", identity_only_payload)
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-id",
+        disabled_by=None,
+        custom_fields={"canonical_id": "device-1"},
+    )
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.identity_key == identity_only_payload["identity_key"]
+    assert identity.pair_date is None
+
+
+def test_active_device_identities_assigns_correct_timestamps_per_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each device should retain its own timestamps from the last device list."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1", "device-2"}
+    coordinator._last_device_list = [
+        {"id": "device-1", "identity_key": b"\x01", "pair_date": 100},
+        {"id": "device-2", "identity_key": b"\x02", "pair_date": 200},
+    ]
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    registry = SimpleNamespace()
+    registry_devices = [
+        SimpleNamespace(
+            id="registry-1",
+            disabled_by=None,
+            custom_fields={"canonical_id": "device-1"},
+        ),
+        SimpleNamespace(
+            id="registry-2",
+            disabled_by=None,
+            custom_fields={"canonical_id": "device-2"},
+        ),
+    ]
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: registry_devices,
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    pair_dates = {identity.canonical_id: identity.pair_date for identity in identities}
+    assert pair_dates == {"device-1": 100, "device-2": 200}
+
+
+def test_active_device_identities_handles_missing_custom_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Coordinator should not crash when registry devices lack custom fields."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {}
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"device-1"}
+    coordinator._last_device_list = [
+        {"id": "device-1", "identity_key": b"\x01", "pair_date": 100}
+    ]
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: getattr(
+        device, "canonical_id", None
+    )
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-1",
+        disabled_by=None,
+        custom_fields=None,
+        canonical_id="device-1",
+    )
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.canonical_id == "device-1"
+    assert identity.pair_date == 100
+
+
+def test_active_device_identities_uses_cache_when_not_in_poll_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pull pair dates directly from cached device data when poll list is empty."""
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._run_on_hass_loop = lambda *args, **kwargs: None
+    coordinator.stats = {}
+    coordinator._device_location_data = {
+        "canonical/device-1": {
+            "identity_key": b"\x01",
+            "pair_date": 123,
+        }
+    }
+    coordinator._device_update_history = {}
+    coordinator._enabled_poll_device_ids = {"canonical/device-1"}
+    coordinator._last_device_list = []
+    coordinator.data = []
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.hass = SimpleNamespace(data={})
+    coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
+        "canonical_id"
+    )
+
+    registry = SimpleNamespace()
+    registry_device = SimpleNamespace(
+        id="registry-1",
+        disabled_by=None,
+        custom_fields={
+            "canonical_id": "canonical/device-1",
+            "identity_key": b"\x01",
+        },
+    )
+
+    # dr is imported in identity.py where get_active_device_identities is defined
+    monkeypatch.setattr(coordinator_identity.dr, "async_get", lambda hass: registry)
+    monkeypatch.setattr(
+        coordinator_identity.dr,
+        "async_entries_for_config_entry",
+        lambda _registry, _entry_id: [registry_device],
+    )
+
+    identities = coordinator.get_active_device_identities()
+
+    assert len(identities) == 1
+    identity = identities[0]
+    assert identity.canonical_id == "canonical/device-1"
+    assert identity.pair_date == 123

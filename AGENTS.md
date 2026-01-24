@@ -17,10 +17,15 @@
     - [Quickstart checks (fast path before `pytest -q`)](#quickstart-checks-fast-path-before-pytest--q)
     - [Cleanup shortcuts](#cleanup-shortcuts)
     - [Module invocation primer](#module-invocation-primer)
+    - [Shared pip cache for stub installs](#shared-pip-cache-for-stub-installs)
   - [1) What must be in **every** PR (lean checklist)](#1-what-must-be-in-every-pr-lean-checklist)
   - [Home Assistant version & dependencies](#home-assistant-version--dependencies)
   - [Maintenance mode](#maintenance-mode)
     - [Config subentry maintenance helper](#config-subentry-maintenance-helper)
+  - [Key material and resolver hypotheses](#key-material-and-resolver-hypotheses)
+    - [Where key material comes from](#where-key-material-comes-from)
+    - [Wrapped EIK hypothesis](#wrapped-eik-hypothesis)
+    - [Timebase hypotheses](#timebase-hypotheses)
   - [2) Roles (right-sized)](#2-roles-right-sized)
     - [2.1 Contributor (implementation) — **accountable for features/fixes/refactors**](#21-contributor-implementation--accountable-for-featuresfixesrefactors)
     - [2.2 Reviewer (maintainer/agent) — **accountable for correctness**](#22-reviewer-maintaineragent--accountable-for-correctness)
@@ -246,7 +251,10 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Cache cleanup:** Run `make clean` to prune `__pycache__` directories and stale bytecode before rerunning tests.
 * **Connectivity probe:** Follow the [connectivity probe](#connectivity-probe) and capture the output before running tests.
 * **Test stub install:** Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` when you need a minimal bootstrap immediately before `pytest -q`. Plan for several minutes of download time in the hosted environment because the Home Assistant wheels are large.
+* **Lint-in-test requirement:** Every testing cycle must include `python -m ruff check --fix .` so lint autofixes run alongside the rest of the suite.
+* **Pinned stub constraints:** The stub versions are locked in `custom_components/googlefindmy/constraints-test-stubs.txt` to reduce resolver backtracking; reuse that constraint file when installing Home Assistant stubs outside the Makefile targets.
 * **DocToc preinstall:** Run `make bootstrap-doctoc` once per environment to install the DocToc dev dependency non-interactively (cached under `.npm-cache`); subsequent `make doctoc` calls reuse the installation to refresh the AGENTS.md table of contents.
+> **Connectivity Probes in Final Reports:** Clarify that a "connectivity probe" (manual verification of API/FCM reachability) counts as a valid required "test" step for the final report when automated integration tests cannot simulate the specific network outage scenario. This reduces ambiguity regarding documentation of probes versus traditional test runs.
 * **Strict mypy prep:** In a fresh environment, run `make test-stubs` before `mypy --install-types --non-interactive --strict` so the Home Assistant stubs are already present and strict type checking doesn't trip over missing packages.
 * **Coverage reminder:** After adjusting registry helper fallbacks, rerun `pytest --cov -q` to confirm coverage stays intact before committing.
 * **Pytest coverage guard:** `pytest -q --cov` will raise the conftest bootstrap error if the Home Assistant stubs are missing. Run `make test-stubs` first so coverage runs complete without runtime import failures.
@@ -259,6 +267,8 @@ Use the following patterns whenever a module only exists as a `.pyi` stub or whe
 * **Generated protobuf sampling.** Use `script/rg_proto_snippet.sh` to preview hits when searching massive generated files (for example, `script/rg_proto_snippet.sh encryptedMetadata custom_components/googlefindmy/ProtoDecoders`). The helper wraps `rg --max-count` and truncates each line via `cut` so shell output stays within the limit documented in this guide.
 
 * **Dependency bootstrap timing:** Expect `pip install --upgrade homeassistant pytest-homeassistant-custom-component` to run for roughly five minutes in the hosted environment (downloads + wheel builds). Plan shell work accordingly so lengthy installs finish before kicking off lint or test runs.
+* **Dev dependency install guard:** Run `make test-deps` after cloning or rebasing to install the full `requirements-dev.txt` stack (and Home Assistant stubs). This avoids skipped or failed `pytest`/`mypy` runs due to missing packages and keeps the resolver checks green without manual pip retries. **Always run this (or an equivalent `python -m pip install -r requirements-dev.txt`) before any lint/test invocation**, especially when exercising Moto Tag regression suites that import optional crypto/backoff libraries.
+* **Rotation-window debug toggle:** The resolver's rotation window helper now accepts an `allow_negative` flag to log and scan negative windows when debugging drift-heavy anchors. When investigating timebase drift, enable the toggle in the resolver debug path instead of re-reading the code to remember how negative offsets are surfaced.
 * **Bootstrap helper:** Run `make bootstrap-base-deps` from the repo root to pre-install `homeassistant` and `pytest-homeassistant-custom-component` once per environment. The task drops a sentinel at `.bootstrap/homeassistant-preinstall.stamp`; delete it (or run `make clean`) if you need to force a reinstall. For a faster, test-focused bootstrap immediately before running `pytest -q`, prefer `make test-stubs`, which installs only these two stub packages without the broader base toolchain.
 * **Stub refresh after upgrades:** When dependency versions change (for example, after rebasing or updating requirements), rerun `make test-stubs` so Home Assistant stubs stay in sync before invoking `pytest -q` or `mypy --strict`.
 * **Fallback reminder:** If a CLI helper such as `pre-commit` is not yet on the PATH, rerun the command via its module form (for example, `python -m pre_commit run --all-files`) so the initial check still succeeds.
@@ -280,6 +290,11 @@ Some developer tools register entry points inside isolated Python environments t
 * **Repository utilities:** Project helpers with `__main__` shims (`python -m script.sync_translations`, for example) follow the same pattern.
 
 Prefer the executable name when it is available; fall back to the module form whenever onboarding, switching interpreters, or recovering from environment churn.
+
+### Shared pip cache for stub installs
+
+* Export `PIP_CACHE_DIR=/workspace/.cache/pip` (or reuse the default `~/.cache/pip`) before invoking `make test-stubs` so wheel downloads persist across sessions. Reusing the same cache keeps the Home Assistant and pytest stub installs fast and avoids repeated dependency fetches in fresh shells.
+* If you routinely rebuild the stub environment, keep a reusable virtualenv or wheelhouse around to sidestep the lengthy `make test-stubs` bootstrap. For example, cache a pre-populated `.venv` or store `pip download` artifacts in a shared directory that `PIP_FIND_LINKS` or `pip --no-index --find-links` can consume on the next run.
 
 ---
 
@@ -366,6 +381,24 @@ Prefer the executable name when it is available; fall back to the module form wh
 
 * `custom_components/googlefindmy/__init__.py::ConfigEntrySubEntryManager._deduplicate_subentries()` removes redundant config subentries while preserving a single canonical group/member pair. Call it when migrations or recovery paths encounter Home Assistant's `AbortFlow("already_configured")` errors to converge on a stable state before retrying updates.
 * The helper is **idempotent** and refreshes the manager's internal `_managed` mapping after cleanup. Avoid creating new subentries inside the helper; it only removes duplicates reported by Home Assistant.
+
+---
+
+## Key material and resolver hypotheses
+
+### Where key material comes from
+
+* The integration stores the uploaded secret bundle under `DATA_SECRET_BUNDLE` on the config entry; it originates from the user's `secrets.json` input.
+* Owner key derivation runs through the Spot API helper and is exposed at runtime via `async_get_owner_key(token_cache)`; the helper records the bytes and version in the entry-scoped token cache.
+* Shared-key retrieval is handled by `async_get_shared_key(cache=token_cache)`, which normalizes the value and stores it in the same entry-scoped cache under the canonical `shared_key` key (falling back to migrated per-user keys when present).
+
+### Wrapped EIK hypothesis
+
+* Some trackers appear to return a 60-byte encrypted identity key envelope shaped as `nonce(12) + ciphertext(32) + tag(16)`; AES-GCM verification on that layout rejects invalid tags so unwrap attempts do not misclassify random blobs as valid identity keys.
+
+### Timebase hypotheses
+
+* Resolver scans currently seed three candidates: `ABSOLUTE` (wall-clock), `REL_PAIR` (pair-date anchored), and `REL_SECRETS` (secrets-creation anchored). Once a candidate yields a match, the resolver caches the winning epoch/offset per device to lock onto that timebase and narrow future rotation windows.
 
 ---
 
@@ -784,7 +817,7 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 
 ### 6) In-repo Find My Device Network protocol reference
 
-* [`custom_components/googlefindmy/FMDN.md`](custom_components/googlefindmy/FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](custom_components/googlefindmy/api.py), [`custom_components/googlefindmy/coordinator.py`](custom_components/googlefindmy/coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](custom_components/googlefindmy/ProtoDecoders/).
+* [`docs/FMDN.md`](docs/FMDN.md) — canonical reference detailing cryptography, provisioning flows, BLE behavior, and failure modes underpinning modules such as [`custom_components/googlefindmy/api.py`](custom_components/googlefindmy/api.py), [`custom_components/googlefindmy/coordinator.py`](custom_components/googlefindmy/coordinator.py), and the BLE parsers in [`custom_components/googlefindmy/ProtoDecoders/`](custom_components/googlefindmy/ProtoDecoders/).
 
 See also: [BOOKMARKS.md](custom_components/googlefindmy/BOOKMARKS.md) for additional, curated reference URLs.
 

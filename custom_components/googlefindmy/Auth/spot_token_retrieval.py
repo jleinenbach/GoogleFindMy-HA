@@ -37,6 +37,7 @@ from .username_provider import async_get_username
 
 _LOGGER = logging.getLogger(__name__)
 
+
 async def _async_generate_spot_token(
     username: str,
     *,
@@ -66,7 +67,9 @@ async def _async_generate_spot_token(
     _LOGGER.debug(
         "async_request_token unavailable or returned empty token; falling back to sync retriever in a thread"
     )
-    aas_token_value = await (aas_provider() if aas_provider else async_get_aas_token(cache=cache))
+    aas_token_value = await (
+        aas_provider() if aas_provider else async_get_aas_token(cache=cache)
+    )
 
     token = await asyncio.to_thread(
         request_token,

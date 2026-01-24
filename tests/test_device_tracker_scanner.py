@@ -32,9 +32,13 @@ def test_scanner_triggers_cloud_discovery(
 ) -> None:
     """The tracker scanner should invoke cloud discovery for new trackers."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
-    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
     triggered_calls: list[Mapping[str, Any]] = []
     scheduled: list[asyncio.Task[Any]] = []
 
@@ -87,7 +91,9 @@ def test_scanner_triggers_cloud_discovery(
             self._device_caps: dict[str, Any] = {}
             self._present_last_seen: dict[str, float] = {}
 
-        def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        def async_add_listener(
+            self, listener: Callable[[], None]
+        ) -> Callable[[], None]:
             self._listeners.append(listener)
             return lambda: None
 
@@ -142,15 +148,19 @@ def test_scanner_triggers_cloud_discovery(
         def async_on_unload(self, callback: Callable[[], None]) -> None:
             self._callbacks.append(callback)
 
-    coordinator = _StubCoordinator([
-        {"id": "tracker-1", "name": "Tracker"},
-    ])
+    coordinator = _StubCoordinator(
+        [
+            {"id": "tracker-1", "name": "Tracker"},
+        ]
+    )
     entry = _StubConfigEntry(coordinator)
     coordinator.config_entry = entry
 
     added: list[list[Any]] = []
 
-    def _capture_entities(entities: Iterable[Any], update_before_add: bool = False) -> None:
+    def _capture_entities(
+        entities: Iterable[Any], update_before_add: bool = False
+    ) -> None:
         added.append(list(entities))
         assert update_before_add is True
 

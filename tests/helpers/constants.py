@@ -15,9 +15,7 @@ def _const_module_path() -> Path:
     """Return the filesystem path to the integration's const module."""
 
     return (
-        Path(__file__)
-        .resolve()
-        .parents[2]
+        Path(__file__).resolve().parents[2]
         / "custom_components"
         / "googlefindmy"
         / "const.py"

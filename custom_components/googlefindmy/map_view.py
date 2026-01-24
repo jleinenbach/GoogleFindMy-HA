@@ -137,12 +137,16 @@ class GoogleFindMyMapView(HomeAssistantView):
         # 1. Security Check (Keep existing logic)
         auth_token = request.query.get("token")
         if not auth_token:
-            return _html_response("Unauthorized", "Missing authentication token.", status=401)
+            return _html_response(
+                "Unauthorized", "Missing authentication token.", status=401
+            )
 
         entry, _accepted = _resolve_entry_by_token(self.hass, auth_token)
         if not entry:
             _LOGGER.debug("Map token mismatch for device_id=%s", device_id)
-            return _html_response("Unauthorized", "Invalid authentication token.", status=401)
+            return _html_response(
+                "Unauthorized", "Invalid authentication token.", status=401
+            )
 
         # 2. Resolve Device Name (Best effort from Coordinator)
         # We lazily resolve the coordinator to get the friendly name
@@ -152,7 +156,11 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         # Try to find device in the entry's coordinator data
         if runtime:
-            coordinator = runtime if isinstance(runtime, coordinator_cls) else getattr(runtime, "coordinator", None)
+            coordinator = (
+                runtime
+                if isinstance(runtime, coordinator_cls)
+                else getattr(runtime, "coordinator", None)
+            )
             if coordinator:
                 data = getattr(coordinator, "data", []) or []
                 for dev in data:
@@ -170,7 +178,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         possible_unique_ids = [
             f"{entry.entry_id}:{device_id}",
             f"{DOMAIN}_{entry.entry_id}_{device_id}",
-            f"{DOMAIN}_{device_id}"
+            f"{DOMAIN}_{device_id}",
         ]
 
         for uid in possible_unique_ids:
@@ -191,8 +199,13 @@ class GoogleFindMyMapView(HomeAssistantView):
             registry_entities = getattr(registry, "entities", None)
             if registry_entities:
                 for entity in registry_entities.values():
-                    if entity.platform == DOMAIN and entity.config_entry_id == entry.entry_id:
-                        if entity.unique_id.endswith(f":{device_id}") or entity.unique_id.endswith(f"_{device_id}"):
+                    if (
+                        entity.platform == DOMAIN
+                        and entity.config_entry_id == entry.entry_id
+                    ):
+                        if entity.unique_id.endswith(
+                            f":{device_id}"
+                        ) or entity.unique_id.endswith(f"_{device_id}"):
                             entity_id = entity.entity_id
                             entity_entry = entity
                             break
@@ -287,15 +300,23 @@ class GoogleFindMyMapView(HomeAssistantView):
                                 continue
 
                             seen_timestamps.add(ts)
-                            locations.append({
-                                "lat": lat,
-                                "lon": lon,
-                                "accuracy": acc,
-                                "timestamp": datetime.fromtimestamp(ts, tz=dt_util.UTC).isoformat(),
-                                "last_seen": ts,
-                                "is_own_report": state.attributes.get("is_own_report"),
-                                "semantic_location": state.attributes.get("semantic_name"),
-                            })
+                            locations.append(
+                                {
+                                    "lat": lat,
+                                    "lon": lon,
+                                    "accuracy": acc,
+                                    "timestamp": datetime.fromtimestamp(
+                                        ts, tz=dt_util.UTC
+                                    ).isoformat(),
+                                    "last_seen": ts,
+                                    "is_own_report": state.attributes.get(
+                                        "is_own_report"
+                                    ),
+                                    "semantic_location": state.attributes.get(
+                                        "semantic_name"
+                                    ),
+                                }
+                            )
                         except (ValueError, TypeError, KeyError):
                             continue  # Skip invalid states
             except Exception as err:  # pragma: no cover - log only
@@ -304,7 +325,9 @@ class GoogleFindMyMapView(HomeAssistantView):
         locations.sort(key=lambda location: location.get("last_seen", 0))
 
         # 6. Render
-        html = self._generate_map_html(device_name, locations, device_id, start_time, end_time, accuracy_filter)
+        html = self._generate_map_html(
+            device_name, locations, device_id, start_time, end_time, accuracy_filter
+        )
         return web.Response(text=html, content_type="text/html", charset="utf-8")
 
     def _generate_map_html(

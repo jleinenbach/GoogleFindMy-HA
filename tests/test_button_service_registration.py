@@ -45,7 +45,9 @@ def test_button_setup_skips_service_registration_when_platform_missing(
 ) -> None:
     """The button platform skips service registration if the platform is missing."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     _ensure_button_dependencies()
     button_module = importlib.import_module("custom_components.googlefindmy.button")

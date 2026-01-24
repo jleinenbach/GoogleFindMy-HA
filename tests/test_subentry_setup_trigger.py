@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,11 +22,13 @@ from custom_components.googlefindmy import (
     _async_unload_parent_entry,
 )
 from custom_components.googlefindmy.const import (
+    DATA_EID_RESOLVER,
     DOMAIN,
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_FEATURE_PLATFORMS,
 )
+from custom_components.googlefindmy.eid_resolver import GoogleFindMyEIDResolver
 from custom_components.googlefindmy.entity import schedule_add_entities
 from tests.helpers.homeassistant import (
     FakeConfigEntriesManager,
@@ -50,6 +52,24 @@ def _attach_runtime(entry: FakeConfigEntry) -> RuntimeData:
     )
     entry.runtime_data = runtime_data
     return runtime_data
+
+
+def _resolver_stub() -> GoogleFindMyEIDResolver:
+    """Build a resolver double without invoking the real initializer."""
+
+    class _ResolverDouble(GoogleFindMyEIDResolver):
+        __slots__ = ("stop_called", "refresh_called")
+
+        def stop(self) -> None:  # type: ignore[override]
+            self.stop_called = True
+
+        async def async_refresh(self) -> None:
+            self.refresh_called = True
+
+    resolver = _ResolverDouble.__new__(_ResolverDouble)
+    resolver.stop_called = False
+    resolver.refresh_called = False
+    return resolver
 
 
 @pytest.mark.asyncio
@@ -202,7 +222,9 @@ async def test_async_setup_legacy_subentry_attaches_bucket_runtime_data() -> Non
 
 
 @pytest.mark.asyncio
-async def test_async_setup_subentry_errors_when_unregistered(caplog: pytest.LogCaptureFixture) -> None:
+async def test_async_setup_subentry_errors_when_unregistered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Modern subentry setup should fail loudly if the subentry is unknown."""
 
     async def _async_refresh() -> None:
@@ -285,9 +307,7 @@ async def test_async_setup_new_subentries_retries_unknown_and_reschedules(
 
     tasks: list[asyncio.Task[Any]] = []
 
-    def _capture_task(
-        coro: Any, *, name: str | None = None
-    ) -> asyncio.Task[Any]:
+    def _capture_task(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task
@@ -344,9 +364,7 @@ async def test_async_setup_new_subentries_stops_after_retry_limit(
 
     tasks: list[asyncio.Task[Any]] = []
 
-    def _capture_task(
-        coro: Any, *, name: str | None = None
-    ) -> asyncio.Task[Any]:
+    def _capture_task(coro: Any, *, name: str | None = None) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro)
         tasks.append(task)
         return task
@@ -367,6 +385,7 @@ async def test_subentry_manager_retries_unknown_entry_without_enforcement() -> N
 
     tracker_key = "tracker"
     parent_entry = FakeConfigEntry(entry_id="parent-entry")
+
     class _RetryingConfigEntriesManager(FakeConfigEntriesManager):
         def __init__(self) -> None:
             super().__init__([parent_entry])
@@ -502,7 +521,9 @@ async def test_async_setup_new_subentries_ignores_value_error(
         forward_calls.append((entry, tuple(platforms)))
         raise ValueError("already setup")
 
-    monkeypatch.setattr(config_entries, "async_forward_entry_setups", _raise_value_error)
+    monkeypatch.setattr(
+        config_entries, "async_forward_entry_setups", _raise_value_error
+    )
 
     await _async_setup_new_subentries(hass, parent_entry, [subentry])
 
@@ -705,7 +726,10 @@ async def test_async_setup_new_subentries_forwards_placeholder_with_skip_registe
         (parent_entry, ("button", "device_tracker", "sensor")),
     ]
     assert hass.dispatcher_signals == [
-        (f"googlefindmy_subentry_setup_{parent_entry.entry_id}", (placeholder_subentry,)),
+        (
+            f"googlefindmy_subentry_setup_{parent_entry.entry_id}",
+            (placeholder_subentry,),
+        ),
     ]
 
 
@@ -863,3 +887,125 @@ async def test_async_unload_entry_cancels_retry_handles() -> None:
     assert handle.cancelled is True
     assert runtime_data.subentry_retry_handles == {}
     assert runtime_data.subentry_retry_attempts == {}
+
+
+@pytest.mark.asyncio
+async def test_parent_unload_failure_preserves_resolver() -> None:
+    """Resolver should remain running when parent unload aborts."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    runtime_data = _attach_runtime(parent_entry)
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    config_entries.async_unload_platforms = lambda entry, platforms: False  # type: ignore[attr-defined]
+    hass = FakeHass(config_entries=config_entries)
+    hass.async_create_task = (
+        lambda coro, name=None: asyncio.create_task(coro)  # noqa: ARG005
+    )
+
+    bucket = hass.data.setdefault(DOMAIN, {})
+    entries_bucket = bucket.setdefault("entries", {})
+    resolver = _resolver_stub()
+    entries_bucket[parent_entry.entry_id] = runtime_data
+    bucket[DATA_EID_RESOLVER] = resolver
+
+    assert await _async_unload_parent_entry(hass, parent_entry) is False
+    assert entries_bucket[parent_entry.entry_id] is runtime_data
+    assert bucket[DATA_EID_RESOLVER] is resolver
+    assert resolver.stop_called is False  # type: ignore[attr-defined]
+    assert resolver.refresh_called is False  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_parent_unload_success_stops_resolver_when_last_entry() -> None:
+    """Resolver should stop only after a successful unload of the final entry."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    runtime_data = _attach_runtime(parent_entry)
+    config_entries = FakeConfigEntriesManager([parent_entry])
+    config_entries.async_unload_platforms = lambda entry, platforms: True  # type: ignore[attr-defined]
+    hass = FakeHass(config_entries=config_entries)
+    hass.async_create_task = (
+        lambda coro, name=None: asyncio.create_task(coro)  # noqa: ARG005
+    )
+
+    bucket = hass.data.setdefault(DOMAIN, {})
+    entries_bucket = bucket.setdefault("entries", {})
+    resolver = _resolver_stub()
+    entries_bucket[parent_entry.entry_id] = runtime_data
+    bucket[DATA_EID_RESOLVER] = resolver
+
+    assert await _async_unload_parent_entry(hass, parent_entry) is True
+    assert parent_entry.entry_id not in entries_bucket
+    assert resolver.stop_called is True  # type: ignore[attr-defined]
+    assert bucket.get(DATA_EID_RESOLVER) is None
+
+
+@pytest.mark.asyncio
+async def test_parent_unload_success_refreshes_resolver_when_entries_remain() -> None:
+    """Resolver should refresh only after a successful unload when others remain."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    other_entry = FakeConfigEntry(entry_id="other-entry")
+    runtime_data = _attach_runtime(parent_entry)
+    _attach_runtime(other_entry)
+    config_entries = FakeConfigEntriesManager([parent_entry, other_entry])
+    config_entries.async_unload_platforms = lambda entry, platforms: True  # type: ignore[attr-defined]
+    hass = FakeHass(config_entries=config_entries)
+
+    tasks: list[asyncio.Task[object]] = []
+
+    def _capture_task(
+        coro: Awaitable[object], name: str | None = None
+    ) -> asyncio.Task[object]:  # noqa: ARG001
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    hass.async_create_task = _capture_task
+
+    bucket = hass.data.setdefault(DOMAIN, {})
+    entries_bucket = bucket.setdefault("entries", {})
+    resolver = _resolver_stub()
+    entries_bucket[parent_entry.entry_id] = runtime_data
+    entries_bucket[other_entry.entry_id] = other_entry.runtime_data  # type: ignore[index]
+    bucket[DATA_EID_RESOLVER] = resolver
+
+    assert await _async_unload_parent_entry(hass, parent_entry) is True
+    for task in tasks:
+        await task
+
+    assert parent_entry.entry_id not in entries_bucket
+    assert other_entry.entry_id in entries_bucket
+    assert resolver.stop_called is False  # type: ignore[attr-defined]
+    assert resolver.refresh_called is True  # type: ignore[attr-defined]
+    assert bucket.get(DATA_EID_RESOLVER) is resolver
+
+
+@pytest.mark.asyncio
+async def test_parent_unload_failure_does_not_refresh_resolver() -> None:
+    """Resolver refresh should not be scheduled when unload fails."""
+
+    parent_entry = FakeConfigEntry(entry_id="parent-entry")
+    other_entry = FakeConfigEntry(entry_id="other-entry")
+    runtime_data = _attach_runtime(parent_entry)
+    _attach_runtime(other_entry)
+    config_entries = FakeConfigEntriesManager([parent_entry, other_entry])
+    config_entries.async_unload_platforms = lambda entry, platforms: False  # type: ignore[attr-defined]
+    hass = FakeHass(config_entries=config_entries)
+
+    hass.async_create_task = (
+        lambda coro, name=None: asyncio.create_task(coro)  # noqa: ARG005
+    )
+
+    bucket = hass.data.setdefault(DOMAIN, {})
+    entries_bucket = bucket.setdefault("entries", {})
+    resolver = _resolver_stub()
+    entries_bucket[parent_entry.entry_id] = runtime_data
+    entries_bucket[other_entry.entry_id] = other_entry.runtime_data  # type: ignore[index]
+    bucket[DATA_EID_RESOLVER] = resolver
+
+    assert await _async_unload_parent_entry(hass, parent_entry) is False
+    assert parent_entry.entry_id in entries_bucket
+    assert resolver.stop_called is False  # type: ignore[attr-defined]
+    assert resolver.refresh_called is False  # type: ignore[attr-defined]
+    assert bucket.get(DATA_EID_RESOLVER) is resolver

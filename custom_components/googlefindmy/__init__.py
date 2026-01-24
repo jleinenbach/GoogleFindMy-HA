@@ -99,6 +99,8 @@ except ImportError:  # pragma: no cover - fallback for legacy or test environmen
                 raise ValueError(entity_id)
             domain, object_id = entity_id.split(".", 1)
             return domain, object_id
+
+
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryNotReady,
@@ -124,6 +126,7 @@ else:  # pragma: no cover - test environments without full Home Assistant
 
             __slots__ = ()
 
+
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
 
@@ -148,16 +151,17 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
     DATA_AUTH_METHOD,
+    DATA_EID_RESOLVER,
     DATA_SECRET_BUNDLE,
     DEFAULT_CONTRIBUTOR_MODE,
     DEFAULT_DELETE_CACHES_ON_REMOVE,
     DEFAULT_DEVICE_POLL_DELAY,
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
-    DEFAULT_MIN_ACCURACY_THRESHOLD,
     DEFAULT_MIN_POLL_INTERVAL,
     DEFAULT_OPTIONS,
     DOMAIN,
+    FEATURE_FMDN_FINDER_ENABLED,
     LEGACY_SERVICE_IDENTIFIER,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
@@ -166,7 +170,6 @@ from .const import (
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_MIN_POLL_INTERVAL,
     OPT_OPTIONS_SCHEMA_VERSION,
     OPTION_KEYS,
@@ -191,15 +194,9 @@ from .const import (
 )
 from .email import normalize_email, unique_account_id
 from .ha_typing import CloudDiscoveryRuntime, callback
+from .SpotApi.spot_grpc_transport import SPOT_GRPC_TRANSPORT
 
 # Shared FCM provider (HA-managed singleton)
-from .NovaApi.ExecuteAction.LocateTracker.location_request import (
-    register_fcm_receiver_provider as loc_register_fcm_provider,
-)
-from .NovaApi.ExecuteAction.LocateTracker.location_request import (
-    unregister_fcm_receiver_provider as loc_unregister_fcm_provider,
-)
-
 try:  # pragma: no cover - OperationNotAllowed introduced alongside HA subentry retries
     from homeassistant.config_entries import OperationNotAllowed as _OperationNotAllowed
 except ImportError:  # pragma: no cover - legacy Home Assistant builds
@@ -286,6 +283,9 @@ def get_proto_decoders() -> Mapping[ProtoDecoderModuleName, ModuleType]:
     for proto_name in _PROTO_DECODER_PATHS:
         _import_proto_decoder(proto_name)
     return _PROTO_DECODER_CACHE_PROXY
+
+
+from .eid_resolver import GoogleFindMyEIDResolver  # noqa: E402
 
 
 def __getattr__(name: str) -> Any:
@@ -391,7 +391,9 @@ else:
         type[Any], type("GoogleFindMyMapRedirectViewPlaceholder", (object,), {})
     )
 
-    api_register_fcm_provider: Callable[[Callable[[], ApiFcmReceiverProtocol]], None] = cast(
+    api_register_fcm_provider: Callable[
+        [Callable[[], ApiFcmReceiverProtocol]], None
+    ] = cast(
         Callable[[Callable[[], ApiFcmReceiverProtocol]], None],
         _runtime_imports_not_initialized,
     )
@@ -404,11 +406,11 @@ else:
         Callable[[HomeAssistant, Mapping[str, Any]], Awaitable[None]],
         _runtime_imports_not_initialized,
     )
-    async_initialize_discovery_runtime: Callable[
-        [HomeAssistant], Awaitable[Any]
-    ] = cast(
-        Callable[[HomeAssistant], Awaitable[Any]],
-        _runtime_imports_not_initialized,
+    async_initialize_discovery_runtime: Callable[[HomeAssistant], Awaitable[Any]] = (
+        cast(
+            Callable[[HomeAssistant], Awaitable[Any]],
+            _runtime_imports_not_initialized,
+        )
     )
     _cloud_discovery_runtime_callable: CloudDiscoveryRuntimeCallable = cast(
         CloudDiscoveryRuntimeCallable,
@@ -422,6 +424,11 @@ else:
         RedactAccountForLogCallable,
         _runtime_imports_not_initialized,
     )
+
+loc_register_fcm_provider: (
+    Callable[[Callable[[str | None], NovaFcmReceiverProtocol]], None] | None
+) = None
+loc_unregister_fcm_provider: Callable[[], None] | None = None
 
 _RUNTIME_IMPORTS_LOADED = False
 _FCM_RECEIVER_CLASS: type[FcmReceiverHAType] | None = None
@@ -542,6 +549,7 @@ def _redact_account_for_log(*args: Any, **kwargs: Any) -> str:
 
     _ensure_runtime_imports()
     return _redact_account_for_log_callable(*args, **kwargs)
+
 
 try:  # pragma: no cover - compatibility shim for stripped test envs
     from homeassistant.helpers.entity_registry import (
@@ -960,6 +968,7 @@ async def async_coalesce_account_entries(
     if valid_candidates:
         winner = sorted(valid_candidates, key=_valid_sort_key)[0]
     else:
+
         def _fallback_sort_key(entry: ConfigEntry) -> tuple[Any, ...]:
             """Order unknown/invalid entries by schema version, enabled flag, and age."""
             not_disabled = 1 if getattr(entry, "disabled_by", None) is None else 0
@@ -1019,6 +1028,7 @@ async def async_coalesce_account_entries(
 
     return winner
 
+
 # Platforms provided by this integration
 PLATFORMS: list[Platform] = [
     Platform.DEVICE_TRACKER,
@@ -1042,6 +1052,7 @@ def _feature_name_from_platform(platform: Platform) -> str:
     if "." in candidate:
         _, candidate = candidate.split(".", 1)
     return candidate.lower()
+
 
 # ---- Runtime typing helpers -------------------------------------------------
 
@@ -1141,15 +1152,25 @@ class ConfigEntrySubEntryManager:
             return None, None, None
 
         entry_id_value = getattr(candidate, "entry_id", None)
-        entry_id = entry_id_value if isinstance(entry_id_value, str) and entry_id_value else None
+        entry_id = (
+            entry_id_value
+            if isinstance(entry_id_value, str) and entry_id_value
+            else None
+        )
 
         subentry_id_value = getattr(candidate, "subentry_id", None)
         subentry_id = (
-            subentry_id_value if isinstance(subentry_id_value, str) and subentry_id_value else None
+            subentry_id_value
+            if isinstance(subentry_id_value, str) and subentry_id_value
+            else None
         )
 
         unique_id_value = getattr(candidate, "unique_id", None)
-        unique_id = unique_id_value if isinstance(unique_id_value, str) and unique_id_value else None
+        unique_id = (
+            unique_id_value
+            if isinstance(unique_id_value, str) and unique_id_value
+            else None
+        )
 
         return entry_id, subentry_id, unique_id
 
@@ -1170,7 +1191,6 @@ class ConfigEntrySubEntryManager:
 
         return True
 
-
     def _managed_key_for_subentry_id(self, subentry_id: str) -> str | None:
         """Return the managed key associated with ``subentry_id`` when present."""
 
@@ -1180,7 +1200,10 @@ class ConfigEntrySubEntryManager:
 
         for managed_key, managed_subentry in self._managed.items():
             candidate_subentry_id = getattr(managed_subentry, "subentry_id", None)
-            if isinstance(candidate_subentry_id, str) and candidate_subentry_id == subentry_id:
+            if (
+                isinstance(candidate_subentry_id, str)
+                and candidate_subentry_id == subentry_id
+            ):
                 self._managed_by_subentry_id[subentry_id] = managed_key
                 return managed_key
 
@@ -1209,7 +1232,9 @@ class ConfigEntrySubEntryManager:
             existing_key = self._managed_by_subentry_id.get(subentry_id)
             if existing_key is None:
                 for managed_key, managed_subentry in list(self._managed.items()):
-                    candidate_subentry_id = getattr(managed_subentry, "subentry_id", None)
+                    candidate_subentry_id = getattr(
+                        managed_subentry, "subentry_id", None
+                    )
                     if (
                         isinstance(candidate_subentry_id, str)
                         and candidate_subentry_id == subentry_id
@@ -1228,7 +1253,8 @@ class ConfigEntrySubEntryManager:
         """Return preference tuple for resolving duplicate managed keys."""
 
         entry_match = int(
-            getattr(subentry, "entry_id", None) == getattr(self._entry, "entry_id", None)
+            getattr(subentry, "entry_id", None)
+            == getattr(self._entry, "entry_id", None)
         )
         unique_id = getattr(subentry, "unique_id", None)
         unique_match = int(
@@ -1311,7 +1337,10 @@ class ConfigEntrySubEntryManager:
                         err,
                     )
 
-        if isinstance(refreshed_entry, ConfigEntry) and refreshed_entry is not self._entry:
+        if (
+            isinstance(refreshed_entry, ConfigEntry)
+            and refreshed_entry is not self._entry
+        ):
             self._entry = refreshed_entry
 
         def _scan(entry: Any) -> ConfigSubentry | None:
@@ -1327,15 +1356,21 @@ class ConfigEntrySubEntryManager:
                     return direct
 
             for subentry in subentries.values():
-                subentry_entry_id, subentry_id, subentry_unique_id = self._subentry_identity(
-                    subentry
+                subentry_entry_id, subentry_id, subentry_unique_id = (
+                    self._subentry_identity(subentry)
                 )
 
-                if isinstance(target_subentry_id, str) and subentry_id == target_subentry_id:
+                if (
+                    isinstance(target_subentry_id, str)
+                    and subentry_id == target_subentry_id
+                ):
                     return subentry
 
                 if isinstance(candidate_entry_id, str):
-                    if isinstance(subentry_entry_id, str) and subentry_entry_id == candidate_entry_id:
+                    if (
+                        isinstance(subentry_entry_id, str)
+                        and subentry_entry_id == candidate_entry_id
+                    ):
                         return subentry
 
                 resolved_candidate_unique_id: str | None
@@ -1599,19 +1634,27 @@ class ConfigEntrySubEntryManager:
                 group_value = data.get(self._key_field)
             else:
                 group_value = None
-            key_value = group_value if isinstance(group_value, str) and group_value else None
-            grouped_by_group[(key_value, getattr(subentry, "subentry_type", None))].append(
-                subentry
+            key_value = (
+                group_value if isinstance(group_value, str) and group_value else None
             )
+            grouped_by_group[
+                (key_value, getattr(subentry, "subentry_type", None))
+            ].append(subentry)
 
         def _select_canonical(candidates: list[ConfigSubentry]) -> ConfigSubentry:
-            def _sort_key(item: tuple[int, ConfigSubentry]) -> tuple[int, str, int, str]:
+            def _sort_key(
+                item: tuple[int, ConfigSubentry],
+            ) -> tuple[int, str, int, str]:
                 index, candidate = item
                 candidate_unique_id = getattr(candidate, "unique_id", None)
-                unique_part = candidate_unique_id if isinstance(candidate_unique_id, str) else ""
+                unique_part = (
+                    candidate_unique_id if isinstance(candidate_unique_id, str) else ""
+                )
                 candidate_subentry_id = getattr(candidate, "subentry_id", None)
                 subentry_part = (
-                    candidate_subentry_id if isinstance(candidate_subentry_id, str) else ""
+                    candidate_subentry_id
+                    if isinstance(candidate_subentry_id, str)
+                    else ""
                 )
                 return (0 if unique_part else 1, unique_part, index, subentry_part)
 
@@ -1753,7 +1796,9 @@ class ConfigEntrySubEntryManager:
                         original=subentry,
                     )
                     self._index_managed_subentry(resolved_key, refreshed_subentry)
-                    refreshed_subentry_id = getattr(refreshed_subentry, "subentry_id", None)
+                    refreshed_subentry_id = getattr(
+                        refreshed_subentry, "subentry_id", None
+                    )
                     if (
                         key != resolved_key
                         and isinstance(refreshed_subentry_id, str)
@@ -1766,9 +1811,7 @@ class ConfigEntrySubEntryManager:
                 name=f"{DOMAIN}.subentry_visibility_refresh",
             )
             self._visibility_update_task = task
-            task.add_done_callback(
-                lambda done_task: self._clear_visibility_task(done_task)
-            )
+            task.add_done_callback(self._clear_visibility_task)
             return
 
         refreshed = self._resolve_updated_subentry(
@@ -1922,8 +1965,7 @@ class ConfigEntrySubEntryManager:
                             )
                             if (
                                 subentry_id_param is not None
-                                and subentry_id_param.default
-                                is inspect.Signature.empty
+                                and subentry_id_param.default is inspect.Signature.empty
                                 and "subentry_id" not in constructor_kwargs
                             ):
                                 constructor_kwargs["subentry_id"] = None
@@ -2017,7 +2059,9 @@ class ConfigEntrySubEntryManager:
                     stored: ConfigSubentry | None
                     if isinstance(resolved_add, ConfigSubentry):
                         stored = resolved_add
-                        fallback_subentry_id = getattr(resolved_add, "subentry_id", None)
+                        fallback_subentry_id = getattr(
+                            resolved_add, "subentry_id", None
+                        )
                     else:
                         stored = new_subentry
 
@@ -2228,12 +2272,13 @@ class RuntimeData:
 
         return self.token_cache
 
+
 type MyConfigEntry = ConfigEntry
 
 
-SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal[
+SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal["_subentry_forward_helper_logs"] = (
     "_subentry_forward_helper_logs"
-] = "_subentry_forward_helper_logs"
+)
 
 
 def _runtime_data(entry: MyConfigEntry) -> RuntimeData:
@@ -2277,7 +2322,9 @@ def _cleanup_cloud_discovery_runtime(runtime_owner: Any) -> None:
         try:
             unsub()
         except Exception:  # noqa: BLE001 - defensive best effort
-            _LOGGER.debug("Cloud discovery dispatcher unsubscribe failed", exc_info=True)
+            _LOGGER.debug(
+                "Cloud discovery dispatcher unsubscribe failed", exc_info=True
+            )
 
     while container.retry_handles:
         handle = container.retry_handles.pop()
@@ -2305,11 +2352,13 @@ def _cleanup_cloud_discovery_runtime(runtime_owner: Any) -> None:
     container.results = None
     container.lock = asyncio.Lock()
 
+
 class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
 
     device_owner_index: dict[str, str]
     entries: dict[str, RuntimeData]
+    eid_resolver: GoogleFindMyEIDResolver
     fcm_lock: asyncio.Lock
     fcm_receiver: FcmReceiverHAType
     fcm_receivers: dict[str, FcmReceiverHAType]
@@ -2378,9 +2427,7 @@ def _clear_subentry_retry_entry(
 
 
 @callback
-def _schedule_subentry_retry(
-    hass: HomeAssistant, parent_entry: MyConfigEntry
-) -> None:
+def _schedule_subentry_retry(hass: HomeAssistant, parent_entry: MyConfigEntry) -> None:
     """Schedule a retry callback for ``parent_entry`` when absent."""
 
     loop = getattr(hass, "loop", None)
@@ -2434,7 +2481,9 @@ def _queue_subentry_retry(
 ) -> None:
     """Record a retry attempt for ``registration_candidate`` and schedule a follow-up."""
 
-    entry_queue = _get_retry_attempts(parent_entry).setdefault(parent_entry.entry_id, {})
+    entry_queue = _get_retry_attempts(parent_entry).setdefault(
+        parent_entry.entry_id, {}
+    )
     attempts = entry_queue.get(registration_candidate, 0) + 1
     entry_queue[registration_candidate] = attempts
 
@@ -2480,6 +2529,7 @@ async def _async_retry_pending_subentries(
         (),
         retry_entry_ids=pending,
     )
+
 
 def _subentry_setup_tracker(
     hass: HomeAssistant, parent_entry: MyConfigEntry
@@ -2550,7 +2600,11 @@ def _registered_subentry_ids(
 
     registered: set[str] = set()
     registered.update(
-        {registered_id for registered_id in getattr(parent, "_registered_subentry_ids", set()) if isinstance(registered_id, str)}
+        {
+            registered_id
+            for registered_id in getattr(parent, "_registered_subentry_ids", set())
+            if isinstance(registered_id, str)
+        }
     )
     parent_subentries = getattr(parent, "subentries", None)
     if isinstance(parent_subentries, Mapping):
@@ -2669,8 +2723,10 @@ async def _async_setup_new_subentries(  # noqa: PLR0913
         identifier in registered for identifier in identifiers
     )
     parent_identifier = getattr(parent_entry, "entry_id", None)
-    if registered_all and parent_identifier and all(
-        identifier == parent_identifier for identifier in identifiers
+    if (
+        registered_all
+        and parent_identifier
+        and all(identifier == parent_identifier for identifier in identifiers)
     ):
         registered_all = False
     auto_schedules_subentries = _core_auto_schedules_subentries(config_entries)
@@ -2804,6 +2860,7 @@ async def _async_purge_unloaded_subentry_registrations(
         )
 
     return removed_entities, removed_devices
+
 
 def _ensure_fcm_lock(bucket: GoogleFindMyDomainData) -> asyncio.Lock:
     """Return the shared FCM lock, creating it if missing."""
@@ -3020,7 +3077,9 @@ def _get_fcm_refcount(bucket: GoogleFindMyDomainData, entry_id: str) -> int:
     return _get_fcm_refcounts(bucket).get(entry_id, 0)
 
 
-def _set_fcm_refcount(bucket: GoogleFindMyDomainData, entry_id: str, value: int) -> None:
+def _set_fcm_refcount(
+    bucket: GoogleFindMyDomainData, entry_id: str, value: int
+) -> None:
     """Persist the refcount for an entry-scoped FCM receiver."""
 
     refcounts = bucket.setdefault("fcm_refcounts", {})
@@ -3351,9 +3410,7 @@ class EntityRecoveryManager:
             ),
         )
 
-    def expected_unique_ids_for_platform(
-        self, platform: Platform | str
-    ) -> set[str]:
+    def expected_unique_ids_for_platform(self, platform: Platform | str) -> set[str]:
         """Return the expected unique IDs for ``platform`` if registered."""
 
         key = platform.value if isinstance(platform, Platform) else str(platform)
@@ -3458,6 +3515,7 @@ class EntityRecoveryManager:
                     platform,
                     err,
                 )
+
 
 def _default_button_subentry_identifier(subentry_map: Mapping[str, str]) -> str:
     """Return the preferred subentry identifier for button entities."""
@@ -3723,9 +3781,7 @@ async def _async_relink_entities_for_entry(  # noqa: PLR0913
         if device is None:
             return None
 
-        config_entries = cast(
-            Collection[str], getattr(device, "config_entries", ())
-        )
+        config_entries = cast(Collection[str], getattr(device, "config_entries", ()))
         if entry_id not in config_entries:
             return None
         if not allow_service and _device_is_service_device(device, entry_id):
@@ -3833,10 +3889,7 @@ def _device_is_service_device(device: dr.DeviceEntry | Any, entry_id: str) -> bo
         if domain != DOMAIN or not isinstance(ident, str) or not ident:
             continue
         canonical = _normalize_device_identifier(device, ident)
-        if (
-            canonical in service_identifiers
-            or canonical.endswith(":service")
-        ):
+        if canonical in service_identifiers or canonical.endswith(":service"):
             return True
 
     return False
@@ -3915,11 +3968,15 @@ async def _async_relink_subentry_entities(
         return
 
     subentry_map = _resolve_subentry_identifier_map(entry)
-    tracker_subentry_id = subentry_map.get("device_tracker", _DEFAULT_SUBENTRY_IDENTIFIER)
+    tracker_subentry_id = subentry_map.get(
+        "device_tracker", _DEFAULT_SUBENTRY_IDENTIFIER
+    )
     if not isinstance(tracker_subentry_id, str) or not tracker_subentry_id:
         tracker_subentry_id = _DEFAULT_SUBENTRY_IDENTIFIER
 
-    service_subentry_id = subentry_map.get("binary_sensor", _DEFAULT_SUBENTRY_IDENTIFIER)
+    service_subentry_id = subentry_map.get(
+        "binary_sensor", _DEFAULT_SUBENTRY_IDENTIFIER
+    )
     if not isinstance(service_subentry_id, str) or not service_subentry_id:
         service_subentry_id = _DEFAULT_SUBENTRY_IDENTIFIER
 
@@ -4214,9 +4271,7 @@ def _coerce_alias_iterable(value: Any) -> list[str] | None:
         value, (str, bytes, bytearray, Mapping)
     ):
         sanitized = [
-            alias.strip()
-            for alias in value
-            if isinstance(alias, str) and alias.strip()
+            alias.strip() for alias in value if isinstance(alias, str) and alias.strip()
         ]
         if sanitized:
             return sanitized
@@ -4260,7 +4315,11 @@ def _sanitize_ignored_meta(device_id: str, meta: Mapping[str, Any]) -> dict[str,
     """Return sanitized metadata for ignored device bookkeeping."""
 
     raw_name = meta.get("name") if isinstance(meta, Mapping) else None
-    name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else device_id
+    name = (
+        raw_name.strip()
+        if isinstance(raw_name, str) and raw_name.strip()
+        else device_id
+    )
 
     alias_sources: list[Iterable[str]] = []
     if isinstance(meta, Mapping):
@@ -4654,9 +4713,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.version,
     )
 
-    canonical_entry = await async_coalesce_account_entries(
-        hass, canonical_entry=entry
-    )
+    canonical_entry = await async_coalesce_account_entries(hass, canonical_entry=entry)
     if canonical_entry.entry_id != entry.entry_id:
         _LOGGER.info(
             "Config entry %s removed during migration; canonical entry is %s",
@@ -4974,7 +5031,9 @@ def _resolve_subentry_identifier_map(entry: ConfigEntry) -> dict[str, str]:
                 identifier = _DEFAULT_SUBENTRY_IDENTIFIER
 
             group_key_raw = data.get("group_key")
-            group_key = str(group_key_raw).strip() if isinstance(group_key_raw, str) else ""
+            group_key = (
+                str(group_key_raw).strip() if isinstance(group_key_raw, str) else ""
+            )
             if group_key == SERVICE_SUBENTRY_KEY and not service_identifier:
                 service_identifier = identifier
             elif group_key == TRACKER_SUBENTRY_KEY and not tracker_identifier:
@@ -5097,7 +5156,9 @@ def _determine_subentry_unique_id(
                 if service_prefix and tail.startswith(service_prefix):
                     assert service_identifier is not None
                     return service_identifier, tail
-                chosen = tracker_identifier if tracker_identifier is not None else identifier
+                chosen = (
+                    tracker_identifier if tracker_identifier is not None else identifier
+                )
                 return chosen, remainder
 
             if service_identifier and not _looks_like_tracker_sensor_suffix(remainder):
@@ -5371,15 +5432,28 @@ async def _async_acquire_shared_fcm(
 
             provider_fn: Callable[[str | None], FcmReceiverHAType] = provider
             if not providers_registered:
-                loc_register_fcm_provider(
-                    cast(
-                        Callable[[str | None], NovaFcmReceiverProtocol], provider_fn
+                global loc_register_fcm_provider, loc_unregister_fcm_provider
+                if loc_register_fcm_provider is None:
+                    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+                        register_fcm_receiver_provider as _loc_register_fcm_provider,
                     )
-                )
+
+                    loc_register_fcm_provider = _loc_register_fcm_provider
+                if loc_unregister_fcm_provider is None:
+                    from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+                        unregister_fcm_receiver_provider as _loc_unregister_fcm_provider,
+                    )
+
+                    loc_unregister_fcm_provider = _loc_unregister_fcm_provider
+
+                if loc_register_fcm_provider is not None:
+                    loc_register_fcm_provider(
+                        cast(
+                            Callable[[str | None], NovaFcmReceiverProtocol], provider_fn
+                        )
+                    )
                 api_register_fcm_provider(
-                    cast(
-                        Callable[[str | None], ApiFcmReceiverProtocol], provider_fn
-                    )
+                    cast(Callable[[str | None], ApiFcmReceiverProtocol], provider_fn)
                 )
                 bucket["providers_registered"] = True
 
@@ -5415,8 +5489,17 @@ async def _async_release_shared_fcm(
 
         # Unregister providers first (consumers will see provider=None immediately)
         if not _get_fcm_receivers(bucket):
+            global loc_unregister_fcm_provider
+            if loc_unregister_fcm_provider is None:
+                from .NovaApi.ExecuteAction.LocateTracker.location_request import (
+                    unregister_fcm_receiver_provider as _loc_unregister_fcm_provider,
+                )
+
+                loc_unregister_fcm_provider = _loc_unregister_fcm_provider
+
             try:
-                loc_unregister_fcm_provider()
+                if loc_unregister_fcm_provider is not None:
+                    loc_unregister_fcm_provider()
             except Exception:
                 pass
             try:
@@ -6155,7 +6238,9 @@ def _determine_subentry_platforms(subentry: Any) -> tuple[Platform, ...]:
         elif subentry_type == SUBENTRY_TYPE_TRACKER or key == TRACKER_SUBENTRY_KEY:
             features = tuple(TRACKER_FEATURE_PLATFORMS)
         else:
-            features = tuple(_feature_name_from_platform(platform) for platform in PLATFORMS)
+            features = tuple(
+                _feature_name_from_platform(platform) for platform in PLATFORMS
+            )
 
     return _normalize_platforms_from_features(features)
 
@@ -6192,16 +6277,23 @@ def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> boo
 
     try:
         signature = inspect.signature(callback)
-    except (TypeError, ValueError):  # pragma: no cover - CPython limitation for some callables
+    except (
+        TypeError,
+        ValueError,
+    ):  # pragma: no cover - CPython limitation for some callables
         return True
 
     for parameter in signature.parameters.values():
         if parameter.kind is inspect.Parameter.VAR_KEYWORD:
             return True
-        if parameter.kind in (
-            inspect.Parameter.KEYWORD_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ) and parameter.name == keyword:
+        if (
+            parameter.kind
+            in (
+                inspect.Parameter.KEYWORD_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+            and parameter.name == keyword
+        ):
             return True
 
     return False
@@ -6318,7 +6410,10 @@ def _collect_entry_subentries(entry: ConfigEntry) -> tuple[Any, ...]:
 
     return tuple(ordered)
 
-_LEGACY_PLATFORM_TRACKERS: WeakKeyDictionary[ConfigEntry, set[str]] = WeakKeyDictionary()
+
+_LEGACY_PLATFORM_TRACKERS: WeakKeyDictionary[ConfigEntry, set[str]] = (
+    WeakKeyDictionary()
+)
 _LEGACY_NOTICE_TRACKER: WeakKeyDictionary[ConfigEntry, bool] = WeakKeyDictionary()
 
 
@@ -6391,9 +6486,7 @@ async def _async_setup_legacy_child_subentry(
             entry.entry_id,
             parent_entry_id,
         )
-        raise ConfigEntryNotReady(
-            f"Parent entry {parent_entry_id} not yet initialized"
-        )
+        raise ConfigEntryNotReady(f"Parent entry {parent_entry_id} not yet initialized")
 
     coordinator: GoogleFindMyCoordinator | None = None
     if isinstance(parent_payload, GoogleFindMyCoordinator):
@@ -6500,9 +6593,7 @@ async def _async_setup_subentry(
             entry.entry_id,
             parent_entry_id,
         )
-        raise ConfigEntryNotReady(
-            f"Parent entry {parent_entry_id} not yet initialized"
-        )
+        raise ConfigEntryNotReady(f"Parent entry {parent_entry_id} not yet initialized")
 
     coordinator = getattr(parent_runtime_data, "coordinator", None)
     if coordinator is None:
@@ -6629,7 +6720,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         )
 
         aas_token_maybe = secrets_bundle.get(DATA_AAS_TOKEN)
-        aas_token_recovered = aas_token_maybe if isinstance(aas_token_maybe, str) else None
+        aas_token_recovered = (
+            aas_token_maybe if isinstance(aas_token_maybe, str) else None
+        )
 
         google_email = entry.data.get(CONF_GOOGLE_EMAIL) or entry.data.get("email")
 
@@ -6642,11 +6735,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                         if not isinstance(key, str):
                             continue
                         if isinstance(candidate, str) and "@" in candidate:
-                            if key.lower() in {"user", "username", "email", "account_name"}:
+                            if key.lower() in {
+                                "user",
+                                "username",
+                                "email",
+                                "account_name",
+                            }:
                                 return candidate
-                        elif isinstance(candidate, (Mapping, Sequence)) and not isinstance(
-                            candidate, (str, bytes, bytearray)
-                        ):
+                        elif isinstance(
+                            candidate, (Mapping, Sequence)
+                        ) and not isinstance(candidate, (str, bytes, bytearray)):
                             stack.append(candidate)
                 elif isinstance(current, Sequence) and not isinstance(
                     current, (str, bytes, bytearray)
@@ -6654,12 +6752,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                     stack.extend(current)
             return None
 
-        if (not isinstance(google_email, str) or "@" not in google_email) and secrets_bundle:
+        if (
+            not isinstance(google_email, str) or "@" not in google_email
+        ) and secrets_bundle:
             email_candidate = _walk_for_email(secrets_bundle)
             google_email = email_candidate if isinstance(email_candidate, str) else None
 
         if not isinstance(google_email, str) or "@" not in google_email:
-            _LOGGER.error("[%s] Legacy migration failed to recover account email", entry.entry_id)
+            _LOGGER.error(
+                "[%s] Legacy migration failed to recover account email", entry.entry_id
+            )
             raise ConfigEntryNotReady("Legacy migration missing email")
 
         normalized_email = normalize_email(google_email)
@@ -6678,7 +6780,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
                 CONF_OAUTH_TOKEN, oauth_token_recovered
             )
         if aas_token_recovered:
-            await legacy_cache.async_set_cached_value(DATA_AAS_TOKEN, aas_token_recovered)
+            await legacy_cache.async_set_cached_value(
+                DATA_AAS_TOKEN, aas_token_recovered
+            )
 
         updated_data = dict(entry.data)
         updated_data.pop(DATA_SECRET_BUNDLE, None)
@@ -6691,7 +6795,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             entry, data=MappingProxyType(updated_data), options={}
         )
         _LOGGER.info(
-            "[%s] Migrated legacy configuration and reset entry for subentry setup", entry.entry_id
+            "[%s] Migrated legacy configuration and reset entry for subentry setup",
+            entry.entry_id,
         )
 
     elif legacy_cache_primed:
@@ -6942,9 +7047,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         ),
         device_poll_delay=_opt(entry, OPT_DEVICE_POLL_DELAY, DEFAULT_DEVICE_POLL_DELAY),
         min_poll_interval=_opt(entry, OPT_MIN_POLL_INTERVAL, DEFAULT_MIN_POLL_INTERVAL),
-        min_accuracy_threshold=_opt(
-            entry, OPT_MIN_ACCURACY_THRESHOLD, DEFAULT_MIN_ACCURACY_THRESHOLD
-        ),
         allow_history_fallback=_opt(
             entry,
             OPT_ALLOW_HISTORY_FALLBACK,
@@ -7019,9 +7121,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     runtime_data.subentry_retry_attempts.clear()
     runtime_data.subentry_retry_handles.clear()
 
-    coordinator.attach_subentry_manager(
-        runtime_subentry_manager, is_reload=is_reload
-    )
+    coordinator.attach_subentry_manager(runtime_subentry_manager, is_reload=is_reload)
 
     config_entries = getattr(hass, "config_entries", None)
     auto_schedule_subentries = _core_auto_schedules_subentries(config_entries)
@@ -7082,7 +7182,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         raise
     except Exception as err:  # noqa: BLE001 - wrap unexpected failures for HA retry
         _LOGGER.error(
-            "[%s] Initial coordinator refresh failed: %s", entry.entry_id, err, exc_info=True
+            "[%s] Initial coordinator refresh failed: %s",
+            entry.entry_id,
+            err,
+            exc_info=True,
         )
         raise ConfigEntryNotReady(f"Initial refresh failed: {err}") from err
 
@@ -7262,6 +7365,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
 
     _register_instance(entry.entry_id, cache)
 
+    existing_resolver = domain_bucket.get(DATA_EID_RESOLVER)
+    if isinstance(existing_resolver, GoogleFindMyEIDResolver):
+        await existing_resolver.async_refresh()
+    else:
+        eid_resolver = GoogleFindMyEIDResolver(hass)
+        # Immediate refresh keeps BLE resolution available before the first
+        # boundary-aligned timer fires after startup/reload.
+        await eid_resolver.async_refresh()
+        # Resolver is shared for the entire domain so BLE scans can resolve
+        # devices across all loaded config entries via hass.data[DOMAIN][DATA_EID_RESOLVER].
+        domain_bucket[DATA_EID_RESOLVER] = eid_resolver
+
+    # Setup FMDN Finder (Bermuda integration listener for location uploads)
+    # This allows Home Assistant to act as a "Finder" in Google's FMDN network,
+    # uploading encrypted location reports for detected FMDN beacons.
+    # Feature is disabled by default via FEATURE_FMDN_FINDER_ENABLED in const.py.
+    if FEATURE_FMDN_FINDER_ENABLED:
+        try:
+            from .fmdn_finder import async_setup_fmdn_finder
+
+            fmdn_setup_success = await async_setup_fmdn_finder(hass)
+            if fmdn_setup_success:
+                _LOGGER.info(
+                    "FMDN Finder enabled - will upload location reports for FMDN beacons detected by Bermuda"
+                )
+            else:
+                _LOGGER.warning("FMDN Finder setup failed - location uploads disabled")
+        except ImportError:
+            _LOGGER.debug("FMDN Finder module not available (optional feature)")
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("FMDN Finder setup failed: %s", err, exc_info=True)
+
     parent_platforms_forwarded = bool(
         getattr(entry, "_gfm_parent_platforms_forwarded", False)
     )
@@ -7351,7 +7486,8 @@ async def _async_normalize_device_names(hass: HomeAssistant) -> None:
         for device in list(dev_reg.devices.values()):
             try:
                 if not any(
-                    len(ident) == 2 and ident[0] == DOMAIN for ident in device.identifiers
+                    len(ident) == 2 and ident[0] == DOMAIN
+                    for ident in device.identifiers
                 ):
                     continue
             except (TypeError, ValueError):
@@ -7413,7 +7549,10 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
             if getattr(device, "entry_type", None) == dr.DeviceEntryType.SERVICE:
                 continue
 
-            if getattr(device, "translation_key", None) == SERVICE_DEVICE_TRANSLATION_KEY:
+            if (
+                getattr(device, "translation_key", None)
+                == SERVICE_DEVICE_TRANSLATION_KEY
+            ):
                 continue
 
             if not any(
@@ -7422,7 +7561,9 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
             ):
                 continue
 
-            entry_id = next((cid for cid in device.config_entries if cid in domain_entries), None)
+            entry_id = next(
+                (cid for cid in device.config_entries if cid in domain_entries), None
+            )
             if not entry_id:
                 continue
 
@@ -7441,7 +7582,9 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
                 dev_id = dev_id.split(":", 1)[1]
 
             entry = domain_entries[entry_id]
-            token_exp = _opt(entry, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION)
+            token_exp = _opt(
+                entry, OPT_MAP_VIEW_TOKEN_EXPIRATION, DEFAULT_MAP_VIEW_TOKEN_EXPIRATION
+            )
             secret = map_token_secret_seed(ha_uuid, entry_id, bool(token_exp))
             auth_token = map_token_hex_digest(secret)
 
@@ -7584,9 +7727,7 @@ async def async_remove_config_entry_device(
                 raw_aliases, (str, bytes, bytearray)
             ):
                 sanitized_aliases = [
-                    alias
-                    for alias in raw_aliases
-                    if isinstance(alias, str) and alias
+                    alias for alias in raw_aliases if isinstance(alias, str) and alias
                 ]
                 if sanitized_aliases:
                     alias_sources.append(sanitized_aliases)
@@ -7654,7 +7795,9 @@ async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> b
     )
     parent_entry_id = getattr(entry, "parent_entry_id", None)
     config_subentry_id = _resolve_config_subentry_identifier(entry, allow_entry_id=True)
-    entry_type = entry.data.get("subentry_type") if isinstance(entry.data, Mapping) else None
+    entry_type = (
+        entry.data.get("subentry_type") if isinstance(entry.data, Mapping) else None
+    )
 
     try:
         result: Any = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
@@ -7679,6 +7822,20 @@ async def _async_unload_subentry(hass: HomeAssistant, entry: MyConfigEntry) -> b
     if unload_success and hasattr(entry, "runtime_data"):
         setattr(entry, "runtime_data", None)
     return unload_success
+
+
+async def _maybe_close_spot_transport(entries_bucket: dict[str, RuntimeData]) -> None:
+    """
+    Close the shared SPOT transport when the integration has no active entries.
+
+    Validated by tests/test_spot_transport_lifecycle.py::test_close_only_when_bucket_empty
+    and tests/test_spot_transport_lifecycle.py::test_close_skipped_when_entries_remain.
+    """
+
+    if entries_bucket:
+        return
+
+    await SPOT_GRPC_TRANSPORT.async_close()
 
 
 async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
@@ -7725,9 +7882,7 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
     unload_callable = getattr(hass.config_entries, "async_unload_platforms", None)
     unload_call_count = int(getattr(entry, "_gfm_parent_unload_call_count", 0) or 0)
     in_progress = bool(getattr(entry, "_gfm_parent_unload_in_progress", False))
-    unload_completed = bool(
-        getattr(entry, "_gfm_parent_platforms_unloaded", False)
-    )
+    unload_completed = bool(getattr(entry, "_gfm_parent_platforms_unloaded", False))
 
     if not forwarded_parent_platforms:
         _LOGGER.debug(
@@ -7761,7 +7916,9 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     result = unload_callable(entry, tuple(PLATFORMS))
                     if isinstance(result, Awaitable):
                         result = await result
-                    unload_parent_platforms = bool(result) if result is not None else True
+                    unload_parent_platforms = (
+                        bool(result) if result is not None else True
+                    )
                 except Exception as err:  # noqa: BLE001 - defensive logging
                     _LOGGER.error(
                         "[%s] Failed to unload parent platforms: %s",  # noqa: G004
@@ -7910,9 +8067,9 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 for index, result in enumerate(unload_results):
                     if isinstance(result, Exception):
                         sub_obj = subentries[index]
-                        sub_id = _resolve_config_subentry_identifier(sub_obj) or getattr(
-                            sub_obj, "entry_id", f"index {index}"
-                        )
+                        sub_id = _resolve_config_subentry_identifier(
+                            sub_obj
+                        ) or getattr(sub_obj, "entry_id", f"index {index}")
                         _LOGGER.debug(
                             "[%s] Subentry %s unload failed: %s",
                             entry.entry_id,
@@ -7935,12 +8092,6 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                     result = shutdown()
                     if inspect.isawaitable(result):
                         await result
-
-            if getattr(runtime_data, "subentry_manager", None) is not None:
-                try:
-                    await runtime_data.subentry_manager.async_remove_all()
-                except Exception as err:
-                    _LOGGER.debug("Subentry cleanup raised during unload: %s", err)
 
             cache = getattr(runtime_data, "token_cache", None)
             if cache is not None:
@@ -7966,6 +8117,17 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         except Exception as err:
             _LOGGER.debug("FCM release during parent unload raised: %s", err)
 
+        # Unload FMDN Finder (if enabled)
+        try:
+            from .fmdn_finder import async_unload_fmdn_finder
+
+            await async_unload_fmdn_finder(hass)
+            _LOGGER.debug("FMDN Finder unloaded successfully")
+        except ImportError:
+            pass  # FMDN Finder module not available (optional feature)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("FMDN Finder unload raised: %s", err)
+
         try:
             owner_index: dict[str, str] = _ensure_device_owner_index(bucket)
             stale = [
@@ -7981,6 +8143,19 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
                 )
         except Exception as err:
             _LOGGER.debug("Owner-index cleanup failed: %s", err)
+
+        resolver = bucket.get(DATA_EID_RESOLVER)
+        if isinstance(resolver, GoogleFindMyEIDResolver):
+            if not entries_bucket:
+                resolver.stop()
+                bucket.pop(DATA_EID_RESOLVER, None)
+            else:
+                hass.async_create_task(resolver.async_refresh())
+
+        try:
+            await _maybe_close_spot_transport(entries_bucket)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug("SPOT transport close during parent unload raised: %s", err)
 
         if hasattr(entry, "runtime_data"):
             with suppress(Exception):
@@ -8109,6 +8284,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
             except Exception:
                 pass
 
+    if not entries_bucket:
+        try:
+            await _maybe_close_spot_transport(entries_bucket)
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.debug(
+                "SPOT transport close during async_remove_entry raised: %s", err
+            )
+
     if hasattr(entry, "runtime_data"):
         try:
             setattr(entry, "runtime_data", None)
@@ -8212,6 +8395,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                 "Failed to delete cache purge issue when retention is requested: %s",
                 err,
             )
+
 
 def _get_local_ip_sync() -> str:
     """Best-effort local IP discovery via UDP connect (executor-only)."""

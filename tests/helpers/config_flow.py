@@ -64,7 +64,9 @@ def _collect_manager_entries(manager: Any, domain: str) -> list[Any]:
             for value in container:
                 _add(value)
             return
-        if isinstance(container, Iterable) and not isinstance(container, (str, bytes, bytearray)):
+        if isinstance(container, Iterable) and not isinstance(
+            container, (str, bytes, bytearray)
+        ):
             for value in container:
                 _add(value)
             return
@@ -151,7 +153,9 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
             return self._holder.hass
 
         @hass.setter
-        def hass(self, value: Any | None) -> None:  # pragma: no cover - simple proxy access
+        def hass(
+            self, value: Any | None
+        ) -> None:  # pragma: no cover - simple proxy access
             self._holder.hass = value
 
     hass_container = getattr(module, "_hass", None)
@@ -199,6 +203,7 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
 
             def __getattr__(self, name: str) -> Any:
                 if name.startswith("async_set_up") or name.startswith("async_setup"):
+
                     async def _async_proxy(hass: Any | None) -> None:
                         result = self.async_set_up(hass)
                         if inspect.isawaitable(result):
@@ -207,6 +212,7 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
                     return _async_proxy
 
                 if name.startswith("set_up") and name != "set_up":
+
                     def _setup_proxy(hass: Any | None) -> None:
                         self.set_up(hass)
 
@@ -240,7 +246,10 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
 
         async def _async_set_up(target: Any) -> None:
             _set_up(target)
-            if callable(original_async_setup) and original_async_setup is not _async_set_up:
+            if (
+                callable(original_async_setup)
+                and original_async_setup is not _async_set_up
+            ):
                 result = original_async_setup(target)
                 if inspect.isawaitable(result):
                     await result
@@ -268,7 +277,10 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                asyncio.run(result)
+                raise AssertionError(
+                    "async_setup returned an awaitable outside a running event loop; "
+                    "run the caller under pytest-asyncio and await the coroutine."
+                ) from None
             else:
                 loop.create_task(result)
 
@@ -358,9 +370,7 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
         except ModuleNotFoundError:
             integration_flow_module = None
         if integration_flow_module is not None:
-            handler_cls = getattr(
-                integration_flow_module, "OptionsFlowHandler", None
-            )
+            handler_cls = getattr(integration_flow_module, "OptionsFlowHandler", None)
             if handler_cls is not None:
 
                 class _ConfigEntryDescriptor:
@@ -379,7 +389,9 @@ def _configure_frame_helper(module: Any, hass: Any) -> None:
     if not getattr(module, "_tests_import_reload_hook", False):
         original_reload = importlib.reload
 
-        def _patched_reload(target: ModuleType, *args: Any, **kwargs: Any) -> ModuleType:
+        def _patched_reload(
+            target: ModuleType, *args: Any, **kwargs: Any
+        ) -> ModuleType:
             result = original_reload(target, *args, **kwargs)
             if target.__name__ in {
                 "homeassistant.config_entries",
@@ -572,8 +584,7 @@ class ConfigEntriesFlowManagerStub:
                 if not isinstance(context, Mapping):
                     context = {}
                 if any(
-                    context.get(key) != value
-                    for key, value in match_context.items()
+                    context.get(key) != value for key, value in match_context.items()
                 ):
                     continue
             matches.append(dict(record))

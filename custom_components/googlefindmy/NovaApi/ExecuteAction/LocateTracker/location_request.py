@@ -37,6 +37,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action imp
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
+    NovaAuthPermanentError,
     NovaHTTPError,
     NovaRateLimitError,
     async_nova_request,
@@ -46,12 +47,15 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
+from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class _DecryptLocationsCallable(Protocol):
-    async def __call__(self, device_update: Any, *, cache: TokenCache) -> list[dict[str, Any]]:
+    async def __call__(
+        self, device_update: Any, *, cache: TokenCache
+    ) -> list[dict[str, Any]]:
         """Decrypt and normalize location updates."""
 
 
@@ -82,7 +86,9 @@ class FcmReceiverProtocol(Protocol):
 
 
 def _import_deviceupdate_pb2() -> ModuleType:
-    return import_module("custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2")
+    return import_module(
+        "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2"
+    )
 
 
 def _import_decoder_module() -> ModuleType:
@@ -102,10 +108,11 @@ def _import_eid_info_module() -> ModuleType:
 
 
 _fcm_receiver_state: dict[
-    str, Callable[[str | None], FcmReceiverProtocol] | Callable[[], FcmReceiverProtocol] | None
-] = {
-    "getter": None
-}
+    str,
+    Callable[[str | None], FcmReceiverProtocol]
+    | Callable[[], FcmReceiverProtocol]
+    | None,
+] = {"getter": None}
 _FCM_ReceiverGetter: (
     Callable[[str | None], FcmReceiverProtocol]
     | Callable[[], FcmReceiverProtocol]
@@ -115,7 +122,7 @@ _FCM_ReceiverGetter: (
 
 def register_fcm_receiver_provider(
     getter: Callable[[str | None], FcmReceiverProtocol]
-    | Callable[[], FcmReceiverProtocol]
+    | Callable[[], FcmReceiverProtocol],
 ) -> None:
     """Register a callable returning the long-lived FCM receiver instance.
 
@@ -249,6 +256,12 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
     ) -> None:
         """Processes the location update received via FCM."""
         try:
+            # [DIAGNOSTIC] Capture full protobuf payload for offline schema inspection
+            _LOGGER.debug(
+                "[DIAG-RAW-DUMP] Device: %s | Raw Protobuf: %s",
+                response_canonic_id,
+                hex_response,
+            )
             _LOGGER.info("FCM callback triggered for %s, processing response...", name)
             _LOGGER.debug("FCM response length: %d chars", len(hex_response))
 
@@ -311,12 +324,14 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                 return
 
             # Validate canonic_id matches what we requested
-            if response_canonic_id != canonic_device_id:
+            if response_canonic_id.lower() != canonic_device_id.lower():
                 _LOGGER.warning(
                     "FCM callback received data for %s, but we requested %s. Ignoring.",
                     response_canonic_id,
                     canonic_device_id,
                 )
+                ctx.data = cast(list[dict[str, Any]], [])
+                ctx.event.set()
                 return
 
             async def _decrypt_and_store() -> None:
@@ -341,13 +356,16 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                             "Failed to register cache provider for %s: %s", name, err
                         )
                 try:
-                    location_data: list[dict[str, Any]] = await async_decrypt_location_response_locations(
+                    location_data: list[
+                        dict[str, Any]
+                    ] = await async_decrypt_location_response_locations(
                         device_update, cache=cache
                     )
                 except (
                     StaleOwnerKeyError,
                     DecryptionError,
                     SpotApiEmptyResponseError,
+                    SpotAuthPermanentError,
                 ) as err:
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
@@ -380,8 +398,8 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                         len(location_data),
                         name,
                     )
-                    # Attach canonic_id for validation after wait
-                    location_data[0]["canonic_id"] = response_canonic_id
+                    # Attach normalized canonic_id for validation after wait
+                    location_data[0]["canonic_id"] = response_canonic_id.lower()
                     ctx.data = location_data
                 else:
                     _LOGGER.warning(
@@ -580,9 +598,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         resolved_last_mode_switch = int(time.time())
 
     try:
-        await ns_set(
-            CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch
-        )
+        await ns_set(CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch)
     except Exception as err:  # pragma: no cover - defensive logging
         _LOGGER.debug("Failed to persist contributor mode timestamp: %s", err)
 
@@ -605,7 +621,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 canonic_device_id, callback
             )
             if not fcm_token:
-                _LOGGER.error("Failed to get FCM token for %s", name)
+                _LOGGER.error(
+                    "Failed to get FCM token for %s: "
+                    "see previous warnings for details (client/token unavailable or no coordinator)",
+                    name,
+                )
                 return []
             registered = True
             _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))
@@ -654,10 +674,13 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             )
             return []
         except NovaAuthError as e:
+            # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
+            # and trigger re-authentication flow. Previously this was swallowed,
+            # causing users to see only "No location data" without re-auth prompt.
             _LOGGER.warning(
                 "Authentication error while requesting location for %s: %s", name, e
             )
-            return []
+            raise
         except aiohttp.ClientError as e:
             _LOGGER.warning(
                 "Network/client error while requesting location for %s: %s", name, e
@@ -684,9 +707,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         if ctx.error:
             if isinstance(ctx.error, SpotApiEmptyResponseError):
                 raise ctx.error
+            if isinstance(ctx.error, SpotAuthPermanentError):
+                raise ctx.error
 
         data = ctx.data or []
-        if data and data[0].get("canonic_id") == canonic_device_id:
+        if data and data[0].get("canonic_id", "").lower() == canonic_device_id.lower():
             _LOGGER.info("Successfully received location data for %s", name)
             return data
         if not data:
@@ -701,8 +726,17 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     except asyncio.CancelledError:
         _LOGGER.info("Location request cancelled for %s", name)
         raise
+    except SpotAuthPermanentError:
+        raise
     except SpotApiEmptyResponseError:
         # Bubble up auth failures so the coordinator can trigger reauth.
+        raise
+    except NovaAuthPermanentError:
+        # Permanent auth failure (AAS token invalid) - must re-raise for immediate reauth.
+        raise
+    except NovaAuthError:
+        # Re-raise auth errors (permanent or transient) so api.py can handle appropriately.
+        # Transient errors will be tracked by the coordinator; permanent ones trigger reauth.
         raise
     except Exception as e:
         _LOGGER.error("Error requesting location for %s: %s", name, e)

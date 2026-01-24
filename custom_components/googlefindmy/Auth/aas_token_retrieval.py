@@ -38,7 +38,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import random
+import secrets
+import time
 from collections.abc import Mapping
 from types import ModuleType
 from typing import Any
@@ -65,6 +66,7 @@ def _gpsoauth() -> GpsoauthModule:
     """Import the optional gpsoauth module on demand."""
 
     return require_gpsoauth()
+
 
 _JWT_SEGMENT_MIN_COUNT = 2
 
@@ -190,7 +192,7 @@ async def _get_or_generate_android_id(
     if cached_android_id is not None:
         return cached_android_id
 
-    android_id = random.randint(0x1000000000000000, 0xFFFFFFFFFFFFFFFF)
+    android_id = secrets.randbelow(0xF000000000000000) + 0x1000000000000000
     _LOGGER.warning(
         "Generated new android_id for %s; cache was missing a stored identifier.",
         _mask_email_for_logs(username),
@@ -271,9 +273,7 @@ async def _exchange_oauth_for_aas(
         error_details_present = False
         if isinstance(resp, dict):
             resp_keys = list(resp.keys())
-            error_details_present = bool(
-                resp.get("ErrorDetails") or resp.get("Error")
-            )
+            error_details_present = bool(resp.get("ErrorDetails") or resp.get("Error"))
         _LOGGER.warning(
             "gpsoauth response missing token; response details recorded in extras.",
             extra={
@@ -343,9 +343,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
         try:
             await cache.set(DATA_AAS_TOKEN, oauth_token)
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "Failed to persist cached AAS token shortcut.", exc_info=err
-            )
+            _LOGGER.debug("Failed to persist cached AAS token shortcut.", exc_info=err)
         return oauth_token
 
     if not oauth_token:
@@ -373,7 +371,12 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
             try:
                 all_cached_global = await async_get_all_cached_values()
                 for key, value in all_cached_global.items():
-                    if isinstance(key, str) and key.startswith("adm_token_") and isinstance(value, str) and value:
+                    if (
+                        isinstance(key, str)
+                        and key.startswith("adm_token_")
+                        and isinstance(value, str)
+                        and value
+                    ):
                         oauth_token = value
                         extracted_username = key.replace("adm_token_", "", 1)
                         if extracted_username and "@" in extracted_username:
@@ -431,6 +434,7 @@ async def async_get_aas_token(
 
     Persistence:
         - Stored under key `DATA_AAS_TOKEN` in the selected cache.
+        - Issuance timestamp stored under `aas_token_issued_at_<username>` for TTL learning.
 
     Retry policy:
         - Non-retryable auth failures (e.g., "BadAuthentication", "invalid_grant",
@@ -448,50 +452,83 @@ async def async_get_aas_token(
     if cache is None:
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
+    # Check if AAS token already exists (for TTL tracking)
+    existing_token = await cache.get(DATA_AAS_TOKEN)
+    was_cached = existing_token is not None and isinstance(existing_token, str)
+
     async def _gen_with_retries() -> str:
+        _LOGGER.info("AAS token: generating new token via OAuth exchange.")
         last_exc: Exception | None = None
         attempts = max(1, retries + 1)
+        max_retries = attempts - 1  # = retries parameter
         for attempt in range(attempts):
             try:
-                return await _generate_aas_token(cache=cache)
+                token = await _generate_aas_token(cache=cache)
+                _LOGGER.info("AAS token: successfully generated.")
+                return token
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 retryable = not _is_non_retryable_auth(exc) and attempt < attempts - 1
+                # retry_num: first attempt (attempt=0) doesn't count
+                retry_num = attempt
+
                 if not retryable:
-                    _LOGGER.error(
-                        "AAS token generation failed.",
-                        exc_info=exc,
-                        extra={
-                            "attempt": attempt + 1,
-                            "attempts": attempts,
-                            "error_type": type(exc).__name__,
-                            "retryable": retryable,
-                        },
-                    )
+                    if retry_num > 0:
+                        _LOGGER.error(
+                            "AAS token: generation failed (retry %d/%d). No more retries. "
+                            "Error: %s",
+                            retry_num,
+                            max_retries,
+                            exc,
+                        )
+                    else:
+                        _LOGGER.error("AAS token: generation failed. Error: %s", exc)
                     break
+
                 sleep_s = backoff * (2**attempt)
-                _LOGGER.info(
-                    "AAS token generation failed; retry scheduled.",
-                    extra={
-                        "attempt": attempt + 1,
-                        "attempts": attempts,
-                        "error_type": type(exc).__name__,
-                        "retry_in_seconds": sleep_s,
-                    },
-                    exc_info=exc,
-                )
+                if retry_num == 0:
+                    _LOGGER.warning(
+                        "AAS token: generation failed. Error: %s. Retrying...", exc
+                    )
+                else:
+                    _LOGGER.warning(
+                        "AAS token: generation failed (retry %d/%d). Error: %s. "
+                        "Retrying in %.0fs...",
+                        retry_num,
+                        max_retries,
+                        exc,
+                        sleep_s,
+                    )
                 await asyncio.sleep(sleep_s)
         assert last_exc is not None
         raise last_exc
 
     token: str = await cache.get_or_set(DATA_AAS_TOKEN, _gen_with_retries)
+
+    # Record AAS token issuance timestamp if a fresh token was generated
+    # This enables TTL learning for proactive AAS refresh
+    if not was_cached:
+        username_val = await cache.get(username_string)
+        if isinstance(username_val, str) and username_val:
+            issued_key = f"aas_token_issued_at_{username_val.strip().lower()}"
+            try:
+                await cache.set(issued_key, time.time())
+                _LOGGER.debug(
+                    "Recorded AAS token issuance timestamp for TTL learning.",
+                    extra={"user": _mask_email_for_logs(username_val)},
+                )
+            except Exception as err:  # noqa: BLE001 - defensive cache write
+                _LOGGER.debug("Failed to record AAS issuance timestamp: %s", err)
+
     return token
 
 
 # ----------------------- Legacy sync wrapper (unsupported) -----------------------
 
 
-def get_aas_token() -> str:  # pragma: no cover - legacy path kept for compatibility messaging
+def get_aas_token() -> (
+    str
+):  # pragma: no cover - legacy path kept for compatibility messaging
     """Legacy sync API is intentionally unsupported to prevent event loop deadlocks.
 
     Raises:

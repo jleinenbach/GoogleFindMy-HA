@@ -42,7 +42,7 @@ For the quickest way to bootstrap Home Assistant test stubs before running `pyte
 - `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
 - `make wheelhouse` — pre-download the Home Assistant development dependencies into `.wheelhouse/` so subsequent virtual environment rebuilds reuse cached wheels instead of re-fetching from PyPI.
 - `make clean-wheelhouse` — delete `.wheelhouse/` (and any manifests or sentinels inside) when you want to prune cached wheels after a bootstrap run or before refreshing dependencies from scratch.
-- `make install-ha-stubs` — install the packages listed in `requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
+- `make install-ha-stubs` — install the packages listed in `custom_components/googlefindmy/requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
 - `make test-unload` — activate the managed virtual environment and run the focused parent-unload rollback regression (`tests/test_unload_subentry_cleanup.py`) so you can confirm the recovery guardrails without executing the entire suite.
 - `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
 - `python script/list_wheelhouse.py` — print a grouped index of cached wheels (optionally against `--manifest script/ssot_wheel_manifest.txt`) before running lengthy installs so you can confirm the cache satisfies the manifest without scrolling through pip logs. Pass `--allow-missing` to preview the formatter when `.wheelhouse/ssot` has not been generated yet.
@@ -52,7 +52,7 @@ For the quickest way to bootstrap Home Assistant test stubs before running `pyte
 
 The repository already ships a lightweight bootstrap for the real Home Assistant
 test stack. Run `make install-ha-stubs` from the project root to install
-`homeassistant` and `pytest-homeassistant-custom-component` into your current
+`homeassistant` and `pytest-homeassistant-custom-component` from `custom_components/googlefindmy/requirements-ha-stubs.txt` into your current
 Python environment without creating the `.venv` managed by other helpers. This
 is the quickest way to unblock `pytest` after cloning the repository or when a
 CI run reports missing Home Assistant packages.
@@ -117,7 +117,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 - #️⃣ **Multi-Account Support**: Add multiple Find Hub Google accounts that show up separately
 - ❣️ **More to come!**
 
-The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.7.0-2 metadata.
+The manifest classifies Google Find My Device as a **hub** integration. Home Assistant treats the integration as a central coordinator that manages multiple connected devices, aligning documentation and compliance checks with the restored 1.7.0-3 metadata.
 
 >[!NOTE]
 >**This is a true integration! No docker containers, external systems, or scripts required (other than for initial authentication)!**
@@ -170,6 +170,10 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 - Home Assistant supports connecting multiple Google accounts, but **only one config entry per email address stays active**. When duplicate entries share the same Google account, the integration automatically disables and unloads the non-authoritative entries to prevent device duplication and token conflicts.
 - The disabled entries remain visible in **Settings → Devices & Services** with an integration-managed disabled state so you can review or remove them manually. Reactivating a disabled duplicate requires removing the authoritative entry first or supplying credentials for a different Google account.
 
+### Interoperability and third-party linking
+
+Third-party consumers should anchor on the `google_device_id` state attribute when associating Find My trackers with external data sources (for example, Bermuda BLE Trilogy listeners). MAC addresses rotate for privacy and are intentionally omitted from state; `google_device_id` is the stable, registry-aligned identifier that will not change across reboots. See [docs/Ephemeral_Identifier_Resolver_API.md](docs/Ephemeral_Identifier_Resolver_API.md#stable-device-identifier-state-api) for usage guidance and templating examples.
+
 ## Configuration Options
 
 Accessible via the ⚙️ cogwheel button on the main Google Find My Device Integration page.
@@ -183,8 +187,6 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `location_poll_interval` | 300 | seconds | How often the integration runs a poll cycle for all devices. |
 | `device_poll_delay` | 5 | seconds | How much time to wait between polling devices during a poll cycle. |
 | `min_poll_interval` | 60 | seconds | Hard lower bound between poll cycles and the manual locate cooldown. |
-| `min_accuracy_threshold` | 100 | meters | Distance beyond which location data is rejected for recorder/logbook writes. |
-| `movement_threshold` | 50 | meters | Minimum distance change required before emitting a location update. |
 | `allow_history_fallback` | false | toggle | Falls back to Recorder history when no live device tracker state is available. |
 | `enable_stats_entities` | true | toggle | Exposes the "Google Find My Integration" statistics entity (polling status, counters, etc.). |
 | `google_home_filter_enabled` | true | toggle | Enables or disables Google Home device location filtering. |

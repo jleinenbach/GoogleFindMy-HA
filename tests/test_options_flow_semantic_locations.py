@@ -87,7 +87,9 @@ class _HassStub:
         self.data: dict[str, Any] = {}
         self._tasks: list[asyncio.Task[Any]] = []
 
-    def async_create_task(self, coro: Awaitable[Any], *, name: str | None = None) -> asyncio.Task[Any]:
+    def async_create_task(
+        self, coro: Awaitable[Any], *, name: str | None = None
+    ) -> asyncio.Task[Any]:
         task = asyncio.create_task(coro, name=name)
         self._tasks.append(task)
         return task
@@ -124,7 +126,9 @@ async def test_semantic_locations_options_lifecycle() -> None:
     for marker in add_form["data_schema"].schema:
         default_factory = marker.default
         defaults[marker.schema] = (
-            default_factory() if isinstance(default_factory, Callable) else default_factory
+            default_factory()
+            if isinstance(default_factory, Callable)
+            else default_factory
         )
     assert defaults == {
         "semantic_name": "",
@@ -195,7 +199,9 @@ async def test_semantic_location_defaults_floor_accuracy() -> None:
     for marker in add_form["data_schema"].schema:
         default_factory = marker.default
         defaults[marker.schema] = (
-            default_factory() if isinstance(default_factory, Callable) else default_factory
+            default_factory()
+            if isinstance(default_factory, Callable)
+            else default_factory
         )
 
     assert defaults == {
@@ -230,7 +236,9 @@ async def test_semantic_location_edit_prefills_existing_values() -> None:
     for marker in edit_form["data_schema"].schema:
         default_factory = marker.default
         defaults[marker.schema] = (
-            default_factory() if isinstance(default_factory, Callable) else default_factory
+            default_factory()
+            if isinstance(default_factory, Callable)
+            else default_factory
         )
 
     assert defaults == {

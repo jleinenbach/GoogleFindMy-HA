@@ -22,7 +22,9 @@ class _FakeHass:
 
 
 @pytest.mark.asyncio
-async def test_context_provider_overrides_default_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_context_provider_overrides_default_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Cache provider should take precedence over the global default instance."""
 
     hass = _FakeHass()

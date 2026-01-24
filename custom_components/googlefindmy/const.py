@@ -10,15 +10,18 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Mapping, Sequence
+from typing import Final, Literal
 
 # --------------------------------------------------------------------------------------
 # Core identifiers
 # --------------------------------------------------------------------------------------
 DOMAIN: str = "googlefindmy"
+# Shared hass.data key for the global EID resolver instance
+DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
-INTEGRATION_VERSION: str = "1.7.0-2"
+INTEGRATION_VERSION: str = "1.7.0-3"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -97,8 +100,6 @@ DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
 OPT_LOCATION_POLL_INTERVAL: str = "location_poll_interval"
 OPT_DEVICE_POLL_DELAY: str = "device_poll_delay"
 OPT_MIN_POLL_INTERVAL: str = "min_poll_interval"
-OPT_MIN_ACCURACY_THRESHOLD: str = "min_accuracy_threshold"
-OPT_MOVEMENT_THRESHOLD: str = "movement_threshold"
 OPT_ALLOW_HISTORY_FALLBACK: str = "allow_history_fallback"
 OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
@@ -108,6 +109,7 @@ OPT_SEMANTIC_LOCATIONS: str = "semantic_locations"
 OPT_CONTRIBUTOR_MODE: str = "contributor_mode"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
 OPT_DELETE_CACHES_ON_REMOVE: str = "delete_caches_on_remove"
+OPT_STALE_THRESHOLD: str = "stale_threshold"
 
 # Canonical list of option keys supported by the integration (without tracked_devices)
 OPTION_KEYS: tuple[str, ...] = (
@@ -115,8 +117,6 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD,
-    OPT_MOVEMENT_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_GOOGLE_HOME_FILTER_ENABLED,
@@ -125,6 +125,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_SEMANTIC_LOCATIONS,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE,
+    OPT_STALE_THRESHOLD,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -147,11 +148,29 @@ DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
 LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 """Cooldown window (seconds) applied after a manual locate trigger."""
 
+# Token regeneration policy (buttons)
+TOKEN_REFRESH_COOLDOWN_S: int = 180
+"""Cooldown window (seconds) between token regeneration requests (3 minutes).
+
+This cooldown is shared across all token regeneration buttons (AAS/ADM).
+"""
+
 # Quality/logic thresholds
-DEFAULT_MIN_ACCURACY_THRESHOLD: int = 100  # meters; drop worse fixes (0 => disabled)
-DEFAULT_MOVEMENT_THRESHOLD: int = 15  # meters; used for future movement gating
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
-DEFAULT_SEMANTIC_DETECTION_RADIUS: float = 50.0  # meters; soft floor for semantic locations
+DEFAULT_SEMANTIC_DETECTION_RADIUS: float = (
+    50.0  # meters; soft floor for semantic locations
+)
+
+# GPS accuracy fallback for invalid/missing values.
+# When accuracy is reported as 0.0m, negative, NaN, or Inf, it indicates missing
+# or corrupted data (0.0m GPS accuracy is physically impossible - real GPS: 3-50m).
+# This fallback represents a conservative estimate based on:
+#   - Bluetooth range: ~40-80m (tracker could be anywhere within BLE range)
+#   - GPS error margin: ~10-30m (finder device uncertainty)
+# Using 50m prevents the "Fusion Lock-in" effect where 0.0m gets extreme weight
+# in weighted averaging (1/0² vs 1/20² = infinite vs 0.0025), while still being
+# easily overridden by real GPS fixes.
+DEFAULT_FALLBACK_ACCURACY_M: float = 50.0
 
 # Location timestamp acceptance window
 MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S: float = 24 * 60 * 60  # 24 hours
@@ -172,6 +191,10 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 
 DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 
+# Stale threshold: After this many seconds without a location update,
+# the tracker state becomes "unknown" (default: 30 minutes = 1800 seconds)
+DEFAULT_STALE_THRESHOLD: int = 1800
+
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
 DEFAULT_CONTRIBUTOR_MODE: str = CONTRIBUTOR_MODE_IN_ALL_AREAS
@@ -187,8 +210,6 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL: DEFAULT_MIN_POLL_INTERVAL,
-    OPT_MIN_ACCURACY_THRESHOLD: DEFAULT_MIN_ACCURACY_THRESHOLD,
-    OPT_MOVEMENT_THRESHOLD: DEFAULT_MOVEMENT_THRESHOLD,
     OPT_ALLOW_HISTORY_FALLBACK: DEFAULT_ALLOW_HISTORY_FALLBACK,
     OPT_ENABLE_STATS_ENTITIES: DEFAULT_ENABLE_STATS_ENTITIES,
     OPT_GOOGLE_HOME_FILTER_ENABLED: DEFAULT_GOOGLE_HOME_FILTER_ENABLED,
@@ -197,6 +218,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_SEMANTIC_LOCATIONS: {},
     OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE: DEFAULT_CONTRIBUTOR_MODE,
+    OPT_STALE_THRESHOLD: DEFAULT_STALE_THRESHOLD,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------
@@ -333,18 +355,6 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "max": 3600,
         "step": 1,
     },
-    OPT_MIN_ACCURACY_THRESHOLD: {
-        "type": "int",
-        "min": 25,
-        "max": 500,
-        "step": 1,
-    },
-    OPT_MOVEMENT_THRESHOLD: {
-        "type": "int",
-        "min": 10,
-        "max": 200,
-        "step": 1,
-    },
     OPT_ALLOW_HISTORY_FALLBACK: {
         "type": "bool",
     },
@@ -359,6 +369,12 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
     },
     OPT_MAP_VIEW_TOKEN_EXPIRATION: {
         "type": "bool",
+    },
+    OPT_STALE_THRESHOLD: {
+        "type": "int",
+        "min": 60,
+        "max": 86400,  # max 24 hours
+        "step": 60,
     },
     # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
     # visibility flow and not edited as a raw field (list of ids).
@@ -410,6 +426,14 @@ FCM_IDLE_RESET_AFTER_S: float = 90.0
 FCM_CONNECTION_RETRY_COUNT: int = 5
 FCM_MONITOR_INTERVAL_S: int = 1
 FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
+
+# --------------------------------------------------------------------------------------
+# Feature Flags (compile-time toggles for optional functionality)
+# --------------------------------------------------------------------------------------
+# FMDN Finder: Upload location reports to Google for FMDN beacons detected by Bermuda.
+# This feature is prepared but disabled by default. Set to True to enable.
+# When disabled, no Bermuda listeners are registered and no logs are produced.
+FEATURE_FMDN_FINDER_ENABLED: bool = False
 
 # --------------------------------------------------------------------------------------
 # Events & Repairs (auth status)
@@ -512,8 +536,6 @@ __all__ = [
     "OPT_LOCATION_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
     "OPT_MIN_POLL_INTERVAL",
-    "OPT_MIN_ACCURACY_THRESHOLD",
-    "OPT_MOVEMENT_THRESHOLD",
     "OPT_ALLOW_HISTORY_FALLBACK",
     "OPT_ENABLE_STATS_ENTITIES",
     "OPT_GOOGLE_HOME_FILTER_ENABLED",
@@ -521,14 +543,13 @@ __all__ = [
     "OPT_MAP_VIEW_TOKEN_EXPIRATION",
     "OPTION_KEYS",
     "OPT_DELETE_CACHES_ON_REMOVE",
+    "OPT_STALE_THRESHOLD",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
     "DEFAULT_LOCATION_POLL_INTERVAL",
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",
     "LOCATE_COOLDOWN_S",
-    "DEFAULT_MIN_ACCURACY_THRESHOLD",
-    "DEFAULT_MOVEMENT_THRESHOLD",
     "DEFAULT_ALLOW_HISTORY_FALLBACK",
     "DEFAULT_ENABLE_STATS_ENTITIES",
     "DEFAULT_GOOGLE_HOME_FILTER_ENABLED",
@@ -536,8 +557,10 @@ __all__ = [
     "GOOGLE_HOME_SPAM_THRESHOLD_MINUTES",
     "DEFAULT_MAP_VIEW_TOKEN_EXPIRATION",
     "DEFAULT_DELETE_CACHES_ON_REMOVE",
+    "DEFAULT_STALE_THRESHOLD",
     "DEFAULT_OPTIONS",
     "CONFIG_FIELDS",
+    "TOKEN_REFRESH_COOLDOWN_S",
     "SERVICE_LOCATE_DEVICE",
     "SERVICE_PLAY_SOUND",
     "SERVICE_STOP_SOUND",

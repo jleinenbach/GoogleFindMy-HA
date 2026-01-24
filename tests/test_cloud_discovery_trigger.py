@@ -21,6 +21,8 @@ from tests.helpers.config_flow import (
     prepare_flow_hass_config_entries,
 )
 
+pytestmark = pytest.mark.asyncio
+
 integration = importlib.import_module("custom_components.googlefindmy")
 
 if TYPE_CHECKING:
@@ -44,12 +46,14 @@ def _make_hass() -> SimpleNamespace:
     hass.config_entries.async_entries = (
         lambda domain: [entry] if domain == DOMAIN else []
     )
-    hass.config_entries.async_get_entry = lambda entry_id: entry if entry_id == entry.entry_id else None
+    hass.config_entries.async_get_entry = (
+        lambda entry_id: entry if entry_id == entry.entry_id else None
+    )
     hass._entry = entry
     return hass
 
 
-def test_trigger_cloud_discovery_uses_helper(
+async def test_trigger_cloud_discovery_uses_helper(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The helper should prefer async_create_discovery_flow when available."""
@@ -71,7 +75,7 @@ def test_trigger_cloud_discovery_uses_helper(
         )
 
     caplog.set_level(logging.INFO, "custom_components.googlefindmy.discovery")
-    assert asyncio.run(_exercise()) is True
+    assert await _exercise() is True
     assert hass.config_entries.flow.async_init.await_count == 0
     assert len(captured) == 1
 
@@ -102,7 +106,7 @@ def test_trigger_cloud_discovery_uses_helper(
     ), "trigger log should redact identifiers"
 
 
-def test_trigger_cloud_discovery_sanitizes_context_source(
+async def test_trigger_cloud_discovery_sanitizes_context_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Custom discovery triggers should not leak into the context source."""
@@ -124,7 +128,7 @@ def test_trigger_cloud_discovery_sanitizes_context_source(
             source="cloud_scanner",
         )
 
-    assert asyncio.run(_exercise()) is True
+    assert await _exercise() is True
     assert len(captured) == 1
 
     _, kwargs = captured[0]
@@ -135,7 +139,7 @@ def test_trigger_cloud_discovery_sanitizes_context_source(
     assert data["discovery_source"] == "cloud_scanner"
 
 
-def test_trigger_cloud_discovery_falls_back(
+async def test_trigger_cloud_discovery_falls_back(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Missing helper should fall back to config_entries.flow.async_init."""
@@ -157,7 +161,7 @@ def test_trigger_cloud_discovery_falls_back(
 
     caplog.set_level(logging.INFO, "custom_components.googlefindmy.discovery")
 
-    assert asyncio.run(_exercise()) is True
+    assert await _exercise() is True
     hass.config_entries.flow.async_init.assert_awaited_once()
     _, kwargs = hass.config_entries.flow.async_init.call_args
     assert kwargs["context"]["source"] == config_flow.SOURCE_DISCOVERY
@@ -170,7 +174,7 @@ def test_trigger_cloud_discovery_falls_back(
     ), "fallback trigger log should redact identifiers"
 
 
-def test_trigger_cloud_discovery_injects_fallback_key(
+async def test_trigger_cloud_discovery_injects_fallback_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DiscoveryKey failures should still provide a structured fallback."""
@@ -192,7 +196,7 @@ def test_trigger_cloud_discovery_injects_fallback_key(
             secrets_bundle=None,
         )
 
-    assert asyncio.run(_exercise()) is True
+    assert await _exercise() is True
 
     kwargs = captured["kwargs"]
     discovery_key = kwargs.get("discovery_key")
@@ -270,8 +274,8 @@ async def test_async_create_discovery_flow_treats_none_as_abort(
     }
 
 
-def test_trigger_cloud_discovery_deduplicates(
-    monkeypatch: pytest.MonkeyPatch, caplog
+async def test_trigger_cloud_discovery_deduplicates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Multiple discoveries with the same stable key should deduplicate flows."""
 
@@ -323,10 +327,12 @@ def test_trigger_cloud_discovery_deduplicates(
         assert again is True
         assert len(calls) == 2
 
-    asyncio.run(_exercise())
+    await _exercise()
 
 
-def test_results_append_triggers_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_results_append_triggers_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Appending to the results list should schedule a discovery flow."""
 
     hass = _make_hass()
@@ -350,12 +356,14 @@ def test_results_append_triggers_flow(monkeypatch: pytest.MonkeyPatch) -> None:
         for task in scheduled:
             await task
 
-    asyncio.run(_drain())
+    await _drain()
     helper.assert_awaited_once()
     assert hass.config_entries.flow.async_init.await_count == 0
 
 
-def test_results_append_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_results_append_deduplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Appending duplicate payloads should only launch one flow at a time."""
 
     hass = _make_hass()
@@ -417,4 +425,4 @@ def test_results_append_deduplicates(monkeypatch: pytest.MonkeyPatch) -> None:
         for task in scheduled:
             await task
 
-    asyncio.run(_exercise())
+    await _exercise()

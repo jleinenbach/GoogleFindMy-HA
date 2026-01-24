@@ -21,7 +21,9 @@ async def test_device_trackers_populate_after_initial_refresh(
 ) -> None:
     """Initial setup should create tracker entities once the first refresh succeeds."""
 
-    del deterministic_config_subentry_id  # fixture side effects patch ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # fixture side effects patch ensure_config_subentry_id
 
     loop = asyncio.get_running_loop()
 
@@ -49,12 +51,16 @@ async def test_device_trackers_populate_after_initial_refresh(
     hass = harness.hass
     coordinator_cls = harness.coordinator_cls
 
-    device_tracker = importlib.import_module("custom_components.googlefindmy.device_tracker")
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
     monkeypatch.setattr(device_tracker, "GoogleFindMyCoordinator", coordinator_cls)
 
     added_entities: list[Any] = []
 
-    def _async_add_entities(entities: list[Any], update_before_add: bool = False) -> None:
+    def _async_add_entities(
+        entities: list[Any], update_before_add: bool = False
+    ) -> None:
         added_entities.extend(entities)
         assert update_before_add is True
 
@@ -86,7 +92,9 @@ async def test_device_trackers_populate_after_initial_refresh(
 
 
 @pytest.mark.asyncio
-async def test_coordinator_first_refresh_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_coordinator_first_refresh_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Coordinator should fall back to async_refresh when HA lacks helper."""
 
     from custom_components.googlefindmy import coordinator as coordinator_module

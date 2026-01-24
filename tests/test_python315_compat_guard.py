@@ -51,7 +51,12 @@ SKIP_PARTS = {
     "build",
     "venv",
     ".venv",
+    ".venv313",
     "__pycache__",
+    # Skip external packages - we only check our own code
+    "site-packages",
+    "lib",
+    "lib64",
 }
 
 
@@ -162,7 +167,9 @@ class Py315CompatibilityVisitor(ast.NodeVisitor):
                 and func.value.id in self.ctypes_modules
             ):
                 self._add_ctypes_error(func)
-            if func.attr == "is_reserved" and self._looks_like_path_instance(func.value):
+            if func.attr == "is_reserved" and self._looks_like_path_instance(
+                func.value
+            ):
                 self._add_pathlib_error(func)
             if (
                 func.attr == "NamedTuple"
@@ -211,7 +218,7 @@ class Py315CompatibilityVisitor(ast.NodeVisitor):
                 getattr(node, "lineno", 1),
                 "`locale.getdefaultlocale()` was removed in Python 3.15.",
                 "Use `locale.getencoding()` for the encoding and `locale.getlocale()` "
-                "(after `locale.setlocale(locale.LC_CTYPE, \"\")`) for the language.",
+                '(after `locale.setlocale(locale.LC_CTYPE, "")`) for the language.',
             )
         )
 
@@ -318,7 +325,7 @@ def test_python_315_compatibility_guard() -> None:
                     path,
                     exc.lineno or 1,
                     "The current interpreter (Python 3.13 compatibility check) could not parse this file. "
-                    "This often means 3.14+ syntax such as template strings (t\"...\") or other grammar changes.",
+                    'This often means 3.14+ syntax such as template strings (t"...") or other grammar changes.',
                     "Use 3.13-compatible syntax (for example, f-strings instead of t-strings) "
                     "so the integration stays runnable across supported versions.",
                 )

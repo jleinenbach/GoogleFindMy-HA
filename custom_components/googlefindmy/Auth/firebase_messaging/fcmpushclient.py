@@ -189,9 +189,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             CredentialsUpdatedCallable[MutableJSONMapping] | None
         ) = credentials_updated_callback
         self.persistent_ids: list[str] = (
-            list(received_persistent_ids)
-            if received_persistent_ids is not None
-            else []
+            list(received_persistent_ids) if received_persistent_ids is not None else []
         )
         self.config = config if config else FcmPushClientConfig()
         self._http_client_session: ClientSession | None = http_client_session
@@ -687,8 +685,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             self.logger.debug("Connected to MCS endpoint (%s,%s)", MCS_HOST, MCS_PORT)
             return True
         except OSError as oex:
-            self.logger.error(
-                "Could not connected to MCS endpoint (%s,%s): %s",
+            # Log at DEBUG level since _connect_with_retry() handles retries
+            # and will log ERROR if all attempts fail
+            self.logger.debug(
+                "Could not connect to MCS endpoint (%s,%s): %s",
                 MCS_HOST,
                 MCS_PORT,
                 oex,

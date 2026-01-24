@@ -57,24 +57,36 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextvars
 import functools
 import json
 import logging
 import math
 import random
 import time
-from collections.abc import Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    MutableMapping,
+)
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from aiohttp import ClientError
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
-from custom_components.googlefindmy.NovaApi import nova_request
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     StaleOwnerKeyError,
     async_decrypt_location_response_locations,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    _CACHE_PROVIDER,
 )
 from custom_components.googlefindmy.ProtoDecoders import decoder as decoder_module
 
@@ -148,6 +160,8 @@ type MutableJSONMapping = MutableMapping[str, Any]
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
+
+_BACKOFF_WARNING_THRESHOLD_S = 1024.0
 
 
 async def _call_in_executor(
@@ -264,6 +278,29 @@ class FcmReceiverHA:
         self._entry_health: dict[str, bool] = {}
         self._entry_last_connected_wall: dict[str, float] = {}
 
+        # Active background tasks for exception tracking (P0 fix)
+        self._active_tasks: set[asyncio.Task[Any]] = set()
+
+    def _clear_fatal_error_for_entry(
+        self, entry_id: str, *, reason: str | None = None
+    ) -> None:
+        """Clear any latched fatal registration error for a config entry."""
+
+        removed = False
+        if entry_id in self._fatal_errors:
+            if reason:
+                _LOGGER.debug(
+                    "[entry=%s] Clearing latched FCM fatal error (%s)", entry_id, reason
+                )
+            else:
+                _LOGGER.debug("[entry=%s] Clearing latched FCM fatal error", entry_id)
+
+            self._fatal_errors.pop(entry_id, None)
+            removed = True
+
+        if removed:
+            self._fatal_error = next(iter(self._fatal_errors.values()), None)
+
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
         """Attach the entry_id to a cache instance when possible."""
@@ -311,6 +348,87 @@ class FcmReceiverHA:
     def attach_hass(self, hass: HomeAssistant) -> None:
         """Optionally attach Home Assistant for owner-index fallback routing."""
         self._hass = hass
+
+    # -------------------- Loop-safe dispatch (P0 fix) --------------------
+
+    def _dispatch_to_hass_loop(
+        self, coro: Coroutine[Any, Any, Any], *, label: str
+    ) -> None:
+        """Dispatch a coroutine into the HA event loop from any thread safely.
+
+        This fixes P0 thread-safety issue: _on_notification may be called from
+        a non-event-loop thread by the FCM client. Using asyncio.create_task
+        directly would fail with 'no running event loop'.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            # Already in an event loop - schedule directly
+            new_task: asyncio.Task[Any] = loop.create_task(
+                coro,
+                name=f"{DOMAIN}.{label}",
+            )
+            self._track_task(new_task, label=label)
+            return
+        except RuntimeError:
+            # No running loop in this thread; schedule onto HA loop
+            pass
+
+        hass_loop = getattr(self._hass, "loop", None) if self._hass else None
+        if hass_loop is None:
+            _LOGGER.error("FCM notification dropped: Home Assistant loop not available")
+            return
+
+        def _schedule() -> None:
+            scheduled_task: asyncio.Task[Any] = hass_loop.create_task(
+                coro, name=f"{DOMAIN}.{label}"
+            )
+            self._track_task(scheduled_task, label=label)
+
+        hass_loop.call_soon_threadsafe(_schedule)
+
+    def _track_task(self, task: asyncio.Task[Any], *, label: str) -> None:
+        """Ensure task exceptions are retrieved and logged.
+
+        Prevents 'Task exception was never retrieved' warnings by attaching
+        a done callback that logs any exceptions.
+        """
+        self._active_tasks.add(task)
+
+        def _done(t: asyncio.Task[Any]) -> None:
+            self._active_tasks.discard(t)
+            try:
+                exc = t.exception()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                _LOGGER.exception(
+                    "Unhandled exception retrieving task result (%s)", label
+                )
+                return
+            if exc:
+                _LOGGER.exception("Background task failed (%s)", label, exc_info=exc)
+
+        task.add_done_callback(_done)
+
+    @contextmanager
+    def _scoped_cache_provider(
+        self, provider: Callable[[], Any]
+    ) -> Iterator[contextvars.Token[Callable[[], Any] | None] | None]:
+        """Context manager for cache provider with guaranteed cleanup (P1-2 fix).
+
+        Uses only contextvars (not global state) to prevent cross-contamination
+        between concurrent async operations from different config entries.
+        """
+        token: contextvars.Token[Callable[[], Any] | None] | None = None
+        try:
+            token = _CACHE_PROVIDER.set(provider)
+            yield token
+        finally:
+            if token is not None:
+                try:
+                    _CACHE_PROVIDER.reset(token)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Cache provider reset failed: %s", err)
 
     def _monotonic_from_wall_time(
         self, wall_time: float, monotonic_now: float
@@ -370,9 +488,9 @@ class FcmReceiverHA:
             else:
                 client_ready = do_listen
 
-            fresh_activity = (
-                last_activity is not None
-                and (stale_after == 0.0 or (activity_age is not None and activity_age <= stale_after))
+            fresh_activity = last_activity is not None and (
+                stale_after == 0.0
+                or (activity_age is not None and activity_age <= stale_after)
             )
 
             snapshots[entry_id] = {
@@ -405,9 +523,7 @@ class FcmReceiverHA:
                 continue
 
             try:
-                update_listeners = getattr(
-                    coordinator, "async_update_listeners", None
-                )
+                update_listeners = getattr(coordinator, "async_update_listeners", None)
                 if callable(update_listeners):
                     update_listeners()
             except Exception as err:  # noqa: BLE001
@@ -599,7 +715,7 @@ class FcmReceiverHA:
                     pc = await self._ensure_client_for_entry(entry_id, cache)
                     if not pc:
                         await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60.0)
+                        backoff = min(backoff * 2, 4096.0)
                         continue
 
                     try:
@@ -630,17 +746,38 @@ class FcmReceiverHA:
                         finally:
                             async with self._lock:
                                 self.pcs.pop(entry_id, None)
-                        delay = backoff + random.uniform(0.1, 0.3) * backoff
-                        _LOGGER.info(
-                            "[entry=%s] Re-trying FCM registration in %.1fs",
-                            entry_id,
-                            delay,
-                        )
+                        delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
+                        if backoff >= _BACKOFF_WARNING_THRESHOLD_S:
+                            _LOGGER.warning(
+                                "[entry=%s] FCM registration still failing after multiple attempts (next retry in %.1fs). "
+                                "Check Firewall (Port 5228) or Credentials.",
+                                entry_id,
+                                delay,
+                            )
+                            if self._hass:
+                                ir.async_create_issue(
+                                    self._hass,
+                                    DOMAIN,
+                                    f"fcm_stuck_{entry_id}",
+                                    is_fixable=False,
+                                    severity=ir.IssueSeverity.WARNING,
+                                    translation_key="fcm_connection_stuck",
+                                )
+                        else:
+                            _LOGGER.info(
+                                "[entry=%s] Re-trying FCM registration in %.1fs",
+                                entry_id,
+                                delay,
+                            )
                         await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 60.0)
+                        backoff = min(backoff * 2, 4096.0)
                         continue
 
                     # Telemetry (aggregate counters)
+                    if self._hass:
+                        ir.async_delete_issue(
+                            self._hass, DOMAIN, f"fcm_stuck_{entry_id}"
+                        )
                     self.last_start_monotonic = time.monotonic()
                     self.start_count += 1
 
@@ -678,10 +815,7 @@ class FcmReceiverHA:
                             and last_activity is not None
                             and (
                                 stale_after == 0.0
-                                or (
-                                    monotonic_now - last_activity
-                                    <= stale_after
-                                )
+                                or (monotonic_now - last_activity <= stale_after)
                             )
                         )
                         self._update_entry_health(entry_id, healthy)
@@ -712,7 +846,10 @@ class FcmReceiverHA:
                             )
                             break
 
-                        if stale_after > 0.0 and monotonic_now - last_activity > stale_after:
+                        if (
+                            stale_after > 0.0
+                            and monotonic_now - last_activity > stale_after
+                        ):
                             _LOGGER.info(
                                 "[entry=%s] FCM client activity stale (age=%.1fs); scheduling restart",
                                 entry_id,
@@ -731,12 +868,12 @@ class FcmReceiverHA:
                         self._update_entry_health(entry_id, False)
 
                     if not stop_evt.is_set():
-                        delay = backoff + random.uniform(0.1, 0.3) * backoff
+                        delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
                         _LOGGER.info(
                             "[entry=%s] Restarting FCM client in %.1fs", entry_id, delay
                         )
                         await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 60.0)
+                        backoff = min(backoff * 2, 4096.0)
             except asyncio.CancelledError:
                 _LOGGER.debug("[entry=%s] FCM supervisor cancelled", entry_id)
                 raise
@@ -765,6 +902,9 @@ class FcmReceiverHA:
                 if token:
                     self._update_token_routing(token, {entry_id})
                     await self._persist_routing_token(entry_id, token)
+                self._clear_fatal_error_for_entry(
+                    entry_id, reason="Registration succeeded"
+                )
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
             return False
@@ -792,8 +932,17 @@ class FcmReceiverHA:
                 err,
             )
             return False
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
+        except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
+            # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
+            # are logged at info level; other exceptions at error level.
+            if isinstance(err, (TimeoutError, RuntimeError)):
+                _LOGGER.info(
+                    "[entry=%s] FCM registration failed (transient): %s - will retry",
+                    entry_id,
+                    err,
+                )
+            else:
+                _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
             return False
 
     # Public entrypoint kept for back-compat (starts supervisors lazily if needed)
@@ -927,6 +1076,7 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
+                self._clear_fatal_error_for_entry(entry_id, reason="Entry unregistered")
 
     # -------------------- Incoming notifications --------------------
 
@@ -937,15 +1087,32 @@ class FcmReceiverHA:
         persistent_id: str | None,
         context: Any | None,
     ) -> None:
-        """Handle incoming FCM notification (sync callback from per-entry client)."""
+        """Handle incoming FCM notification (sync callback from per-entry client).
+
+        This callback may be invoked from any thread by the FCM client.
+        We use _dispatch_to_hass_loop for thread-safe async dispatch (P0 fix).
+        """
         _ = persistent_id  # maintained for signature compatibility
         _ = context
+
+        # Thread-safe dispatch to HA event loop
+        label = f"fcm-notification[{entry_id[:8] if entry_id else 'unknown'}]"
+        self._dispatch_to_hass_loop(
+            self._handle_notification_async(entry_id, payload),
+            label=label,
+        )
+
+    async def _handle_notification_async(
+        self, entry_id: str, payload: Mapping[str, Any]
+    ) -> None:
+        """Async handler executed in HA loop: parse, route, and schedule downstream work."""
         try:
             hex_string = self._extract_hex_payload(payload)
             if hex_string is None:
                 return
 
-            canonic_id = self._extract_canonic_id_from_response(hex_string)
+            # P1 fix: offload protobuf parsing to executor
+            canonic_id = await self._extract_canonic_id_async(hex_string)
             if not canonic_id:
                 _LOGGER.debug("FCM response has no canonical id")
                 return
@@ -959,9 +1126,7 @@ class FcmReceiverHA:
             cb = self.location_update_callbacks.get(canonic_id)
             if cb:
                 self._log_push_received(canonic_id, target_entries, route_src, 1)
-                asyncio.create_task(
-                    self._run_callback_async(cb, canonic_id, hex_string)
-                )
+                await self._run_callback_async(cb, canonic_id, hex_string)
                 return
 
             tracked = [
@@ -983,14 +1148,12 @@ class FcmReceiverHA:
                 )
                 return
 
-            asyncio.create_task(
-                self._process_background_update(
-                    entry_id, canonic_id, hex_string, target_entries
-                )
+            await self._process_background_update(
+                entry_id, canonic_id, hex_string, target_entries
             )
 
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Error processing FCM notification: %s", err)
+        except Exception:
+            _LOGGER.exception("Failed to handle FCM notification safely")
 
     # -------------------- Routing helpers --------------------
 
@@ -1255,22 +1418,54 @@ class FcmReceiverHA:
         return True
 
     def _extract_canonic_id_from_response(self, hex_response: str) -> str | None:
-        """Extract canonical id via the decoder."""
+        """Extract canonical id via the decoder.
+
+        Handles the schema difference between Android devices (nested in phoneInformation)
+        and Spot/Tracker devices (direct canonicIds), as defined in DeviceUpdate.proto.
+        """
         try:
             device_update = decoder_module.parse_device_update_protobuf(hex_response)
             if device_update.HasField("deviceMetadata"):
-                ids = device_update.deviceMetadata.identifierInformation.canonicIds.canonicId
+                info = device_update.deviceMetadata.identifierInformation
+
+                # Aligns with ProtoDecoders.decoder.get_canonic_ids logic:
+                # type == 1 → Android devices store IDs under phoneInformation.canonicIds.
+                if info.type == 1:
+                    ids = info.phoneInformation.canonicIds.canonicId
+                else:
+                    ids = info.canonicIds.canonicId
+
                 if ids:
                     return ids[0].id
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed to extract canonical id from FCM response: %s", err)
         return None
 
+    async def _extract_canonic_id_async(self, hex_response: str) -> str | None:
+        """Extract canonical ID via the decoder in an executor (P1-1 fix).
+
+        Offloads CPU-bound protobuf parsing to avoid blocking the event loop.
+        """
+        return await _call_in_executor(
+            self._extract_canonic_id_from_response, hex_response
+        )
+
     async def _run_callback_async(
         self, callback: Callable[[str, str], None], canonic_id: str, hex_string: str
     ) -> None:
-        """Run a potentially blocking callback in a thread."""
-        await _call_in_executor(callback, canonic_id, hex_string)
+        """Run a user callback safely without unhandled task exceptions (P0-2 fix).
+
+        Catches and logs exceptions to prevent 'Task exception was never retrieved'.
+        """
+        try:
+            await _call_in_executor(callback, canonic_id, hex_string)
+        except Exception:
+            # Do NOT log the full payload - use length only for safety
+            _LOGGER.exception(
+                "FCM locate callback failed (canonic_id=%s, payload_len=%d)",
+                canonic_id[:8] if canonic_id else "unknown",
+                len(hex_string) if hex_string else 0,
+            )
 
     # -------------------- Push-path decode → debounce → flush --------------------
 
@@ -1384,9 +1579,17 @@ class FcmReceiverHA:
     async def _decode_background_location_async(
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
-        """Decode background location using protobuf decoders (CPU-bound)."""
+        """Decode background location using protobuf decoders.
+
+        P1 fixes applied:
+        - Protobuf parsing offloaded to executor (non-blocking)
+        - Scoped cache provider prevents cross-contamination between entries
+        """
         try:
-            device_update = decoder_module.parse_device_update_protobuf(hex_string)
+            # P1-1: Offload CPU-bound protobuf parsing to executor
+            device_update = await _call_in_executor(
+                decoder_module.parse_device_update_protobuf, hex_string
+            )
             cache = self._entry_caches.get(entry_id)
             if cache is None:
                 _LOGGER.error(
@@ -1395,19 +1598,18 @@ class FcmReceiverHA:
                 )
                 return {}
 
-            nova_request.register_cache_provider(lambda: cache)
-            try:
-                raw_locations = await async_decrypt_location_response_locations(
-                    device_update, cache=cache
-                )
-            except StaleOwnerKeyError:
-                _LOGGER.info(
-                    "Background location update skipped (stale key) for entry %s",
-                    entry_id,
-                )
-                return {}
-            finally:
-                nova_request.unregister_cache_provider()
+            # P1-2: Use scoped context manager for proper cleanup
+            with self._scoped_cache_provider(lambda: cache):
+                try:
+                    raw_locations = await async_decrypt_location_response_locations(
+                        device_update, cache=cache
+                    )
+                except StaleOwnerKeyError:
+                    _LOGGER.info(
+                        "Background location update skipped (stale key) for entry %s",
+                        entry_id,
+                    )
+                    return {}
 
             locations: list[JSONDict] = (
                 raw_locations if raw_locations is not None else []
@@ -1467,6 +1669,9 @@ class FcmReceiverHA:
         if token:
             self._update_token_routing(token, {entry_id})
             asyncio.create_task(self._persist_routing_token(entry_id, token))
+        self._clear_fatal_error_for_entry(
+            entry_id, reason="Credentials updated for entry"
+        )
 
         asyncio.create_task(self._async_save_credentials_for_entry(entry_id))
         _LOGGER.info("[entry=%s] FCM credentials updated", entry_id)

@@ -15,7 +15,7 @@ import subprocess
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Protocol
 
-from google.protobuf.message import Message
+from google.protobuf.message import DecodeError, Message
 
 try:
     from zoneinfo import ZoneInfo  # stdlib, Python 3.9+
@@ -25,6 +25,9 @@ except ImportError:
 if TYPE_CHECKING:
     from custom_components.googlefindmy.Auth.token_cache import TokenCache
 
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    NovaProtobufDecodeError,
+)
 from custom_components.googlefindmy.ProtoDecoders import (
     Common_pb2,
     DeviceUpdate_pb2,
@@ -53,8 +56,7 @@ class _DecryptLocationsCallable(Protocol):
         device_update_protobuf: DeviceUpdate_pb2.DeviceUpdate,
         *,
         cache: TokenCache,
-    ) -> list[dict[str, Any]] | None:
-        ...
+    ) -> list[dict[str, Any]] | None: ...
 
 
 # --------------------------------------------------------------------------------------
@@ -148,9 +150,7 @@ def custom_message_formatter(
                 nested_message = custom_message_formatter(
                     value, f"{indent}  ", _as_one_line
                 )
-                lines.append(
-                    f"{indent}{field.name} {{\n{nested_message}\n{indent}}}"
-                )
+                lines.append(f"{indent}{field.name} {{\n{nested_message}\n{indent}}}")
         else:
             lines.append(f"{indent}{field.name}: {value}")
     return "\n".join(lines)
@@ -164,27 +164,66 @@ def custom_message_formatter(
 def parse_location_report_upload_protobuf(
     hex_string: str,
 ) -> LocationReportsUpload_pb2.LocationReportsUpload:
-    """Parse LocationReportsUpload from a hex string."""
+    """Parse LocationReportsUpload from a hex string.
+
+    Raises:
+        NovaProtobufDecodeError: If the response cannot be decoded as a valid Protobuf.
+    """
     location_reports = LocationReportsUpload_pb2.LocationReportsUpload()
-    location_reports.ParseFromString(bytes.fromhex(hex_string))
+    try:
+        location_reports.ParseFromString(bytes.fromhex(hex_string))
+    except (DecodeError, ValueError, binascii.Error) as exc:
+        _LOGGER.error(
+            "Failed to decode Google Protobuf response (LocationReportsUpload): %s",
+            exc,
+        )
+        raise NovaProtobufDecodeError(
+            f"LocationReportsUpload decode failed: {exc}"
+        ) from exc
     return location_reports
 
 
 def parse_device_update_protobuf(
     hex_string: str,
 ) -> DeviceUpdate_pb2.DeviceUpdate:
-    """Parse DeviceUpdate from a hex string."""
+    """Parse DeviceUpdate from a hex string.
+
+    Raises:
+        NovaProtobufDecodeError: If the response cannot be decoded as a valid Protobuf.
+    """
     device_update = DeviceUpdate_pb2.DeviceUpdate()
-    device_update.ParseFromString(bytes.fromhex(hex_string))
+    try:
+        device_update.ParseFromString(bytes.fromhex(hex_string))
+    except (DecodeError, ValueError, binascii.Error) as exc:
+        _LOGGER.error(
+            "Failed to decode Google Protobuf response (DeviceUpdate): %s",
+            exc,
+        )
+        raise NovaProtobufDecodeError(
+            f"DeviceUpdate decode failed: {exc}"
+        ) from exc
     return device_update
 
 
 def parse_device_list_protobuf(
     hex_string: str,
 ) -> DeviceUpdate_pb2.DevicesList:
-    """Parse DevicesList from a hex string."""
+    """Parse DevicesList from a hex string.
+
+    Raises:
+        NovaProtobufDecodeError: If the response cannot be decoded as a valid Protobuf.
+    """
     device_list = DeviceUpdate_pb2.DevicesList()
-    device_list.ParseFromString(bytes.fromhex(hex_string))
+    try:
+        device_list.ParseFromString(bytes.fromhex(hex_string))
+    except (DecodeError, ValueError, binascii.Error) as exc:
+        _LOGGER.error(
+            "Failed to decode Google Protobuf response (DevicesList): %s",
+            exc,
+        )
+        raise NovaProtobufDecodeError(
+            f"DevicesList decode failed: {exc}"
+        ) from exc
     return device_list
 
 
@@ -196,11 +235,16 @@ def parse_device_list_protobuf(
 def get_canonic_ids(
     device_list: DeviceUpdate_pb2.DevicesList,
 ) -> list[tuple[str, str]]:
-    """Return (device_name, canonic_id) for all devices in the list.
+    """Return (device_name, canonic_id) for devices in the list.
+
+    Only returns the PRIMARY (first) canonical ID for each device.
+    Android devices can have multiple canonical IDs (historical IDs from
+    updates/resets), but we only want the current primary identifier.
 
     Defensive policy:
         * Handle Android and non-Android identifier shapes.
         * Skip non-string/empty IDs to avoid downstream surprises.
+        * Use only first valid ID per device to prevent duplicates.
     """
     result: list[tuple[str, str]] = []
     for device in getattr(device_list, "deviceMetadata", []):
@@ -220,7 +264,13 @@ def get_canonic_ids(
         for canonic_id in canonic_ids:
             cid = getattr(canonic_id, "id", None)
             if isinstance(cid, str) and cid:
+                _LOGGER.debug(
+                    "ID extraction: Using primary ID '%s' for device '%s'",
+                    cid,
+                    device_name,
+                )
                 result.append((device_name, cid))
+                break  # Only use first (primary) canonical ID per device
     return result
 
 
@@ -231,10 +281,33 @@ def get_canonic_ids(
 # Tunables to keep behavior explicit and easily auditable
 _NEAR_TS_TOLERANCE_S: float = 5.0  # semantic merge tolerance (seconds)
 
+_ANCHOR_METADATA_KEYS: tuple[str, ...] = (
+    "pair_date",
+    "secrets_creation_date",
+    "device_registration",
+    "device_type_information",
+    "encrypted_user_secrets",
+    "identity_key",
+    "identity_key_candidates",
+    "encrypted_identity_key_candidates",
+    "encrypted_identity_key",
+    "owner_key_version",
+    "time_anchors_debug",
+    "metadata_only",
+)
+
 _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "name",
     "id",
     "device_id",
+    "encrypted_identity_key",
+    "encrypted_account_key",
+    "public_key_address",
+    "owner_key_version",
+    "device_type",
+    "fast_pair_model_id",
+    "manufacturer",
+    "model",
     "latitude",
     "longitude",
     "altitude",
@@ -246,6 +319,7 @@ _DEVICE_STUB_KEYS: tuple[str, ...] = (
     "is_own_report",
     "semantic_name",
     "battery_level",
+    *_ANCHOR_METADATA_KEYS,
 )
 
 
@@ -259,6 +333,14 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "name": device_name,
         "id": canonic_id,
         "device_id": canonic_id,
+        "encrypted_identity_key": None,
+        "encrypted_account_key": None,
+        "public_key_address": None,
+        "owner_key_version": None,
+        "device_type": None,
+        "fast_pair_model_id": None,
+        "manufacturer": None,
+        "model": None,
         "latitude": None,
         "longitude": None,
         "altitude": None,
@@ -270,14 +352,38 @@ def _build_device_stub(device_name: str, canonic_id: str) -> dict[str, Any]:
         "is_own_report": None,
         "semantic_name": None,
         "battery_level": None,
+        "pair_date": None,
+        "secrets_creation_date": None,
+        "device_registration": None,
+        "device_type_information": None,
+        "encrypted_user_secrets": None,
+        "identity_key": None,
+        "identity_key_candidates": None,
+        "encrypted_identity_key_candidates": None,
+        "time_anchors_debug": None,
+        "metadata_only": None,
     }
 
 
 def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
-    """Coerce numeric fields to floats (when present) and drop NaN/Inf.
+    """Coerce numeric fields to floats (when present) and drop invalid values.
 
     Only mutates a shallow copy. Unknown keys are preserved (e.g., `_report_hint`).
+
+    Validation rules:
+        - NaN/Inf values are dropped for all numeric fields.
+        - accuracy < 0.001m is dropped: The Android Location API uses 0.0 as an error
+          code meaning "no accuracy available". Modern dual-frequency GNSS can achieve
+          sub-meter accuracy, so only the error code (0.0) is filtered. The REPORT is
+          kept, but accuracy is treated as unmeasured (acc_rank = -inf in ranking).
+        - "Null Island" coordinates (0.0, 0.0) are dropped: This location in the
+          Atlantic Ocean is a common API default when no real location is available.
     """
+    # Minimum valid accuracy threshold (1mm).
+    # Only the error code 0.0 (and negative values) are filtered.
+    # Modern dual-frequency GNSS can achieve sub-meter accuracy.
+    _MIN_VALID_ACCURACY = 0.001
+
     out = dict(loc)
     for num_key in ("latitude", "longitude", "accuracy", "last_seen", "altitude"):
         val = out.get(num_key)
@@ -287,11 +393,169 @@ def _normalize_location_dict(loc: dict[str, Any]) -> dict[str, Any]:
             f = float(val)
             if not math.isfinite(f):
                 out.pop(num_key, None)
+            # accuracy < 0.001m is the error code (0.0 = "no accuracy").
+            # We KEEP the report but REMOVE the accuracy key so it doesn't
+            # corrupt ranking (acc_rank = -inf when accuracy is None).
+            # Valid sub-meter values like 0.5m are preserved!
+            elif num_key == "accuracy" and f < _MIN_VALID_ACCURACY:
+                out.pop(num_key, None)
             else:
                 out[num_key] = f
         except (TypeError, ValueError):
             out.pop(num_key, None)
+
+    # "Null Island" filter: Coordinates at (0.0, 0.0) are in the Atlantic Ocean
+    # and indicate a default/missing value from the API, not a real location.
+    lat = out.get("latitude")
+    lon = out.get("longitude")
+    if lat is not None and lon is not None:
+        # Use small epsilon for floating point comparison (covers 0.0 defaults)
+        if abs(lat) < 0.0001 and abs(lon) < 0.0001:
+            out.pop("latitude", None)
+            out.pop("longitude", None)
+            out.pop("accuracy", None)  # Without coordinates, accuracy is meaningless
+
     return out
+
+
+def _normalize_timestamp(value: Any) -> int | None:
+    """Return epoch seconds from primitive or Timestamp-like values.
+
+    For *anchor* timestamps, treat unset/default values (0 / non-positive) as missing.
+    """
+
+    if value is None:
+        return None
+
+    # Protobuf Timestamp-like object
+    if hasattr(value, "seconds"):
+        try:
+            seconds = int(getattr(value, "seconds"))
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    return seconds if seconds > 0 else None
+
+
+def _merge_dict_preserve_left(
+    left: dict[str, Any], right: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge two dicts without overwriting keys from the left dict."""
+
+    merged = dict(left)
+    for key, value in right.items():
+        if key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _collect_anchor_metadata(
+    location_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Union anchor/metadata keys across *all* candidates.
+
+    This protects metadata-only candidates from being dropped when a different
+    candidate wins the location ranking.
+    """
+
+    union: dict[str, Any] = {}
+    for key in _ANCHOR_METADATA_KEYS:
+        union[key] = None
+
+    # Union strategy:
+    # - timestamps: keep the first non-null positive value
+    # - identity_key: keep the first non-null bytes value
+    # - *_candidates: union lists (dedup, stable order)
+    # - dict blobs: keep first; for time_anchors_debug merge (preserve-left)
+    # - metadata_only: OR
+    for cand in location_candidates:
+        if not isinstance(cand, dict):
+            continue
+
+        # boolean
+        if "metadata_only" in cand:
+            union["metadata_only"] = bool(union.get("metadata_only")) or bool(
+                cand.get("metadata_only")
+            )
+
+        for ts_key in ("pair_date", "secrets_creation_date"):
+            if ts_key in cand:
+                ts_val = _normalize_timestamp(cand.get(ts_key))
+                if ts_val is not None and union.get(ts_key) is None:
+                    union[ts_key] = ts_val
+
+        # identity key material (convert bytes to hex string for consistency)
+        if union.get("identity_key") is None:
+            ik_val = cand.get("identity_key")
+            if isinstance(ik_val, (bytes, bytearray)) and ik_val:
+                union["identity_key"] = bytes(ik_val).hex()
+            elif isinstance(ik_val, str) and ik_val:
+                union["identity_key"] = ik_val
+
+        # encrypted_identity_key (convert bytes to hex string for consistency)
+        if union.get("encrypted_identity_key") is None:
+            eik_val = cand.get("encrypted_identity_key")
+            if isinstance(eik_val, (bytes, bytearray)) and eik_val:
+                union["encrypted_identity_key"] = bytes(eik_val).hex()
+            elif isinstance(eik_val, str) and eik_val:
+                union["encrypted_identity_key"] = eik_val
+
+        # owner_key_version (int)
+        if union.get("owner_key_version") is None:
+            okv = cand.get("owner_key_version")
+            if isinstance(okv, int) and okv > 0:
+                union["owner_key_version"] = okv
+
+        # list unions
+        for list_key in (
+            "identity_key_candidates",
+            "encrypted_identity_key_candidates",
+        ):
+            lst = cand.get(list_key)
+            if not isinstance(lst, list) or not lst:
+                continue
+            existing = union.get(list_key)
+            if not isinstance(existing, list):
+                existing = []
+            for item in lst:
+                if isinstance(item, (bytes, bytearray)) and item:
+                    b = bytes(item)
+                    if b not in existing:
+                        existing.append(b)
+                # allow non-bytes items (diagnostics) but still dedup
+                elif item not in existing:
+                    existing.append(item)
+            union[list_key] = existing
+
+        # dict blobs (diagnostics)
+        for dict_key in (
+            "device_registration",
+            "device_type_information",
+            "encrypted_user_secrets",
+        ):
+            if union.get(dict_key) is None:
+                d_val = cand.get(dict_key)
+                if isinstance(d_val, dict) and d_val:
+                    union[dict_key] = d_val
+
+        # debug blob: merge without overwriting left keys
+        dbg = cand.get("time_anchors_debug")
+        if isinstance(dbg, dict) and dbg:
+            existing_dbg = union.get("time_anchors_debug")
+            if isinstance(existing_dbg, dict) and existing_dbg:
+                union["time_anchors_debug"] = _merge_dict_preserve_left(
+                    existing_dbg, dbg
+                )
+            else:
+                union["time_anchors_debug"] = dbg
+
+    return union
 
 
 def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
@@ -300,12 +564,28 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     Priority (high to low):
       1. Newer ``last_seen`` timestamp
       2. Source/Status: Owner > Crowdsourced > Aggregated > Unknown
+         (BUT: is_own_report only trusted if accuracy is valid)
       3. Presence of coordinates (tie-breaker when timestamps/status match)
       4. Better accuracy (smaller is better)
       5. Deterministic tie-breaker string
     """
-    # 1) Owner-Reports always take precedence
-    is_own = 1 if bool(n.get("is_own_report")) else 0
+    # Pre-compute accuracy validity for status ranking decisions.
+    # A report claiming is_own_report=True but with invalid/missing accuracy
+    # (after normalization strips accuracy <= 0) is suspicious and should NOT
+    # get the "own report" bonus. This prevents the January 2025 phantom bug.
+    acc = n.get("accuracy")
+    has_valid_accuracy = (
+        isinstance(acc, (int, float)) and math.isfinite(float(acc)) and float(acc) > 0
+    )
+
+    # 1) Owner-Reports take precedence ONLY if accuracy is trustworthy
+    is_own_flag = bool(n.get("is_own_report"))
+    # Own report bonus requires valid accuracy (or no coordinates = semantic only)
+    has_coords = isinstance(n.get("latitude"), (int, float)) and isinstance(
+        n.get("longitude"), (int, float)
+    )
+    # Trust is_own_report if: (1) accuracy is valid, OR (2) no coordinates (semantic)
+    is_own_trusted = is_own_flag and (has_valid_accuracy or not has_coords)
 
     # 2) Robustly determine status rank (String, Int, or via Hint)
     status_code = n.get("status_code")
@@ -331,7 +611,7 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     _MISSING = object()
     cs = getattr(Common_pb2.Status, "CROWDSOURCED", _MISSING)
     ag = getattr(Common_pb2.Status, "AGGREGATED", _MISSING)
-    if is_own:
+    if is_own_trusted:
         status_rank = 3
     elif (
         (cs is not _MISSING and status_code_int == cs)
@@ -350,24 +630,25 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
     else:
         status_rank = 0  # SEMANTIC/Unknown/Default
 
-    has_coords = (
-        1
-        if isinstance(n.get("latitude"), (int, float))
-        and isinstance(n.get("longitude"), (int, float))
-        else 0
-    )
+    # has_coords already computed above as boolean; convert to int for tuple
+    has_coords_rank = 1 if has_coords else 0
+
     seen = n.get("last_seen")
     seen_rank = (
         float(seen)
         if isinstance(seen, (int, float)) and math.isfinite(float(seen))
         else float("-inf")
     )
-    acc = n.get("accuracy")
-    acc_rank = (
-        -float(acc)
-        if isinstance(acc, (int, float)) and math.isfinite(float(acc))
-        else float("-inf")
-    )
+
+    # accuracy <= 0 is physically impossible for GPS; treat as missing/worst rank.
+    # Defense in depth: even if _normalize_location_dict didn't filter it.
+    # (has_valid_accuracy already computed above; assert helps mypy)
+    if has_valid_accuracy:
+        assert acc is not None  # validated in has_valid_accuracy
+        acc_rank = -float(acc)
+    else:
+        acc_rank = float("-inf")
+
     # Deterministic final tiebreaker: canonical content key (string).
     stable_key = "|".join(
         str(x)
@@ -382,7 +663,7 @@ def _get_rank_tuple(n: dict[str, Any]) -> tuple[float, int, int, float, str]:
             n.get("semantic_name", ""),
         )
     )
-    return (seen_rank, status_rank, has_coords, acc_rank, stable_key)
+    return (seen_rank, status_rank, has_coords_rank, acc_rank, stable_key)
 
 
 def _select_best_location(
@@ -448,10 +729,17 @@ def _merge_semantics_if_near_ts(
 
     out = dict(best)
 
+    # Extract best candidate's timestamp FIRST - used for identity protection.
+    t_best = _extract_ts(out.get("last_seen"))
+
     # Track the freshest coordinate-bearing candidate so semantic-only entries can
     # still expose stable position data after the merge step.
+    #
+    # IDENTITY PROTECTION: Initialize to t_best (not -inf) so that lower-ranked
+    # candidates with the SAME timestamp cannot "steal" coordinates from the best.
+    # A lower-ranked entry must be STRICTLY newer to update coordinates.
     best_coordinate: dict[str, Any] | None = None
-    best_coordinate_ts = float("-inf")
+    best_coordinate_ts = t_best  # Protects against timestamp collision identity theft
 
     # Track the semantic label currently attached to the outgoing payload.
     semantic_label: str | None = None
@@ -459,8 +747,6 @@ def _merge_semantics_if_near_ts(
     if out.get("semantic_name"):
         semantic_label = str(out["semantic_name"])
         semantic_ts = _extract_ts(out.get("last_seen"))
-
-    t_best = _extract_ts(out.get("last_seen"))
 
     # Historical behaviour: borrow a semantic label very close to the coordinate
     # fix timestamp when none is present yet.
@@ -492,10 +778,13 @@ def _merge_semantics_if_near_ts(
         ts = _extract_ts(n.get("last_seen"))
         latest_seen = max(latest_seen, ts)
 
+        # Use strict > to preserve sort order: when timestamps are equal,
+        # the first entry (already ranked higher by _get_rank_tuple) wins.
+        # Using >= would cause "last-write-wins" and prefer worse entries.
         if (
             isinstance(n.get("latitude"), (int, float))
             and isinstance(n.get("longitude"), (int, float))
-            and ts >= best_coordinate_ts
+            and ts > best_coordinate_ts
         ):
             best_coordinate = n
             best_coordinate_ts = ts
@@ -566,11 +855,21 @@ def get_devices_with_location(
 
     for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
+        # FIX: For phones (IDENTIFIER_ANDROID), use only the FIRST canonical ID.
+        # Phones can have multiple canonical IDs in the array (e.g., after re-pairing),
+        # but only the first/primary ID should be used to avoid creating duplicate
+        # device entries. This matches fcm_receiver_ha._extract_canonic_id_from_response().
+        is_android_device = False
         try:
-            if device.identifierInformation.type == DeviceUpdate_pb2.IDENTIFIER_ANDROID:
-                canonic_ids = (
+            is_android_device = (
+                device.identifierInformation.type == DeviceUpdate_pb2.IDENTIFIER_ANDROID
+            )
+            if is_android_device:
+                all_ids = (
                     device.identifierInformation.phoneInformation.canonicIds.canonicId
                 )
+                # Use only the first canonical ID for phones to prevent duplicates
+                canonic_ids = all_ids[:1] if all_ids else []
             else:
                 canonic_ids = device.identifierInformation.canonicIds.canonicId
         except Exception:
@@ -591,12 +890,33 @@ def get_devices_with_location(
                         f.name
                         for f, _ in device.information.locationInformation.ListFields()
                     ]
-                    _LOGGER.debug(
-                        "    -> locationInformation fields: %s", loc_fields
-                    )
+                    _LOGGER.debug("    -> locationInformation fields: %s", loc_fields)
+
+            device_str = str(device)
+            unknown_lines = [
+                line
+                for line in device_str.splitlines()
+                if line.strip() and line.strip()[0].isdigit()
+            ]
+            if unknown_lines:
+                _LOGGER.debug(
+                    "Device '%s' has UNKNOWN FIELDS: \n%s",
+                    device_name,
+                    "\n".join(unknown_lines),
+                )
 
         # Try decryption ONCE per device; share across all its canonic IDs
         location_candidates: list[dict[str, Any]] = []
+        encrypted_identity_key = None
+        owner_key_version = None
+        device_type = None
+        fast_pair_model_id: str | None = None
+        manufacturer: str | None = None
+        model: str | None = None
+        pair_date: int | None = None
+        secrets_creation_date: int | None = None
+        encrypted_account_key: str | None = None
+        public_key_address: str | None = None
         if decrypt_location_response_locations is not None and cache is not None:
             try:
                 if device.HasField("information") and device.information.HasField(
@@ -624,9 +944,162 @@ def get_devices_with_location(
                             )
                             or []
                         )
-            except Exception:
-                # Defensive: decryption issues must not break the whole list.
+            except Exception as err:
+                # Defensive: decryption issues must not break the whole list, but log
+                # the root cause so users can debug key or parsing mismatches.
+                _LOGGER.warning(
+                    "Failed to decrypt location for device '%s': %s",
+                    device_name or "<unknown>",
+                    err,
+                    exc_info=err,
+                )
                 location_candidates = []
+
+        if device.HasField("information") and device.information.HasField(
+            "deviceRegistration"
+        ):
+            registration = device.information.deviceRegistration
+            encrypted_user_secrets = registration.encryptedUserSecrets
+
+            if encrypted_user_secrets.encryptedIdentityKey:
+                encrypted_identity_key = (
+                    encrypted_user_secrets.encryptedIdentityKey.hex()
+                )
+
+            # NOTE: In Proto3, non-optional scalar fields (int32) do not support
+            # HasField(). Accessing them directly returns 0 if unset.
+            owner_key_version = encrypted_user_secrets.ownerKeyVersion
+
+            if registration.HasField("deviceTypeInformation"):
+                device_type = registration.deviceTypeInformation.deviceType
+
+            raw_fast_pair_model_id = getattr(registration, "fastPairModelId", None)
+            if isinstance(raw_fast_pair_model_id, str):
+                fast_pair_model_id = raw_fast_pair_model_id or None
+            elif isinstance(raw_fast_pair_model_id, (bytes, bytearray)):
+                try:
+                    fast_pair_model_id = raw_fast_pair_model_id.decode() or None
+                except UnicodeDecodeError:
+                    fast_pair_model_id = raw_fast_pair_model_id.hex()
+
+            raw_manufacturer = getattr(registration, "manufacturer", None)
+            if isinstance(raw_manufacturer, str):
+                raw_manufacturer = raw_manufacturer.strip()
+                manufacturer = raw_manufacturer or None
+
+            raw_model = getattr(registration, "model", None)
+            if isinstance(raw_model, str):
+                raw_model = raw_model.strip()
+                model = raw_model or None
+
+            # Anchor timestamps used for relative EID timebases
+            # - pairDate is a scalar proto3 field: default 0 means "unset"
+            raw_pair_date: Any = getattr(registration, "pairDate", None)
+            try:
+                if isinstance(raw_pair_date, (int, float)) and raw_pair_date > 0:
+                    pair_date = int(raw_pair_date)
+            except (TypeError, ValueError):
+                pair_date = None
+
+            # - creationDate is a Timestamp message: avoid treating an unset/default Timestamp as epoch (0)
+            raw_creation_date_seconds: Any = None
+            try:
+                if encrypted_user_secrets.HasField("creationDate"):
+                    creation_date_obj: Any | None = getattr(
+                        encrypted_user_secrets, "creationDate", None
+                    )
+                    raw_creation_date_seconds = getattr(
+                        creation_date_obj, "seconds", None
+                    )
+            except (ValueError, AttributeError):
+                creation_date_obj = getattr(
+                    encrypted_user_secrets, "creationDate", None
+                )
+                raw_creation_date_seconds = (
+                    getattr(creation_date_obj, "seconds", None)
+                    if creation_date_obj is not None
+                    else None
+                )
+
+            try:
+                if (
+                    isinstance(raw_creation_date_seconds, (int, float))
+                    and raw_creation_date_seconds > 0
+                ):
+                    secrets_creation_date = int(raw_creation_date_seconds)
+            except (TypeError, ValueError):
+                secrets_creation_date = None
+
+            raw_encrypted_account_key = getattr(
+                encrypted_user_secrets, "encryptedAccountKey", None
+            )
+            if isinstance(raw_encrypted_account_key, (bytes, bytearray)) and (
+                raw_encrypted_account_key
+            ):
+                encrypted_account_key = bytes(raw_encrypted_account_key).hex()
+
+            raw_public_key_address = getattr(
+                encrypted_user_secrets, "encryptedSha256AccountKeyPublicAddress", None
+            )
+            if isinstance(raw_public_key_address, (bytes, bytearray)) and (
+                raw_public_key_address
+            ):
+                public_key_address = bytes(raw_public_key_address).hex()
+
+        # --- DIAGNOSTIC: FIND HIDDEN KEYS ---
+        # Phones (IDENTIFIER_ANDROID) and similar devices may not have keys in the
+        # device listing payload, but keys ARE available via the Locate flow (FCM).
+        # Only warn for tracker-like devices that unexpectedly lack keys.
+        if not encrypted_identity_key:
+            ids_str = ", ".join(
+                [str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids]
+            )
+
+            # Check if device has reduced fields (no 'information' block)
+            # Note: is_android_device is already set at the top of the device loop
+            has_information_block = device.HasField("information")
+
+            # Phone devices legitimately don't have keys in list_devices - this is expected.
+            # The keys are provided via the Locate flow (FCM response) instead.
+            if is_android_device or not has_information_block:
+                _LOGGER.debug(
+                    "Device '%s' has no key in listing (expected for phones/Android devices); "
+                    "keys will be obtained via Locate flow. (IDs: %s)",
+                    device_name,
+                    ids_str,
+                )
+            else:
+                # For tracker devices that should have keys but don't, log at WARNING
+                _LOGGER.warning(
+                    "DEBUG STRUCTURE: Missing Key for '%s' (IDs: %s)",
+                    device_name,
+                    ids_str,
+                )
+
+                # Level 1
+                fields = [f.name for f, _ in device.ListFields()]
+                _LOGGER.warning(" -> Device fields: %s", fields)
+
+                if device.HasField("information"):
+                    info = device.information
+                    _LOGGER.warning(
+                        " -> Info fields: %s", [f.name for f, _ in info.ListFields()]
+                    )
+
+                    if info.HasField("deviceRegistration"):
+                        reg = info.deviceRegistration
+                        _LOGGER.warning(
+                            " -> Registration fields: %s",
+                            [f.name for f, _ in reg.ListFields()],
+                        )
+
+                        if reg.HasField("encryptedUserSecrets"):
+                            sec = reg.encryptedUserSecrets
+                            _LOGGER.warning(
+                                " -> Secrets fields: %s",
+                                [f.name for f, _ in sec.ListFields()],
+                            )
+        # ------------------------------------
 
         # If decryption yielded results, select the best one and keep normalized list.
         if location_candidates:
@@ -636,6 +1109,26 @@ def get_devices_with_location(
         else:
             best, normed = None, []
 
+        # Collect anchor/metadata keys across all candidates to avoid dropping metadata-only payloads.
+        anchor_union = _collect_anchor_metadata(location_candidates)
+        if pair_date is not None:
+            anchor_union["pair_date"] = pair_date
+        if secrets_creation_date is not None:
+            anchor_union["secrets_creation_date"] = secrets_creation_date
+
+        # Record provenance hints for later refactoring-robust testing/debugging.
+        if pair_date is not None or secrets_creation_date is not None:
+            dbg = anchor_union.get("time_anchors_debug")
+            if not isinstance(dbg, dict):
+                dbg = {}
+            if pair_date is not None:
+                dbg.setdefault("pair_date_source", "device_registration.proto")
+            if secrets_creation_date is not None:
+                dbg.setdefault(
+                    "secrets_creation_date_source", "encrypted_user_secrets.proto"
+                )
+            anchor_union["time_anchors_debug"] = dbg
+
         # Emit **exactly one** row per canonic ID.
         for canonic in canonic_ids:
             cid = getattr(canonic, "id", None)
@@ -643,6 +1136,17 @@ def get_devices_with_location(
                 continue
 
             row = _build_device_stub(device_name, cid)
+            row["encrypted_identity_key"] = encrypted_identity_key
+            row["owner_key_version"] = owner_key_version
+            row["device_type"] = device_type
+            row["fast_pair_model_id"] = fast_pair_model_id
+            row["manufacturer"] = manufacturer
+            row["model"] = model
+            row["pair_date"] = pair_date
+            row["secrets_creation_date"] = secrets_creation_date
+            row["encrypted_account_key"] = encrypted_account_key
+            row["public_key_address"] = public_key_address
+            # Apply anchor/metadata union after identity fields are set (and after location merge below)
 
             if best:
                 # best already normalized by selection; merge only known keys
@@ -653,6 +1157,12 @@ def get_devices_with_location(
                 row["name"] = device_name
                 row["id"] = cid
                 row["device_id"] = cid
+
+            # Ensure anchor/metadata keys survive location ranking and do not get overwritten by defaults.
+            for k in _ANCHOR_METADATA_KEYS:
+                v = anchor_union.get(k)
+                if v is not None:
+                    row[k] = v
 
             results.append(row)
 

@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
 
 from custom_components.googlefindmy.Auth.username_provider import username_string
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+    OwnerKeyInfo,
+)
 from tests.helpers import DummyCache
 
 
@@ -22,11 +24,14 @@ def test_async_retrieve_identity_key_threads_cache(
         decrypt_locations,
     )
 
+    # Clear the global EIK cache to avoid interference from previous tests
+    decrypt_locations.clear_eik_cache()
+
     owner_calls: dict[str, object] = {}
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
         owner_calls["owner_cache"] = cache
-        return b"\x01" * 32
+        return OwnerKeyInfo(key=b"\x01" * 32, version=1)
 
     async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
         owner_calls["eid_cache"] = cache
@@ -57,7 +62,7 @@ def test_async_retrieve_identity_key_threads_cache(
         decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
 
-    assert result == b"\x02" * 32
+    assert result == [b"\x02" * 32]
     assert owner_calls["owner_cache"] is cache
     # Success path does not consult async_get_eid_info; ensure no unexpected call
     assert "eid_cache" not in owner_calls
@@ -72,11 +77,14 @@ def test_async_retrieve_identity_key_error_uses_cache(
         decrypt_locations,
     )
 
+    # Clear the global EIK cache to avoid interference from previous tests
+    decrypt_locations.clear_eik_cache()
+
     caches: dict[str, object] = {}
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
         caches["owner_cache"] = cache
-        return b"\x01" * 32
+        return OwnerKeyInfo(key=b"\x01" * 32, version=1)
 
     async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
         caches["eid_cache"] = cache
@@ -128,12 +136,15 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
         decrypt_locations,
     )
 
+    # Clear the global EIK cache to avoid interference from previous tests
+    decrypt_locations.clear_eik_cache()
+
     owner_calls: list[object] = []
     eid_calls: list[object] = []
 
     async def fake_async_get_owner_key(*, cache, **kwargs):  # type: ignore[no-untyped-def]
         owner_calls.append(cache)
-        return b"\x01" * 32
+        return OwnerKeyInfo(key=b"\x01" * 32, version=1)
 
     async def fake_async_get_eid_info(*, cache):  # type: ignore[no-untyped-def]
         eid_calls.append(cache)
@@ -152,12 +163,14 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
         if decrypt_attempts == 1:
             raise ValueError("stale")
         assert owner_key == b"\x01" * 32
-        return b"\xAA" * 32
+        return b"\xaa" * 32
 
     monkeypatch.setattr(
         decrypt_locations, "async_get_owner_key", fake_async_get_owner_key
     )
-    monkeypatch.setattr(decrypt_locations, "async_get_eid_info", fake_async_get_eid_info)
+    monkeypatch.setattr(
+        decrypt_locations, "async_get_eid_info", fake_async_get_eid_info
+    )
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     monkeypatch.setattr(decrypt_locations, "decrypt_eik", fake_decrypt)
     monkeypatch.setattr(decrypt_locations, "flip_bits", lambda data, _: data)
@@ -178,7 +191,7 @@ def test_async_retrieve_identity_key_retries_after_clearing_owner_key(
         decrypt_locations.async_retrieve_identity_key(DummyRegistration(), cache=cache)
     )
 
-    assert result == b"\xAA" * 32
+    assert result == [b"\xaa" * 32]
     assert cache.values.get("owner_key_user@example.com") is None
     assert owner_calls == [cache, cache]
     assert eid_calls == [cache]
@@ -265,15 +278,20 @@ def test_sync_decrypt_location_response_forwards_cache(
 def test_fcm_background_decode_uses_entry_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Background FCM decoding must supply the entry TokenCache."""
+    """Background FCM decoding must supply the entry TokenCache.
 
+    P1-2 fix: Now uses scoped context manager with contextvars instead of
+    global register/unregister to prevent cross-contamination between entries.
+    """
     from custom_components.googlefindmy.Auth import fcm_receiver_ha
+    from custom_components.googlefindmy.NovaApi.nova_request import _CACHE_PROVIDER
 
     receiver = fcm_receiver_ha.FcmReceiverHA()
     cache = object()
     receiver._entry_caches["entry"] = cache
 
     captured: dict[str, object] = {}
+    initial_provider = _CACHE_PROVIDER.get()
 
     def fake_parse(hex_string: str) -> str:
         captured["hex"] = hex_string
@@ -291,15 +309,13 @@ def test_fcm_background_decode_uses_entry_cache(
         },
     ]
 
-    def fake_register_cache_provider(provider: Callable[[], object]) -> None:
-        captured["cache_provider"] = provider
-
-    def fake_unregister_cache_provider() -> None:
-        captured["unregistered"] = True
-
     async def fake_async_decrypt(  # type: ignore[no-untyped-def]
         device_update, *, cache: object
     ):
+        # P1-2: Capture the provider during decryption to verify scoped context
+        provider = _CACHE_PROVIDER.get()
+        if provider is not None:
+            captured["provider_cache"] = provider()
         captured["device_update"] = device_update
         captured["cache"] = cache
         return records
@@ -307,16 +323,6 @@ def test_fcm_background_decode_uses_entry_cache(
     monkeypatch.setattr(
         "custom_components.googlefindmy.ProtoDecoders.decoder.parse_device_update_protobuf",
         fake_parse,
-    )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.NovaApi.nova_request.register_cache_provider",
-        fake_register_cache_provider,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        "custom_components.googlefindmy.NovaApi.nova_request.unregister_cache_provider",
-        fake_unregister_cache_provider,
-        raising=False,
     )
     monkeypatch.setattr(
         "custom_components.googlefindmy.Auth.fcm_receiver_ha.async_decrypt_location_response_locations",
@@ -336,4 +342,7 @@ def test_fcm_background_decode_uses_entry_cache(
     assert captured["hex"] == "payload"
     assert captured["device_update"] == "parsed"
     assert captured["cache"] is cache
-    assert captured["unregistered"] is True
+    # P1-2: Verify scoped cache provider was set during decryption
+    assert captured["provider_cache"] is cache
+    # P1-2: Verify provider is reset after decryption (scoped cleanup)
+    assert _CACHE_PROVIDER.get() == initial_provider

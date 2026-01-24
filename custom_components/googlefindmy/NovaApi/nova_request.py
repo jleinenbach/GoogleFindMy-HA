@@ -52,6 +52,19 @@ from custom_components.googlefindmy.Auth.username_provider import (
     username_string,
 )
 
+# Import vendored google.rpc.Status for decoding Google API error responses
+try:
+    from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import (
+        Status as RpcStatus,
+    )
+    from google.protobuf.message import DecodeError as ProtobufDecodeError
+
+    _RPC_STATUS_AVAILABLE = True
+except ImportError:
+    RpcStatus = None  # type: ignore[misc,assignment]
+    ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
+    _RPC_STATUS_AVAILABLE = False
+
 from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
 if TYPE_CHECKING:
@@ -64,7 +77,9 @@ else:
 _beautiful_soup_factory: Callable[[str, str], _BeautifulSoupType] | None
 try:
     from bs4 import BeautifulSoup as _bs_factory
-except ImportError:  # pragma: no cover - optional dependency, covered via fallback branch
+except (
+    ImportError
+):  # pragma: no cover - optional dependency, covered via fallback branch
     _beautiful_soup_factory = None
     _BS4_AVAILABLE = False
 else:
@@ -86,11 +101,74 @@ NOVA_INITIAL_BACKOFF_S = 4.0
 NOVA_BACKOFF_FACTOR = 2.0
 NOVA_MAX_RETRY_AFTER_S = 60.0
 
+# ---------------------------------------------------------------------------
+# HTTP Status Codes (RFC 9110)
+# ---------------------------------------------------------------------------
+# Reference: https://httpwg.org/specs/rfc9110.html#status.codes
+#
+# Retry behavior follows industry best practices:
+# - https://www.baeldung.com/cs/http-error-status-codes-retry
+# - https://www.restapitutorial.com/advanced/responses/retries
+# ---------------------------------------------------------------------------
+
+# 2xx Success
 HTTP_OK = 200
-HTTP_UNAUTHORIZED = 401
-HTTP_TOO_MANY_REQUESTS = 429
-HTTP_SERVER_ERROR_MIN = 500
-HTTP_SERVER_ERROR_MAX = 600
+
+# 4xx Client Errors
+HTTP_BAD_REQUEST = 400  # Malformed request syntax - DO NOT RETRY
+HTTP_UNAUTHORIZED = 401  # Auth failed - RETRY after token refresh
+HTTP_FORBIDDEN = 403  # Permission denied - DO NOT RETRY
+HTTP_NOT_FOUND = 404  # Resource not found - DO NOT RETRY
+HTTP_METHOD_NOT_ALLOWED = 405  # HTTP method not supported - DO NOT RETRY
+HTTP_REQUEST_TIMEOUT = 408  # Server timeout waiting for request - RETRY OK
+HTTP_CONFLICT = 409  # Request conflicts with server state - DO NOT RETRY
+HTTP_GONE = 410  # Resource permanently removed - DO NOT RETRY
+HTTP_PRECONDITION_FAILED = 412  # Precondition in headers not met - DO NOT RETRY
+HTTP_PAYLOAD_TOO_LARGE = 413  # Request body too large - DO NOT RETRY
+HTTP_UNPROCESSABLE_ENTITY = 422  # Semantic errors in request - DO NOT RETRY
+HTTP_TOO_MANY_REQUESTS = 429  # Rate limited - RETRY with backoff
+
+# 5xx Server Errors
+HTTP_INTERNAL_SERVER_ERROR = 500  # Generic server error - RETRY OK
+HTTP_NOT_IMPLEMENTED = 501  # Server doesn't support functionality - DO NOT RETRY
+HTTP_BAD_GATEWAY = 502  # Invalid response from upstream - RETRY OK
+HTTP_SERVICE_UNAVAILABLE = (
+    503  # Server overloaded/maintenance - RETRY OK (check Retry-After)
+)
+HTTP_GATEWAY_TIMEOUT = 504  # Upstream timeout - RETRY OK
+HTTP_VERSION_NOT_SUPPORTED = 505  # HTTP version not supported - DO NOT RETRY
+HTTP_LOOP_DETECTED = 508  # Infinite loop in request processing - DO NOT RETRY
+
+# ---------------------------------------------------------------------------
+# Retry-eligible status codes for Nova API
+# ---------------------------------------------------------------------------
+# These codes indicate transient failures that may succeed on retry:
+# - 408: Request Timeout (network issues)
+# - 429: Too Many Requests (rate limiting)
+# - 500: Internal Server Error (transient server issues)
+# - 502: Bad Gateway (upstream issues)
+# - 503: Service Unavailable (overload/maintenance)
+# - 504: Gateway Timeout (upstream timeout)
+#
+# These codes should NOT be retried (permanent errors):
+# - 400: Bad Request (malformed request)
+# - 403: Forbidden (no permission)
+# - 404: Not Found (resource doesn't exist)
+# - 501: Not Implemented (server doesn't support this)
+# - 505: HTTP Version Not Supported (config issue)
+# - 508: Loop Detected (server config issue)
+# ---------------------------------------------------------------------------
+HTTP_RETRY_ELIGIBLE = frozenset(
+    {
+        HTTP_REQUEST_TIMEOUT,
+        HTTP_TOO_MANY_REQUESTS,
+        HTTP_INTERNAL_SERVER_ERROR,
+        HTTP_BAD_GATEWAY,
+        HTTP_SERVICE_UNAVAILABLE,
+        HTTP_GATEWAY_TIMEOUT,
+    }
+)
+
 RECENT_REFRESH_WINDOW_S = 2.0
 
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
@@ -166,18 +244,108 @@ def _beautify_text(resp_text: str) -> str:
     return resp_text[:_ERROR_SNIPPET_MAX]
 
 
+def _decode_error_response(content: bytes, http_status: int) -> str:
+    """Decode a Google API error response using smart fallback.
+
+    Google's Nova API returns errors in google.rpc.Status Protobuf format,
+    not as HTML/text. This function attempts to decode the Protobuf first,
+    falling back to text/HTML parsing for load balancer errors.
+
+    Args:
+        content: Raw response body bytes.
+        http_status: HTTP status code for context.
+
+    Returns:
+        Human-readable error message for logging.
+
+    Strategy:
+        1. Try to parse as google.rpc.Status Protobuf (primary)
+        2. Fall back to text/HTML parsing (for load balancer errors, etc.)
+    """
+    if not content:
+        return f"HTTP {http_status} (empty response body)"
+
+    # --- Strategy 1: Try google.rpc.Status Protobuf decoding ---
+    if _RPC_STATUS_AVAILABLE and RpcStatus is not None:
+        try:
+            status = RpcStatus()
+            status.ParseFromString(content)
+
+            # Check if we got meaningful data (code or message present)
+            if status.code or status.message:
+                rpc_code = status.code if status.code else http_status
+                rpc_message = (
+                    status.message if status.message else "No message provided"
+                )
+
+                # Log details if present (for debugging)
+                if status.details:
+                    _LOGGER.debug(
+                        "RpcStatus contains %d detail message(s)", len(status.details)
+                    )
+
+                return f"HTTP {http_status} - RPC {rpc_code}: {rpc_message}"
+        except ProtobufDecodeError:
+            # Not a valid Protobuf - fall through to text/HTML parsing
+            _LOGGER.debug(
+                "Response body is not a valid google.rpc.Status Protobuf, "
+                "falling back to text parsing"
+            )
+        except Exception as exc:
+            # Unexpected error during Protobuf parsing - log and fall through
+            _LOGGER.debug("Unexpected error during RpcStatus decoding: %s", exc)
+
+    # --- Strategy 2: Fall back to text/HTML parsing ---
+    # This handles load balancer errors, maintenance pages, etc.
+    try:
+        text = content.decode(errors="ignore")
+        return _beautify_text(text) or f"HTTP {http_status} (non-decodable response)"
+    except Exception:
+        return f"HTTP {http_status} (failed to decode response body)"
+
+
 # --- Custom Exceptions ---
 class NovaError(Exception):
     """Base exception for Nova API errors."""
 
 
 class NovaAuthError(NovaError):
-    """Raised on 4xx client errors after retries."""
+    """Raised on 4xx client errors after retries.
 
-    def __init__(self, status: int, detail: str | None = None):
+    This is the base class for authentication errors. It may be transient
+    (e.g., temporary 401 after token refresh due to backend propagation delay)
+    or permanent (e.g., AAS token invalidated by Google).
+
+    Attributes:
+        status: HTTP status code (typically 401 or 403).
+        detail: Human-readable error detail.
+        is_permanent: If True, re-authentication is required. If False,
+            the error may resolve on its own in subsequent poll cycles.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        detail: str | None = None,
+        *,
+        is_permanent: bool = False,
+    ):
         super().__init__(f"HTTP Client Error {status}: {detail or ''}".strip())
         self.status = status
         self.detail = detail
+        self.is_permanent = is_permanent
+
+
+class NovaAuthPermanentError(NovaAuthError):
+    """Raised when re-authentication is definitively required.
+
+    This is raised when the underlying AAS token has been rejected by Google,
+    meaning the user must re-authenticate through the config flow. There is
+    no possibility of self-healing without new credentials.
+    """
+
+    def __init__(self, status: int, detail: str | None = None):
+        super().__init__(status, detail, is_permanent=True)
 
 
 class NovaRateLimitError(NovaError):
@@ -197,13 +365,51 @@ class NovaHTTPError(NovaError):
         self.detail = detail
 
 
+class NovaLogicError(NovaError):
+    """Raised when Google returns a logical error in the Protobuf response.
+
+    This happens when the HTTP request succeeds (200 OK) but the response
+    payload contains an error code indicating the request could not be
+    processed (e.g., invalid device ID, permission denied at the API level).
+
+    Attributes:
+        code: The error code from the Protobuf response.
+        message: The error message from the Protobuf response (if available).
+    """
+
+    def __init__(self, code: int, message: str | None = None):
+        detail = f"Code {code}"
+        if message:
+            detail = f"{detail} - {message}"
+        super().__init__(f"Nova API Logic Error: {detail}")
+        self.code = code
+        self.message = message
+
+
+class NovaProtobufDecodeError(NovaError):
+    """Raised when a Protobuf response cannot be decoded.
+
+    This indicates either a malformed response from Google, a protocol
+    version mismatch, or network corruption.
+    """
+
+    def __init__(self, detail: str | None = None):
+        super().__init__(
+            f"Failed to decode Google Protobuf response: {detail or 'Unknown error'}"
+        )
+
+
 # ------------------------ Optional Home Assistant hooks ------------------------
 # These hooks allow the integration to supply a shared aiohttp ClientSession.
 _STATE: dict[str, Any] = {
     "hass": None,
     "async_refresh_lock": None,
+    "async_refresh_lock_loop_id": None,
     "cache_provider": None,
 }
+
+# Key for storing auth retry deadline in cache (prevents parallel refresh storms)
+AUTH_RETRY_DEADLINE_KEY = "auth_retry_deadline"
 
 
 def register_hass(hass: HomeAssistant) -> None:
@@ -219,9 +425,10 @@ def unregister_hass() -> None:
 
 
 # Cache provider hook for multi-entry support using contextvars for async safety
-_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], Any] | None] = contextvars.ContextVar(
-    "_cache_provider", default=None
+_CACHE_PROVIDER: contextvars.ContextVar[Callable[[], Any] | None] = (
+    contextvars.ContextVar("_cache_provider", default=None)
 )
+
 
 def register_cache_provider(provider: Callable[[], Any]) -> None:
     """Register a callable that returns the entry-specific cache (context-local).
@@ -236,6 +443,7 @@ def register_cache_provider(provider: Callable[[], Any]) -> None:
     _STATE["cache_provider"] = provider
     _CACHE_PROVIDER.set(provider)
 
+
 def unregister_cache_provider() -> None:
     """Unregister the cache provider for the current context."""
     _STATE["cache_provider"] = None
@@ -247,7 +455,9 @@ def resolve_cache_from_provider() -> TokenCache | None:
 
     provider: Callable[[], TokenCache | None] | None = _CACHE_PROVIDER.get()
     if provider is None:
-        provider = cast(Callable[[], TokenCache | None] | None, _STATE.get("cache_provider"))
+        provider = cast(
+            Callable[[], TokenCache | None] | None, _STATE.get("cache_provider")
+        )
     if provider is None:
         return None
     try:
@@ -259,6 +469,7 @@ def resolve_cache_from_provider() -> TokenCache | None:
         _LOGGER.warning("Cache provider callable failed: %s", exc)
         return None
 
+
 def _get_cache_provider() -> TokenCache | None:
     """Get the registered cache provider for the current context or None.
 
@@ -266,15 +477,29 @@ def _get_cache_provider() -> TokenCache | None:
     """
     return resolve_cache_from_provider()
 
+
 # --- Refresh Locks ---
-_async_refresh_lock: asyncio.Lock | None = None
 
 
 def _get_async_refresh_lock() -> asyncio.Lock:
-    """Lazily initialize and return the async refresh lock."""
+    """Lazily initialize and return the async refresh lock.
 
-    if _STATE["async_refresh_lock"] is None:
+    Creates a new lock if the event loop has changed (e.g., after HA restart)
+    to avoid 'attached to a different loop' errors.
+    """
+    try:
+        current_loop = asyncio.get_running_loop()
+        current_loop_id = id(current_loop)
+    except RuntimeError:
+        # No running loop - create lock anyway, will be used when loop starts
+        current_loop_id = None
+
+    if (
+        _STATE["async_refresh_lock"] is None
+        or _STATE["async_refresh_lock_loop_id"] != current_loop_id
+    ):
         _STATE["async_refresh_lock"] = asyncio.Lock()
+        _STATE["async_refresh_lock_loop_id"] = current_loop_id
     return cast(asyncio.Lock, _STATE["async_refresh_lock"])
 
 
@@ -344,6 +569,11 @@ class TTLPolicy:
 
     TTL_MARGIN_SEC, JITTER_SEC = 120, 90
     PROBE_INTERVAL_SEC, PROBE_INTERVAL_JITTER_PCT = 6 * 3600, 0.1
+    # Minimum TTL threshold: ignore TTL learning for tokens that expire too quickly,
+    # as this typically indicates a transient server issue (rate-limit, propagation
+    # delay) rather than the actual token lifetime. 5 minutes is a safe minimum since
+    # ADM tokens typically last 1-4 hours.
+    MIN_TTL_FOR_LEARNING_SEC = 300  # 5 minutes
 
     def __init__(  # noqa: PLR0913
         self,
@@ -552,8 +782,16 @@ class TTLPolicy:
             if adaptive_downshift:
                 best = self._get(self.k_bestttl)
                 try:
-                    # If clearly shorter than our current model (>10% shorter), recalibrate immediately.
-                    if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
+                    # Skip TTL learning for very short lifetimes - these typically indicate
+                    # transient server issues (rate-limit, propagation race) not actual TTL.
+                    if age_sec < self.MIN_TTL_FOR_LEARNING_SEC:
+                        self.log.debug(
+                            "Ignoring TTL learning: observed %.1f min < %.1f min minimum threshold.",
+                            age_min,
+                            self.MIN_TTL_FOR_LEARNING_SEC / 60.0,
+                        )
+                    # If clearly shorter than our current model (>10% shorter), recalibrate.
+                    elif best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
                         self.log.warning(
                             "Unexpected short TTL – recalibrating best known TTL with safety buffer."
                         )
@@ -565,16 +803,27 @@ class TTLPolicy:
         # Always refresh after a 401 to resume normal operation.
         return self._do_refresh(now)
 
-    async def async_on_401(
-        self, adaptive_downshift: bool = True
-    ) -> str | None:  # noqa: PLR0915
+    async def async_on_401(self, adaptive_downshift: bool = True) -> str | None:  # noqa: PLR0915
         """Async wrapper delegating to the synchronous policy."""
 
         return self.on_401(adaptive_downshift=adaptive_downshift)
 
 
 class AsyncTTLPolicy(TTLPolicy):
-    """Native async version of the TTL policy (no blocking calls)."""
+    """Native async version of the TTL policy (no blocking calls).
+
+    This policy manages both ADM and AAS token TTL learning:
+    - ADM tokens: proactive refresh based on measured TTL
+    - AAS tokens: proactive refresh based on learned lifetime (when AAS+ADM chain fails)
+    """
+
+    # AAS token TTL learning constants
+    AAS_TTL_MARGIN_SEC = 300  # 5 min margin before expiry
+    AAS_DEFAULT_TTL_SEC = 7 * 24 * 3600  # 7 days default (conservative estimate)
+    # Minimum AAS TTL threshold: ignore learning for very short lifetimes.
+    # AAS tokens typically live days/weeks, so 1 hour is a safe minimum.
+    # Short lifetimes usually indicate transient server issues, not actual TTL.
+    AAS_MIN_TTL_FOR_LEARNING_SEC = 3600  # 1 hour
 
     def __init__(  # noqa: PLR0913
         self,
@@ -599,6 +848,142 @@ class AsyncTTLPolicy(TTLPolicy):
         self._aget: Callable[[str], Awaitable[Any]] = get_value
         self._aset: Callable[[str, Any], Awaitable[None]] = set_value
         self._arefresh: Callable[[], Awaitable[str | None]] = refresh_fn
+
+    # --- AAS TTL learning cache keys ---
+    @property
+    def k_aas_issued(self) -> str:
+        """Cache key for AAS token issuance timestamp."""
+        return f"{self._ns}aas_token_issued_at_{self.username}"
+
+    @property
+    def k_aas_bestttl(self) -> str:
+        """Cache key for best known AAS token TTL."""
+        return f"{self._ns}aas_best_ttl_sec_{self.username}"
+
+    async def async_record_aas_issued(self) -> None:
+        """Record the issuance timestamp when a fresh AAS token is generated.
+
+        This enables TTL learning for AAS tokens by tracking how long they
+        remain valid before Google rejects them.
+        """
+        now = time.time()
+        for key in self._key_variants(f"aas_token_issued_at_{self.username}"):
+            try:
+                await self._aset(key, now)
+            except Exception:  # noqa: BLE001 - defensive cache write
+                pass
+
+    async def _learn_aas_ttl(self, now: float) -> None:
+        """Learn AAS token TTL from observed lifetime before invalidation."""
+        issued_raw = await self._aget(self.k_aas_issued)
+        if issued_raw is None:
+            return
+        try:
+            issued_at = float(issued_raw)
+            observed_ttl = now - issued_at
+            observed_ttl_hours = observed_ttl / 3600
+            self.log.info(
+                "AAS token for %s lived %.1f hours before invalidation.",
+                self.username,
+                observed_ttl_hours,
+            )
+            # Skip TTL learning for very short lifetimes - these typically indicate
+            # transient server issues (rate-limit, propagation race) not actual TTL.
+            if observed_ttl < self.AAS_MIN_TTL_FOR_LEARNING_SEC:
+                self.log.debug(
+                    "Ignoring AAS TTL learning: observed %.1f hours < %.1f hours minimum threshold.",
+                    observed_ttl_hours,
+                    self.AAS_MIN_TTL_FOR_LEARNING_SEC / 3600,
+                )
+                return
+            # Update best known TTL (conservative: take the shorter one)
+            best_raw = await self._aget(self.k_aas_bestttl)
+            if best_raw is None or observed_ttl < float(best_raw):
+                # Apply 5% safety margin
+                safe_ttl = observed_ttl * 0.95
+                for key in self._key_variants(f"aas_best_ttl_sec_{self.username}"):
+                    try:
+                        await self._aset(key, safe_ttl)
+                    except Exception:  # noqa: BLE001 - defensive cache write
+                        pass
+                self.log.info(
+                    "Updated AAS best TTL for %s to %.1f hours (with 5%% margin).",
+                    self.username,
+                    safe_ttl / 3600,
+                )
+        except (TypeError, ValueError) as e:
+            self.log.debug("Failed to learn AAS TTL: %s", e)
+
+    async def async_invalidate_aas_token(self) -> None:
+        """Clear the cached AAS token and learn its actual TTL.
+
+        This should be called when persistent 401 errors occur after a token
+        refresh, as it indicates the underlying AAS token may be invalid even
+        if gpsoauth didn't explicitly reject it.
+
+        TTL Learning: When invalidating, we record the observed lifetime to
+        enable proactive refresh before future tokens expire.
+        """
+        now = time.time()
+        await self._learn_aas_ttl(now)
+
+        self.log.warning(
+            "Invalidating cached AAS token for %s due to persistent 401 errors.",
+            self.username,
+        )
+        for key in self._key_variants(DATA_AAS_TOKEN):
+            try:
+                await self._aset(key, None)
+            except Exception:
+                pass
+        # Clear issued timestamp so next refresh records a fresh one
+        for key in self._key_variants(f"aas_token_issued_at_{self.username}"):
+            try:
+                await self._aset(key, None)
+            except Exception:
+                pass
+        # Also clear ADM issued timestamp to bypass stampede guard in async_on_401
+        # This ensures the subsequent refresh actually happens instead of being skipped
+        for key in self._key_variants(f"adm_token_issued_at_{self.username}"):
+            try:
+                await self._aset(key, None)
+            except Exception:
+                pass
+
+    async def async_check_aas_proactive_refresh(self) -> bool:
+        """Check if AAS token should be proactively refreshed based on learned TTL.
+
+        Returns:
+            True if AAS token was refreshed, False otherwise.
+        """
+        now = time.time()
+        issued_raw = await self._aget(self.k_aas_issued)
+        best_ttl_raw = await self._aget(self.k_aas_bestttl)
+
+        if issued_raw is None or best_ttl_raw is None:
+            return False
+
+        try:
+            issued_at = float(issued_raw)
+            best_ttl = float(best_ttl_raw)
+            age = now - issued_at
+            threshold = max(0.0, best_ttl - self.AAS_TTL_MARGIN_SEC)
+            threshold = self._jitter_sec(threshold, self.JITTER_SEC)
+
+            if age >= threshold:
+                self.log.info(
+                    "AAS token for %s reached measured threshold (%.1f hours) – "
+                    "proactively refreshing token chain.",
+                    self.username,
+                    best_ttl / 3600,
+                )
+                await self.async_invalidate_aas_token()
+                # The next ADM refresh will trigger a fresh AAS token generation
+                return True
+        except (TypeError, ValueError) as e:
+            self.log.debug("AAS proactive refresh check failed: %s", e)
+
+        return False
 
     async def _arm_probe_if_due_async(self, now: float) -> bool:
         startup_left = await self._aget(self.k_startleft)
@@ -649,7 +1034,9 @@ class AsyncTTLPolicy(TTLPolicy):
                     await self._aset(key, None)
                 except Exception:
                     pass
-            raise NovaAuthError(401, "AAS token invalid during ADM refresh") from err
+            raise NovaAuthPermanentError(
+                401, "AAS token invalid during ADM refresh"
+            ) from err
         if tok:
             token_base = f"adm_token_{self.username}"
             for key in self._key_variants(token_base):
@@ -676,6 +1063,16 @@ class AsyncTTLPolicy(TTLPolicy):
         return tok
 
     async def async_pre_request(self) -> None:
+        """Perform proactive token refresh checks for both AAS and ADM tokens.
+
+        This method checks:
+        1. AAS token: if approaching learned TTL, invalidate to trigger fresh generation
+        2. ADM token: if approaching measured TTL, proactively refresh
+        """
+        # Check AAS token proactive refresh first (longer-lived, less frequent)
+        await self.async_check_aas_proactive_refresh()
+
+        # Then check ADM token proactive refresh (shorter-lived, more frequent)
         now = time.time()
         issued_at = await self._aget(self.k_issued)
         best_ttl = await self._aget(self.k_bestttl)
@@ -769,7 +1166,17 @@ class AsyncTTLPolicy(TTLPolicy):
                 if adaptive_downshift:
                     best = await self._aget(self.k_bestttl)
                     try:
-                        if best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
+                        # Skip TTL learning for very short lifetimes - these typically indicate
+                        # transient server issues (rate-limit, propagation race) not actual TTL.
+                        if age_sec < self.MIN_TTL_FOR_LEARNING_SEC:
+                            self.log.debug(
+                                "Ignoring TTL learning: observed %.1f min < %.1f min minimum threshold.",
+                                age_min,
+                                self.MIN_TTL_FOR_LEARNING_SEC / 60.0,
+                            )
+                        elif best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(
+                            best
+                        ):
                             self.log.warning(
                                 "Unexpected short TTL – recalibrating best known TTL with safety buffer (async)."
                             )
@@ -878,9 +1285,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             if ns_prefix:
                 await resolved_cache.set(f"{ns_prefix}{DATA_AAS_TOKEN}", token)
         except Exception as err:  # noqa: BLE001 - defensive caching
-            _LOGGER.debug(
-                "Failed to seed provided flow token into cache", exc_info=err
-            )
+            _LOGGER.debug("Failed to seed provided flow token into cache", exc_info=err)
 
     initial_token = await _get_initial_token_async(
         user, _LOGGER, ns_prefix=(namespace or ""), cache=resolved_cache
@@ -916,6 +1321,40 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     )
     await policy.async_pre_request()
 
+    # --- Pre-request gate: wait if auth refresh is in progress ---
+    # This prevents unnecessary 401s when another request is already refreshing.
+    # Instead of each request hitting Google's API and getting 401, they wait here.
+    ns_deadline_key = (
+        f"{ns_prefix}{AUTH_RETRY_DEADLINE_KEY}"
+        if ns_prefix
+        else AUTH_RETRY_DEADLINE_KEY
+    )
+    deadline_raw = await _cache_get(ns_deadline_key)
+    if deadline_raw is not None:
+        try:
+            deadline = float(deadline_raw)
+            now = time.time()
+            if now < deadline:
+                wait_time = min(deadline - now + 1.0, 120.0)
+                _LOGGER.info(
+                    "Nova API: auth refresh in progress. Waiting %.1fs before request to %s.",
+                    wait_time,
+                    api_scope,
+                )
+                await asyncio.sleep(wait_time)
+                # Reload token after waiting (may have been refreshed)
+                token_key = f"adm_token_{user}"
+                if ns_prefix:
+                    token_key = f"{ns_prefix}adm_token_{user}"
+                fresh_token = await _cache_get(token_key)
+                if fresh_token:
+                    headers["Authorization"] = f"Bearer {fresh_token}"
+                    _LOGGER.debug(
+                        "Nova API: using refreshed token for request to %s.", api_scope
+                    )
+        except (ValueError, TypeError):
+            pass  # Invalid deadline, proceed normally
+
     ephemeral_session = False
     if session is None:
         hass_ref = _STATE.get("hass")
@@ -934,8 +1373,8 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             ephemeral_session = True
 
     try:
-        refreshed_once = False
         retries_used = 0
+        auth_retries_used = 0  # Counter for 401 retries after token refresh
         while True:
             attempt = retries_used + 1
             try:
@@ -954,77 +1393,212 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     )
 
                     if status == HTTP_OK:
-                        return content.hex()
+                        return cast(bytes, content).hex()
 
-                    text_snippet = _redact(
-                        _beautify_text(content.decode(errors="ignore"))
-                    )
+                    # Decode error response: try Protobuf first, then text/HTML
+                    text_snippet = _redact(_decode_error_response(content, status))
 
                     if status == HTTP_UNAUTHORIZED:
-                        lvl = logging.INFO if not refreshed_once else logging.WARNING
-                        _LOGGER.log(
-                            lvl,
-                            "Nova API async request to %s: 401 Unauthorized. Refreshing token.",
-                            api_scope,
+                        # 401 Retry Sequence (OAuth → AAS → ADM token chain):
+                        # ----------------------------------------------------------
+                        # Step 0 (initial): Request fails with 401
+                        # Step 1: Refresh ADM only → wait 6s (propagation) → retry
+                        # Step 2: If 401: wait 61s → invalidate AAS, refresh AAS+ADM → wait 6s → retry
+                        # Step 3: If 401: wait 501s (long cooldown) → retry
+                        # Step 4: If 401: permanent error, re-auth required
+                        #
+                        # Delays use odd numbers to avoid hitting rate-limit boundaries.
+                        # The 6s propagation delay allows Google's backend to sync new tokens.
+                        _PROPAGATION_DELAY_S = 6.0
+                        _SHORT_COOLDOWN_S = 61.0  # ~1 min
+                        _LONG_COOLDOWN_S = 501.0  # ~8 min
+                        # Auth retry step constants
+                        _AUTH_STEP_ADM_REFRESH = 0
+                        _AUTH_STEP_AAS_ADM_REFRESH = 1
+                        _AUTH_STEP_LONG_COOLDOWN = 2
+
+                        # --- Race condition guard ---
+                        # Check if another request is already handling auth refresh.
+                        # If so, wait for it to complete instead of starting parallel refreshes.
+                        ns_deadline_key = (
+                            f"{ns_prefix}{AUTH_RETRY_DEADLINE_KEY}"
+                            if ns_prefix
+                            else AUTH_RETRY_DEADLINE_KEY
                         )
-                        await policy.async_on_401()
-                        if not refreshed_once:
-                            refreshed_once = True
-                            # Allow time for the refreshed token to propagate across Google backends
-                            # before retrying the request.
-                            await asyncio.sleep(3.0)
-                            continue  # Free retry
+                        deadline_raw = await _cache_get(ns_deadline_key)
+                        now = time.time()
+                        if deadline_raw is not None:
+                            try:
+                                deadline = float(deadline_raw)
+                                if now < deadline:
+                                    # Another request is handling refresh - wait and retry
+                                    wait_time = min(deadline - now + 1.0, 30.0)
+                                    _LOGGER.info(
+                                        "Nova API: auth refresh in progress by another request. "
+                                        "Waiting %.1fs before retry.",
+                                        wait_time,
+                                    )
+                                    await asyncio.sleep(wait_time)
+                                    # Reload token from cache (may have been refreshed)
+                                    token_key = f"adm_token_{user}"
+                                    if ns_prefix:
+                                        token_key = f"{ns_prefix}adm_token_{user}"
+                                    fresh_token = await _cache_get(token_key)
+                                    if fresh_token:
+                                        headers["Authorization"] = (
+                                            f"Bearer {fresh_token}"
+                                        )
+                                    continue  # Retry with possibly fresh token
+                            except (ValueError, TypeError):
+                                pass  # Invalid deadline, proceed normally
 
-                        raise NovaAuthError(status, "Unauthorized after token refresh")
+                        if auth_retries_used == _AUTH_STEP_ADM_REFRESH:
+                            # Step 1: First 401 - refresh ADM token only, wait for propagation
+                            # Set deadline to prevent parallel refresh storms
+                            await _cache_set(
+                                ns_deadline_key,
+                                time.time() + _PROPAGATION_DELAY_S + 2.0,
+                            )
+                            _LOGGER.info(
+                                "Nova API: 401 Unauthorized - token expired. Refreshing ADM token."
+                            )
+                            try:
+                                await policy.async_on_401()
+                            except NovaAuthPermanentError:
+                                # AAS token explicitly rejected - no point retrying
+                                await _cache_set(
+                                    ns_deadline_key, None
+                                )  # Clear deadline
+                                raise
+                            _LOGGER.info(
+                                "Nova API: waiting %.0fs for token propagation.",
+                                _PROPAGATION_DELAY_S,
+                            )
+                            await asyncio.sleep(_PROPAGATION_DELAY_S)
+                            await _cache_set(ns_deadline_key, None)  # Clear deadline
+                            auth_retries_used += 1
+                            continue
 
-                    if status in (408, HTTP_TOO_MANY_REQUESTS) or (
-                        HTTP_SERVER_ERROR_MIN <= status < HTTP_SERVER_ERROR_MAX
-                    ):
+                        if auth_retries_used == _AUTH_STEP_AAS_ADM_REFRESH:
+                            # Step 2: Second 401 - ADM refresh didn't help
+                            # Wait cooldown, then invalidate AAS and refresh entire chain
+                            # Set deadline for entire cooldown + refresh period
+                            await _cache_set(
+                                ns_deadline_key,
+                                time.time()
+                                + _SHORT_COOLDOWN_S
+                                + _PROPAGATION_DELAY_S
+                                + 2.0,
+                            )
+                            _LOGGER.info(
+                                "Nova API: 401 Unauthorized - ADM refresh unsuccessful. "
+                                "AAS token likely invalid. Waiting %.0fs before refreshing entire token chain.",
+                                _SHORT_COOLDOWN_S,
+                            )
+                            await asyncio.sleep(_SHORT_COOLDOWN_S)
+                            _LOGGER.info("Nova API: invalidating AAS token.")
+                            await policy.async_invalidate_aas_token()
+                            _LOGGER.info("Nova API: refreshing AAS+ADM token chain.")
+                            try:
+                                await policy.async_on_401()
+                            except NovaAuthPermanentError:
+                                await _cache_set(
+                                    ns_deadline_key, None
+                                )  # Clear deadline
+                                raise
+                            _LOGGER.info(
+                                "Nova API: waiting %.0fs for token propagation.",
+                                _PROPAGATION_DELAY_S,
+                            )
+                            await asyncio.sleep(_PROPAGATION_DELAY_S)
+                            await _cache_set(ns_deadline_key, None)  # Clear deadline
+                            auth_retries_used += 1
+                            continue
+
+                        if auth_retries_used == _AUTH_STEP_LONG_COOLDOWN:
+                            # Step 3: Third 401 - even fresh AAS+ADM didn't help
+                            # Wait long cooldown, then retry once more
+                            await _cache_set(
+                                ns_deadline_key, time.time() + _LONG_COOLDOWN_S + 2.0
+                            )
+                            _LOGGER.warning(
+                                "Nova API: 401 Unauthorized - AAS+ADM refresh unsuccessful. "
+                                "Waiting %.0fs (long cooldown) before final retry.",
+                                _LONG_COOLDOWN_S,
+                            )
+                            await asyncio.sleep(_LONG_COOLDOWN_S)
+                            await _cache_set(ns_deadline_key, None)  # Clear deadline
+                            auth_retries_used += 1
+                            continue
+
+                        # Step 4: Fourth 401 - all retries exhausted
+                        _LOGGER.error(
+                            "Nova API: 401 Unauthorized persists. "
+                            "Authentication invalid; re-authentication required."
+                        )
+                        raise NovaAuthError(
+                            status,
+                            "Unauthorized after token refresh; re-authentication required",
+                            is_permanent=True,
+                        )
+
+                    if status in HTTP_RETRY_ELIGIBLE:
                         if retries_used < NOVA_MAX_RETRIES:
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
                             )
-                            _LOGGER.info(
-                                "Nova API async request to %s failed with status %d. Retrying in %.2f seconds (attempt %d/%d)...",
-                                api_scope,
-                                status,
-                                delay,
+                            _LOGGER.warning(
+                                "Nova API request failed (Attempt %d/%d): HTTP %d for %s. "
+                                "Server response: %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
                                 NOVA_MAX_RETRIES,
+                                status,
+                                api_scope,
+                                text_snippet,
+                                delay,
                             )
                             retries_used += 1
                             await asyncio.sleep(delay)
                             continue
                         else:
                             _LOGGER.error(
-                                "Nova API async request to %s failed after %d attempts with status %d.",
+                                "Nova API async request to %s failed after %d attempts with status %d. "
+                                "Last server response: %s",
                                 api_scope,
                                 retries_used + 1,
                                 status,
+                                text_snippet,
                             )
-                    if status == HTTP_TOO_MANY_REQUESTS:
-                        raise NovaRateLimitError(
-                            f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts."
-                        )
-                    raise NovaHTTPError(
-                        status,
-                        f"Nova API failed after {NOVA_MAX_RETRIES} attempts.",
-                    )
+                            if status == HTTP_TOO_MANY_REQUESTS:
+                                raise NovaRateLimitError(
+                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts. "
+                                    f"Server response: {text_snippet}"
+                                )
+                            raise NovaHTTPError(
+                                status,
+                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts. "
+                                f"Server response: {text_snippet}",
+                            )
 
-                raise NovaAuthError(status, text_snippet)
+                    # Non-retryable errors: distinguish between client (4xx) and server (5xx)
+                    # - 4xx: Client errors (e.g., 403 Forbidden, 404 Not Found) → NovaAuthError
+                    # - 5xx: Server errors (e.g., 501 Not Implemented, 505) → NovaHTTPError
+                    if status >= HTTP_INTERNAL_SERVER_ERROR:
+                        raise NovaHTTPError(status, text_snippet)
+                    raise NovaAuthError(status, text_snippet)
 
             except asyncio.CancelledError:
                 raise
             except (TimeoutError, aiohttp.ClientError) as e:
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
-                    _LOGGER.info(
-                        "Nova API async request to %s failed with %s. Retrying in %.2f seconds (attempt %d/%d)...",
-                        api_scope,
-                        type(e).__name__,
-                        delay,
+                    _LOGGER.warning(
+                        "Nova API request failed (Attempt %d/%d): %s for %s. Retrying in %.2f seconds...",
                         retries_used + 1,
                         NOVA_MAX_RETRIES,
+                        type(e).__name__,
+                        api_scope,
+                        delay,
                     )
                     retries_used += 1
                     await asyncio.sleep(delay)

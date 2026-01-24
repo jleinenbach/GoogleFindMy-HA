@@ -4,11 +4,40 @@ import importlib
 import logging
 import os
 import platform
+import re
 import shutil
-from types import SimpleNamespace
+import subprocess
+import sys
+import time
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 from selenium.webdriver.chrome.webdriver import WebDriver
+
+# Platform-specific import for Windows registry access
+_winreg: ModuleType | None = None
+if sys.platform == "win32":
+    import winreg as _winreg
+
+# Optional imports for webdriver-manager fallback
+_selenium_webdriver: Any = None
+_chrome_service_cls: Any = None
+_chrome_driver_manager_cls: Any = None
+_WEBDRIVER_MANAGER_AVAILABLE = False
+
+try:
+    from selenium import webdriver as _selenium_webdriver_module
+    from selenium.webdriver.chrome.service import Service as _ChromeServiceClass
+    from webdriver_manager.chrome import (
+        ChromeDriverManager as _ChromeDriverManagerClass,
+    )
+
+    _selenium_webdriver = _selenium_webdriver_module
+    _chrome_service_cls = _ChromeServiceClass
+    _chrome_driver_manager_cls = _ChromeDriverManagerClass
+    _WEBDRIVER_MANAGER_AVAILABLE = True
+except ImportError:
+    pass
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +101,78 @@ def _reset_uc_cache(module: Any | None = None) -> None:
 type ChromeOptions = Any
 
 
+def get_chrome_version(chrome_path: str) -> int | None:
+    """Get Chrome version from executable.
+
+    Parameters
+    ----------
+    chrome_path: str
+        Path to the Chrome executable.
+
+    Returns
+    -------
+    int | None
+        The major Chrome version number, or None if it could not be determined.
+    """
+    try:
+        if platform.system() == "Windows":
+            # Try to get version from registry first
+            if _winreg is not None:
+                try:
+                    key = _winreg.OpenKey(
+                        _winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon"
+                    )
+                    version, _ = _winreg.QueryValueEx(key, "version")
+                    _winreg.CloseKey(key)
+                    return int(version.split(".")[0])
+                except Exception:  # noqa: BLE001 - defensive fallback
+                    pass
+            # Fallback: run chrome with --version
+            result = subprocess.run(
+                [chrome_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            version_match = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout)
+            if version_match:
+                return int(version_match.group(1))
+        else:
+            result = subprocess.run(
+                [chrome_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            version_match = re.search(r"(\d+)\.\d+\.\d+\.\d+", result.stdout)
+            if version_match:
+                return int(version_match.group(1))
+    except Exception as err:  # noqa: BLE001 - defensive logging
+        LOGGER.debug("Could not determine Chrome version: %s", err)
+    return None
+
+
+def _kill_existing_chrome_processes() -> None:
+    """Terminate any existing Chrome processes to avoid conflicts.
+
+    This helps prevent issues when Chrome is already running or has zombie processes.
+    """
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(
+                ["taskkill", "/f", "/im", "chrome.exe"],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            subprocess.run(["pkill", "-f", "chrome"], capture_output=True, check=False)
+        time.sleep(2)  # Allow time for processes to terminate
+    except Exception:  # pragma: no cover - defensive, best-effort cleanup
+        LOGGER.debug("Failed to kill existing Chrome processes (non-fatal)")
+
+
 def find_chrome() -> str | None:
     """Locate the Chrome executable on the current system.
 
@@ -80,32 +181,92 @@ def find_chrome() -> str | None:
     str | None
         The absolute path to the Chrome binary if it could be resolved, otherwise ``None``.
     """
+    # Expand %USERNAME% for Windows paths
+    username = os.environ.get("USERNAME", os.environ.get("USER", ""))
 
     possible_paths = [
-        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        r"C:\\ProgramData\\chocolatey\\bin\\chrome.exe",
-        r"C:\\Users\\%USERNAME%\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe",
+        # Windows paths
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\ProgramData\chocolatey\bin\chrome.exe",
+        os.path.expandvars(
+            r"C:\Users\%USERNAME%\AppData\Local\Google\Chrome\Application\chrome.exe"
+        ),
+        f"C:\\Users\\{username}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe",
+        # Additional Windows paths for Chrome installed per-user
+        os.path.join(
+            os.environ.get("LOCALAPPDATA", ""),
+            "Google",
+            "Chrome",
+            "Application",
+            "chrome.exe",
+        ),
+        os.path.join(
+            os.environ.get("PROGRAMFILES", ""),
+            "Google",
+            "Chrome",
+            "Application",
+            "chrome.exe",
+        ),
+        os.path.join(
+            os.environ.get("PROGRAMFILES(X86)", ""),
+            "Google",
+            "Chrome",
+            "Application",
+            "chrome.exe",
+        ),
+        # Linux paths
         "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
         "/usr/local/bin/google-chrome",
         "/opt/google/chrome/chrome",
         "/snap/bin/chromium",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        # macOS paths
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        os.path.expanduser(
+            "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        ),
     ]
 
-    # Check predefined paths
+    # Filter out empty paths and check for existence
     for path in possible_paths:
-        if os.path.exists(path):
+        if path and os.path.exists(path):
+            LOGGER.debug("Found Chrome at: %s", path)
             return path
 
     # Use system command to find Chrome
     try:
         if platform.system() == "Windows":
-            chrome_path = shutil.which("chrome")
+            # Try multiple executable names on Windows
+            for name in ["chrome", "google-chrome", "chromium"]:
+                chrome_path = shutil.which(name)
+                if chrome_path:
+                    return chrome_path
+            # Try using 'where' command on Windows
+            try:
+                result = subprocess.run(
+                    ["where", "chrome.exe"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip().split("\n")[0]
+            except Exception:  # noqa: BLE001 - defensive fallback
+                pass
         else:
-            chrome_path = shutil.which("google-chrome") or shutil.which("chromium")
-        if chrome_path:
-            return chrome_path
+            for name in [
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium",
+                "chromium-browser",
+            ]:
+                chrome_path = shutil.which(name)
+                if chrome_path:
+                    return chrome_path
     except Exception:  # pragma: no cover - defensive logging
         LOGGER.exception("Failed to resolve Chrome binary via PATH lookup")
 
@@ -134,6 +295,9 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-web-security")
+    chrome_options.add_argument("--allow-running-insecure-content")
 
     return chrome_options
 
@@ -158,30 +322,175 @@ def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
     if chrome_path:
         options.binary_location = chrome_path
 
-    return cast(WebDriver, _get_uc_module().Chrome(options=options))
+    return cast(WebDriver, _get_uc_module().Chrome(options=options, version_main=None))
 
 
-def create_driver(chrome_path: str | None = None, *, headless: bool = False) -> WebDriver:
-    """Backward-compatible wrapper for driver creation."""
+def _try_webdriver_manager_fallback() -> WebDriver | None:
+    """Try to use webdriver-manager as a fallback for standard Selenium.
+
+    Returns
+    -------
+    WebDriver | None
+        A WebDriver instance if successful, otherwise None.
+    """
+    if not _WEBDRIVER_MANAGER_AVAILABLE:
+        LOGGER.debug("webdriver-manager not available, skipping fallback")
+        return None
+
     try:
-        return get_driver(chrome_path, headless=headless)
-    except Exception as err:  # noqa: BLE001
-        LOGGER.warning("Default ChromeDriver startup failed: %s", err)
+        LOGGER.info("Attempting webdriver-manager fallback...")
+        service = _chrome_service_cls(_chrome_driver_manager_cls().install())
+        options = _selenium_webdriver.ChromeOptions()
+        options.add_argument("--start-maximized")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
 
-        fallback_path = chrome_path or find_chrome()
-        if fallback_path is None:
-            raise FileNotFoundError(
-                "Chrome binary not found; install Chrome or provide chrome_path"
-            ) from err
+        driver: WebDriver = _selenium_webdriver.Chrome(service=service, options=options)
+        LOGGER.warning(
+            "Started using webdriver-manager (standard Selenium). "
+            "This uses standard Selenium without bot detection bypass!"
+        )
+        return driver
+    except Exception as err:  # noqa: BLE001 - fallback should not raise
+        LOGGER.debug("webdriver-manager fallback failed: %s", err)
+        return None
 
-        fallback_options = get_options(headless=headless)
-        fallback_options.binary_location = fallback_path
+
+def safe_quit_driver(driver: WebDriver | None) -> None:
+    """Safely quit the Chrome driver, handling WinError 6 and other errors.
+
+    Parameters
+    ----------
+    driver: WebDriver | None
+        The WebDriver instance to quit, or None.
+    """
+    if driver is None:
+        return
+
+    try:
+        # Try normal quit first
+        driver.quit()
+    except OSError as err:
+        # Handle "WinError 6: The handle is invalid" and similar errors
+        LOGGER.debug("OSError during driver quit (usually harmless): %s", err)
+    except Exception as err:  # noqa: BLE001 - cleanup should not raise
+        LOGGER.debug("Error during driver quit: %s", err)
+    finally:
+        # Force kill any remaining processes
         try:
-            return cast(WebDriver, _get_uc_module().Chrome(options=fallback_options))
-        except Exception as fallback_err:  # noqa: BLE001
-            LOGGER.warning(
-                "ChromeDriver failed using system binary: %s", fallback_err
+            if platform.system() == "Windows":
+                subprocess.run(
+                    ["taskkill", "/f", "/im", "chromedriver.exe"],
+                    capture_output=True,
+                    check=False,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "chromedriver"],
+                    capture_output=True,
+                    check=False,
+                )
+        except Exception:  # noqa: BLE001 - cleanup should not raise
+            pass
+
+
+def create_driver(
+    chrome_path: str | None = None, *, headless: bool = False
+) -> WebDriver:
+    """Backward-compatible wrapper for driver creation with multiple fallbacks.
+
+    Attempts driver creation in this order:
+    1. Standard creation with version_main for Chrome version compatibility
+    2. Fallback with explicit Chrome path from system
+    3. Fallback without specifying version
+    4. Headless mode
+    5. webdriver-manager fallback (standard Selenium)
+    """
+    # Kill any existing Chrome processes to avoid conflicts
+    _kill_existing_chrome_processes()
+
+    resolved_path = chrome_path or find_chrome()
+    version_main: int | None = None
+
+    if resolved_path:
+        version_main = get_chrome_version(resolved_path)
+        if version_main:
+            LOGGER.debug("Detected Chrome version: %d", version_main)
+
+    # Strategy 1: Default with version_main if detected
+    try:
+        options = get_options(headless=headless)
+        if resolved_path:
+            options.binary_location = resolved_path
+        driver = cast(
+            WebDriver,
+            _get_uc_module().Chrome(options=options, version_main=version_main),
+        )
+        LOGGER.debug("ChromeDriver started successfully.")
+        return driver
+    except Exception as err:  # noqa: BLE001
+        LOGGER.warning("Strategy 1 (default) failed: %s", err)
+
+    # Strategy 2: Use browser_executable_path parameter (if supported)
+    if resolved_path:
+        try:
+            options = get_options(headless=headless)
+            driver = cast(
+                WebDriver,
+                _get_uc_module().Chrome(
+                    options=options,
+                    version_main=version_main,
+                    browser_executable_path=resolved_path,
+                ),
             )
-            raise RuntimeError(
-                "Chrome driver startup failed using bundled and system binaries"
-            ) from fallback_err
+            LOGGER.debug("ChromeDriver started with browser_executable_path.")
+            return driver
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
+
+    # Strategy 3: Try without specifying version
+    try:
+        options = get_options(headless=headless)
+        if resolved_path:
+            options.binary_location = resolved_path
+        driver = cast(
+            WebDriver, _get_uc_module().Chrome(options=options, version_main=None)
+        )
+        LOGGER.debug("ChromeDriver started without explicit version.")
+        return driver
+    except Exception as err:  # noqa: BLE001
+        LOGGER.warning("Strategy 3 (no version) failed: %s", err)
+
+    # Strategy 4: Try headless mode
+    if not headless:
+        LOGGER.info("Trying headless mode...")
+        try:
+            headless_options = get_options(headless=True)
+            if resolved_path:
+                headless_options.binary_location = resolved_path
+            driver = cast(
+                WebDriver,
+                _get_uc_module().Chrome(
+                    options=headless_options, version_main=version_main
+                ),
+            )
+            LOGGER.debug("ChromeDriver started in headless mode.")
+            return driver
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Strategy 4 (headless) failed: %s", err)
+
+    # Strategy 5: webdriver-manager fallback
+    fallback_driver = _try_webdriver_manager_fallback()
+    if fallback_driver is not None:
+        return fallback_driver
+
+    # All strategies failed
+    raise RuntimeError(
+        "Failed to start ChromeDriver after all attempts.\n"
+        "Possible solutions:\n"
+        "1. Make sure Google Chrome is installed and up-to-date\n"
+        "2. Try: pip install --upgrade undetected-chromedriver selenium webdriver-manager\n"
+        f"3. Current detected path: {resolved_path or 'None'}\n"
+        f"4. Current detected version: {version_main or 'Unknown'}\n"
+        "5. Check if Chrome is blocked by antivirus or firewall"
+    )

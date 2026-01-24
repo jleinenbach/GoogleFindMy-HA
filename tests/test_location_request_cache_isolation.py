@@ -256,7 +256,9 @@ def test_stop_sound_request_accepts_request_uuid(
         recorded["request_uuid"] = request_uuid
         return "payload-hex"
 
-    monkeypatch.setattr(stop_sound_request, "create_sound_request", _fake_create_sound_request)
+    monkeypatch.setattr(
+        stop_sound_request, "create_sound_request", _fake_create_sound_request
+    )
 
     result = stop_sound_request.stop_sound_request(
         "device-uuid",

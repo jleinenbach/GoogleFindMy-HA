@@ -67,18 +67,72 @@ CBC_IV_LEN = 16
 # HKDF (SHA-256)
 # ---------------------------------------------------------------------------
 def derive_key_using_hkdf_sha256(input_key: bytes, salt: bytes, info: bytes) -> bytes:
-    """Derive a 16-byte key using HKDF-SHA256.
+    """Derive a 16-byte key using HKDF-SHA256 (RFC 5869).
+
+    HKDF Algorithm Overview
+    -----------------------
+    HKDF (HMAC-based Key Derivation Function) transforms input keying material
+    (IKM) into cryptographically strong output keying material (OKM). It operates
+    in two phases:
+
+    **Phase 1: Extract**
+
+        PRK = HMAC-SHA256(salt, IKM)
+
+    This phase extracts a pseudorandom key (PRK) from the input. The salt acts
+    as a non-secret randomizer, ensuring uniformity even if IKM has structure
+    (e.g., ECDH output which is not uniformly random).
+
+    **Phase 2: Expand**
+
+        T(1) = HMAC-SHA256(PRK, info || 0x01)
+        T(2) = HMAC-SHA256(PRK, T(1) || info || 0x02)
+        ...
+        OKM = T(1) || T(2) || ... (truncated to desired length)
+
+    This phase expands the PRK into arbitrary-length output. The 'info' parameter
+    provides application-specific context (domain separation).
+
+    Why HKDF is Used Here
+    ---------------------
+    1. **Key Uniformity**: ECDH shared secrets are not uniformly distributed;
+       HKDF's Extract phase produces uniformly random keys.
+
+    2. **Domain Separation**: The 'info' parameter ensures keys derived for
+       different purposes are cryptographically independent, even from the
+       same source material.
+
+    3. **Key Stretching**: Multiple keys of arbitrary length can be derived
+       from a single source (though we derive just 16 bytes here).
+
+    Parameters in FMDN Context
+    --------------------------
+    - salt: Typically "SECUREBOX" || VERSION for protocol binding
+    - info: "SHARED HKDF-SHA-256 AES-128-GCM" or similar for algorithm binding
+    - length: 16 bytes for AES-128-GCM key
 
     Args:
-        input_key: Input keying material (IKM).
-        salt: HKDF salt (non-secret).
-        info: HKDF context/application info.
+        input_key: Input keying material (IKM) - the source secret.
+        salt: HKDF salt (non-secret, provides randomness extraction).
+        info: Context/application info (domain separation string).
 
     Returns:
-        A 16-byte derived key (suitable for AES-128-GCM).
+        A 16-byte derived key suitable for AES-128-GCM.
 
     Raises:
         ValueError: If input types are invalid (implicitly via cryptography).
+
+    Example:
+        >>> ikm = bytes(32)  # 32-byte source key
+        >>> salt = b"SECUREBOX" + b"\\x02\\x00"
+        >>> info = b"SHARED HKDF-SHA-256 AES-128-GCM"
+        >>> derived = derive_key_using_hkdf_sha256(ikm, salt, info)
+        >>> len(derived)
+        16
+
+    References:
+        - RFC 5869: HMAC-based Extract-and-Expand Key Derivation Function
+        - NIST SP 800-56C: Recommendation for Key-Derivation Methods
     """
     hkdf = HKDF(
         algorithm=SHA256(),
@@ -273,9 +327,7 @@ def derive_shared_secret(private_key_jwt: bytes, public_key: bytes) -> bytes:
         ValueError: If input lengths are invalid or key decoding fails.
     """
     if len(private_key_jwt) < PRIVATE_KEY_MIN_LEN:
-        raise ValueError(
-            "Private key buffer too short (need at least 32 bytes)"
-        )
+        raise ValueError("Private key buffer too short (need at least 32 bytes)")
     if len(public_key) != PUBLIC_KEY_UNCOMPRESSED_LEN:
         raise ValueError("Public key must be 65 bytes (uncompressed SEC1)")
 
@@ -353,7 +405,9 @@ def decrypt_account_key(owner_key: bytes, encrypted_account_key: bytes) -> bytes
     """
     if len(encrypted_account_key) == ACCOUNT_KEY_CBC_TOTAL_LEN:  # 16 IV + 16 CT (CBC)
         return decrypt_aes_cbc_no_padding(owner_key, encrypted_account_key, CBC_IV_LEN)
-    if len(encrypted_account_key) == ACCOUNT_KEY_GCM_TOTAL_LEN:  # 12 IV + 32 CT||TAG (GCM)
+    if (
+        len(encrypted_account_key) == ACCOUNT_KEY_GCM_TOTAL_LEN
+    ):  # 12 IV + 32 CT||TAG (GCM)
         return decrypt_aes_gcm(
             owner_key, encrypted_account_key, iv_length=GCM_IV_LEN_DEFAULT
         )

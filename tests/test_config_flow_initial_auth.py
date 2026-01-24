@@ -34,7 +34,6 @@ from custom_components.googlefindmy.const import (
     OPT_GOOGLE_HOME_FILTER_ENABLED,
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
-    OPT_MIN_ACCURACY_THRESHOLD,
     OPT_OPTIONS_SCHEMA_VERSION,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
@@ -140,7 +139,6 @@ def _prepare_reconfigure_flow(
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -170,7 +168,9 @@ def _prepare_reconfigure_flow(
             if "options" in updates:
                 entry.options = dict(updates["options"])
 
-        async def async_reload(self, entry_id: str) -> None:  # pragma: no cover - overridden
+        async def async_reload(
+            self, entry_id: str
+        ) -> None:  # pragma: no cover - overridden
             raise AssertionError("Override async_reload per test")
 
     class _Hass:
@@ -534,9 +534,7 @@ async def test_manual_tokens_abort_when_dependency_missing(
     flow.context = {}
     set_config_flow_unique_id(flow, None)
 
-    async def _set_unique_id(
-        value: str, *, raise_on_progress: bool = False
-    ) -> None:
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
         assert raise_on_progress is False
         set_config_flow_unique_id(flow, value)
 
@@ -626,7 +624,8 @@ async def test_manual_tokens_abort_when_account_exists(
     assert len(hass.config_entries.entries) == 1
 
 
-def test_device_selection_creates_and_updates_subentry() -> None:
+@pytest.mark.asyncio
+async def test_device_selection_creates_and_updates_subentry() -> None:
     """Device-selection step must manage feature subentries with stable IDs."""
 
     class _StubEntry:
@@ -730,7 +729,6 @@ def test_device_selection_creates_and_updates_subentry() -> None:
     first_input: dict[str, Any] = {
         OPT_LOCATION_POLL_INTERVAL: 300,
         OPT_DEVICE_POLL_DELAY: 5,
-        OPT_MIN_ACCURACY_THRESHOLD: 100,
         OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
         OPT_CONTRIBUTOR_MODE: config_flow.CONTRIBUTOR_MODE_IN_ALL_AREAS,
     }
@@ -739,7 +737,7 @@ def test_device_selection_creates_and_updates_subentry() -> None:
     if OPT_ENABLE_STATS_ENTITIES is not None:
         first_input[OPT_ENABLE_STATS_ENTITIES] = True
 
-    result = asyncio.run(flow.async_step_device_selection(first_input))
+    result = await flow.async_step_device_selection(first_input)
     assert result["type"] == "create_entry"
 
     manager = hass.config_entries
@@ -764,8 +762,14 @@ def test_device_selection_creates_and_updates_subentry() -> None:
         entry.entry_id, SERVICE_SUBENTRY_KEY
     )
     assert service_subentry.unique_id == f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
-    assert flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY] == tracker_subentry.subentry_id
-    assert flow.context["subentry_ids"][SERVICE_SUBENTRY_KEY] == service_subentry.subentry_id
+    assert (
+        flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY]
+        == tracker_subentry.subentry_id
+    )
+    assert (
+        flow.context["subentry_ids"][SERVICE_SUBENTRY_KEY]
+        == service_subentry.subentry_id
+    )
 
     second_input = dict(first_input)
     second_input[OPT_MAP_VIEW_TOKEN_EXPIRATION] = False
@@ -774,13 +778,16 @@ def test_device_selection_creates_and_updates_subentry() -> None:
 
     previous_created = len(manager.created)
     manager.updated.clear()
-    result2 = asyncio.run(flow.async_step_device_selection(second_input))
+    result2 = await flow.async_step_device_selection(second_input)
     assert result2["type"] == "create_entry"
     assert len(manager.created) == previous_created
     assert manager.updated, "Expected tracker subentry to be updated on second run"
     updated_subentry = manager.updated[-1]
     assert updated_subentry.subentry_id == tracker_subentry.subentry_id
-    assert flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY] == tracker_subentry.subentry_id
+    assert (
+        flow.context["subentry_ids"][TRACKER_SUBENTRY_KEY]
+        == tracker_subentry.subentry_id
+    )
 
 
 def test_ephemeral_probe_cache_allows_missing_namespace(
@@ -1012,7 +1019,6 @@ async def test_async_step_reconfigure_awaits_reload(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1067,7 +1073,6 @@ async def test_async_step_reconfigure_defers_reload_and_logs_warning(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1131,7 +1136,9 @@ async def test_async_step_reconfigure_defers_reload_and_logs_exception(
 
     hass.async_create_task = _fake_create_task  # type: ignore[assignment]
 
-    monkeypatch.setattr(config_flow, "async_call_later", lambda hass_obj, delay, action: action(None))
+    monkeypatch.setattr(
+        config_flow, "async_call_later", lambda hass_obj, delay, action: action(None)
+    )
 
     caplog.set_level(logging.ERROR)
 
@@ -1143,7 +1150,6 @@ async def test_async_step_reconfigure_defers_reload_and_logs_exception(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
@@ -1164,7 +1170,10 @@ async def test_async_step_reconfigure_defers_reload_and_logs_exception(
     )
 
 
-def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_updates_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Reconfigure flows should reuse device selection and update existing entries."""
 
     class _Entry:
@@ -1180,7 +1189,6 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -1281,13 +1289,12 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
         return initial, result
 
-    initial_result, final_result = asyncio.run(_exercise())
+    initial_result, final_result = await _exercise()
 
     assert initial_result["type"] == "form"
     assert final_result["type"] == "abort"
@@ -1303,7 +1310,8 @@ def test_async_step_reconfigure_updates_entry(monkeypatch: pytest.MonkeyPatch) -
     assert hass.config_entries.reloaded == [entry.entry_id]
 
 
-def test_async_step_reconfigure_legacy_update_preserves_options(
+@pytest.mark.asyncio
+async def test_async_step_reconfigure_legacy_update_preserves_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Legacy async_update_entry fallback must still persist options."""
@@ -1321,7 +1329,6 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -1349,7 +1356,9 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
             update_kwargs = dict(updates)
             self.updated.append((target, update_kwargs))
             if "options" in update_kwargs:
-                raise TypeError("async_update_entry() got an unexpected keyword 'options'")
+                raise TypeError(
+                    "async_update_entry() got an unexpected keyword 'options'"
+                )
             if "data" in update_kwargs:
                 entry.data = dict(update_kwargs["data"])
 
@@ -1423,13 +1432,12 @@ def test_async_step_reconfigure_legacy_update_preserves_options(
             {
                 OPT_LOCATION_POLL_INTERVAL: 120,
                 OPT_DEVICE_POLL_DELAY: 5,
-                OPT_MIN_ACCURACY_THRESHOLD: 90,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
             }
         )
         return initial, result
 
-    initial_result, final_result = asyncio.run(_exercise())
+    initial_result, final_result = await _exercise()
 
     assert initial_result["type"] == "form"
     assert final_result["type"] == "abort"
@@ -1471,7 +1479,6 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
             self.options: dict[str, Any] = {
                 OPT_LOCATION_POLL_INTERVAL: 300,
                 OPT_DEVICE_POLL_DELAY: 10,
-                OPT_MIN_ACCURACY_THRESHOLD: 150,
                 OPT_MAP_VIEW_TOKEN_EXPIRATION: False,
                 OPT_OPTIONS_SCHEMA_VERSION: 1,
             }
@@ -1540,9 +1547,7 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         async def async_reload(self, entry_id: str) -> None:
             self.reloaded.append(entry_id)
 
-        async def async_remove_subentry(
-            self, target: Any, *, subentry_id: str
-        ) -> bool:
+        async def async_remove_subentry(self, target: Any, *, subentry_id: str) -> bool:
             assert target is entry
             self.removed.append(subentry_id)
             entry.subentries.pop(subentry_id, None)
@@ -1589,7 +1594,6 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         {
             OPT_LOCATION_POLL_INTERVAL: 120,
             OPT_DEVICE_POLL_DELAY: 5,
-            OPT_MIN_ACCURACY_THRESHOLD: 90,
             OPT_MAP_VIEW_TOKEN_EXPIRATION: True,
         }
     )
@@ -1605,4 +1609,3 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         stale_tracker.subentry_id,
         stale_service.subentry_id,
     }
-
