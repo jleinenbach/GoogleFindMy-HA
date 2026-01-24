@@ -14,8 +14,11 @@ _sym_db = _symbol_database.Default()
 
 from custom_components.googlefindmy.ProtoDecoders import Any_pb2 as ProtoDecoders_dot_Any__pb2
 
+# Use the same descriptor pool as Any_pb2 to maintain message dependencies
+# and avoid duplicate symbol registration in the default pool.
+_rpc_pool = ProtoDecoders_dot_Any__pb2._any_pool
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x1dProtoDecoders/RpcStatus.proto\x12\ngoogle.rpc\x1a\x17ProtoDecoders/Any.proto\"N\n\x06Status\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0f\n\x07message\x18\x02 \x01(\t\x12%\n\x07\x64\x65tails\x18\x03 \x03(\x0b\x32\x14.google.protobuf.Anyb\x06proto3')
+DESCRIPTOR = _rpc_pool.AddSerializedFile(b'\n\x1dProtoDecoders/RpcStatus.proto\x12\ngoogle.rpc\x1a\x17ProtoDecoders/Any.proto\"N\n\x06Status\x12\x0c\n\x04\x63ode\x18\x01 \x01(\x05\x12\x0f\n\x07message\x18\x02 \x01(\t\x12%\n\x07\x64\x65tails\x18\x03 \x03(\x0b\x32\x14.google.protobuf.Anyb\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'ProtoDecoders.RpcStatus_pb2', globals())

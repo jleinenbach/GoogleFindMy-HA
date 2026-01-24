@@ -11,10 +11,11 @@ from google.protobuf import symbol_database as _symbol_database
 
 _sym_db = _symbol_database.Default()
 
+# Create a separate descriptor pool to avoid conflicts with google.protobuf.Any
+# already registered by the protobuf library or other components.
+_any_pool = _descriptor_pool.DescriptorPool()
 
-
-
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x17ProtoDecoders/Any.proto\x12\x0fgoogle.protobuf\"&\n\x03\x41ny\x12\x10\n\x08type_url\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x0c\x62\x06proto3')
+DESCRIPTOR = _any_pool.AddSerializedFile(b'\n\x17ProtoDecoders/Any.proto\x12\x0fgoogle.protobuf\"&\n\x03\x41ny\x12\x10\n\x08type_url\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x0c\x62\x06proto3')
 
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'ProtoDecoders.Any_pb2', globals())
