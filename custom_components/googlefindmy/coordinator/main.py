@@ -754,6 +754,7 @@ class GoogleFindMyCoordinator(
             "future_ts_drop_count": 0,  # timestamps too far in the future
             "drop_reason_invalid_ts": 0,  # invalid/stale timestamps (detail bucket)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
+            "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
