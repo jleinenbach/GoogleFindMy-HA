@@ -13,7 +13,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
@@ -655,7 +655,16 @@ class GoogleFindMyEIDResolver:
 
         self._ensure_cache_defaults()
         self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY)
-        self._load_task = self.hass.async_create_task(self._async_load_locks())
+        load_coro = self._async_load_locks()
+        self._load_task = self.hass.async_create_task(load_coro)
+        if self._load_task is None or not isinstance(self._load_task, asyncio.Task):
+            # Task creation returned None or non-Task (e.g., in tests with mocks)
+            # Close the coroutine to prevent "coroutine never awaited" warnings
+            try:
+                load_coro.close()
+            except Exception:  # pragma: no cover - defensive close
+                pass
+            self._load_task = None
         self._start_alignment_timer()
 
     def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912
@@ -786,6 +795,7 @@ class GoogleFindMyEIDResolver:
     def _schedule_lock_save(self) -> None:
         """Schedule persistence of EID locks."""
 
+        lock_save: Coroutine[Any, Any, None] | None = None
         try:
             task_name = "googlefindmy_eid_resolver_save"
             create_task = getattr(
@@ -800,22 +810,32 @@ class GoogleFindMyEIDResolver:
                 scheduled = create_task(lock_save)
             if scheduled is None:
                 asyncio.create_task(lock_save)
+                lock_save = None  # Ownership transferred to asyncio.create_task
                 _LOGGER.warning(
                     "EID lock save was not scheduled (task helper returned None)"
                 )
             elif asyncio.iscoroutine(scheduled):
                 asyncio.create_task(scheduled)
+                lock_save = None  # Ownership transferred
             elif not isinstance(scheduled, asyncio.Task):
                 try:
                     lock_save.close()
                 except Exception:  # pragma: no cover - defensive close
                     pass
+                lock_save = None
                 _LOGGER.warning(
                     "EID lock save task helper returned non-awaitable %s; coroutine closed",
                     type(scheduled).__name__,
                 )
+            else:
+                lock_save = None  # Ownership transferred to task
         except Exception as err:  # pragma: no cover - defensive log
             _LOGGER.error("Failed to schedule EID lock persistence: %s", err)
+            if lock_save is not None:
+                try:
+                    lock_save.close()
+                except Exception:  # pragma: no cover - defensive close
+                    pass
 
     def _purge_stale_locks(self, *, now: int) -> None:  # noqa: PLR0912
         """Drop expired generation locks to keep cache fresh."""
