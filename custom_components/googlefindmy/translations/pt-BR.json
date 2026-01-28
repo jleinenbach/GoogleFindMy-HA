@@ -260,14 +260,14 @@
         "data": {
           "location_poll_interval": "Intervalo(s) de pesquisa de localização",
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
+          "stale_threshold_enabled": "Ativar limite de obsolescência",
+          "stale_threshold": "Limite de obsolescência (s)",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
-          "stale_threshold_enabled": "Ativar limite de obsolescência",
-          "stale_threshold": "Limite de obsolescência (s)",
           "subentry": "Grupo de recursos"
         },
         "data_description": {

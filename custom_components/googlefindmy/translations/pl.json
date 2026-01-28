@@ -260,14 +260,14 @@
         "data": {
           "location_poll_interval": "Interwał odpytywania lokalizacji (s)",
           "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
+          "stale_threshold_enabled": "Włącz próg nieaktualności",
+          "stale_threshold": "Próg nieaktualności (s)",
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
           "enable_stats_entities": "Twórz encje statystyczne",
           "delete_caches_on_remove": "Usuń pamięć podręczną podczas usuwania wpisu",
           "map_view_token_expiration": "Włącz wygasanie tokenu widoku mapy",
           "contributor_mode": "Tryb raportowania lokalizacji",
-          "stale_threshold_enabled": "Włącz próg nieaktualności",
-          "stale_threshold": "Próg nieaktualności (s)",
           "subentry": "Grupa funkcji"
         },
         "data_description": {
