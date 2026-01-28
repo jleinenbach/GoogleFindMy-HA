@@ -110,6 +110,7 @@ OPT_CONTRIBUTOR_MODE: str = "contributor_mode"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
 OPT_DELETE_CACHES_ON_REMOVE: str = "delete_caches_on_remove"
 OPT_STALE_THRESHOLD: str = "stale_threshold"
+OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 
 # Canonical list of option keys supported by the integration (without tracked_devices)
 OPTION_KEYS: tuple[str, ...] = (
@@ -126,6 +127,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE,
     OPT_STALE_THRESHOLD,
+    OPT_STALE_THRESHOLD_ENABLED,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -194,6 +196,7 @@ DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 # Stale threshold: After this many seconds without a location update,
 # the tracker state becomes "unknown" (default: 30 minutes = 1800 seconds)
 DEFAULT_STALE_THRESHOLD: int = 1800
+DEFAULT_STALE_THRESHOLD_ENABLED: bool = False
 
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
@@ -219,6 +222,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_DELETE_CACHES_ON_REMOVE: DEFAULT_DELETE_CACHES_ON_REMOVE,
     OPT_CONTRIBUTOR_MODE: DEFAULT_CONTRIBUTOR_MODE,
     OPT_STALE_THRESHOLD: DEFAULT_STALE_THRESHOLD,
+    OPT_STALE_THRESHOLD_ENABLED: DEFAULT_STALE_THRESHOLD_ENABLED,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------
@@ -368,6 +372,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "type": "str",
     },
     OPT_MAP_VIEW_TOKEN_EXPIRATION: {
+        "type": "bool",
+    },
+    OPT_STALE_THRESHOLD_ENABLED: {
         "type": "bool",
     },
     OPT_STALE_THRESHOLD: {
@@ -544,6 +551,7 @@ __all__ = [
     "OPTION_KEYS",
     "OPT_DELETE_CACHES_ON_REMOVE",
     "OPT_STALE_THRESHOLD",
+    "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
     "DEFAULT_LOCATION_POLL_INTERVAL",
@@ -558,6 +566,7 @@ __all__ = [
     "DEFAULT_MAP_VIEW_TOKEN_EXPIRATION",
     "DEFAULT_DELETE_CACHES_ON_REMOVE",
     "DEFAULT_STALE_THRESHOLD",
+    "DEFAULT_STALE_THRESHOLD_ENABLED",
     "DEFAULT_OPTIONS",
     "CONFIG_FIELDS",
     "TOKEN_REFRESH_COOLDOWN_S",

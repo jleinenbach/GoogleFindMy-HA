@@ -45,8 +45,10 @@ from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
     DEFAULT_STALE_THRESHOLD,
+    DEFAULT_STALE_THRESHOLD_ENABLED,
     DOMAIN,
     OPT_STALE_THRESHOLD,
+    OPT_STALE_THRESHOLD_ENABLED,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -961,6 +963,18 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 return True
         return self._last_good_accuracy_data is not None
 
+    def _is_stale_threshold_enabled(self) -> bool:
+        """Return True if the stale threshold feature is enabled."""
+        entry = getattr(self.coordinator, "config_entry", None)
+        if entry is None:
+            return DEFAULT_STALE_THRESHOLD_ENABLED
+        options = getattr(entry, "options", {})
+        if not isinstance(options, Mapping):
+            return DEFAULT_STALE_THRESHOLD_ENABLED
+        return bool(
+            options.get(OPT_STALE_THRESHOLD_ENABLED, DEFAULT_STALE_THRESHOLD_ENABLED)
+        )
+
     def _get_stale_threshold(self) -> int:
         """Return the configured stale threshold in seconds."""
         entry = getattr(self.coordinator, "config_entry", None)
@@ -991,6 +1005,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
     def _is_location_stale(self) -> bool:
         """Return True if the location data is considered stale."""
+        if not self._is_stale_threshold_enabled():
+            return False  # Stale threshold feature is disabled
         age = self._get_location_age()
         if age is None:
             return False  # No age information, assume not stale
@@ -1002,6 +1018,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         age = self._get_location_age()
         if age is None:
             return "unknown"
+        if not self._is_stale_threshold_enabled():
+            return "current"  # Stale threshold feature is disabled
         threshold = self._get_stale_threshold()
         if age > threshold:
             return "stale"
