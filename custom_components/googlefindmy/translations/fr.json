@@ -260,6 +260,7 @@
         "data": {
           "location_poll_interval": "Intervalle d'interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d'appareil (s)",
+          "stale_threshold_enabled": "Activer le seuil d'obsolescence",
           "stale_threshold": "Seuil d'obsolescence (s)",
           "google_home_filter_enabled": "Filtrer les appareils Google Home",
           "google_home_filter_keywords": "Mots-clés du filtre (séparés par des virgules)",
@@ -270,7 +271,8 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "stale_threshold": "Après ce délai en secondes sans mise à jour de position, l'état du traceur passe à inconnu. Les dernières coordonnées connues restent disponibles dans les attributs. Par défaut : 1800 (30 minutes).",
+          "stale_threshold_enabled": "Si activé, l'état du traceur passe à inconnu après le délai sans mises à jour. Si désactivé, le traceur affiche toujours la dernière position connue.",
+          "stale_threshold": "Après ce délai en secondes sans mise à jour de position, l'état du traceur passe à inconnu. Les dernières coordonnées connues restent disponibles dans les attributs. Par défaut : 7200 (2 heures).",
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu'elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu'elle est désactivée (par défaut), ils n'expirent pas.",
           "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut les zones à forte affluence ou Toutes les zones pour une contribution participative).",

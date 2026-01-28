@@ -260,6 +260,7 @@
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
+          "stale_threshold_enabled": "Abilita soglia di obsolescenza",
           "stale_threshold": "Soglia di obsolescenza (s)",
           "google_home_filter_enabled": "Filtra dispositivi Google Home",
           "google_home_filter_keywords": "Parole chiave del filtro (separate da virgole)",
@@ -270,7 +271,8 @@
           "subentry": "Gruppo di funzionalità"
         },
         "data_description": {
-          "stale_threshold": "Dopo questo numero di secondi senza aggiornamento di posizione, lo stato del tracker diventa sconosciuto. Le ultime coordinate note rimangono disponibili negli attributi. Predefinito: 1800 (30 minuti).",
+          "stale_threshold_enabled": "Se abilitato, lo stato del tracker diventa sconosciuto dopo il tempo soglia senza aggiornamenti. Se disabilitato, il tracker mostra sempre l'ultima posizione nota.",
+          "stale_threshold": "Dopo questo numero di secondi senza aggiornamento di posizione, lo stato del tracker diventa sconosciuto. Le ultime coordinate note rimangono disponibili negli attributi. Predefinito: 7200 (2 ore).",
           "delete_caches_on_remove": "Elimina i token memorizzati in cache e i metadati dei dispositivi quando questa voce viene rimossa.",
           "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono.",
           "contributor_mode": "Scegli come il dispositivo contribuisce alla rete di Google (per impostazione predefinita Aree ad alto traffico oppure Tutte le aree per un contributo collaborativo).",
