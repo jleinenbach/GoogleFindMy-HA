@@ -272,7 +272,7 @@
         },
         "data_description": {
           "stale_threshold_enabled": "Po włączeniu status trackera zmieni się na nieznany po upływie progu nieaktualności bez aktualizacji. Po wyłączeniu tracker zawsze pokazuje ostatnią znaną lokalizację.",
-          "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Ostatnie znane współrzędne pozostają dostępne w atrybutach. Domyślnie: 1800 (30 minut).",
+          "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Ostatnie znane współrzędne pozostają dostępne w atrybutach. Domyślnie: 7200 (2 godziny).",
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
           "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie obszary o dużym ruchu lub Wszystkie obszary w trybie crowdsourcingu).",

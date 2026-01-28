@@ -194,8 +194,10 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 
 # Stale threshold: After this many seconds without a location update,
-# the tracker state becomes "unknown" (default: 30 minutes = 1800 seconds)
-DEFAULT_STALE_THRESHOLD: int = 1800
+# the tracker state becomes "unknown" (default: 2 hours = 7200 seconds)
+# This should be at least 2x the maximum configurable poll interval (3600s)
+# to avoid false staleness when users set longer poll intervals.
+DEFAULT_STALE_THRESHOLD: int = 7200
 DEFAULT_STALE_THRESHOLD_ENABLED: bool = False
 
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"

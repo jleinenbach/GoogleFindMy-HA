@@ -272,7 +272,7 @@
         },
         "data_description": {
           "stale_threshold_enabled": "Quando ativado, o status do rastreador muda para desconhecido após o tempo limite de obsolescência sem atualizações. Quando desativado, o rastreador sempre mostra a última localização conhecida.",
-          "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. As últimas coordenadas conhecidas permanecem disponíveis nos atributos. Padrão: 1800 (30 minutos).",
+          "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. As últimas coordenadas conhecidas permanecem disponíveis nos atributos. Padrão: 7200 (2 horas).",
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (áreas de alto tráfego por padrão ou todas as áreas para relatórios de crowdsourcing).",
