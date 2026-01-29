@@ -3,13 +3,16 @@
 
 Home Assistant loads the official google-protobuf library (e.g. via the Nest
 integration).  This custom integration ships its own .proto definitions whose
-``package`` is ``google.protobuf`` (for ``Any``) and ``google.rpc`` (for
-``RpcStatus``).  On Python >= 3.13 the protobuf runtime is very strict about
-duplicate symbol registration in the default descriptor pool.
+``package`` values (``google.rpc`` for ``RpcStatus``, plus custom packages)
+must never collide with types already registered in the process-wide default
+descriptor pool.
 
-Commit edc1a4f introduced **separate descriptor pools** for every vendored
-``_pb2.py`` file so that the custom definitions never collide with the
-official ones.  These tests guard against regressions.
+Originally, a vendored copy of ``google.protobuf.Any`` caused a
+``duplicate symbol 'google.protobuf.Any'`` crash on Python >= 3.13 when
+another integration loaded the official ``any_pb2``.  That vendored copy was
+removed in favour of the official ``google.protobuf.any_pb2``; remaining
+custom ``_pb2.py`` files use separate descriptor pools.  These tests guard
+against regressions.
 """
 from __future__ import annotations
 
@@ -27,6 +30,21 @@ def _default_pool() -> _descriptor_pool.DescriptorPool:
 
 
 # ---------------------------------------------------------------------------
+# Vendored Any_pb2 must NOT exist (it was redundant with the official one)
+# ---------------------------------------------------------------------------
+
+
+class TestVendoredAnyCleaned:
+    """The vendored Any_pb2 has been removed – it was identical to the official
+    ``google.protobuf.any_pb2`` and caused a duplicate-symbol crash."""
+
+    def test_any_pb2_not_importable(self) -> None:
+        """Importing Any_pb2 from ProtoDecoders must raise ImportError."""
+        with pytest.raises(ImportError):
+            from custom_components.googlefindmy.ProtoDecoders import Any_pb2  # noqa: F401
+
+
+# ---------------------------------------------------------------------------
 # ProtoDecoders – separate pool assertions
 # ---------------------------------------------------------------------------
 
@@ -34,32 +52,16 @@ def _default_pool() -> _descriptor_pool.DescriptorPool:
 class TestProtoDecodersSeparatePools:
     """Each vendored _pb2 module MUST use its own (non-default) descriptor pool."""
 
-    def test_any_pb2_uses_separate_pool(self) -> None:
-        """Any_pb2 must NOT register in the default pool."""
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2
-
-        assert hasattr(Any_pb2, "_any_pool"), (
-            "Any_pb2 must expose _any_pool for downstream dependants"
-        )
-        assert Any_pb2._any_pool is not _default_pool(), (
-            "Any_pb2._any_pool must differ from the default descriptor pool – "
-            "using the default pool causes 'duplicate symbol google.protobuf.Any' "
-            "when another integration (e.g. Nest) loads the official any_pb2"
-        )
-
-    def test_rpc_status_pb2_shares_any_pool(self) -> None:
-        """RpcStatus_pb2 depends on Any and must share its pool."""
-        from custom_components.googlefindmy.ProtoDecoders import (
-            Any_pb2,
-            RpcStatus_pb2,
-        )
+    def test_rpc_status_pb2_uses_separate_pool(self) -> None:
+        """RpcStatus_pb2 must NOT register in the default pool."""
+        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2
 
         assert hasattr(RpcStatus_pb2, "_rpc_pool")
-        assert RpcStatus_pb2._rpc_pool is Any_pb2._any_pool, (
-            "RpcStatus_pb2 must share _any_pool with Any_pb2 so that the "
-            "google.protobuf.Any dependency resolves within the same pool"
+        assert RpcStatus_pb2._rpc_pool is not _default_pool(), (
+            "RpcStatus_pb2._rpc_pool must differ from the default descriptor "
+            "pool – using the default pool would collide with "
+            "googleapis-common-protos if another integration installs it"
         )
-        assert RpcStatus_pb2._rpc_pool is not _default_pool()
 
     def test_common_pb2_uses_separate_pool(self) -> None:
         """Common_pb2 must have its own pool that is NOT the default."""
@@ -134,42 +136,29 @@ class TestFirebaseSeparatePools:
 class TestOfficialProtobufCoexistence:
     """The custom modules must load without disturbing the official library."""
 
-    def test_official_any_pb2_loads_after_custom(self) -> None:
-        """Loading the official any_pb2 after our custom one must not raise."""
-        # Import custom first
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2  # noqa: F401
+    def test_rpc_status_loads_alongside_official_any(self) -> None:
+        """RpcStatus_pb2 must import cleanly when the official any_pb2 is loaded."""
+        from google.protobuf import any_pb2  # noqa: F401
+        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2  # noqa: F401
 
-        # Then import official
-        from google.protobuf import any_pb2 as official_any  # noqa: F401
+    def test_rpc_status_roundtrip(self) -> None:
+        """The Status message must serialize and deserialize correctly."""
+        from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import Status
 
-    def test_official_any_pb2_loads_before_custom(self) -> None:
-        """Loading the official any_pb2 before our custom one must not raise."""
-        from google.protobuf import any_pb2 as official_any  # noqa: F401
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2  # noqa: F401
+        msg = Status()
+        msg.code = 7
+        msg.message = "PERMISSION_DENIED"
+        data = msg.SerializeToString()
 
-    def test_custom_any_and_official_any_are_distinct_types(self) -> None:
-        """The two Any message classes must NOT be the same Python type."""
-        from google.protobuf import any_pb2 as official_any
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2 as custom_any
-
-        assert type(official_any.Any()) is not type(custom_any.Any()), (
-            "Official and custom Any must be distinct types to avoid cross-talk"
-        )
-
-    def test_custom_any_instance_is_functional(self) -> None:
-        """The custom Any message must support basic field access."""
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2
-
-        msg = Any_pb2.Any()
-        msg.type_url = "type.googleapis.com/test"
-        msg.value = b"\x01\x02\x03"
-        assert msg.type_url == "type.googleapis.com/test"
-        assert msg.value == b"\x01\x02\x03"
+        msg2 = Status()
+        msg2.ParseFromString(data)
+        assert msg2.code == 7
+        assert msg2.message == "PERMISSION_DENIED"
 
     def test_official_any_instance_is_functional(self) -> None:
-        """The official Any message must remain usable alongside the custom one."""
+        """The official Any message must remain usable alongside our modules."""
         from google.protobuf import any_pb2 as official_any
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2  # noqa: F401
+        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2  # noqa: F401
 
         msg = official_any.Any()
         msg.type_url = "type.googleapis.com/google.protobuf.Duration"
@@ -177,26 +166,27 @@ class TestOfficialProtobufCoexistence:
         assert msg.type_url == "type.googleapis.com/google.protobuf.Duration"
         assert msg.value == b"\x08\x01"
 
+    def test_default_pool_rejects_duplicate_any_symbol(self) -> None:
+        """A second file defining ``google.protobuf.Any`` must be rejected.
 
-# ---------------------------------------------------------------------------
-# Regression: default pool MUST reject the duplicate
-# ---------------------------------------------------------------------------
+        This proves that vendoring ``Any.proto`` under a different file name
+        (as the project used to do) would crash at import time because the
+        official ``any_pb2`` already registered the symbol in the default pool.
+        """
+        from google.protobuf import any_pb2  # noqa: F401 – ensure it's loaded
 
-
-class TestDefaultPoolRejectsDuplicate:
-    """Adding our Any.proto to the default pool must fail (regression guard)."""
-
-    def test_default_pool_rejects_custom_any_serialized_file(self) -> None:
-        """Proves the separate pool is *necessary* – the default pool conflicts."""
-        from custom_components.googlefindmy.ProtoDecoders import Any_pb2
-
-        # The official any_pb2 is already registered in the default pool.
-        # Ensure it is loaded:
-        from google.protobuf import any_pb2 as _official  # noqa: F401
-
-        serialized = Any_pb2.DESCRIPTOR.serialized_pb
+        # Simulate the OLD vendored Any.proto: same package and message,
+        # but different file name (ProtoDecoders/Any.proto).
+        _vendored_any_serialized = (
+            b"\n\x17ProtoDecoders/Any.proto"
+            b"\x12\x0fgoogle.protobuf"
+            b'"&\n\x03Any'
+            b"\x12\x10\n\x08type_url\x18\x01 \x01(\t"
+            b"\x12\r\n\x05value\x18\x02 \x01(\x0c"
+            b"b\x06proto3"
+        )
         with pytest.raises(TypeError, match="(?i)duplicate|conflict|couldn't build"):
-            _default_pool().AddSerializedFile(serialized)
+            _default_pool().AddSerializedFile(_vendored_any_serialized)
 
 
 # ---------------------------------------------------------------------------
