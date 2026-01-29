@@ -256,7 +256,7 @@
       },
       "settings": {
         "title": "Optionen",
-        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden)\n• Veraltungsgrenze: Nach dieser Zeit ohne Update wird der Tracker-Status unbekannt\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der Zuhause-Zone zuzuordnen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: nest passt zu Küche Nest Mini",
+        "description": "Standorteinstellungen anpassen:\n• Standort-Abfrageintervall: Wie oft Standorte abgefragt werden (60–3600 Sekunden)\n• Geräte-Abfrageverzögerung: Verzögerung zwischen Geräteabfragen (1–60 Sekunden)\n• Veraltungsgrenze: Nach dieser Zeit ohne Update wird der Tracker-Status unbekannt\n\nGoogle Home-Filter:\n• Aktivieren, um Erkennungen von Google Home-Geräten mit der Heimzone zu verknüpfen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: „nest“ stimmt mit „Küche Nest Mini“ überein",
         "data": {
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
@@ -620,9 +620,9 @@
       "stat_invalid_coords": {
         "name": "Ungültige Koordinaten"
       },
-        "stat_fused_updates": {
-            "name": "Fusionierte Standort-Updates"
-        }
+      "stat_fused_updates": {
+        "name": "Fusionierte Standort-Updates"
+      }
     }
   },
   "issues": {

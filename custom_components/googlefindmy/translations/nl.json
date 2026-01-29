@@ -256,7 +256,7 @@
       },
       "settings": {
         "title": "Opties",
-        "description": "Locatie-instellingen aanpassen:\n• Locatie-pollinginterval: Hoe vaak locaties worden gepolld (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen apparaat-polls (1–60 seconden)\n\nGoogle Home-filter:\n• Schakel in om detecties van Google Home-apparaten te koppelen aan de Thuiszone\n• Trefwoorden ondersteunen gedeeltelijke overeenkomsten (kommagescheiden)\n• Voorbeeld: \"nest\" komt overeen met \"Keuken Nest Mini\"",
+        "description": "Locatie-instellingen aanpassen:\n• Locatie-pollinginterval: Hoe vaak locaties worden gepolld (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen apparaat-polls (1–60 seconden)\n• Verouderingsdrempel: Na deze tijd zonder updates wordt de trackerstatus onbekend\n\nGoogle Home-filter:\n• Schakel in om detecties van Google Home-apparaten te koppelen aan de Thuiszone\n• Trefwoorden ondersteunen gedeeltelijke overeenkomsten (kommagescheiden)\n• Voorbeeld: \"nest\" komt overeen met \"Keuken Nest Mini\"",
         "data": {
           "location_poll_interval": "Locatie-pollinginterval (s)",
           "device_poll_delay": "Apparaat-pollingvertraging (s)",
