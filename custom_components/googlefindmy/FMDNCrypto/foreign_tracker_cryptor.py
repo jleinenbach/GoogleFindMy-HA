@@ -231,8 +231,7 @@ def decrypt_aes_eax(m_dash: bytes, tag: bytes, nonce: bytes, key: bytes) -> byte
 
     AES = get_aes_class()
     cipher = AES.new(key, AES.MODE_EAX, nonce=nonce)
-    plaintext: bytes = cipher.decrypt(m_dash)
-    cipher.verify(tag)
+    plaintext: bytes = cipher.decrypt_and_verify(m_dash, tag)
     return plaintext
 
 

@@ -206,8 +206,9 @@ def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> N
         token_retrieval, "async_get_aas_token", fake_async_get_aas_token
     )
     monkeypatch.setattr(token_retrieval, "_perform_oauth_sync", fake_perform_oauth)
+    fixed_id = 0xDEADBEEFCAFED00D
     monkeypatch.setattr(
-        token_retrieval.random, "randint", lambda *_: 0xDEADBEEFCAFED00D
+        token_retrieval.secrets, "randbelow", lambda _: fixed_id - 0x1000000000000000
     )
 
     sentinel_cache = _DummyCache()
@@ -222,9 +223,9 @@ def test_request_token_uses_supplied_cache(monkeypatch: pytest.MonkeyPatch) -> N
         "aas-token",
         "spot",
         False,
-        0xDEADBEEFCAFED00D,
+        fixed_id,
     )
-    assert sentinel_cache._data["android_id_user@example.com"] == 0xDEADBEEFCAFED00D
+    assert sentinel_cache._data["android_id_user@example.com"] == fixed_id
 
 
 # ---------------------------------------------------------------------------
@@ -617,52 +618,18 @@ async def test_generate_aas_token_persists_email(
     assert cache._data[username_string] == "new@example.com"
 
 
-async def test_generate_aas_token_global_cache_fallback(
+async def test_generate_aas_token_no_oauth_uses_entry_adm_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Global cache ADM tokens should be used as fallback."""
-    cache = _DummyCache()
-    await cache.set(username_string, "user@example.com")
-    # No local OAuth or ADM tokens
-
-    # Mock global cache to return ADM token
-    async def mock_get_all_cached_values() -> dict[str, Any]:
-        return {"adm_token_global@example.com": "global_oauth_token"}
-
-    monkeypatch.setattr(
-        aas_token_retrieval, "async_get_all_cached_values", mock_get_all_cached_values
-    )
-
-    def fake_exchange(
-        username: str, oauth_token: str, android_id: int
-    ) -> dict[str, Any]:
-        assert oauth_token == "global_oauth_token"
-        return {"Token": "aas_from_global", "Email": "global@example.com"}
-
-    monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
-
-    result = await aas_token_retrieval._generate_aas_token(cache=cache)
-    assert result == "aas_from_global"
-
-
-async def test_generate_aas_token_global_cache_fallback_exception(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Global cache exceptions should be handled gracefully."""
+    """Without OAuth token, only the entry-scoped ADM cache should be used (no global fallback)."""
     cache = _DummyCache()
     await cache.set(username_string, "user@example.com")
     await cache.set("adm_token_user@example.com", "local_oauth")
 
-    async def mock_get_all_cached_values() -> dict[str, Any]:
-        raise RuntimeError("Global cache unavailable")
-
-    monkeypatch.setattr(
-        aas_token_retrieval, "async_get_all_cached_values", mock_get_all_cached_values
-    )
-
     def fake_exchange(
         username: str, oauth_token: str, android_id: int
     ) -> dict[str, Any]:
+        assert oauth_token == "local_oauth"
         return {"Token": "aas_token", "Email": username}
 
     monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
