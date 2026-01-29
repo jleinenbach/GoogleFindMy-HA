@@ -13,17 +13,19 @@ another integration loaded the official libraries.  Those copies were removed
 in favour of the official packages (``protobuf`` and
 ``googleapis-common-protos``).  These tests guard against regressions.
 """
+
 from __future__ import annotations
 
 import importlib
 
 import pytest
-from google.protobuf import descriptor_pool as _descriptor_pool
 
+from google.protobuf import descriptor_pool as _descriptor_pool
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _default_pool() -> _descriptor_pool.DescriptorPool:
     """Return the process-wide default descriptor pool."""
@@ -42,7 +44,9 @@ class TestVendoredAnyCleaned:
     def test_any_pb2_not_importable(self) -> None:
         """Importing Any_pb2 from ProtoDecoders must raise ImportError."""
         with pytest.raises(ImportError):
-            from custom_components.googlefindmy.ProtoDecoders import Any_pb2  # noqa: F401
+            from custom_components.googlefindmy.ProtoDecoders import (
+                Any_pb2,  # noqa: F401
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +87,7 @@ class TestRpcStatusResolution:
             pytest.skip("googleapis-common-protos not installed")
 
         from google.rpc.status_pb2 import Status as OfficialStatus
+
         from custom_components.googlefindmy.NovaApi.nova_request import RpcStatus
 
         assert RpcStatus is OfficialStatus
@@ -187,8 +192,10 @@ class TestOfficialProtobufCoexistence:
 
     def test_official_any_instance_is_functional(self) -> None:
         """The official Any message must remain usable alongside our modules."""
+        from custom_components.googlefindmy.ProtoDecoders import (
+            RpcStatus_pb2,  # noqa: F401
+        )
         from google.protobuf import any_pb2 as official_any
-        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2  # noqa: F401
 
         msg = official_any.Any()
         msg.type_url = "type.googleapis.com/google.protobuf.Duration"

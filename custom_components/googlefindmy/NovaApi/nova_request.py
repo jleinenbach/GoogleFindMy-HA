@@ -56,7 +56,10 @@ from custom_components.googlefindmy.Auth.username_provider import (
 # Prefer the official googleapis-common-protos package; fall back to the
 # vendored copy only when the official package is not installed.
 try:
-    from google.rpc.status_pb2 import Status as RpcStatus  # type: ignore[import-untyped]
+    from google.rpc.status_pb2 import (
+        Status as RpcStatus,  # type: ignore[import-untyped]
+    )
+
     from google.protobuf.message import DecodeError as ProtobufDecodeError
 
     _RPC_STATUS_AVAILABLE = True

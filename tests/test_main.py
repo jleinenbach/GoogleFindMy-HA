@@ -4,6 +4,7 @@
 Target: 100 % line- and branch-coverage of
 ``custom_components.googlefindmy.main``.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -14,7 +15,6 @@ import pytest
 
 # Module under test
 from custom_components.googlefindmy import main as main_mod
-
 
 # ---------------------------------------------------------------------------
 # _parse_args
@@ -92,9 +92,7 @@ class TestListDevices:
         self, mock_cli: mock.MagicMock, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """KeyboardInterrupt prints a friendly exit message."""
-        with mock.patch(
-            "custom_components.googlefindmy.main.asyncio"
-        ) as mock_asyncio:
+        with mock.patch("custom_components.googlefindmy.main.asyncio") as mock_asyncio:
             mock_asyncio.run.side_effect = KeyboardInterrupt
             # Must NOT raise
             main_mod.list_devices(entry_id="x")
@@ -106,9 +104,7 @@ class TestListDevices:
         self, mock_cli: mock.MagicMock, capsys: pytest.CaptureFixture[str]
     ) -> None:
         """Any other exception prints to stderr and exits with code 1."""
-        with mock.patch(
-            "custom_components.googlefindmy.main.asyncio"
-        ) as mock_asyncio:
+        with mock.patch("custom_components.googlefindmy.main.asyncio") as mock_asyncio:
             mock_asyncio.run.side_effect = RuntimeError("boom")
             with pytest.raises(SystemExit) as exc_info:
                 main_mod.list_devices(entry_id="x")
@@ -152,6 +148,7 @@ class TestDunderMain:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
         assert result.returncode == 0
         assert "GoogleFindMyTools CLI" in result.stdout
@@ -172,6 +169,7 @@ class TestFunctionalCLI:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
         )
         assert result.returncode == 0
         assert "GoogleFindMyTools CLI" in result.stdout
@@ -191,6 +189,7 @@ class TestFunctionalCLI:
             capture_output=True,
             text=True,
             timeout=30,
+            check=False,
             env={**dict(__import__("os").environ), "PYTHONPATH": "."},
         )
         # The exact error depends on the cache backend, but exit code must be 1
