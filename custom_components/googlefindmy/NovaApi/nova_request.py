@@ -1562,7 +1562,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 "Nova API request failed (Attempt %d/%d): HTTP %d for %s. "
                                 "Server response: %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
-                                NOVA_MAX_RETRIES,
+                                NOVA_MAX_RETRIES + 1,
                                 status,
                                 api_scope,
                                 text_snippet,
@@ -1582,12 +1582,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             )
                             if status == HTTP_TOO_MANY_REQUESTS:
                                 raise NovaRateLimitError(
-                                    f"Nova API rate limited after {NOVA_MAX_RETRIES} attempts. "
+                                    f"Nova API rate limited after {NOVA_MAX_RETRIES + 1} attempts. "
                                     f"Server response: {text_snippet}"
                                 )
                             raise NovaHTTPError(
                                 status,
-                                f"Nova API failed after {NOVA_MAX_RETRIES} attempts. "
+                                f"Nova API failed after {NOVA_MAX_RETRIES + 1} attempts. "
                                 f"Server response: {text_snippet}",
                             )
 
@@ -1606,7 +1606,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     _LOGGER.warning(
                         "Nova API request failed (Attempt %d/%d): %s for %s. Retrying in %.2f seconds...",
                         retries_used + 1,
-                        NOVA_MAX_RETRIES,
+                        NOVA_MAX_RETRIES + 1,
                         type(e).__name__,
                         api_scope,
                         delay,
