@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
-from typing import Any, Protocol, TypeAlias, TypeVar
+from typing import Any, Protocol, TypeVar
 
-JSONDict: TypeAlias = dict[str, Any]
-MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
+type JSONDict = dict[str, Any]
+type MutableJSONMapping = MutableMapping[str, Any]
 
 NotificationPayloadT_contra = TypeVar(
     "NotificationPayloadT_contra",

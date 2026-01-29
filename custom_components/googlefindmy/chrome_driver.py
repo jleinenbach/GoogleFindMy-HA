@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from types import ModuleType, SimpleNamespace
-from typing import Any, TypeAlias, cast
+from typing import Any, cast
 
 from selenium.webdriver.chrome.webdriver import WebDriver
 
@@ -98,7 +98,7 @@ def _reset_uc_cache(module: Any | None = None) -> None:
     _UC_CACHE.module = module
 
 
-ChromeOptions: TypeAlias = Any
+type ChromeOptions = Any
 
 
 def get_chrome_version(chrome_path: str) -> int | None:
