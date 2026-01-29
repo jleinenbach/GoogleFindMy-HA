@@ -2,19 +2,20 @@
 """Verify that custom protobuf modules coexist with the official google-protobuf library.
 
 Home Assistant loads the official google-protobuf library (e.g. via the Nest
-integration).  This custom integration ships its own .proto definitions whose
-``package`` values (``google.rpc`` for ``RpcStatus``, plus custom packages)
-must never collide with types already registered in the process-wide default
-descriptor pool.
+integration).  This custom integration ships its own .proto definitions
+(``Common``, ``DeviceUpdate``, ``LocationReportsUpload``, Firebase protos)
+that must never collide with types already registered in the process-wide
+default descriptor pool.
 
-Originally, a vendored copy of ``google.protobuf.Any`` caused a
-``duplicate symbol 'google.protobuf.Any'`` crash on Python >= 3.13 when
-another integration loaded the official ``any_pb2``.  That vendored copy was
-removed in favour of the official ``google.protobuf.any_pb2``; remaining
-custom ``_pb2.py`` files use separate descriptor pools.  These tests guard
-against regressions.
+Originally, vendored copies of ``google.protobuf.Any`` and
+``google.rpc.Status`` caused duplicate-symbol crashes on Python >= 3.13 when
+another integration loaded the official libraries.  Those copies were removed
+in favour of the official packages (``protobuf`` and
+``googleapis-common-protos``).  These tests guard against regressions.
 """
 from __future__ import annotations
+
+import importlib
 
 import pytest
 from google.protobuf import descriptor_pool as _descriptor_pool
@@ -35,7 +36,7 @@ def _default_pool() -> _descriptor_pool.DescriptorPool:
 
 
 class TestVendoredAnyCleaned:
-    """The vendored Any_pb2 has been removed – it was identical to the official
+    """The vendored Any_pb2 has been removed -- it was identical to the official
     ``google.protobuf.any_pb2`` and caused a duplicate-symbol crash."""
 
     def test_any_pb2_not_importable(self) -> None:
@@ -45,23 +46,71 @@ class TestVendoredAnyCleaned:
 
 
 # ---------------------------------------------------------------------------
-# ProtoDecoders – separate pool assertions
+# RpcStatus: prefer official googleapis-common-protos, keep vendored fallback
+# ---------------------------------------------------------------------------
+
+
+class TestRpcStatusResolution:
+    """nova_request must prefer the official google.rpc.status_pb2 when
+    googleapis-common-protos is installed, and fall back to the vendored
+    RpcStatus_pb2 otherwise."""
+
+    def test_nova_request_rpc_status_available(self) -> None:
+        """_RPC_STATUS_AVAILABLE must be True regardless of which provider is used."""
+        from custom_components.googlefindmy.NovaApi import nova_request
+
+        assert nova_request._RPC_STATUS_AVAILABLE is True
+        assert nova_request.RpcStatus is not None
+
+    def test_rpc_status_has_required_fields(self) -> None:
+        """The resolved RpcStatus class must have code, message, details fields."""
+        from custom_components.googlefindmy.NovaApi.nova_request import RpcStatus
+
+        msg = RpcStatus()
+        msg.code = 7
+        msg.message = "PERMISSION_DENIED"
+        data = msg.SerializeToString()
+
+        msg2 = RpcStatus()
+        msg2.ParseFromString(data)
+        assert msg2.code == 7
+        assert msg2.message == "PERMISSION_DENIED"
+
+    def test_prefers_official_when_available(self) -> None:
+        """When googleapis-common-protos is installed, the official Status is used."""
+        official_available = importlib.util.find_spec("google.rpc") is not None
+        if not official_available:
+            pytest.skip("googleapis-common-protos not installed")
+
+        from google.rpc.status_pb2 import Status as OfficialStatus
+        from custom_components.googlefindmy.NovaApi.nova_request import RpcStatus
+
+        assert RpcStatus is OfficialStatus
+
+    def test_vendored_fallback_loads(self) -> None:
+        """The vendored RpcStatus_pb2 fallback must remain importable."""
+        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2
+
+        msg = RpcStatus_pb2.Status()
+        msg.code = 3
+        msg.message = "INVALID_ARGUMENT"
+        assert msg.code == 3
+
+    def test_vendored_rpc_status_uses_separate_pool(self) -> None:
+        """The vendored RpcStatus_pb2 must NOT use the default pool."""
+        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2
+
+        assert hasattr(RpcStatus_pb2, "_rpc_pool")
+        assert RpcStatus_pb2._rpc_pool is not _default_pool()
+
+
+# ---------------------------------------------------------------------------
+# ProtoDecoders -- separate pool assertions
 # ---------------------------------------------------------------------------
 
 
 class TestProtoDecodersSeparatePools:
-    """Each vendored _pb2 module MUST use its own (non-default) descriptor pool."""
-
-    def test_rpc_status_pb2_uses_separate_pool(self) -> None:
-        """RpcStatus_pb2 must NOT register in the default pool."""
-        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2
-
-        assert hasattr(RpcStatus_pb2, "_rpc_pool")
-        assert RpcStatus_pb2._rpc_pool is not _default_pool(), (
-            "RpcStatus_pb2._rpc_pool must differ from the default descriptor "
-            "pool – using the default pool would collide with "
-            "googleapis-common-protos if another integration installs it"
-        )
+    """Each custom _pb2 module MUST use its own (non-default) descriptor pool."""
 
     def test_common_pb2_uses_separate_pool(self) -> None:
         """Common_pb2 must have its own pool that is NOT the default."""
@@ -96,7 +145,7 @@ class TestProtoDecodersSeparatePools:
 
 
 # ---------------------------------------------------------------------------
-# Firebase proto – separate pool assertions
+# Firebase proto -- separate pool assertions
 # ---------------------------------------------------------------------------
 
 
@@ -136,25 +185,6 @@ class TestFirebaseSeparatePools:
 class TestOfficialProtobufCoexistence:
     """The custom modules must load without disturbing the official library."""
 
-    def test_rpc_status_loads_alongside_official_any(self) -> None:
-        """RpcStatus_pb2 must import cleanly when the official any_pb2 is loaded."""
-        from google.protobuf import any_pb2  # noqa: F401
-        from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2  # noqa: F401
-
-    def test_rpc_status_roundtrip(self) -> None:
-        """The Status message must serialize and deserialize correctly."""
-        from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import Status
-
-        msg = Status()
-        msg.code = 7
-        msg.message = "PERMISSION_DENIED"
-        data = msg.SerializeToString()
-
-        msg2 = Status()
-        msg2.ParseFromString(data)
-        assert msg2.code == 7
-        assert msg2.message == "PERMISSION_DENIED"
-
     def test_official_any_instance_is_functional(self) -> None:
         """The official Any message must remain usable alongside our modules."""
         from google.protobuf import any_pb2 as official_any
@@ -173,7 +203,7 @@ class TestOfficialProtobufCoexistence:
         (as the project used to do) would crash at import time because the
         official ``any_pb2`` already registered the symbol in the default pool.
         """
-        from google.protobuf import any_pb2  # noqa: F401 – ensure it's loaded
+        from google.protobuf import any_pb2  # noqa: F401 -- ensure it's loaded
 
         # Simulate the OLD vendored Any.proto: same package and message,
         # but different file name (ProtoDecoders/Any.proto).
@@ -190,6 +220,66 @@ class TestOfficialProtobufCoexistence:
 
 
 # ---------------------------------------------------------------------------
+# Standalone main.py: all proto dependencies must be importable
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneProtoDependencies:
+    """The standalone main.py entry point (browser-based secrets extraction)
+    requires protobuf at runtime.  Verify all proto modules are importable
+    without Home Assistant."""
+
+    def test_protobuf_package_importable(self) -> None:
+        """The protobuf package itself must be importable."""
+        import google.protobuf
+
+        assert google.protobuf is not None
+
+    def test_official_any_pb2_importable(self) -> None:
+        """google.protobuf.any_pb2 must be importable (replaces vendored Any)."""
+        from google.protobuf import any_pb2  # noqa: F401
+
+    def test_all_proto_decoders_importable(self) -> None:
+        """All ProtoDecoders modules must import without errors."""
+        modules = [
+            "custom_components.googlefindmy.ProtoDecoders.Common_pb2",
+            "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2",
+            "custom_components.googlefindmy.ProtoDecoders.LocationReportsUpload_pb2",
+            "custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2",
+        ]
+        for mod_name in modules:
+            mod = importlib.import_module(mod_name)
+            assert mod.DESCRIPTOR is not None, f"{mod_name} has no DESCRIPTOR"
+
+    def test_all_firebase_protos_importable(self) -> None:
+        """All Firebase proto modules must import without errors."""
+        modules = [
+            "custom_components.googlefindmy.Auth.firebase_messaging.proto.android_checkin_pb2",
+            "custom_components.googlefindmy.Auth.firebase_messaging.proto.mcs_pb2",
+            "custom_components.googlefindmy.Auth.firebase_messaging.proto.checkin_pb2",
+        ]
+        for mod_name in modules:
+            mod = importlib.import_module(mod_name)
+            assert mod.DESCRIPTOR is not None, f"{mod_name} has no DESCRIPTOR"
+
+    def test_protobuf_in_requirements_txt(self) -> None:
+        """protobuf must be declared in requirements.txt for standalone pip install."""
+        from pathlib import Path
+
+        req_file = (
+            Path(__file__).resolve().parents[1]
+            / "custom_components"
+            / "googlefindmy"
+            / "requirements.txt"
+        )
+        content = req_file.read_text()
+        assert "protobuf" in content, (
+            "protobuf must be listed in requirements.txt so standalone users "
+            "who run 'pip install -r requirements.txt' get it installed"
+        )
+
+
+# ---------------------------------------------------------------------------
 # google/ project-root directory must not shadow the installed package
 # ---------------------------------------------------------------------------
 
@@ -201,8 +291,6 @@ class TestGoogleDirectoryNotShadowing:
         """google.protobuf.descriptor_pool must resolve to the installed package."""
         from google.protobuf import descriptor_pool
 
-        # If the project-root google/ dir were shadowing the installed package,
-        # descriptor_pool would not be importable (only .pyi stubs live there).
         assert hasattr(descriptor_pool, "DescriptorPool")
         assert hasattr(descriptor_pool, "Default")
 
