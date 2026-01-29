@@ -240,9 +240,10 @@ def _beautify_text(resp_text: str) -> str:
 
     if _BS4_AVAILABLE and _beautiful_soup_factory is not None:
         try:
-            text_raw = _beautiful_soup_factory(resp_text, "html.parser").get_text(
-                separator=" ", strip=True
-            )
+            soup = _beautiful_soup_factory(resp_text, "html.parser")
+            # Extract from <body> only to avoid duplicating <title> content
+            node = soup.body if soup.body else soup
+            text_raw = node.get_text(separator=" ", strip=True)
             text = str(text_raw)
         except Exception as err:  # pragma: no cover - defensive logging path
             _LOGGER.debug(
@@ -1558,7 +1559,8 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
                             )
-                            _LOGGER.warning(
+                            log_fn = _LOGGER.info if retries_used == 0 else _LOGGER.warning
+                            log_fn(
                                 "Nova API request failed (Attempt %d/%d): HTTP %d for %s. "
                                 "Server response: %s. Retrying in %.2f seconds...",
                                 retries_used + 1,
