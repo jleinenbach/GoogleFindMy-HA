@@ -4,12 +4,13 @@
 // Reference: https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
 //
 // This is a local copy to avoid depending on googleapis-common-protos.
+// google.protobuf.Any is imported from the official protobuf package.
 
 syntax = "proto3";
 
 package google.rpc;
 
-import "ProtoDecoders/Any.proto";
+import "google/protobuf/any.proto";
 
 // The `Status` type defines a logical error model that is suitable for
 // different programming environments, including REST APIs and RPC APIs.

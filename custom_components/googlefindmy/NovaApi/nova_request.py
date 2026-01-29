@@ -52,18 +52,29 @@ from custom_components.googlefindmy.Auth.username_provider import (
     username_string,
 )
 
-# Import vendored google.rpc.Status for decoding Google API error responses
+# Import google.rpc.Status for decoding Google API error responses.
+# Prefer the official googleapis-common-protos package; fall back to the
+# vendored copy only when the official package is not installed.
 try:
-    from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import (
+    from google.rpc.status_pb2 import (  # type: ignore[import-untyped]
         Status as RpcStatus,
     )
+
     from google.protobuf.message import DecodeError as ProtobufDecodeError
 
     _RPC_STATUS_AVAILABLE = True
 except ImportError:
-    RpcStatus = None  # type: ignore[misc,assignment]
-    ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
-    _RPC_STATUS_AVAILABLE = False
+    try:
+        from custom_components.googlefindmy.ProtoDecoders.RpcStatus_pb2 import (
+            Status as RpcStatus,
+        )
+        from google.protobuf.message import DecodeError as ProtobufDecodeError
+
+        _RPC_STATUS_AVAILABLE = True
+    except ImportError:
+        RpcStatus = None
+        ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
+        _RPC_STATUS_AVAILABLE = False
 
 from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
 
