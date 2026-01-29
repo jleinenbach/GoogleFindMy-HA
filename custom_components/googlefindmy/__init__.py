@@ -58,6 +58,7 @@ from typing import (
     Any,
     Literal,
     Protocol,
+    TypeAlias,
     TypedDict,
     TypeGuard,
     TypeVar,
@@ -2273,7 +2274,7 @@ class RuntimeData:
         return self.token_cache
 
 
-type MyConfigEntry = ConfigEntry
+MyConfigEntry: TypeAlias = ConfigEntry
 
 
 SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal["_subentry_forward_helper_logs"] = (
@@ -2391,7 +2392,7 @@ _SUBENTRY_SETUP_RETRY_DELAY = 2.0
 _SUBENTRY_SETUP_MAX_ATTEMPTS = 20
 """Maximum number of setup attempts recorded per config subentry."""
 
-type CoroutineType = Coroutine[Any, Any, Any]
+CoroutineType: TypeAlias = Coroutine[Any, Any, Any]
 
 
 def _cancel_subentry_retry_handle(parent_entry: MyConfigEntry) -> None:

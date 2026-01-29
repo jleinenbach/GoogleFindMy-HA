@@ -74,7 +74,7 @@ from collections.abc import (
 )
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeAlias, TypeVar, cast
 
 from aiohttp import ClientError
 from homeassistant.helpers import issue_registry as ir
@@ -155,8 +155,8 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
-type JSONDict = dict[str, Any]
-type MutableJSONMapping = MutableMapping[str, Any]
+JSONDict: TypeAlias = dict[str, Any]
+MutableJSONMapping: TypeAlias = MutableMapping[str, Any]
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
