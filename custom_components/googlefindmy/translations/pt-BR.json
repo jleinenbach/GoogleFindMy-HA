@@ -251,7 +251,7 @@
           "subentry": "Grupo de recursos"
         },
         "data_description": {
-          "subentry": "Aplique atualizações de credenciais ao grupo de recursos selecionado. "
+          "subentry": "Aplique atualizações de credenciais ao grupo de recursos selecionado. Consulte o guia [Subentradas e grupos de recursos]({subentries_docs_url}) para detalhes."
         }
       },
       "settings": {
@@ -276,7 +276,7 @@
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (áreas de alto tráfego por padrão ou todas as áreas para relatórios de crowdsourcing).",
-          "subentry": "Armazene essas opções no grupo de recursos selecionado. "
+          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos."
         }
       },
       "visibility": {
@@ -287,7 +287,7 @@
           "subentry": "Grupo de recursos"
         },
         "data_description": {
-          "subentry": "Os dispositivos restaurados ingressam no grupo de recursos que você escolher. "
+          "subentry": "Os dispositivos restaurados ingressam no grupo de recursos que você escolher. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para orientações."
         }
       },
       "repairs": {

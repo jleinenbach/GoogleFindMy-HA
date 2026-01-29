@@ -251,7 +251,7 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "settings": {
@@ -276,7 +276,7 @@
           "delete_caches_on_remove": "Löscht zwischengespeicherte Tokens und Gerätemetadaten, wenn dieser Eintrag entfernt wird.",
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
           "contributor_mode": "Lege fest, wie dein Gerät zum Google-Netzwerk beiträgt (standardmäßig stark frequentierte Bereiche oder Alle Bereiche für Crowdsourcing).",
-          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subeinträge und Funktionsgruppen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "visibility": {
@@ -287,7 +287,7 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subeinträge und Funktionsgruppen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "repairs": {

@@ -251,7 +251,7 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour les différents parcours."
+          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour les différents parcours."
         }
       },
       "settings": {
@@ -276,7 +276,7 @@
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu'elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu'elle est désactivée (par défaut), ils n'expirent pas.",
           "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut les zones à forte affluence ou Toutes les zones pour une contribution participative).",
-          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
+          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour des exemples."
         }
       },
       "visibility": {
@@ -287,7 +287,7 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour obtenir des conseils."
+          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour obtenir des conseils."
         }
       },
       "repairs": {

@@ -251,7 +251,7 @@
           "subentry": "Grupa funkcji"
         },
         "data_description": {
-          "subentry": "Zastosuj aktualizacje poświadczeń do wybranej grupy funkcji. Zobacz sekcję [Podpozycje i grupy funkcji](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać dostępne przebiegi."
+          "subentry": "Zastosuj aktualizacje poświadczeń do wybranej grupy funkcji. Zobacz sekcję [Podpozycje i grupy funkcji]({subentries_docs_url}), aby poznać dostępne przebiegi."
         }
       },
       "settings": {
@@ -276,7 +276,7 @@
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
           "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie obszary o dużym ruchu lub Wszystkie obszary w trybie crowdsourcingu).",
-          "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Podpozycje i grupy funkcji](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups), aby poznać przykłady."
+          "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Podpozycje i grupy funkcji]({subentries_docs_url}), aby poznać przykłady."
         }
       },
       "visibility": {
@@ -287,7 +287,7 @@
           "subentry": "Grupa funkcji"
         },
         "data_description": {
-          "subentry": "Przywrócone urządzenia zostaną przypisane do wybranej grupy funkcji. Wskazówki znajdziesz w sekcji [Podpozycje i grupy funkcji](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "subentry": "Przywrócone urządzenia zostaną przypisane do wybranej grupy funkcji. Wskazówki znajdziesz w sekcji [Podpozycje i grupy funkcji]({subentries_docs_url})."
         }
       },
       "repairs": {

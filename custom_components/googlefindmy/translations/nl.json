@@ -251,7 +251,7 @@
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "subentry": "Pas inloggegevensupdates toe op de geselecteerde functiegroep. Bekijk de [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) handleiding voor workflow-details."
+          "subentry": "Pas inloggegevensupdates toe op de geselecteerde functiegroep. Bekijk de [Subentries en functiegroepen]({subentries_docs_url}) handleiding voor workflow-details."
         }
       },
       "settings": {
@@ -276,7 +276,7 @@
           "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
           "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
           "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard drukbezochte gebieden, of Alle gebieden voor crowdsourced rapportage).",
-          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor voorbeelden."
+          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor voorbeelden."
         }
       },
       "visibility": {
@@ -287,7 +287,7 @@
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "subentry": "Herstelde apparaten worden toegevoegd aan de functiegroep die je kiest. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor toewijzingsadvies."
+          "subentry": "Herstelde apparaten worden toegevoegd aan de functiegroep die je kiest. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor toewijzingsadvies."
         }
       },
       "repairs": {

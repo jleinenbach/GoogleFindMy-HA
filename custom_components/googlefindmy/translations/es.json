@@ -251,7 +251,7 @@
           "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la sección [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver los flujos disponibles."
+          "subentry": "Aplica las actualizaciones de credenciales al grupo de funciones seleccionado. Consulta la sección [Subentradas y grupos de funciones]({subentries_docs_url}) para ver los flujos disponibles."
         }
       },
       "settings": {
@@ -276,7 +276,7 @@
           "delete_caches_on_remove": "Borra los tokens almacenados en caché y los metadatos de los dispositivos cuando se elimina esta entrada.",
           "map_view_token_expiration": "Si está activado, los tokens de la vista de mapa caducan tras 1 semana. Si está desactivado (por defecto), no caducan.",
           "contributor_mode": "Elige cómo contribuye tu dispositivo a la red de Google (Zonas de alto tránsito por defecto o Todas las zonas para aportes colaborativos).",
-          "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para ver ejemplos."
+          "subentry": "Guarda estas opciones en el grupo de funciones seleccionado. Consulta [Subentradas y grupos de funciones]({subentries_docs_url}) para ver ejemplos."
         }
       },
       "visibility": {
@@ -287,7 +287,7 @@
           "subentry": "Grupo de funciones"
         },
         "data_description": {
-          "subentry": "Los dispositivos restaurados se asignan al grupo de funciones elegido. Consulta [Subentradas y grupos de funciones](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) para obtener orientación."
+          "subentry": "Los dispositivos restaurados se asignan al grupo de funciones elegido. Consulta [Subentradas y grupos de funciones]({subentries_docs_url}) para obtener orientación."
         }
       },
       "repairs": {

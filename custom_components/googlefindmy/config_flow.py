@@ -924,6 +924,14 @@ _FIELD_VISIBILITY_HUB = "hub"
 # Field identifiers used in options/visibility flows
 _FIELD_REPAIR_DEVICES = "device_ids"
 
+_SUBENTRIES_DOCS_URL = (
+    "https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md"
+    "#subentries-and-feature-groups"
+)
+_SUBENTRY_PLACEHOLDERS: dict[str, str] = {
+    "subentries_docs_url": _SUBENTRIES_DOCS_URL,
+}
+
 # ---------------------------
 # Validators (format/plausibility)
 # ---------------------------
@@ -5397,7 +5405,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
-            step_id="settings", data_schema=schema_with_defaults, errors=errors
+            step_id="settings",
+            data_schema=schema_with_defaults,
+            errors=errors,
+            description_placeholders=_SUBENTRY_PLACEHOLDERS,
         )
 
     # ---------- Visibility (restore ignored devices) ----------
@@ -5447,6 +5458,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     step_id="visibility",
                     data_schema=schema,
                     errors={_FIELD_SUBENTRY: "invalid_subentry"},
+                    description_placeholders=_SUBENTRY_PLACEHOLDERS,
                 )
 
             raw_restore = user_input.get("unignore_devices") or []
@@ -5469,7 +5481,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
             return self.async_create_entry(title="", data=new_options)
 
-        return self.async_show_form(step_id="visibility", data_schema=schema)
+        return self.async_show_form(
+            step_id="visibility",
+            data_schema=schema,
+            description_placeholders=_SUBENTRY_PLACEHOLDERS,
+        )
 
     async def async_step_repairs(
         self, user_input: dict[str, Any] | None = None
@@ -5828,7 +5844,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                         errors["base"] = _map_api_exc_to_error_key(err2)
 
         return self.async_show_form(
-            step_id="credentials", data_schema=schema, errors=errors
+            step_id="credentials",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders=_SUBENTRY_PLACEHOLDERS,
         )
 
 
