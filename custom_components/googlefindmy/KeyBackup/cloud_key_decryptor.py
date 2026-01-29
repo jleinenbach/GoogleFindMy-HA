@@ -253,7 +253,7 @@ def decrypt_aes_cbc_no_padding(
         ValueError: If framing is invalid or ciphertext not block-size aligned.
     """
     iv, ciphertext = _split_iv_and_ciphertext(encrypted_data_and_iv, iv_length)
-    if len(ciphertext) % algorithms.AES.block_size // 8 != 0:
+    if len(ciphertext) % (algorithms.AES.block_size // 8) != 0:
         raise ValueError("AES-CBC ciphertext is not block-size aligned")
 
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv))

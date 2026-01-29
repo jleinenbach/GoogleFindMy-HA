@@ -398,7 +398,11 @@ def test_async_request_token_generates_android_id_when_missing(
         monkeypatch.setattr(
             token_retrieval.gpsoauth, "perform_oauth", fake_perform_oauth
         )
-        monkeypatch.setattr(token_retrieval.random, "randint", lambda *_: generated_id)
+        monkeypatch.setattr(
+            token_retrieval.secrets,
+            "randbelow",
+            lambda _: generated_id - 0x1000000000000000,
+        )
 
         cache = _DummyTokenCache()
 
