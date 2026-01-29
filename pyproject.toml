@@ -50,7 +50,7 @@ pip-audit = ">=2.6"
 # Additional dev tools
 pyyaml = ">=6.0.2"
 grpclib = ">=0.4.7"
-pycares = ">=4.4.0,<5"
+pycares = ">=4.4.0"
 certifi = ">=2024.7.4"
 
 # Release automation
