@@ -163,26 +163,26 @@
           "credentials": "Actualizar credenciales",
           "settings": "Modificar ajustes",
           "visibility": "Visibilidad de dispositivos",
-          "semantic_locations": "Semantic locations",
+          "semantic_locations": "Ubicaciones semánticas",
           "repairs": "Reparaciones de grupos de funciones"
         }
       },
       "semantic_locations_menu": {
-        "title": "Semantic locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Ubicaciones semánticas",
+        "description": "Gestiona las anulaciones de ubicación semántica. Asignaciones existentes:\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_location_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Agregar ubicación semántica",
+          "semantic_location_edit": "Editar ubicación semántica",
+          "semantic_locations_delete": "Eliminar ubicación semántica"
         }
       },
       "semantic_locations": {
-        "title": "Semantic Locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Ubicaciones semánticas",
+        "description": "Gestiona las anulaciones de ubicación semántica. Asignaciones existentes:\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_locations_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Agregar ubicación semántica",
+          "semantic_locations_edit": "Editar ubicación semántica",
+          "semantic_locations_delete": "Eliminar ubicación semántica"
         }
       },
       "semantic_locations_add": {
@@ -199,10 +199,10 @@
         }
       },
       "semantic_locations_edit": {
-        "title": "Choose semantic location",
-        "description": "Select a semantic location to edit.",
+        "title": "Elegir ubicación semántica",
+        "description": "Selecciona una ubicación semántica para editar.",
         "data": {
-          "semantic_location": "Semantic location"
+          "semantic_location": "Ubicación semántica"
         }
       },
       "semantic_location_edit": {
@@ -232,10 +232,10 @@
         }
       },
       "semantic_locations_delete": {
-        "title": "Delete semantic locations",
-        "description": "Select semantic locations to delete.",
+        "title": "Eliminar ubicaciones semánticas",
+        "description": "Selecciona ubicaciones semánticas para eliminar.",
         "data": {
-          "semantic_locations": "Semantic locations"
+          "semantic_locations": "Ubicaciones semánticas"
         }
       },
       "credentials": {
@@ -256,7 +256,7 @@
       },
       "settings": {
         "title": "Opciones",
-        "description": "Ajustar la configuración de localización:\n• Intervalo de sondeo de ubicación: frecuencia con la que se consultan ubicaciones (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre consultas por dispositivo (1–60 segundos)\n• Umbral de obsolescencia: tras este tiempo sin actualizaciones, el estado del rastreador pasa a desconocido\n\nFiltro de Google Home:\n• Activar para asociar las detecciones de Google Home con la zona «Hogar»\n• Las palabras clave admiten coincidencias parciales (separadas por comas)\n• Ejemplo: «nest» coincide con «Kitchen Nest Mini»",
+        "description": "Ajustar opciones de localización:\n• Intervalo de sondeo de ubicación: Con qué frecuencia sondear ubicaciones (60–3600 segundos)\n• Retraso de sondeo de dispositivos: Retraso entre sondeos de dispositivos (1–60 segundos)\n• Umbral de obsolescencia: Tras este tiempo sin actualizaciones, el estado del rastreador pasa a desconocido\n\nFiltro Google Home:\n• Activar para asociar detecciones de dispositivos Google Home con la zona Hogar\n• Las palabras clave admiten coincidencia parcial (separadas por comas)\n• Ejemplo: \"nest\" coincide con \"Kitchen Nest Mini\"",
         "data": {
           "location_poll_interval": "Intervalo de sondeo de ubicación (s)",
           "device_poll_delay": "Retardo entre sondeos de dispositivos (s)",
@@ -324,15 +324,15 @@
       "choose_one": "Proporciona exactamente un método de credenciales.",
       "required": "Este campo es obligatorio.",
       "invalid_token": "Credenciales no válidas (token/correo). Comprueba el formato y el contenido.",
-      "duplicate_name": "Semantic name already exists. Choose a different name.",
-      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
+      "duplicate_name": "El nombre semántico ya existe. Elige un nombre diferente.",
+      "duplicate_semantic_location": "El nombre semántico ya existe. Elige un nombre diferente.",
       "unknown": "Error inesperado.",
       "invalid_subentry": "Elige un grupo de funciones válido."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguración correcta.",
       "no_ignored_devices": "No hay dispositivos ignorados para restaurar.",
-      "no_semantic_locations": "No semantic locations are configured.",
+      "no_semantic_locations": "No hay ubicaciones semánticas configuradas.",
       "repairs_no_subentries": "No hay grupos de funciones que reparar.",
       "repair_no_devices": "Selecciona al menos un dispositivo para mover.",
       "subentry_move_success": "Dispositivos asignados a **{subentry}** ({count} actualizados).",
@@ -620,9 +620,9 @@
       "stat_invalid_coords": {
         "name": "Coordenadas no válidas"
       },
-        "stat_fused_updates": {
-            "name": "Actualizaciones de ubicación fusionadas"
-        }
+      "stat_fused_updates": {
+        "name": "Actualizaciones de ubicación fusionadas"
+      }
     }
   },
   "issues": {

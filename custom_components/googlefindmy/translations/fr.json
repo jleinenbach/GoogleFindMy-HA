@@ -163,26 +163,26 @@
           "credentials": "Mettre à jour les identifiants",
           "settings": "Modifier les paramètres",
           "visibility": "Visibilité des appareils",
-          "semantic_locations": "Semantic locations",
+          "semantic_locations": "Emplacements sémantiques",
           "repairs": "Réparations des groupes de fonctionnalités"
         }
       },
       "semantic_locations_menu": {
-        "title": "Semantic locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Emplacements sémantiques",
+        "description": "Gérez les remplacements d’emplacements sémantiques. Correspondances existantes :\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_location_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Ajouter un emplacement sémantique",
+          "semantic_location_edit": "Modifier un emplacement sémantique",
+          "semantic_locations_delete": "Supprimer un emplacement sémantique"
         }
       },
       "semantic_locations": {
-        "title": "Semantic Locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Emplacements sémantiques",
+        "description": "Gérez les remplacements d’emplacements sémantiques. Correspondances existantes :\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_locations_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Ajouter un emplacement sémantique",
+          "semantic_locations_edit": "Modifier un emplacement sémantique",
+          "semantic_locations_delete": "Supprimer un emplacement sémantique"
         }
       },
       "semantic_locations_add": {
@@ -199,10 +199,10 @@
         }
       },
       "semantic_locations_edit": {
-        "title": "Choose semantic location",
-        "description": "Select a semantic location to edit.",
+        "title": "Choisir un emplacement sémantique",
+        "description": "Sélectionnez un emplacement sémantique à modifier.",
         "data": {
-          "semantic_location": "Semantic location"
+          "semantic_location": "Emplacement sémantique"
         }
       },
       "semantic_location_edit": {
@@ -232,10 +232,10 @@
         }
       },
       "semantic_locations_delete": {
-        "title": "Delete semantic locations",
-        "description": "Select semantic locations to delete.",
+        "title": "Supprimer des emplacements sémantiques",
+        "description": "Sélectionnez les emplacements sémantiques à supprimer.",
         "data": {
-          "semantic_locations": "Semantic locations"
+          "semantic_locations": "Emplacements sémantiques"
         }
       },
       "credentials": {
@@ -256,7 +256,7 @@
       },
       "settings": {
         "title": "Options",
-        "description": "Ajuster les paramètres de localisation :\n• Intervalle d'interrogation de localisation : fréquence des interrogations (60–3600 secondes)\n• Délai entre interrogations d'appareils : intervalle entre les requêtes par appareil (1–60 secondes)\n• Seuil d'obsolescence : au-delà de ce délai sans mise à jour, l'état du traceur passe à inconnu\n\nFiltre Google Home :\n• Activer pour associer les détections des appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Ajuster les paramètres de localisation :\n• Intervalle de sondage de localisation : Fréquence de sondage des localisations (60–3600 secondes)\n• Délai entre les sondages d’appareils : Délai entre les sondages d’appareils (1–60 secondes)\n• Seuil d’obsolescence : Au-delà de ce délai sans mise à jour, l’état du traceur passe à inconnu\n\nFiltre Google Home :\n• Activer pour associer les détections d’appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge la correspondance partielle (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
           "location_poll_interval": "Intervalle d'interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d'appareil (s)",
@@ -324,15 +324,15 @@
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "invalid_token": "Identifiants invalides (jeton/e-mail). Veuillez vérifier le format et le contenu.",
-      "duplicate_name": "Semantic name already exists. Choose a different name.",
-      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
+      "duplicate_name": "Le nom sémantique existe déjà. Choisissez un autre nom.",
+      "duplicate_semantic_location": "Le nom sémantique existe déjà. Choisissez un autre nom.",
       "unknown": "Erreur inattendue.",
       "invalid_subentry": "Choisissez un groupe de fonctionnalités valide."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
       "no_ignored_devices": "Aucun appareil ignoré à restaurer.",
-      "no_semantic_locations": "No semantic locations are configured.",
+      "no_semantic_locations": "Aucun emplacement sémantique n’est configuré.",
       "repairs_no_subentries": "Aucun groupe de fonctionnalités à réparer.",
       "repair_no_devices": "Sélectionnez au moins un appareil à déplacer.",
       "subentry_move_success": "Appareils attribués à **{subentry}** ({count} mis à jour).",
@@ -620,9 +620,9 @@
       "stat_invalid_coords": {
         "name": "Coordonnées invalides"
       },
-        "stat_fused_updates": {
-            "name": "Mises à jour de position fusionnées"
-        }
+      "stat_fused_updates": {
+        "name": "Mises à jour de position fusionnées"
+      }
     }
   },
   "issues": {

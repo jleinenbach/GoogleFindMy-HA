@@ -163,26 +163,26 @@
           "credentials": "Zaktualizuj poświadczenia",
           "settings": "Zmień ustawienia",
           "visibility": "Widoczność urządzeń",
-          "semantic_locations": "Semantic locations",
+          "semantic_locations": "Lokalizacje semantyczne",
           "repairs": "Naprawy grup funkcji"
         }
       },
       "semantic_locations_menu": {
-        "title": "Semantic locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Lokalizacje semantyczne",
+        "description": "Zarządzaj nadpisaniami lokalizacji semantycznych. Istniejące mapowania:\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_location_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Dodaj lokalizację semantyczną",
+          "semantic_location_edit": "Edytuj lokalizację semantyczną",
+          "semantic_locations_delete": "Usuń lokalizację semantyczną"
         }
       },
       "semantic_locations": {
-        "title": "Semantic Locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Lokalizacje semantyczne",
+        "description": "Zarządzaj nadpisaniami lokalizacji semantycznych. Istniejące mapowania:\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_locations_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Dodaj lokalizację semantyczną",
+          "semantic_locations_edit": "Edytuj lokalizację semantyczną",
+          "semantic_locations_delete": "Usuń lokalizację semantyczną"
         }
       },
       "semantic_locations_add": {
@@ -199,10 +199,10 @@
         }
       },
       "semantic_locations_edit": {
-        "title": "Choose semantic location",
-        "description": "Select a semantic location to edit.",
+        "title": "Wybierz lokalizację semantyczną",
+        "description": "Wybierz lokalizację semantyczną do edycji.",
         "data": {
-          "semantic_location": "Semantic location"
+          "semantic_location": "Lokalizacja semantyczna"
         }
       },
       "semantic_location_edit": {
@@ -232,10 +232,10 @@
         }
       },
       "semantic_locations_delete": {
-        "title": "Delete semantic locations",
-        "description": "Select semantic locations to delete.",
+        "title": "Usuń lokalizacje semantyczne",
+        "description": "Wybierz lokalizacje semantyczne do usunięcia.",
         "data": {
-          "semantic_locations": "Semantic locations"
+          "semantic_locations": "Lokalizacje semantyczne"
         }
       },
       "credentials": {
@@ -256,7 +256,7 @@
       },
       "settings": {
         "title": "Opcje",
-        "description": "Dostosuj ustawienia lokalizacji:\n• Interwał odpytywania lokalizacji: jak często pobierać lokalizacje (60–3600 sekund)\n• Opóźnienie między odpytywaniem urządzeń: przerwa między zapytaniami dla urządzeń (1–60 sekund)\n\nFiltr Google Home:\n• Włącz, aby powiązać wykrycia z urządzeń Google Home ze strefą Dom\n• Słowa kluczowe obsługują częściowe dopasowania (oddzielone przecinkami)\n• Przykład: „nest” pasuje do „Kitchen Nest Mini”",
+        "description": "Dostosuj ustawienia lokalizacji:\n• Interwał odpytywania lokalizacji: Jak często pobierać lokalizacje (60–3600 sekund)\n• Opóźnienie między odpytywaniem urządzeń: Przerwa między zapytaniami dla urządzeń (1–60 sekund)\n• Próg nieaktualności: Po tym czasie bez aktualizacji status trackera zmieni się na nieznany\n\nFiltr Google Home:\n• Włącz, aby powiązać wykrycia z urządzeń Google Home ze strefą Dom\n• Słowa kluczowe obsługują częściowe dopasowania (oddzielone przecinkami)\n• Przykład: „nest“ pasuje do „Kitchen Nest Mini“",
         "data": {
           "location_poll_interval": "Interwał odpytywania lokalizacji (s)",
           "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
@@ -324,15 +324,15 @@
       "choose_one": "Podaj dokładnie jedną metodę poświadczeń.",
       "required": "To pole jest wymagane.",
       "invalid_token": "Nieprawidłowe dane logowania (token/e-mail). Sprawdź format i zawartość.",
-      "duplicate_name": "Semantic name already exists. Choose a different name.",
-      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
+      "duplicate_name": "Nazwa semantyczna już istnieje. Wybierz inną nazwę.",
+      "duplicate_semantic_location": "Nazwa semantyczna już istnieje. Wybierz inną nazwę.",
       "unknown": "Wystąpił nieoczekiwany błąd.",
       "invalid_subentry": "Wybierz prawidłową grupę funkcji."
     },
     "abort": {
       "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
       "no_ignored_devices": "Brak ignorowanych urządzeń do przywrócenia.",
-      "no_semantic_locations": "No semantic locations are configured.",
+      "no_semantic_locations": "Nie skonfigurowano lokalizacji semantycznych.",
       "repairs_no_subentries": "Brak grup funkcji do naprawy.",
       "repair_no_devices": "Wybierz co najmniej jedno urządzenie do przeniesienia.",
       "subentry_move_success": "Urządzenia przypisane do **{subentry}** ({count} zaktualizowano).",
@@ -620,9 +620,9 @@
       "stat_invalid_coords": {
         "name": "Nieprawidłowe współrzędne"
       },
-        "stat_fused_updates": {
-            "name": "Połączone aktualizacje lokalizacji"
-        }
+      "stat_fused_updates": {
+        "name": "Połączone aktualizacje lokalizacji"
+      }
     }
   },
   "issues": {
