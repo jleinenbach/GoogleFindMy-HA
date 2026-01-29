@@ -3,7 +3,7 @@
 >[!CAUTION]
 > ## **V1.7 Semi-Breaking Change**
 >
-> After installing this update, you must delete your existing configuration and re-add the integration.  This is due to major architectural hanges. Location history should not be affected.
+> After installing this update, you must delete your existing configuration and re-add the integration.  This is due to major architectural changes. Location history should not be affected.
 
 ---
 
@@ -26,51 +26,53 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 
 ### Continuous integration checks
 
-Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
+Our GitHub Actions pipeline now validates manifests with hassfest, runs the HACS integration checker, and executes Ruff, Codespell, Bandit, `mypy --strict`, and `pytest -q --cov` on Python 3.13 to protect code quality before merges.
 
-For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification) (they call out `make test-stubs`, which typically finishes in about five minutes in hosted environments).
+For the quickest way to bootstrap Home Assistant test stubs before running `pytest -q`, see the Environment verification bullets in [AGENTS.md](AGENTS.md#environment-verification).
 
 #### Quickstart checks
 
 - **Clean caches**: Run `make clean` (or the equivalent `find … '__pycache__' -prune` command from [AGENTS.md](AGENTS.md#environment-verification)) after test runs to avoid stale bytecode interfering with CI results.
 - **Connectivity probe**: Capture a quick HTTP/HTTPS check (for example, `python -m pip install --dry-run --no-deps pip`) before longer installs so summaries document network status.
-- **Home Assistant stubs**: Use `make test-stubs` to install `homeassistant` and `pytest-homeassistant-custom-component` right before `pytest -q` when you want the fastest path to a green suite without the full toolchain (allow roughly five minutes for downloads/builds in hosted environments).
+- **Home Assistant stubs**: Run `make install-dev` to install Poetry dev/test dependencies (including `homeassistant` and `pytest-homeassistant-custom-component`) before running `pytest -q`.
 
 #### Local verification commands
 
 - `mypy --strict` — run the full strict type-checker locally to mirror CI expectations before opening a pull request.
-- `make lint` — invoke the Ruff lint target for the entire repository using the same settings enforced in CI.
-- `make wheelhouse` — pre-download the Home Assistant development dependencies into `.wheelhouse/` so subsequent virtual environment rebuilds reuse cached wheels instead of re-fetching from PyPI.
-- `make clean-wheelhouse` — delete `.wheelhouse/` (and any manifests or sentinels inside) when you want to prune cached wheels after a bootstrap run or before refreshing dependencies from scratch.
-- `make install-ha-stubs` — install the packages listed in `custom_components/googlefindmy/requirements-ha-stubs.txt` (currently `homeassistant` and `pytest-homeassistant-custom-component`) into the active environment so `pytest` and the regression helpers work immediately after cloning the repository.
-- `make test-unload` — activate the managed virtual environment and run the focused parent-unload rollback regression (`tests/test_unload_subentry_cleanup.py`) so you can confirm the recovery guardrails without executing the entire suite.
+- `make lint` — invoke `ruff check . --fix` across the entire repository (auto-fixes safe issues). CI runs the same check without `--fix`.
+- `make test-unload` — run the focused parent-unload rollback regression (`tests/test_unload_subentry_cleanup.py`) so you can confirm the recovery guardrails without executing the entire suite.
+- `make test-ha` — execute the targeted regression smoke tests (`tests/test_entity_recovery_manager.py`, `tests/test_homeassistant_callback_stub_helper.py`) and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, or override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` for slimmer output.
+- `make test-cov` — run `pytest -q --cov` with coverage reporting (output teed to `pytest_output.log`).
+- `make test-single TEST=<path>` — run a single test file with optional `PYTEST_ARGS`.
+- `make translation-check` — check for missing translation keys across all locale files.
+- `make check-ha-compat` — check dependency compatibility with Home Assistant.
 - `script/bootstrap_ssot_cached.sh` — stage the Home Assistant Single Source of Truth (SSoT) wheels in `.wheelhouse/ssot` and install them from the local cache. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse the cached artifacts on subsequent bootstrap runs or `PYTHON=python3.12` to target an alternate interpreter. The helper also validates `.wheelhouse/ssot` against `script/ssot_wheel_manifest.txt` (override with `SSOT_MANIFEST=…`) so repeated runs can confirm the primary wheels are cached without re-listing the full directory.
 - `python script/list_wheelhouse.py` — print a grouped index of cached wheels (optionally against `--manifest script/ssot_wheel_manifest.txt`) before running lengthy installs so you can confirm the cache satisfies the manifest without scrolling through pip logs. Pass `--allow-missing` to preview the formatter when `.wheelhouse/ssot` has not been generated yet.
-- `make test-ha` — provision the `.venv` environment (installing `homeassistant` and `pytest-homeassistant-custom-component` when missing), execute the targeted regression smoke tests, and then run `pytest -q --cov` for the full suite while teeing detailed output to `pytest_output.log`. Append flags such as `--maxfail=1 -k recovery` with `make test-ha PYTEST_ARGS="…"` when you need custom pytest options, override the coverage summary with `make test-ha PYTEST_COV_FLAGS="--cov-report=term"` (or `term-summary`, `term-skip-covered`, etc.) for slimmer CI logs, and reuse an existing wheel cache without redownloading by passing `make test-ha SKIP_WHEELHOUSE_REFRESH=1`.
 
 ### Installing Home Assistant test dependencies on demand
 
-The repository already ships a lightweight bootstrap for the real Home Assistant
-test stack. Run `make install-ha-stubs` from the project root to install
-`homeassistant` and `pytest-homeassistant-custom-component` from `custom_components/googlefindmy/requirements-ha-stubs.txt` into your current
-Python environment without creating the `.venv` managed by other helpers. This
-is the quickest way to unblock `pytest` after cloning the repository or when a
-CI run reports missing Home Assistant packages.
+The repository uses [Poetry](https://python-poetry.org/) to manage all
+development and test dependencies. Run `make install-dev` from the project root
+to install `homeassistant`, `pytest-homeassistant-custom-component`, and the
+remaining dev/test packages into your Poetry-managed environment. This is the
+quickest way to unblock `pytest` after cloning the repository or when a CI run
+reports missing Home Assistant packages.
 
-If you prefer an isolated environment, `make test-ha` provisions `.venv/` using
-the cached wheels under `.wheelhouse/`, installs the same stub dependencies, and
-then executes the regression suite. Pass `SKIP_WHEELHOUSE_REFRESH=1` to reuse an
-existing cache or adjust `PYTEST_ARGS`/`PYTEST_COV_FLAGS` to narrow the test
-selection while still benefiting from the automated dependency install.
+Alternatively, `make test-ha` runs the targeted regression smoke tests followed
+by the full `pytest -q --cov` suite. Adjust `PYTEST_ARGS`/`PYTEST_COV_FLAGS` to
+narrow the test selection.
 
 #### Wheelhouse cache management
 
-`make test-ha` depends on the `.wheelhouse/` cache and automatically refreshes it when `custom_components/googlefindmy/requirements-dev.txt` changes. Delete the directory (or run `make wheelhouse` manually) whenever you need to rebuild the cache for a clean-room test of updated dependencies. When the existing cache already satisfies the pinned requirements, skip the refresh step by invoking `make test-ha SKIP_WHEELHOUSE_REFRESH=1` (or the equivalent `make wheelhouse SKIP_WHEELHOUSE_REFRESH=1`).
+The `script/bootstrap_ssot_cached.sh` helper stages heavy wheels (e.g.
+`homeassistant`, `pytest-homeassistant-custom-component`) in `.wheelhouse/ssot`
+for offline or cached installs. Delete the directory whenever you need to rebuild
+the cache for a clean-room test of updated dependencies, or pass
+`SKIP_WHEELHOUSE_REFRESH=1` to reuse the existing cache.
 
 ##### Sharing cached wheels between environments
 
-The `make wheelhouse` target pulls down the heavy `homeassistant` and
-`pytest-homeassistant-custom-component` wheels into `.wheelhouse/`. Package the
+The bootstrap script pulls down heavy wheels into `.wheelhouse/`. Package the
 cache once and reuse it on future containers or machines instead of redownloading
 hundreds of megabytes every regression run:
 
@@ -79,7 +81,7 @@ tar -czf wheelhouse-ha-cache.tgz -C .wheelhouse .
 ```
 
 Copy `wheelhouse-ha-cache.tgz` to the new environment, extract it at the project
-root, and the next `make wheelhouse`/`make test-ha` invocation will reuse the
+root, and the next `script/bootstrap_ssot_cached.sh` invocation will reuse the
 cached wheels immediately:
 
 ```bash
@@ -87,23 +89,30 @@ tar -xzf wheelhouse-ha-cache.tgz -C .
 ```
 
 When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
-`make wheelhouse` to regenerate the cache before producing a fresh snapshot.
+`script/bootstrap_ssot_cached.sh` to regenerate the cache before producing a fresh snapshot.
 
 #### Running Home Assistant integration tests locally
 
-1. Create a virtual environment for development: `python -m venv .venv`
-2. Activate it for the current shell: `. .venv/bin/activate`
-3. Install the required dependencies (includes `homeassistant` and `pytest-homeassistant-custom-component`):
-   - Full toolchain (linting, typing, tests): `pip install -r custom_components/googlefindmy/requirements-dev.txt`
+1. Install Poetry if not already available: `pip install poetry`
+2. Install the full development toolchain (linting, typing, tests): `make install-dev` (or `poetry install --with dev,test`)
    - Minimal options-flow test stack (`homeassistant`, pytest helpers, and `bcrypt` only): `./script/install_options_flow_test_deps.sh`
-4. Execute the regression suite, for example: `pytest tests/test_entity_recovery_manager.py tests/test_homeassistant_callback_stub_helper.py` or simply `make test-ha` (override pytest flags with `make test-ha PYTEST_ARGS="--maxfail=1 -k callback"` as needed)
-5. When finished, leave the environment with `deactivate`
+3. Execute the regression suite, for example: `poetry run pytest tests/test_entity_recovery_manager.py tests/test_homeassistant_callback_stub_helper.py` or simply `make test-ha` (override pytest flags with `make test-ha PYTEST_ARGS="--maxfail=1 -k callback"` as needed)
 
 ### Available Make targets
 
-- `make lint`: Run `ruff check .` across the entire repository to ensure lint compliance before sending a pull request.
+- `make install`: Install Poetry dependencies.
+- `make install-dev`: Install Poetry dependencies with dev and test groups.
+- `make lint`: Run `ruff check . --fix` across the entire repository (auto-fixes safe issues).
 - `make clean`: Remove Python bytecode caches via `script/clean_pycache.py` to keep local environments tidy during development.
-- `make test-unload`: Execute the targeted unload regression suite (`tests/test_unload_subentry_cleanup.py`) inside the managed virtual environment to verify the parent-unload rollback path.
+- `make clean-node-modules`: Remove the `node_modules/` directory via `script/clean_node_modules.py`.
+- `make test-ha`: Run targeted Home Assistant regression smoke tests followed by the full `pytest -q --cov` suite (output teed to `pytest_output.log`).
+- `make test-unload`: Execute the targeted unload regression suite (`tests/test_unload_subentry_cleanup.py`) to verify the parent-unload rollback path.
+- `make test-cov`: Run `pytest -q --cov` with coverage reporting (output teed to `pytest_output.log`).
+- `make test-single TEST=<path>`: Run a single test file with optional `PYTEST_ARGS`.
+- `make translation-check`: Check for missing translation keys across all locale files.
+- `make check-ha-compat`: Check dependency compatibility with Home Assistant via `script/check_ha_compatibility.py`.
+- `make doctoc`: Regenerate the AGENTS.md table of contents (requires Node.js; installs DocToc via `make bootstrap-doctoc`).
+- `make bootstrap-doctoc`: Install the DocToc npm dev dependency into the local cache.
 
 ---
 ## Features
@@ -192,8 +201,11 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `google_home_filter_enabled` | true | toggle | Enables or disables Google Home device location filtering. |
 | `google_home_filter_keywords` | nest,google,home,mini,hub,display,chromecast,speaker | text input | Comma-separated keywords used to filter out location data from Google Home devices. |
 | `map_view_token_expiration` | false | toggle | Enables expiration of generated API tokens used in Map View history queries. |
+| `semantic_locations` | none | - | User-defined semantic location zones (managed via a dedicated options flow step). |
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
+| `stale_threshold` | 7200 | seconds | After this many seconds without a location update, the tracker state becomes `unknown`. |
+| `stale_threshold_enabled` | false | toggle | Enables the stale-threshold check that marks trackers as `unknown` after prolonged silence. |
 
 ### Google Home filter behavior
 
@@ -396,19 +408,19 @@ Contributions are welcome and encouraged!
 To contribute, please:
 1. Fork the repository
 2. Create a feature branch
-3. Install the development dependencies with `python -m pip install -r custom_components/googlefindmy/requirements-dev.txt`
+3. Install the development dependencies with `make install-dev` (or `poetry install --with dev,test`)
 4. Install the development hooks with `pre-commit install` and ensure `pre-commit run --all-files` passes before submitting changes. If the CLI entry points are unavailable, use the `python -m` fallbacks from the [module invocation primer](AGENTS.md#module-invocation-primer) to run the same commands reliably.
 5. Run `python script/local_verify.py` to execute the required `ruff format --check` and `pytest -q` commands together (or invoke `python script/precommit_hooks/ruff_format.py --check ...` and `pytest -q` manually if you need custom arguments).
 6. When running pytest (either through the helper script or directly) fix any failures and address every `DeprecationWarning` you encounter—rerun with `PYTHONWARNINGS=error::DeprecationWarning pytest -q` if you need help spotting new warnings.
 7. Test thoroughly with your Find My devices
 8. Submit a pull request with detailed description
 
-For quick sanity checks during development, run the lint and type checks after bootstrapping the Home Assistant stubs:
+For quick sanity checks during development, run the lint and type checks after installing dev dependencies:
 
 ```bash
-make test-stubs
-python -m ruff check
-python -m mypy --strict
+make install-dev
+poetry run ruff check .
+poetry run mypy --strict
 ```
 
 ### Release process
