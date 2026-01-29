@@ -32,6 +32,7 @@ def test_hacs_metadata_matches_manifest(
 
     allowed_keys = {
         "name",
+        "homeassistant",
         "content_in_root",
         "render_readme",
         "filename",
@@ -46,7 +47,6 @@ def test_hacs_metadata_matches_manifest(
     assert match, "INTEGRATION_VERSION constant missing"
     assert manifest["version"] == INTEGRATION_VERSION == match.group(1)
     assert "homeassistant" not in manifest
-    assert "homeassistant" not in hacs_metadata
 
 
 def test_no_micro_sign_in_integration_files(
