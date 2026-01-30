@@ -155,9 +155,9 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         try:
             if self._cache is not None:
                 if creds is None:
-                    self._cache._data.pop("fcm_credentials", None)
+                    self._cache.sync_pop("fcm_credentials")
                 else:
-                    self._cache._data["fcm_credentials"] = creds
+                    self._cache.sync_set("fcm_credentials", creds)
             else:
                 set_cached_value("fcm_credentials", creds)
             self._creds = creds
@@ -203,5 +203,5 @@ class FcmReceiver:  # pragma: no cover - legacy surface kept for compatibility
         """Return credentials from the selected cache without raising."""
 
         if self._cache is not None:
-            return self._cache._data.get("fcm_credentials")
+            return self._cache.sync_get("fcm_credentials")
         return get_cached_value("fcm_credentials")

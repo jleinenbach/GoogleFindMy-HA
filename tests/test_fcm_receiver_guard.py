@@ -216,7 +216,6 @@ def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> Non
     """Removing a coordinator clears its tokens and blocks future fan-out."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         receiver = FcmReceiverHA()

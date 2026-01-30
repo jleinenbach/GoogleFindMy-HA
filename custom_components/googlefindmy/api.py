@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, cast, runtime_checkable
@@ -565,11 +566,8 @@ class GoogleFindMyAPI:
         """Return the event loop the sync helpers should execute on."""
 
         if self._session is not None:
-            session_loop = cast(
-                asyncio.AbstractEventLoop | None,
-                getattr(self._session, "_loop", None),
-            )
-            if session_loop is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
                 session_loop = cast(
                     asyncio.AbstractEventLoop | None,
                     getattr(self._session, "loop", None),

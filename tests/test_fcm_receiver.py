@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-import custom_components.googlefindmy.Auth.fcm_receiver_ha as fcm_receiver_module
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.const import DOMAIN
 
@@ -339,18 +338,6 @@ async def test_credentials_update_clears_latched_fatal_error(
     receiver._fatal_errors[entry_id] = "BadAuthentication"
     receiver._fatal_error = "BadAuthentication"
 
-    loop = asyncio.get_running_loop()
-    captured_tasks: list[asyncio.Task[object]] = []
-
-    def _capture_task(
-        coro: Awaitable[object], *, name: str | None = None
-    ) -> asyncio.Task[object]:
-        task = loop.create_task(coro, name=name)
-        captured_tasks.append(task)
-        return task
-
-    monkeypatch.setattr(fcm_receiver_module.asyncio, "create_task", _capture_task)
-
     token_routes: list[tuple[str, set[str]]] = []
     monkeypatch.setattr(
         receiver,
@@ -372,7 +359,9 @@ async def test_credentials_update_clears_latched_fatal_error(
         entry_id, {"fcm": {"registration": {"token": "token-abc"}}}
     )
 
-    await asyncio.gather(*captured_tasks)
+    # _dispatch_to_hass_loop tracks tasks in _active_tasks; gather them
+    if receiver._active_tasks:
+        await asyncio.gather(*list(receiver._active_tasks))
 
     assert entry_id not in receiver._fatal_errors
     assert receiver._fatal_error is None

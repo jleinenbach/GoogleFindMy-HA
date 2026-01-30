@@ -87,7 +87,6 @@ def test_poll_timeout_sets_update_error(monkeypatch: pytest.MonkeyPatch) -> None
     """Timeouts should propagate as update errors and mark the cycle as failed."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass = _DummyHass(loop)
 
     monkeypatch.setattr(
@@ -139,7 +138,6 @@ def test_poll_auth_failure_raises_auth_failed(monkeypatch: pytest.MonkeyPatch) -
     """Auth failures should translate to ConfigEntryAuthFailed and mark the cycle failed."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass = _DummyHass(loop)
 
     monkeypatch.setattr(
@@ -193,7 +191,6 @@ def test_poll_timeout_still_processes_other_devices(
     """A timeout for one device should not prevent polling of the rest."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass = _DummyHass(loop)
 
     monkeypatch.setattr(

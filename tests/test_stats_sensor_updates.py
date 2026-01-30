@@ -218,7 +218,6 @@ def test_increment_stat_notifies_registered_stats_sensor(
     """Stats increments must notify listeners so CoordinatorEntity state updates."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         hass = _StubHass(loop)
@@ -272,7 +271,6 @@ def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stats increments must trigger persistence via the debounced writer."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         hass = _StubHass(loop)
@@ -308,7 +306,6 @@ def test_history_fallback_increments_history_stat(
     """Recorder fallback should increment the history counter and surface via sensors."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         hass = _StubHass(loop)
@@ -396,7 +393,6 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
     """Stats sensors attach the hub device identifier set with subentry metadata."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         hass = _StubHass(loop)
@@ -435,7 +431,6 @@ def test_semantic_label_sensor_exposes_observations() -> None:
     """Semantic label sensor should surface cached labels and device IDs."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         hass = _StubHass(loop)

@@ -409,7 +409,6 @@ def test_poll_spot_auth_error_triggers_config_entry_auth_failed(
     """SpotAuthPermanentError should propagate as ConfigEntryAuthFailed in polling."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass_coordinator = _prepare_coordinator(loop)
     hass_coordinator.api = _AuthErrorAPI()
 

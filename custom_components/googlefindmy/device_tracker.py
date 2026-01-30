@@ -1067,11 +1067,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         return data.get("longitude")
 
     @property
-    def location_accuracy(self) -> int | None:
-        """Return accuracy of location in meters as an integer.
-
-        Coordinator stores accuracy as a float; HA's device_tracker expects
-        an integer for the `gps_accuracy` attribute, so we coerce here.
+    def location_accuracy(self) -> float | None:
+        """Return accuracy of location in meters.
 
         Returns None if location data is stale (older than stale_threshold),
         mirroring the behaviour of latitude/longitude for consistency.
@@ -1085,7 +1082,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         if acc is None:
             return None
         try:
-            return int(round(float(acc)))
+            return float(acc)
         except (TypeError, ValueError):
             return None
 

@@ -225,9 +225,6 @@ def _default_async_run_hass_job(hass: HomeAssistant) -> Callable[..., Any]:
                     return loop.create_task(coroutine)
                 return asyncio.create_task(coroutine)
 
-            if loop is not None:
-                return asyncio.ensure_future(awaitable_result, loop=loop)
-
             return asyncio.ensure_future(awaitable_result)
 
         return result

@@ -42,7 +42,7 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     FHNA_K,
     EidVariant,
     build_table10_prf_input,
-    generate_eid,
+    generate_eid_variant,
     prf_aes_256_ecb,
 )
 
@@ -345,10 +345,10 @@ def decrypt(
     r = calculate_r(identity_key, beacon_time_counter) % order
 
     # R and S points
-    Rx = generate_eid(
+    Rx = generate_eid_variant(
         identity_key,
         beacon_time_counter,
-        variant=EidVariant.LEGACY_SECP160R1_X20_BE,
+        EidVariant.LEGACY_SECP160R1_X20_BE,
     )
     R = int.from_bytes(Rx, byteorder="big")
     _ = rx_to_ry(R, curve.curve)
@@ -393,12 +393,12 @@ def _get_random_bytes(length: int) -> bytes:
 
 
 def _create_random_eid(identity_key: bytes) -> bytes:
-    # Uses generate_eid to create a random EID
+    # Uses generate_eid_variant to create a random EID
     beacon_time_counter: int = int.from_bytes(_get_random_bytes(4), byteorder="big")
-    return generate_eid(
+    return generate_eid_variant(
         identity_key,
         beacon_time_counter,
-        variant=EidVariant.LEGACY_SECP160R1_X20_BE,
+        EidVariant.LEGACY_SECP160R1_X20_BE,
     )
 
 
