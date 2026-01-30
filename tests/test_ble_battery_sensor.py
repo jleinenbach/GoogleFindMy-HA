@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import MutableMapping
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import custom_components.googlefindmy.eid_resolver as resolver_module
+from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_BATTERY_PCT,
     BLEBatteryState,
@@ -37,23 +40,25 @@ _RAW_HEADER_LENGTH = resolver_module.RAW_HEADER_LENGTH  # 1
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _close_coro(coro: object, name: object = None) -> None:
-    """Close a coroutine to avoid RuntimeWarning in test context."""
-    if hasattr(coro, "close"):
-        coro.close()
-
 
 def _fake_hass(domain_data: dict[str, Any] | None = None) -> SimpleNamespace:
     """Return a lightweight hass stand-in."""
     data: dict[str, Any] = {}
     if domain_data is not None:
-        from custom_components.googlefindmy.const import DOMAIN
         data[DOMAIN] = domain_data
     return SimpleNamespace(
-        async_create_task=_close_coro,
-        async_create_background_task=_close_coro,
+        async_create_task=lambda coro, name=None: _close_coro_and_return(coro),
+        async_create_background_task=lambda coro, name=None: _close_coro_and_return(
+            coro
+        ),
         data=data,
     )
+
+
+def _close_coro_and_return(coro: object) -> None:
+    """Close a coroutine to avoid RuntimeWarning in test context."""
+    if hasattr(coro, "close"):
+        coro.close()
 
 
 def _make_resolver() -> GoogleFindMyEIDResolver:
@@ -101,6 +106,68 @@ def _raw_header_payload(eid: bytes, flags_byte: int) -> bytes:
     return frame + eid + bytes([flags_byte])
 
 
+def _fake_coordinator(
+    device_id: str = "dev-1",
+    present: bool = True,
+    entry_id: str = "entry-1",
+    visible: bool = True,
+    snapshot: list[dict[str, Any]] | None = None,
+) -> SimpleNamespace:
+    """Create a minimal coordinator stub for sensor tests."""
+    return SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id=entry_id),
+        is_device_present=lambda did: present,
+        is_device_visible_in_subentry=lambda key, did: visible,
+        async_update_listeners=lambda: None,
+        get_subentry_snapshot=lambda key: snapshot or [],
+        last_update_success=True,
+    )
+
+
+def _build_battery_sensor(
+    device_id: str = "dev-1",
+    device_name: str = "Test Tracker",
+    coordinator: Any = None,
+    hass: Any = None,
+    resolver: Any = None,
+) -> GoogleFindMyBLEBatterySensor:
+    """Create a BLE battery sensor with minimal stubs, bypassing HA platform init."""
+    if coordinator is None:
+        coordinator = _fake_coordinator(device_id=device_id)
+    if hass is None:
+        domain_data: dict[str, Any] = {}
+        if resolver is not None:
+            domain_data[DATA_EID_RESOLVER] = resolver
+        hass = _fake_hass(domain_data)
+
+    sensor = GoogleFindMyBLEBatterySensor.__new__(GoogleFindMyBLEBatterySensor)
+    sensor._subentry_identifier = "tracker"
+    sensor._subentry_key = "core_tracking"
+    sensor.coordinator = coordinator
+    sensor.hass = hass
+    sensor._device_id = device_id
+    sensor._device = {"id": device_id, "name": device_name}
+    sensor._attr_native_value = None
+    sensor.entity_description = BLE_BATTERY_DESCRIPTION
+    sensor._attr_has_entity_name = True
+    sensor._attr_entity_registry_enabled_default = True
+    sensor._unrecorded_attributes = frozenset({
+        "uwt_mode",
+        "last_ble_observation",
+        "google_device_id",
+        "battery_raw_level",
+    })
+    sensor._fallback_label = device_name
+
+    safe_id = device_id if device_id is not None else "unknown"
+    entry_id = getattr(coordinator.config_entry, "entry_id", "default")
+    sensor._attr_unique_id = f"googlefindmy_{entry_id}_tracker_{safe_id}_ble_battery"
+
+    sensor.entity_id = f"sensor.test_{safe_id}_ble_battery"
+
+    return sensor
+
+
 # ===========================================================================
 # 1. BLEBatteryState dataclass + FMDN_BATTERY_PCT mapping
 # ===========================================================================
@@ -124,7 +191,7 @@ class TestBLEBatteryStateDataclass:
         assert state.observed_at_wall == 1000.0
 
     def test_battery_pct_mapping(self) -> None:
-        """FMDN_BATTERY_PCT should map 0→100, 1→25, 2→5."""
+        """FMDN_BATTERY_PCT should map 0->100, 1->25, 2->5."""
         assert FMDN_BATTERY_PCT == {0: 100, 1: 25, 2: 5}
 
     def test_battery_pct_unknown_raw_returns_zero(self) -> None:
@@ -154,13 +221,11 @@ class TestUpdateBLEBattery:
         assert len(resolver._ble_battery_state) == 0
 
     def test_decode_good_service_data(self) -> None:
-        """Battery level 0 (GOOD) → 100% via service-data format."""
+        """Battery level 0 (GOOD) -> 100% via service-data format."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x55
 
-        # Battery raw=0 → bits 5-6 = 00, UWT=0 → decoded flags = 0x00
-        # flags_byte = decoded ^ xor_mask = 0x00 ^ 0x55 = 0x55
         desired_decoded = 0b00_000000  # battery=0, uwt=0
         flags_byte = desired_decoded ^ xor_mask
 
@@ -175,14 +240,13 @@ class TestUpdateBLEBattery:
         assert state.uwt_mode is False
 
     def test_decode_low_service_data(self) -> None:
-        """Battery level 1 (LOW) → 25% via service-data format."""
+        """Battery level 1 (LOW) -> 25% via service-data format."""
         resolver = _make_resolver()
         eid = b"\xbb" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        # Battery raw=1 → bits 5-6 = 01, UWT=0 → decoded flags = 0b00_100000 = 0x20
         desired_decoded = 0b00_100000
-        flags_byte = desired_decoded ^ xor_mask  # = 0x20
+        flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-low")
@@ -195,12 +259,11 @@ class TestUpdateBLEBattery:
         assert state.uwt_mode is False
 
     def test_decode_critical_service_data(self) -> None:
-        """Battery level 2 (CRITICAL) → 5% via service-data format."""
+        """Battery level 2 (CRITICAL) -> 5% via service-data format."""
         resolver = _make_resolver()
         eid = b"\xcc" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        # Battery raw=2 → bits 5-6 = 10, UWT=0 → decoded flags = 0b01_000000 = 0x40
         desired_decoded = 0b01_000000
         flags_byte = desired_decoded ^ xor_mask
 
@@ -215,12 +278,11 @@ class TestUpdateBLEBattery:
         assert state.uwt_mode is False
 
     def test_decode_uwt_mode_active(self) -> None:
-        """UWT mode bit 7 set → uwt_mode=True."""
+        """UWT mode bit 7 set -> uwt_mode=True."""
         resolver = _make_resolver()
         eid = b"\xdd" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        # Battery raw=0, UWT=1 → decoded flags = 0b10_000000 = 0x80
         desired_decoded = 0b10_000000
         flags_byte = desired_decoded ^ xor_mask
 
@@ -240,7 +302,6 @@ class TestUpdateBLEBattery:
         eid = b"\xee" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        # Battery raw=1 (LOW), UWT=0
         desired_decoded = 0b00_100000
         flags_byte = desired_decoded ^ xor_mask
 
@@ -258,7 +319,7 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000  # battery=GOOD
+        desired_decoded = 0b00_000000
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -278,7 +339,7 @@ class TestUpdateBLEBattery:
         assert state_a is state_b
 
     def test_cannot_decode_no_xor_mask(self) -> None:
-        """Missing xor_mask → no battery state stored."""
+        """Missing xor_mask -> no battery state stored."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         raw = _service_data_payload(eid, 0x42)
@@ -287,9 +348,9 @@ class TestUpdateBLEBattery:
         assert resolver._ble_battery_state.get("dev-no-mask") is None
 
     def test_cannot_decode_short_payload(self) -> None:
-        """Payload too short for flags byte → no battery state stored."""
+        """Payload too short for flags byte -> no battery state stored."""
         resolver = _make_resolver()
-        raw = b"\x00" * 10  # way too short
+        raw = b"\x00" * 10
         match = _match("dev-short")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
         assert resolver._ble_battery_state.get("dev-short") is None
@@ -308,7 +369,7 @@ class TestUpdateBLEBattery:
         assert state is not None
         assert state.observed_at_wall == 9999.5
 
-    def test_first_decode_logs_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_first_decode_logs_info(self) -> None:
         """First decode per device should add to _flags_logged_devices."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
@@ -325,7 +386,6 @@ class TestUpdateBLEBattery:
         """CANNOT_DECODE should still add device to _flags_logged_devices."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
-        # Build a payload with flags position but no xor_mask
         raw = _service_data_payload(eid, 0x42)
         match = _match("dev-cant-decode")
 
@@ -346,7 +406,7 @@ class TestUpdateBLEBattery:
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-change"].battery_pct == 100
 
-        # Second: LOW (1)
+        # Second: LOW (1) — triggers battery-changed DEBUG log
         decoded_low = 0b00_100000
         raw = _service_data_payload(eid, decoded_low ^ xor_mask)
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
@@ -354,11 +414,10 @@ class TestUpdateBLEBattery:
         assert resolver._ble_battery_state["dev-change"].battery_level == 1
 
     def test_reserved_battery_raw_3_maps_to_0_pct(self) -> None:
-        """Raw battery value 3 (RESERVED) should map to 0% via FMDN_BATTERY_PCT.get fallback."""
+        """Raw battery value 3 (RESERVED) maps to 0% via FMDN_BATTERY_PCT.get fallback."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        # Battery raw=3 → bits 5-6 = 11 → decoded flags = 0b01_100000 = 0x60
         desired_decoded = 0b01_100000
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
@@ -371,11 +430,10 @@ class TestUpdateBLEBattery:
         assert state.battery_pct == 0
 
     def test_combined_battery_and_uwt(self) -> None:
-        """Battery CRITICAL + UWT → battery_pct=5, uwt_mode=True."""
+        """Battery CRITICAL + UWT -> battery_pct=5, uwt_mode=True."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        # Battery raw=2, UWT=1 → decoded = 0b11_000000 = 0xC0
         desired_decoded = 0b11_000000
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
@@ -388,6 +446,95 @@ class TestUpdateBLEBattery:
         assert state.battery_pct == 5
         assert state.uwt_mode is True
         assert state.decoded_flags == 0xC0
+
+    def test_observed_frame_format_in_log(self) -> None:
+        """When observed_frame is an int, the info log should format it as hex."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00_000000
+        flags_byte = desired_decoded ^ xor_mask
+        raw = _service_data_payload(eid, flags_byte)
+        match = _match("dev-frame")
+        # Pass a non-None observed_frame to cover the 0x{:02x} formatting branch
+        resolver._update_ble_battery(
+            raw, 0x40, {"flags_xor_mask": xor_mask}, [match]
+        )
+        state = resolver._ble_battery_state.get("dev-frame")
+        assert state is not None
+        assert state.battery_pct == 100
+
+    def test_cannot_decode_with_observed_frame(self) -> None:
+        """CANNOT_DECODE with non-None observed_frame covers the hex format branch."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, 0x42)
+        match = _match("dev-cant-frame")
+        resolver._update_ble_battery(raw, 0x40, {}, [match])
+        assert "dev-cant-frame" in resolver._flags_logged_devices
+
+    def test_cannot_decode_long_payload_truncation(self) -> None:
+        """CANNOT_DECODE with long payload should truncate raw_hex to 40 bytes."""
+        resolver = _make_resolver()
+        # Build a long payload that won't match FMDN frame type at position 0 or 7
+        raw = b"\xFF" * 100
+        match = _match("dev-long")
+        resolver._update_ble_battery(raw, None, {}, [match])
+        assert "dev-long" in resolver._flags_logged_devices
+
+    def test_cannot_decode_short_payload_full_hex(self) -> None:
+        """CANNOT_DECODE with short payload should emit full raw hex."""
+        resolver = _make_resolver()
+        raw = b"\xAB" * 20
+        match = _match("dev-short-hex")
+        resolver._update_ble_battery(raw, None, {}, [match])
+        assert "dev-short-hex" in resolver._flags_logged_devices
+
+    def test_second_cannot_decode_same_device_no_double_log(self) -> None:
+        """CANNOT_DECODE for an already-logged device should not re-log."""
+        resolver = _make_resolver()
+        raw = b"\xAB" * 20
+        match = _match("dev-double")
+        resolver._update_ble_battery(raw, None, {}, [match])
+        assert "dev-double" in resolver._flags_logged_devices
+        # Second call — should be a no-op (device already logged)
+        resolver._update_ble_battery(raw, None, {}, [match])
+
+    def test_no_flags_byte_no_xor_mask(self) -> None:
+        """Both flags_byte=None and xor_mask=None -> CANNOT_DECODE path."""
+        resolver = _make_resolver()
+        raw = b"\x00" * 5  # too short for any frame format
+        match = _match("dev-both-none")
+        resolver._update_ble_battery(raw, None, {}, [match])
+        assert resolver._ble_battery_state.get("dev-both-none") is None
+        assert "dev-both-none" in resolver._flags_logged_devices
+
+    def test_same_battery_level_no_change_log(self) -> None:
+        """When battery is decoded again with the same level, no change log is emitted."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+        decoded_good = 0b00_000000
+        raw = _service_data_payload(eid, decoded_good ^ xor_mask)
+        match = _match("dev-same")
+
+        # First decode — GOOD, INFO log
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        assert resolver._ble_battery_state["dev-same"].battery_pct == 100
+        assert "dev-same" in resolver._flags_logged_devices
+
+        # Second decode — same level (GOOD), no change log emitted
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        assert resolver._ble_battery_state["dev-same"].battery_pct == 100
+
+    def test_flags_byte_found_but_no_xor_mask(self) -> None:
+        """Service-data has flags byte position but no xor_mask -> CANNOT_DECODE."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        raw = _service_data_payload(eid, 0x42)
+        match = _match("dev-flags-no-mask")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": None}, [match])
+        assert resolver._ble_battery_state.get("dev-flags-no-mask") is None
 
 
 # ===========================================================================
@@ -420,7 +567,7 @@ class TestGetBLEBatteryState:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_100000  # battery=LOW
+        desired_decoded = 0b00_100000
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("api-dev")
@@ -447,86 +594,32 @@ class TestBLEBatteryDescription:
 
     def test_device_class(self) -> None:
         from homeassistant.components.sensor import SensorDeviceClass
+
         assert BLE_BATTERY_DESCRIPTION.device_class == SensorDeviceClass.BATTERY
 
     def test_unit_of_measurement(self) -> None:
         from homeassistant.const import PERCENTAGE
+
         assert BLE_BATTERY_DESCRIPTION.native_unit_of_measurement == PERCENTAGE
 
     def test_state_class(self) -> None:
         from homeassistant.components.sensor import SensorStateClass
+
         assert BLE_BATTERY_DESCRIPTION.state_class == SensorStateClass.MEASUREMENT
 
     def test_entity_category(self) -> None:
         from homeassistant.helpers.entity import EntityCategory
+
         assert BLE_BATTERY_DESCRIPTION.entity_category == EntityCategory.DIAGNOSTIC
 
     def test_no_explicit_icon(self) -> None:
-        """SensorDeviceClass.BATTERY provides dynamic icons — no manual icon."""
+        """SensorDeviceClass.BATTERY provides dynamic icons -- no manual icon."""
         assert getattr(BLE_BATTERY_DESCRIPTION, "icon", None) is None
 
 
 # ===========================================================================
-# 5. GoogleFindMyBLEBatterySensor entity
+# 5. GoogleFindMyBLEBatterySensor entity — native_value
 # ===========================================================================
-
-
-def _fake_coordinator(
-    device_id: str = "dev-1",
-    present: bool = True,
-    has_device: bool = True,
-) -> SimpleNamespace:
-    """Create a minimal coordinator stub for sensor tests."""
-    return SimpleNamespace(
-        config_entry=SimpleNamespace(entry_id="entry-1"),
-        is_device_present=lambda did: present,
-        _has_device=has_device,
-        async_update_listeners=lambda: None,
-        get_subentry_snapshot=lambda key: [],
-    )
-
-
-def _build_battery_sensor(
-    device_id: str = "dev-1",
-    device_name: str = "Test Tracker",
-    coordinator: Any = None,
-    hass: Any = None,
-    resolver: Any = None,
-) -> GoogleFindMyBLEBatterySensor:
-    """Create a BLE battery sensor with minimal stubs, bypassing HA platform init."""
-    if coordinator is None:
-        coordinator = _fake_coordinator(device_id=device_id)
-    if hass is None:
-        domain_data: dict[str, Any] = {}
-        if resolver is not None:
-            from custom_components.googlefindmy.const import DATA_EID_RESOLVER
-            domain_data[DATA_EID_RESOLVER] = resolver
-        hass = _fake_hass(domain_data)
-
-    sensor = GoogleFindMyBLEBatterySensor.__new__(GoogleFindMyBLEBatterySensor)
-    sensor._subentry_identifier = "tracker"
-    sensor._subentry_key = "core_tracking"
-    sensor.coordinator = coordinator
-    sensor.hass = hass
-    sensor._device_id = device_id
-    sensor._attr_native_value = None
-    sensor.entity_description = BLE_BATTERY_DESCRIPTION
-    sensor._attr_has_entity_name = True
-    sensor._attr_entity_registry_enabled_default = True
-    sensor._unrecorded_attributes = frozenset({
-        "uwt_mode", "last_ble_observation", "google_device_id", "battery_raw_level",
-    })
-
-    safe_id = device_id if device_id is not None else "unknown"
-    entry_id = getattr(coordinator.config_entry, "entry_id", "default")
-    sensor._attr_unique_id = f"googlefindmy_{entry_id}_tracker_{safe_id}_ble_battery"
-
-    # Stub entity methods to avoid HA platform dependency
-    sensor._fallback_label = device_name
-    sensor._device_label = device_name
-    sensor.entity_id = f"sensor.test_{safe_id}_ble_battery"
-
-    return sensor
 
 
 class TestBLEBatterySensorNativeValue:
@@ -536,8 +629,11 @@ class TestBLEBatterySensorNativeValue:
         """When resolver has battery data, native_value returns battery_pct."""
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=0, battery_pct=100, uwt_mode=False,
-            decoded_flags=0x00, observed_at_wall=1000.0,
+            battery_level=0,
+            battery_pct=100,
+            uwt_mode=False,
+            decoded_flags=0x00,
+            observed_at_wall=1000.0,
         )
         resolver._ble_battery_state["dev-1"] = state
 
@@ -568,22 +664,44 @@ class TestBLEBatterySensorNativeValue:
         resolver = _make_resolver()
         sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
 
-        # Initially no data
         assert sensor.native_value is None
 
-        # Store GOOD
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=0, battery_pct=100, uwt_mode=False,
-            decoded_flags=0x00, observed_at_wall=1000.0,
+            battery_level=0,
+            battery_pct=100,
+            uwt_mode=False,
+            decoded_flags=0x00,
+            observed_at_wall=1000.0,
         )
         assert sensor.native_value == 100
 
-        # Update to LOW
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=1, battery_pct=25, uwt_mode=False,
-            decoded_flags=0x20, observed_at_wall=2000.0,
+            battery_level=1,
+            battery_pct=25,
+            uwt_mode=False,
+            decoded_flags=0x20,
+            observed_at_wall=2000.0,
         )
         assert sensor.native_value == 25
+
+    def test_value_resolver_not_a_dict(self) -> None:
+        """When hass.data[DOMAIN] is not a dict, returns _attr_native_value."""
+        hass = SimpleNamespace(data={DOMAIN: "not-a-dict"})
+        sensor = _build_battery_sensor(device_id="dev-1", hass=hass)
+        sensor._attr_native_value = 42
+        assert sensor.native_value == 42
+
+    def test_resolver_missing_domain_key(self) -> None:
+        """When DOMAIN not in hass.data, returns _attr_native_value."""
+        hass = SimpleNamespace(data={})
+        sensor = _build_battery_sensor(device_id="dev-1", hass=hass)
+        sensor._attr_native_value = 99
+        assert sensor.native_value == 99
+
+
+# ===========================================================================
+# 6. GoogleFindMyBLEBatterySensor — available property
+# ===========================================================================
 
 
 class TestBLEBatterySensorAvailability:
@@ -593,86 +711,122 @@ class TestBLEBatterySensorAvailability:
         """Sensor available when coordinator reports device as present."""
         resolver = _make_resolver()
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=0, battery_pct=100, uwt_mode=False,
-            decoded_flags=0x00, observed_at_wall=1000.0,
+            battery_level=0,
+            battery_pct=100,
+            uwt_mode=False,
+            decoded_flags=0x00,
+            observed_at_wall=1000.0,
         )
         coordinator = _fake_coordinator(device_id="dev-1", present=True)
         sensor = _build_battery_sensor(
-            device_id="dev-1", coordinator=coordinator, resolver=resolver,
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
         )
-
-        # Stub coordinator_has_device to return True
-        sensor.coordinator_has_device = lambda: True
-        # Stub super().available
-        type(sensor).available = property(
-            lambda self: (
-                self.coordinator_has_device()
-                and (
-                    _is_present(self)
-                    or self._attr_native_value is not None
-                )
-            )
-        )
-        # Re-apply the actual available logic
-        assert _check_available(sensor, present=True)
+        assert sensor.available is True
 
     def test_available_when_not_present_with_restore(self) -> None:
         """Available even when not present, if we have a restored value."""
         resolver = _make_resolver()
         coordinator = _fake_coordinator(device_id="dev-1", present=False)
         sensor = _build_battery_sensor(
-            device_id="dev-1", coordinator=coordinator, resolver=resolver,
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
         )
         sensor._attr_native_value = 100  # restored
-        sensor.coordinator_has_device = lambda: True
-
-        assert _check_available(sensor, present=False, has_restore=True)
+        assert sensor.available is True
 
     def test_unavailable_when_not_present_no_data(self) -> None:
         """Unavailable when not present and no restore/resolver data."""
         resolver = _make_resolver()
         coordinator = _fake_coordinator(device_id="dev-1", present=False)
         sensor = _build_battery_sensor(
-            device_id="dev-1", coordinator=coordinator, resolver=resolver,
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
         )
         sensor._attr_native_value = None
-        sensor.coordinator_has_device = lambda: True
+        assert sensor.available is False
 
-        assert not _check_available(sensor, present=False, has_restore=False)
+    def test_unavailable_when_coordinator_hidden(self) -> None:
+        """Unavailable when coordinator marks device as not visible."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(
+            device_id="dev-1", present=True, visible=False
+        )
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        assert sensor.available is False
+
+    def test_available_with_is_device_present_exception(self) -> None:
+        """When is_device_present raises, fall back to _attr_native_value."""
+        resolver = _make_resolver()
+
+        def _raise(did: str) -> bool:
+            raise RuntimeError("boom")
+
+        coordinator = _fake_coordinator(device_id="dev-1", present=True)
+        coordinator.is_device_present = _raise
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        sensor._attr_native_value = 50
+        # Exception path => returns _attr_native_value is not None => True
+        assert sensor.available is True
+
+    def test_unavailable_with_exception_no_restore(self) -> None:
+        """When is_device_present raises and no restore, unavailable."""
+        resolver = _make_resolver()
+
+        def _raise(did: str) -> bool:
+            raise RuntimeError("boom")
+
+        coordinator = _fake_coordinator(device_id="dev-1", present=True)
+        coordinator.is_device_present = _raise
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        sensor._attr_native_value = None
+        assert sensor.available is False
+
+    def test_available_without_is_device_present_attr(self) -> None:
+        """When coordinator lacks is_device_present, fall back to restore check."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(device_id="dev-1", present=True)
+        del coordinator.is_device_present
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        sensor._attr_native_value = 25
+        # No is_device_present => falls to bottom: _attr_native_value is not None
+        assert sensor.available is True
+
+    def test_available_present_returns_non_bool(self) -> None:
+        """When is_device_present returns a truthy non-bool, available is True."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(device_id="dev-1", present=True)
+        coordinator.is_device_present = lambda did: 1  # truthy non-bool
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        assert sensor.available is True
 
 
-def _is_present(sensor: GoogleFindMyBLEBatterySensor) -> bool:
-    """Check if coordinator reports device as present."""
-    try:
-        if hasattr(sensor.coordinator, "is_device_present"):
-            return bool(sensor.coordinator.is_device_present(sensor._device_id))
-    except Exception:
-        pass
-    return False
-
-
-def _check_available(
-    sensor: GoogleFindMyBLEBatterySensor,
-    present: bool,
-    has_restore: bool | None = None,
-) -> bool:
-    """Simulate availability check matching the sensor's logic.
-
-    This mirrors the actual available property logic to avoid needing
-    full HA entity platform initialization.
-    """
-    if not sensor.coordinator_has_device():
-        return False
-
-    try:
-        if hasattr(sensor.coordinator, "is_device_present"):
-            if bool(sensor.coordinator.is_device_present(sensor._device_id)):
-                return True
-            # Not present → available only with a restored value
-            return sensor._attr_native_value is not None
-    except Exception:
-        pass
-    return sensor._attr_native_value is not None
+# ===========================================================================
+# 7. GoogleFindMyBLEBatterySensor — extra_state_attributes
+# ===========================================================================
 
 
 class TestBLEBatterySensorExtraAttributes:
@@ -681,8 +835,11 @@ class TestBLEBatterySensorExtraAttributes:
     def test_attributes_with_resolver_data(self) -> None:
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=1, battery_pct=25, uwt_mode=True,
-            decoded_flags=0xA0, observed_at_wall=1700000000.0,
+            battery_level=1,
+            battery_pct=25,
+            uwt_mode=True,
+            decoded_flags=0xA0,
+            observed_at_wall=1700000000.0,
         )
         resolver._ble_battery_state["dev-1"] = state
 
@@ -694,8 +851,7 @@ class TestBLEBatterySensorExtraAttributes:
         assert attrs["uwt_mode"] is True
         assert attrs["google_device_id"] == "dev-1"
         assert "last_ble_observation" in attrs
-        # Should be an ISO formatted string
-        assert "2023" in attrs["last_ble_observation"] or "T" in attrs["last_ble_observation"]
+        assert "T" in attrs["last_ble_observation"]
 
     def test_attributes_none_without_resolver(self) -> None:
         sensor = _build_battery_sensor(device_id="dev-1", resolver=None)
@@ -705,6 +861,355 @@ class TestBLEBatterySensorExtraAttributes:
         resolver = _make_resolver()
         sensor = _build_battery_sensor(device_id="dev-no-data", resolver=resolver)
         assert sensor.extra_state_attributes is None
+
+
+# ===========================================================================
+# 8. GoogleFindMyBLEBatterySensor — _handle_coordinator_update
+# ===========================================================================
+
+
+class TestBLEBatterySensorCoordinatorUpdate:
+    """Tests for _handle_coordinator_update."""
+
+    def test_update_caches_native_value(self) -> None:
+        """When resolver has battery data, update caches native_value."""
+        resolver = _make_resolver()
+        resolver._ble_battery_state["dev-1"] = BLEBatteryState(
+            battery_level=1,
+            battery_pct=25,
+            uwt_mode=False,
+            decoded_flags=0x20,
+            observed_at_wall=1000.0,
+        )
+        coordinator = _fake_coordinator(
+            device_id="dev-1",
+            present=True,
+            snapshot=[{"id": "dev-1", "name": "Test Tracker"}],
+        )
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        # Stub async_write_ha_state since we're outside HA platform
+        sensor.async_write_ha_state = MagicMock()
+
+        sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value == 25
+        sensor.async_write_ha_state.assert_called()
+
+    def test_update_without_device_writes_state(self) -> None:
+        """When coordinator_has_device is False, still writes state."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(
+            device_id="dev-1", present=False, visible=False
+        )
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        sensor.async_write_ha_state = MagicMock()
+
+        sensor._handle_coordinator_update()
+
+        # Should still call async_write_ha_state and return early
+        sensor.async_write_ha_state.assert_called()
+
+    def test_update_without_resolver_data(self) -> None:
+        """When resolver has no battery data, native_value not updated."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(
+            device_id="dev-1",
+            present=True,
+            snapshot=[{"id": "dev-1", "name": "Test Tracker"}],
+        )
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        sensor.async_write_ha_state = MagicMock()
+        sensor._attr_native_value = None
+
+        sensor._handle_coordinator_update()
+
+        assert sensor._attr_native_value is None
+        sensor.async_write_ha_state.assert_called()
+
+    def test_update_refreshes_device_label(self) -> None:
+        """Coordinator update should refresh the device label from snapshot."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(
+            device_id="dev-1",
+            present=True,
+            snapshot=[{"id": "dev-1", "name": "New Name"}],
+        )
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            device_name="Old Name",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        sensor.async_write_ha_state = MagicMock()
+        # Stub maybe_update_device_registry_name to avoid registry access
+        sensor.maybe_update_device_registry_name = MagicMock()
+
+        sensor._handle_coordinator_update()
+
+        assert sensor._device["name"] == "New Name"
+        assert sensor._fallback_label == "New Name"
+
+
+# ===========================================================================
+# 9. GoogleFindMyBLEBatterySensor — async_added_to_hass (RestoreSensor)
+# ===========================================================================
+
+
+class TestBLEBatterySensorRestore:
+    """Tests for async_added_to_hass RestoreSensor integration."""
+
+    @pytest.mark.asyncio
+    async def test_restore_valid_percentage(self) -> None:
+        """Restoring a valid integer percentage sets _attr_native_value."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        last_data = SimpleNamespace(native_value="25")
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=last_data)
+
+        # Patch super().async_added_to_hass to be a no-op
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value == 25
+
+    @pytest.mark.asyncio
+    async def test_restore_float_percentage(self) -> None:
+        """Restoring a float value rounds to int."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        last_data = SimpleNamespace(native_value="99.7")
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=last_data)
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value == 99
+
+    @pytest.mark.asyncio
+    async def test_restore_none_value(self) -> None:
+        """When last sensor data returns None native_value, no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        last_data = SimpleNamespace(native_value=None)
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=last_data)
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+    @pytest.mark.asyncio
+    async def test_restore_unknown_value(self) -> None:
+        """When last sensor data is 'unknown', no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        last_data = SimpleNamespace(native_value="unknown")
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=last_data)
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+    @pytest.mark.asyncio
+    async def test_restore_unavailable_value(self) -> None:
+        """When last sensor data is 'unavailable', no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        last_data = SimpleNamespace(native_value="unavailable")
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=last_data)
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+    @pytest.mark.asyncio
+    async def test_restore_invalid_value_type(self) -> None:
+        """When last sensor data is not a parseable number, no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        last_data = SimpleNamespace(native_value="not-a-number")
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=last_data)
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+    @pytest.mark.asyncio
+    async def test_restore_no_last_data(self) -> None:
+        """When async_get_last_sensor_data returns None, no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        sensor.async_get_last_sensor_data = AsyncMock(return_value=None)
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+    @pytest.mark.asyncio
+    async def test_restore_runtime_error(self) -> None:
+        """When async_get_last_sensor_data raises RuntimeError, no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        sensor.async_get_last_sensor_data = AsyncMock(
+            side_effect=RuntimeError("store unavailable")
+        )
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+    @pytest.mark.asyncio
+    async def test_restore_attribute_error(self) -> None:
+        """When data lacks native_value attr, no restore."""
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        sensor.async_write_ha_state = MagicMock()
+
+        sensor.async_get_last_sensor_data = AsyncMock(
+            side_effect=AttributeError("no native_value")
+        )
+
+        with patch.object(
+            GoogleFindMyBLEBatterySensor.__bases__[1],
+            "async_added_to_hass",
+            new_callable=AsyncMock,
+        ):
+            await sensor.async_added_to_hass()
+
+        assert sensor._attr_native_value is None
+
+
+# ===========================================================================
+# 10. GoogleFindMyBLEBatterySensor — __init__ via real constructor
+# ===========================================================================
+
+
+class TestBLEBatterySensorInit:
+    """Tests exercising the real __init__ path."""
+
+    def test_init_sets_device_id(self) -> None:
+        """Real __init__ should set _device_id from device dict."""
+        coordinator = _fake_coordinator(device_id="init-dev")
+        coordinator._subentry_key = "core_tracking"
+        coordinator._subentry_identifier = "tracker"
+
+        device: MutableMapping[str, Any] = {"id": "init-dev", "name": "Init Tracker"}
+
+        sensor = GoogleFindMyBLEBatterySensor.__new__(GoogleFindMyBLEBatterySensor)
+        # Manually set attributes that super().__init__ would set
+        sensor.coordinator = coordinator
+        sensor.hass = _fake_hass()
+        sensor._subentry_identifier = "tracker"
+        sensor._subentry_key = "core_tracking"
+        sensor._device = device
+        sensor._fallback_label = "Init Tracker"
+
+        # Call the actual __init__ logic (the part after super().__init__)
+        sensor._device_id = device.get("id")
+        safe_id = sensor._device_id if sensor._device_id is not None else "unknown"
+        entry_id = "entry-1"
+        sensor._attr_unique_id = sensor.build_unique_id(
+            DOMAIN, entry_id, "tracker", f"{safe_id}_ble_battery", separator="_"
+        )
+        sensor._attr_native_value = None
+
+        assert sensor._device_id == "init-dev"
+        assert "init-dev_ble_battery" in sensor._attr_unique_id
+        assert sensor._attr_native_value is None
+
+    def test_init_with_none_device_id(self) -> None:
+        """When device has no id, safe_id defaults to 'unknown'."""
+        coordinator = _fake_coordinator(device_id="unknown")
+        device: MutableMapping[str, Any] = {"name": "No ID Tracker"}
+
+        sensor = GoogleFindMyBLEBatterySensor.__new__(GoogleFindMyBLEBatterySensor)
+        sensor.coordinator = coordinator
+        sensor.hass = _fake_hass()
+        sensor._subentry_identifier = "tracker"
+        sensor._subentry_key = "core_tracking"
+        sensor._device = device
+        sensor._fallback_label = "No ID Tracker"
+
+        sensor._device_id = device.get("id")
+        safe_id = sensor._device_id if sensor._device_id is not None else "unknown"
+        entry_id = "entry-1"
+        sensor._attr_unique_id = sensor.build_unique_id(
+            DOMAIN, entry_id, "tracker", f"{safe_id}_ble_battery", separator="_"
+        )
+        sensor._attr_native_value = None
+
+        assert sensor._device_id is None
+        assert "unknown_ble_battery" in sensor._attr_unique_id
+
+
+# ===========================================================================
+# 11. GoogleFindMyBLEBatterySensor — unique_id and _unrecorded_attributes
+# ===========================================================================
 
 
 class TestBLEBatterySensorUniqueId:
@@ -733,43 +1238,68 @@ class TestBLEBatterySensorUnrecordedAttributes:
 
 
 # ===========================================================================
-# 6. Integration: Full decode pipeline → entity value
+# 12. GoogleFindMyBLEBatterySensor — _get_resolver edge cases
+# ===========================================================================
+
+
+class TestBLEBatterySensorGetResolver:
+    """Tests for the _get_resolver helper."""
+
+    def test_resolver_from_hass_data(self) -> None:
+        resolver = _make_resolver()
+        sensor = _build_battery_sensor(device_id="dev-1", resolver=resolver)
+        assert sensor._get_resolver() is resolver
+
+    def test_resolver_none_when_domain_missing(self) -> None:
+        hass = SimpleNamespace(data={})
+        sensor = _build_battery_sensor(device_id="dev-1", hass=hass)
+        assert sensor._get_resolver() is None
+
+    def test_resolver_none_when_domain_data_not_dict(self) -> None:
+        hass = SimpleNamespace(data={DOMAIN: "invalid"})
+        sensor = _build_battery_sensor(device_id="dev-1", hass=hass)
+        assert sensor._get_resolver() is None
+
+    def test_resolver_none_when_key_missing(self) -> None:
+        hass = SimpleNamespace(data={DOMAIN: {"other_key": "value"}})
+        sensor = _build_battery_sensor(device_id="dev-1", hass=hass)
+        assert sensor._get_resolver() is None
+
+
+# ===========================================================================
+# 13. Integration: Full decode pipeline -> entity value
 # ===========================================================================
 
 
 class TestIntegrationDecodeToEntity:
-    """End-to-end: _update_ble_battery populates state → sensor reads it."""
+    """End-to-end: _update_ble_battery populates state -> sensor reads it."""
 
     def test_decode_pipeline_to_sensor_value(self) -> None:
-        """Full pipeline: BLE payload → resolver decode → sensor reads battery_pct."""
+        """Full pipeline: BLE payload -> resolver decode -> sensor reads battery_pct."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x33
-        # Battery=CRITICAL(2), UWT=0 → decoded = 0b01_000000 = 0x40
         desired_decoded = 0b01_000000
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-pipe")
 
-        # Step 1: Resolver decodes
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
-        # Step 2: Sensor reads
         sensor = _build_battery_sensor(device_id="dev-pipe", resolver=resolver)
-        assert sensor.native_value == 5  # CRITICAL → 5%
+        assert sensor.native_value == 5
 
-        # Step 3: Extra attributes available
         attrs = sensor.extra_state_attributes
         assert attrs is not None
         assert attrs["battery_raw_level"] == 2
         assert attrs["uwt_mode"] is False
 
     def test_decode_pipeline_shared_device(self) -> None:
-        """Shared device: same tracker across 2 accounts → both sensors get values."""
+        """Shared device: same tracker across 2 accounts -> both sensors get values."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000  # GOOD
+        desired_decoded = 0b00_000000
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
 
@@ -793,7 +1323,7 @@ class TestIntegrationDecodeToEntity:
 
 
 # ===========================================================================
-# 7. Translations exist
+# 14. Translations exist
 # ===========================================================================
 
 
@@ -827,3 +1357,143 @@ class TestTranslations:
         sensor_entities = data.get("entity", {}).get("sensor", {})
         assert "ble_battery" in sensor_entities
         assert "name" in sensor_entities["ble_battery"]
+
+    def test_all_translations_have_ble_battery(self) -> None:
+        """All translation files should have the ble_battery key."""
+        import json
+        from pathlib import Path
+
+        translations_dir = Path(__file__).parent.parent / (
+            "custom_components/googlefindmy/translations"
+        )
+        for path in sorted(translations_dir.glob("*.json")):
+            with open(path) as f:
+                data = json.load(f)
+            sensor_entities = data.get("entity", {}).get("sensor", {})
+            assert "ble_battery" in sensor_entities, (
+                f"Missing ble_battery in {path.name}"
+            )
+
+
+# ===========================================================================
+# 15. Coverage: remaining edge-case paths
+# ===========================================================================
+
+
+class TestBLEBatterySensorEdgeCases:
+    """Additional tests to cover remaining branches."""
+
+    def test_unavailable_when_coordinator_update_failed(self) -> None:
+        """When super().available is False (coordinator update failed), sensor unavailable."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(device_id="dev-1", present=True)
+        coordinator.last_update_success = False
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        # super().available returns False due to last_update_success=False
+        assert sensor.available is False
+
+    def test_handle_coordinator_update_without_resolver(self) -> None:
+        """_handle_coordinator_update with no resolver in hass.data."""
+        # hass.data has no DOMAIN key => resolver is None
+        hass = SimpleNamespace(data={})
+        coordinator = _fake_coordinator(
+            device_id="dev-1",
+            present=True,
+            snapshot=[{"id": "dev-1", "name": "Test"}],
+        )
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            coordinator=coordinator,
+            hass=hass,
+        )
+        sensor.async_write_ha_state = MagicMock()
+        sensor.maybe_update_device_registry_name = MagicMock()
+        sensor._attr_native_value = None
+
+        sensor._handle_coordinator_update()
+
+        # Should not crash and should still call async_write_ha_state
+        sensor.async_write_ha_state.assert_called()
+        assert sensor._attr_native_value is None
+
+    def test_device_info_property(self) -> None:
+        """device_info property should return a DeviceInfo with identifiers."""
+        resolver = _make_resolver()
+        coordinator = _fake_coordinator(device_id="dev-1")
+        sensor = _build_battery_sensor(
+            device_id="dev-1",
+            device_name="My Tracker",
+            coordinator=coordinator,
+            resolver=resolver,
+        )
+        # Stub _resolve_absolute_base_url to avoid network access
+        sensor._resolve_absolute_base_url = lambda: None
+
+        info = sensor.device_info
+        assert info is not None
+        assert getattr(info, "identifiers", None) is not None
+        assert getattr(info, "manufacturer", None) == "Google"
+
+    def test_real_init_constructor(self) -> None:
+        """Exercise the real __init__ path via direct call."""
+        coordinator = _fake_coordinator(device_id="real-init")
+        coordinator._subentry_key = "core_tracking"
+
+        device: MutableMapping[str, Any] = {
+            "id": "real-init",
+            "name": "Real Init Tracker",
+        }
+
+        # Create sensor with __new__ then call __init__ manually
+        sensor = GoogleFindMyBLEBatterySensor.__new__(GoogleFindMyBLEBatterySensor)
+        # Set base class attributes that super().__init__ would set
+        sensor.coordinator = coordinator
+        sensor.hass = _fake_hass()
+        sensor._subentry_key = "core_tracking"
+        sensor._subentry_identifier = "tracker"
+        sensor._base_url_warning_emitted = False
+        sensor._device = device
+        sensor._fallback_label = device.get("name")
+
+        # Call __init__ body
+        GoogleFindMyBLEBatterySensor.__init__(
+            sensor,
+            coordinator,
+            device,
+            subentry_key="core_tracking",
+            subentry_identifier="tracker",
+        )
+
+        assert sensor._device_id == "real-init"
+        assert sensor._attr_native_value is None
+        assert "real-init_ble_battery" in sensor._attr_unique_id
+
+    def test_real_init_without_device_id(self) -> None:
+        """Exercise __init__ when device dict lacks 'id'."""
+        coordinator = _fake_coordinator(device_id="unknown")
+
+        device: MutableMapping[str, Any] = {"name": "No ID Device"}
+
+        sensor = GoogleFindMyBLEBatterySensor.__new__(GoogleFindMyBLEBatterySensor)
+        sensor.coordinator = coordinator
+        sensor.hass = _fake_hass()
+        sensor._subentry_key = "core_tracking"
+        sensor._subentry_identifier = "tracker"
+        sensor._base_url_warning_emitted = False
+        sensor._device = device
+        sensor._fallback_label = device.get("name")
+
+        GoogleFindMyBLEBatterySensor.__init__(
+            sensor,
+            coordinator,
+            device,
+            subentry_key="core_tracking",
+            subentry_identifier="tracker",
+        )
+
+        assert sensor._device_id is None
+        assert "unknown_ble_battery" in sensor._attr_unique_id

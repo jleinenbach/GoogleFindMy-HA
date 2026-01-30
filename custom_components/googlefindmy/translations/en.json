@@ -552,6 +552,9 @@
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "BLE Battery"
+      },
       "last_seen": {
         "name": "Last Seen",
         "state_attributes": {
@@ -622,9 +625,6 @@
       },
       "stat_fused_updates": {
         "name": "Fused location updates"
-      },
-      "ble_battery": {
-        "name": "BLE Battery"
       }
     }
   },

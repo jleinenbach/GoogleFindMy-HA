@@ -552,6 +552,9 @@
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "BLE-Akku"
+      },
       "last_seen": {
         "name": "Zuletzt gesehen",
         "state_attributes": {
@@ -622,16 +625,13 @@
       },
       "stat_fused_updates": {
         "name": "Fusionierte Standort-Updates"
-      },
-      "ble_battery": {
-        "name": "BLE-Akku"
       }
     }
   },
   "issues": {
     "auth_expired": {
       "title": "Erneute Anmeldung erforderlich",
-      "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen.\n\n**Tipp:** Google kann Tokens widerrufen, wenn Anfragen von einer anderen IP-Adresse oder Region kommen als bei der Token-Erstellung (z.\u00a0B. Token auf einem Laptop erstellt, aber von einem Server oder VPS in einem anderen Land genutzt). Erstelle deine `secrets.json` im selben Netzwerk, in dem Home Assistant läuft, oder verwende dieselbe öffentliche IP-Adresse."
+      "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen.\n\n**Tipp:** Google kann Tokens widerrufen, wenn Anfragen von einer anderen IP-Adresse oder Region kommen als bei der Token-Erstellung (z. B. Token auf einem Laptop erstellt, aber von einem Server oder VPS in einem anderen Land genutzt). Erstelle deine `secrets.json` im selben Netzwerk, in dem Home Assistant läuft, oder verwende dieselbe öffentliche IP-Adresse."
     },
     "fcm_connection_stuck": {
       "title": "FCM Push-Verbindung fehlgeschlagen",
