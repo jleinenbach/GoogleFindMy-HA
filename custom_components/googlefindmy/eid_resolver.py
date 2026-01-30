@@ -2281,20 +2281,14 @@ class GoogleFindMyEIDResolver:
         XOR-mask computation correctly decodes it.  Search for
         ``FMDN_FLAGS_PROBE`` in the Home Assistant log to find output.
         """
-        if observed_frame != FMDN_FRAME_TYPE:
-            return  # only legacy 0x40 frames carry the hashed-flags byte
-
-        xor_mask = metadata.get("flags_xor_mask")
-        if xor_mask is None:
-            return  # no mask stored → cannot decode
-
         device_id: str = matches[0].device_id if matches else "<unknown>"
         if device_id in self._flags_logged_devices:
             return  # already logged for this device
 
-        # Determine the byte offset of the hashed-flags byte depending on
-        # which payload format was matched by _extract_candidates.
         length = len(raw)
+        xor_mask = metadata.get("flags_xor_mask")
+
+        # ---- Determine the hashed-flags byte position ----
         flags_byte: int | None = None
         if (
             length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
@@ -2309,36 +2303,45 @@ class GoogleFindMyEIDResolver:
             # Raw-header format: [frame(1)][EID(20)][flags(1)]
             flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
 
-        if flags_byte is None:
-            # Payload too short or format not recognised → no flags byte
+        # ---- Can we fully decode? ----
+        if flags_byte is not None and xor_mask is not None:
+            decoded = flags_byte ^ xor_mask
+            battery_raw = (decoded >> 5) & 0x03  # bits 5-6
+            uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
+            battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
+            battery_label = battery_labels.get(
+                battery_raw, f"UNKNOWN({battery_raw})"
+            )
             _LOGGER.info(
-                "FMDN_FLAGS_PROBE device=%s payload_len=%d — "
-                "no hashed-flags byte present (payload too short or "
-                "unrecognised format)",
+                "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x xor_mask=0x%02x "
+                "decoded=0x%02x battery=%s(%d) uwt_mode=%s "
+                "observed_frame=%s payload_len=%d",
                 device_id,
+                flags_byte,
+                xor_mask,
+                decoded,
+                battery_label,
+                battery_raw,
+                uwt_mode,
+                f"0x{observed_frame:02x}" if observed_frame is not None else None,
                 length,
             )
-            self._flags_logged_devices.add(device_id)
-            return
+        else:
+            # Log why we could NOT decode — this is the diagnostic path
+            _max_hex = 40
+            raw_hex = raw.hex() if length <= _max_hex else raw[:_max_hex].hex() + "..."
+            _LOGGER.info(
+                "FMDN_FLAGS_PROBE device=%s CANNOT_DECODE "
+                "observed_frame=%s payload_len=%d "
+                "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",
+                device_id,
+                f"0x{observed_frame:02x}" if observed_frame is not None else None,
+                length,
+                xor_mask is not None,
+                flags_byte is not None,
+                raw_hex,
+            )
 
-        decoded = flags_byte ^ xor_mask
-        battery_raw = (decoded >> 5) & 0x03  # bits 5-6
-        uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
-        battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
-        battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
-
-        _LOGGER.info(
-            "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x xor_mask=0x%02x "
-            "decoded=0x%02x battery=%s(%d) uwt_mode=%s payload_len=%d",
-            device_id,
-            flags_byte,
-            xor_mask,
-            decoded,
-            battery_label,
-            battery_raw,
-            uwt_mode,
-            length,
-        )
         self._flags_logged_devices.add(device_id)
 
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
