@@ -319,6 +319,11 @@ The integration provides a couple of Home Assistant Actions for use with automat
 - Check firewall settings for Firebase Cloud Messaging
 - Review FCM debug logs for connection details
 
+### Authentication Expires Repeatedly
+- Google may revoke tokens when API requests originate from a different IP address or geographic region than where the token was originally created.
+- **Common scenario:** `secrets.json` generated on a laptop at home, but Home Assistant runs on a cloud VPS or a server in another country.
+- **Fix:** Run the authentication script on the same network (same public IP) where your Home Assistant instance is located, then re-import the credentials.
+
 ### Rate Limiting
 The integration respects Google's rate limits by:
 - Sequential device polling (one device at a time)

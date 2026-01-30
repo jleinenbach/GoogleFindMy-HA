@@ -628,7 +628,7 @@
   "issues": {
     "auth_expired": {
       "title": "Se requiere volver a iniciar sesión",
-      "description": "La autenticación de Google Find My Device no es válida o ha caducado.\n\n**Entrada:** {entry_title}\n**Cuenta:** {email}\n\nEn la tarjeta de la integración, elige **Reconfigurar** para volver a autenticarte. Si recientemente cambiaste tu contraseña de Google o revocaste tokens, tendrás que iniciar sesión aquí para restablecer la funcionalidad."
+      "description": "La autenticación de Google Find My Device no es válida o ha caducado.\n\n**Entrada:** {entry_title}\n**Cuenta:** {email}\n\nEn la tarjeta de la integración, elige **Reconfigurar** para volver a autenticarte. Si recientemente cambiaste tu contraseña de Google o revocaste tokens, tendrás que iniciar sesión aquí para restablecer la funcionalidad.\n\n**Consejo:** Google puede revocar tokens cuando las solicitudes provienen de una dirección IP o región diferente a la que se usó al crear el token (p. ej. token generado en un portátil pero utilizado desde un servidor o VPS en otro país). Genera tu `secrets.json` en la misma red donde se ejecuta Home Assistant o utiliza la misma dirección IP pública."
     },
     "fcm_connection_stuck": {
       "title": "Conexión push de FCM fallida",

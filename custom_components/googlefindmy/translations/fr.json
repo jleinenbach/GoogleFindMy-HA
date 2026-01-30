@@ -628,7 +628,7 @@
   "issues": {
     "auth_expired": {
       "title": "Une réauthentification est requise",
-      "description": "L’authentification de Google Find My Device n’est plus valide ou a expiré.\n\n**Entrée :** {entry_title}\n**Compte :** {email}\n\nDans la carte de l’intégration, choisissez **Reconfigurer** pour vous réauthentifier. Si vous avez récemment changé votre mot de passe Google ou révoqué des jetons, vous devrez vous reconnecter ici pour rétablir le fonctionnement."
+      "description": "L'authentification de Google Find My Device n'est plus valide ou a expiré.\n\n**Entrée :** {entry_title}\n**Compte :** {email}\n\nDans la carte de l'intégration, choisissez **Reconfigurer** pour vous réauthentifier. Si vous avez récemment changé votre mot de passe Google ou révoqué des jetons, vous devrez vous reconnecter ici pour rétablir le fonctionnement.\n\n**Conseil :** Google peut révoquer les jetons lorsque les requêtes proviennent d'une adresse IP ou d'une région différente de celle où le jeton a été créé (par ex. jeton généré sur un ordinateur portable mais utilisé depuis un serveur ou un VPS dans un autre pays). Générez votre `secrets.json` sur le même réseau que Home Assistant, ou utilisez la même adresse IP publique."
     },
     "fcm_connection_stuck": {
       "title": "Échec de la connexion push FCM",

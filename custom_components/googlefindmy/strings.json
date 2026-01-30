@@ -628,7 +628,7 @@
   "issues": {
     "auth_expired": {
       "title": "Reauthentication required",
-      "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
+      "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality.\n\n**Tip:** Google may revoke tokens when requests come from a different IP address or region than where the token was created (e.g. token generated on a laptop but used from a server or VPS in another country). Generate your `secrets.json` on the same network where Home Assistant runs, or use the same public IP address."
     },
     "fcm_connection_stuck": {
       "title": "FCM Push Connection Failed",
