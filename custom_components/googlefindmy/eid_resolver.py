@@ -2419,23 +2419,14 @@ class GoogleFindMyEIDResolver:
                 observed_frame = frame_type
                 modern_required_length = RAW_HEADER_LENGTH + MODERN_EID_LENGTH
 
-                def _legacy_payload_start() -> int:
-                    """Return the starting index for a legacy-length payload slice."""
-
-                    if (
-                        length == RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
-                        and payload[RAW_HEADER_LENGTH] == 0
-                        and payload[-1] != 0
-                    ):
-                        return RAW_HEADER_LENGTH + 1
-                    return RAW_HEADER_LENGTH
-
                 if frame_type == FMDN_FRAME_TYPE and length >= (
                     RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
                 ):
-                    payload_start = _legacy_payload_start()
                     candidates.append(
-                        payload[payload_start : payload_start + LEGACY_EID_LENGTH]
+                        payload[
+                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                            + LEGACY_EID_LENGTH
+                        ]
                     )
                 elif frame_type == MODERN_FRAME_TYPE:
                     if length >= modern_required_length:
@@ -2451,9 +2442,11 @@ class GoogleFindMyEIDResolver:
                         <= length
                         <= (RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1)
                     ):
-                        payload_start = _legacy_payload_start()
                         candidates.append(
-                            payload[payload_start : payload_start + LEGACY_EID_LENGTH]
+                            payload[
+                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                                + LEGACY_EID_LENGTH
+                            ]
                         )
                     else:
                         allow_sliding_window = length >= modern_required_length - 1
