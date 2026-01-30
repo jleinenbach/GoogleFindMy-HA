@@ -98,9 +98,9 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
-      "entry_type": "Hub feature group",
+      "entry_type": "Groupe de fonctionnalités du hub",
       "initiate_flow": {
-        "user": "Add hub feature group"
+        "user": "Ajouter un groupe de fonctionnalités du hub"
       },
       "step": {
         "user": {
@@ -117,9 +117,9 @@
     },
     "service": {
       "title": "Service Google Find Hub",
-      "entry_type": "Service feature group",
+      "entry_type": "Groupe de fonctionnalités du service",
       "initiate_flow": {
-        "user": "Add service feature group"
+        "user": "Ajouter un groupe de fonctionnalités du service"
       },
       "step": {
         "user": {
@@ -136,9 +136,9 @@
     },
     "core_tracking": {
       "title": "Appareils Google Find My",
-      "entry_type": "Device feature group",
+      "entry_type": "Groupe de fonctionnalités des appareils",
       "initiate_flow": {
-        "user": "Add device feature group"
+        "user": "Ajouter un groupe de fonctionnalités des appareils"
       },
       "step": {
         "user": {
@@ -552,6 +552,9 @@
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "Batterie BLE"
+      },
       "last_seen": {
         "name": "Vu pour la dernière fois",
         "state_attributes": {

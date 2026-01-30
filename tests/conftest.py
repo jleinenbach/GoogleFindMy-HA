@@ -624,6 +624,7 @@ def _stub_homeassistant() -> None:
         "state_changed"  # For FMDN Finder event listening
     )
     const_module.Platform = Platform
+    const_module.PERCENTAGE = "%"
     sys.modules["homeassistant.const"] = const_module
 
     loader_module = ModuleType("homeassistant.loader")
@@ -1718,9 +1719,11 @@ def _stub_homeassistant() -> None:
 
     class SensorDeviceClass:  # pragma: no cover - stub values
         TIMESTAMP = "timestamp"
+        BATTERY = "battery"
 
     class SensorStateClass:  # pragma: no cover - stub values
         TOTAL_INCREASING = "total_increasing"
+        MEASUREMENT = "measurement"
 
     sensor_module.SensorEntity = SensorEntity
     sensor_module.RestoreSensor = RestoreSensor

@@ -552,6 +552,9 @@
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "Bateria BLE"
+      },
       "last_seen": {
         "name": "Visto pela última vez",
         "state_attributes": {
