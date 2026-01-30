@@ -628,7 +628,7 @@
   "issues": {
     "auth_expired": {
       "title": "Wymagane ponowne uwierzytelnienie",
-      "description": "Uwierzytelnienie Google Find My Device jest nieprawidłowe lub wygasło.\n\n**Wpis:** {entry_title}\n**Konto:** {email}\n\nNa karcie integracji wybierz **Skonfiguruj ponownie**, aby przejść proces ponownego logowania. Jeśli niedawno zmieniono hasło do Google lub cofnięto tokeny, musisz zalogować się tutaj ponownie, aby przywrócić działanie."
+      "description": "Uwierzytelnienie Google Find My Device jest nieprawidłowe lub wygasło.\n\n**Wpis:** {entry_title}\n**Konto:** {email}\n\nNa karcie integracji wybierz **Skonfiguruj ponownie**, aby przejść proces ponownego logowania. Jeśli niedawno zmieniono hasło do Google lub cofnięto tokeny, musisz zalogować się tutaj ponownie, aby przywrócić działanie.\n\n**Wskazówka:** Google może unieważnić tokeny, gdy żądania pochodzą z innego adresu IP lub regionu niż ten, w którym token został utworzony (np. token wygenerowany na laptopie, ale używany z serwera lub VPS w innym kraju). Wygeneruj plik `secrets.json` w tej samej sieci, w której działa Home Assistant, lub użyj tego samego publicznego adresu IP."
     },
     "fcm_connection_stuck": {
       "title": "Połączenie push FCM nie powiodło się",

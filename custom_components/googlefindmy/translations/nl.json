@@ -628,7 +628,7 @@
   "issues": {
     "auth_expired": {
       "title": "Herauthenticatie vereist",
-      "description": "Authenticatie voor Google Find My Device is ongeldig of verlopen voor dit item.\n\n**Item:** {entry_title}\n**Account:** {email}\n\nSelecteer **Opnieuw configureren** op de integratiekaart om opnieuw aan te melden. Als je onlangs je Google-wachtwoord hebt gewijzigd of tokens hebt ingetrokken, moet je hier opnieuw authenticeren om de functionaliteit te herstellen."
+      "description": "Authenticatie voor Google Find My Device is ongeldig of verlopen voor dit item.\n\n**Item:** {entry_title}\n**Account:** {email}\n\nSelecteer **Opnieuw configureren** op de integratiekaart om opnieuw aan te melden. Als je onlangs je Google-wachtwoord hebt gewijzigd of tokens hebt ingetrokken, moet je hier opnieuw authenticeren om de functionaliteit te herstellen.\n\n**Tip:** Google kan tokens intrekken wanneer verzoeken afkomstig zijn van een ander IP-adres of een andere regio dan waar het token is aangemaakt (bijv. token gegenereerd op een laptop maar gebruikt vanaf een server of VPS in een ander land). Genereer je `secrets.json` op hetzelfde netwerk waar Home Assistant draait, of gebruik hetzelfde openbare IP-adres."
     },
     "fcm_connection_stuck": {
       "title": "FCM push-verbinding mislukt",

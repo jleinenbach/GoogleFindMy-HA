@@ -628,7 +628,7 @@
   "issues": {
     "auth_expired": {
       "title": "Reautenticação necessária",
-      "description": "A autenticação do Google Find My Device é inválida ou expirou para esta entrada.\n\n**Entrada:** {entry_title}\n**Conta:** {email}\n\nSelecione **Reconfigurar** no cartão da integração para entrar novamente. Se você alterou recentemente sua senha do Google ou revogou tokens, é necessário se autenticar novamente aqui para restaurar a funcionalidade."
+      "description": "A autenticação do Google Find My Device é inválida ou expirou para esta entrada.\n\n**Entrada:** {entry_title}\n**Conta:** {email}\n\nSelecione **Reconfigurar** no cartão da integração para entrar novamente. Se você alterou recentemente sua senha do Google ou revogou tokens, é necessário se autenticar novamente aqui para restaurar a funcionalidade.\n\n**Dica:** O Google pode revogar tokens quando as solicitações vêm de um endereço IP ou região diferente de onde o token foi criado (por ex. token gerado num portátil mas utilizado a partir de um servidor ou VPS noutro país). Gere o ficheiro `secrets.json` na mesma rede onde o Home Assistant está a funcionar ou utilize o mesmo endereço IP público."
     },
     "fcm_connection_stuck": {
       "title": "Falha na conexão push do FCM",
