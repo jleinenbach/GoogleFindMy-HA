@@ -13,11 +13,6 @@ def drain_loop(loop: asyncio.AbstractEventLoop) -> None:
     if loop.is_closed():
         return
 
-    try:
-        current_loop = asyncio.get_event_loop()
-    except RuntimeError:
-        current_loop = None
-
     pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
     for task in pending:
         task.cancel()
@@ -26,6 +21,3 @@ def drain_loop(loop: asyncio.AbstractEventLoop) -> None:
 
     loop.run_until_complete(asyncio.sleep(0))
     loop.close()
-
-    if current_loop is loop:
-        asyncio.set_event_loop(None)

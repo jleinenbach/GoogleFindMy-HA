@@ -239,7 +239,6 @@ def test_polling_path_translates_auth_error(monkeypatch: pytest.MonkeyPatch) -> 
     """SpotAuthPermanentError from the API should surface as ConfigEntryAuthFailed."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass_coordinator = _prepare_coordinator(loop)
     hass_coordinator.api = _AuthErrorAPI()
 

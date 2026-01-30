@@ -149,7 +149,6 @@ def coordinator(
     """Instantiate a coordinator with lightweight stubs for hass/cache."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass = _DummyHass(loop)
     monkeypatch.setattr(
         "custom_components.googlefindmy.coordinator.GoogleFindMyCoordinator._async_load_stats",

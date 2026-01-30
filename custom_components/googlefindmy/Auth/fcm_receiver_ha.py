@@ -985,7 +985,10 @@ class FcmReceiverHA:
 
             pending_creds = self._pending_creds.pop(entry.entry_id, None)
             if pending_creds is not None:
-                asyncio.create_task(cache.set("fcm_credentials", pending_creds))
+                self._dispatch_to_hass_loop(
+                    cache.set("fcm_credentials", pending_creds),
+                    label=f"set_pending_creds_{entry.entry_id}",
+                )
 
             pending_tokens = self._pending_routing_tokens.pop(entry.entry_id, set())
 
@@ -1007,13 +1010,19 @@ class FcmReceiverHA:
                             err,
                         )
 
-                asyncio.create_task(_flush_tokens())
+                self._dispatch_to_hass_loop(
+                    _flush_tokens(),
+                    label=f"flush_pending_tokens_{entry.entry_id}",
+                )
 
         # Mirror any known credentials to this entry cache
         try:
             creds = self.creds.get(entry.entry_id)
             if creds and cache is not None:
-                asyncio.create_task(cache.set("fcm_credentials", creds))
+                self._dispatch_to_hass_loop(
+                    cache.set("fcm_credentials", creds),
+                    label=f"mirror_creds_{entry.entry_id}",
+                )
         except Exception as err:
             _LOGGER.debug("Entry-scoped credentials persistence skipped: %s", err)
 
@@ -1021,7 +1030,10 @@ class FcmReceiverHA:
         token = self.get_fcm_token(entry.entry_id)
         if token:
             self._update_token_routing(token, {entry.entry_id})
-            asyncio.create_task(self._persist_routing_token(entry.entry_id, token))
+            self._dispatch_to_hass_loop(
+                self._persist_routing_token(entry.entry_id, token),
+                label=f"persist_routing_token_{entry.entry_id}",
+            )
 
         # Load persisted routing tokens for this entry and map them as well
         if cache is not None:
@@ -1040,10 +1052,16 @@ class FcmReceiverHA:
                         err,
                     )
 
-            asyncio.create_task(_load_tokens())
+            self._dispatch_to_hass_loop(
+                _load_tokens(),
+                label=f"load_persisted_tokens_{entry.entry_id}",
+            )
 
         # Start supervisor for this entry
-        asyncio.create_task(self._start_supervisor_for_entry(entry.entry_id, cache))
+        self._dispatch_to_hass_loop(
+            self._start_supervisor_for_entry(entry.entry_id, cache),
+            label=f"start_supervisor_{entry.entry_id}",
+        )
 
     def unregister_coordinator(self, coordinator: Any) -> None:
         """Unregister a coordinator (sync; safe for async_on_unload)."""

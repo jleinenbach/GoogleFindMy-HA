@@ -293,7 +293,6 @@ def test_multi_account_end_to_end(
     """Two entries can coexist with isolated caches, services, and FCM tokens."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         if "homeassistant.loader" not in sys.modules:

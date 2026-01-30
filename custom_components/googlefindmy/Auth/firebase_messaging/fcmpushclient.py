@@ -43,7 +43,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientSession
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
 import http_ece
@@ -449,9 +448,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         der_data = urlsafe_b64decode(private_value.encode("ascii") + b"========")
         secret = urlsafe_b64decode(secret_value.encode("ascii") + b"========")
-        privkey = load_der_private_key(
-            der_data, password=None, backend=default_backend()
-        )
+        privkey = load_der_private_key(der_data, password=None)
         decrypted = http_decrypt(
             raw_data,
             salt=salt,

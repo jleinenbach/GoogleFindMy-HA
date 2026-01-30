@@ -135,10 +135,12 @@ if _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
             loop = request.getfixturevalue("event_loop")
         except pytest.FixtureLookupError:
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
             except RuntimeError:
                 loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                # pytest-homeassistant-custom-component calls get_event_loop()
+                # internally, so we must register the loop for compatibility.
+                asyncio.set_event_loop(loop)  # noqa: ASYNC110
                 created_loop = True
         loop.set_debug(True)
         try:
@@ -147,7 +149,7 @@ if _PYTEST_HOMEASSISTANT_PLUGIN_AVAILABLE:
             loop.set_debug(False)
             if created_loop:
                 loop.close()
-                asyncio.set_event_loop(None)
+                asyncio.set_event_loop(None)  # noqa: ASYNC110
 
 
 class _FakeIssueRegistry:
@@ -480,7 +482,6 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
 
     loop = asyncio.new_event_loop()
     try:
-        asyncio.set_event_loop(loop)
         argnames = getattr(pyfuncitem._fixtureinfo, "argnames", ())  # noqa: SLF001 - pytest internals
         if any(
             param.kind is inspect.Parameter.VAR_KEYWORD
@@ -495,7 +496,6 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
             }
         loop.run_until_complete(pyfuncitem.obj(**call_kwargs))
     finally:
-        asyncio.set_event_loop(None)
         loop.close()
     return True
 

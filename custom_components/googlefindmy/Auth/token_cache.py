@@ -200,6 +200,29 @@ class TokenCache:
 
     # ------------------------------- Get/Set ---------------------------------
 
+    def sync_get(self, name: str) -> Any:
+        """Return a value from the in-memory cache (sync, no lock).
+
+        Use from synchronous code paths that cannot await.
+        """
+        return self._data.get(name)
+
+    def sync_pop(self, name: str, default: Any = None) -> Any:
+        """Remove and return a value from the in-memory cache (sync, no lock).
+
+        Use from synchronous code paths that cannot await.
+        """
+        return self._data.pop(name, default)
+
+    def sync_set(self, name: str, value: Any) -> None:
+        """Set a value in the in-memory cache (sync, no lock, no persist).
+
+        Use from synchronous code paths that cannot await.
+        Note: does not trigger deferred save; call ``set()`` from async code
+        when persistence is required.
+        """
+        self._data[name] = value
+
     async def get(self, name: str) -> Any:
         """Return a value from the in-memory cache (non-blocking)."""
         return self._data.get(name)

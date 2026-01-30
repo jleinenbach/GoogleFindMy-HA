@@ -181,7 +181,7 @@ def _prepare_reconfigure_flow(
                 frame_module=frame,
             )
             self.tasks: list[asyncio.Task[Any]] = []
-            self.loop = asyncio.get_event_loop()
+            self.loop = asyncio.get_running_loop()
 
         def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
             task = asyncio.create_task(coro)
