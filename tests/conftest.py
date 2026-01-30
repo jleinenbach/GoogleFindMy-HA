@@ -475,7 +475,7 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
     """Execute asyncio-marked coroutine tests without requiring pytest-asyncio."""
 
     marker = pyfuncitem.get_closest_marker("asyncio")
-    if marker is None or not asyncio.iscoroutinefunction(pyfuncitem.obj):
+    if marker is None or not inspect.iscoroutinefunction(pyfuncitem.obj):
         return None
 
     loop = asyncio.new_event_loop()

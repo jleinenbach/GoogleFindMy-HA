@@ -558,15 +558,14 @@ def set_cached_value(name: str, value: Any | None) -> None:
         RuntimeError: If called inside the event loop (use async variant instead).
     """
     try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                f"Sync `set_cached_value({name!r})` used inside event loop. "
-                "Use `async_set_cached_value` instead."
-            )
+        asyncio.get_running_loop()  # raises RuntimeError if no running loop
     except RuntimeError:
-        # No running loop; proceed synchronously
-        pass
+        pass  # No running loop; proceed synchronously
+    else:
+        raise RuntimeError(
+            f"Sync `set_cached_value({name!r})` used inside event loop. "
+            "Use `async_set_cached_value` instead."
+        )
 
     if not _INSTANCES:
         _LOGGER.warning("Cache not initialized; cannot set '%s'", name)
@@ -593,15 +592,14 @@ def get_cached_value_or_set(name: str, generator: Callable[[], Any]) -> Any:
     """
     # Prevent usage in the event loop
     try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            raise RuntimeError(
-                f"Sync `get_cached_value_or_set({name!r})` used inside event loop. "
-                "Use `async_get_cached_value_or_set` instead."
-            )
+        asyncio.get_running_loop()  # raises RuntimeError if no running loop
     except RuntimeError:
-        # No running loop -> safe to proceed
-        pass
+        pass  # No running loop -> safe to proceed
+    else:
+        raise RuntimeError(
+            f"Sync `get_cached_value_or_set({name!r})` used inside event loop. "
+            "Use `async_get_cached_value_or_set` instead."
+        )
 
     if not _INSTANCES:
         _LOGGER.warning(

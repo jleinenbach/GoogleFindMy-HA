@@ -31,6 +31,7 @@ Methods moved here:
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import logging
 import time
@@ -211,7 +212,10 @@ class PollingOperations:
           return the callable's result to the caller. Only use with functions that
           **return None** and are safe to run on the HA loop.
         """
-        self.hass.loop.call_soon_threadsafe(func, *args, **kwargs)
+        if kwargs:
+            self.hass.loop.call_soon_threadsafe(functools.partial(func, *args, **kwargs))
+        else:
+            self.hass.loop.call_soon_threadsafe(func, *args)
 
     def _dispatch_async_request_refresh(
         self: GoogleFindMyCoordinator, *, task_name: str, log_context: str

@@ -1668,12 +1668,18 @@ class FcmReceiverHA:
         token = self.get_fcm_token(entry_id)
         if token:
             self._update_token_routing(token, {entry_id})
-            asyncio.create_task(self._persist_routing_token(entry_id, token))
+            self._dispatch_to_hass_loop(
+                self._persist_routing_token(entry_id, token),
+                label=f"persist_routing_token_{entry_id}",
+            )
         self._clear_fatal_error_for_entry(
             entry_id, reason="Credentials updated for entry"
         )
 
-        asyncio.create_task(self._async_save_credentials_for_entry(entry_id))
+        self._dispatch_to_hass_loop(
+            self._async_save_credentials_for_entry(entry_id),
+            label=f"save_credentials_{entry_id}",
+        )
         _LOGGER.info("[entry=%s] FCM credentials updated", entry_id)
 
     async def _async_save_credentials_for_entry(self, entry_id: str) -> None:
@@ -1755,7 +1761,7 @@ class FcmReceiverHA:
                     eid,
                     timeout,
                 )
-            except (ConnectionError, TimeoutError) as err:
+            except ConnectionError as err:
                 _LOGGER.debug("[entry=%s] FCM client stop network error: %s", eid, err)
             except Exception as err:  # noqa: BLE001
                 _LOGGER.debug(
