@@ -27,15 +27,20 @@ from custom_components.googlefindmy.SpotApi.CreateBleDevice.util import hours_to
 from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
 
+# Google's server rejects UploadPrecomputedPublicKeyIds requests containing
+# more than 40 devices with "Invalid GRPC payload".  Split into batches.
+# See upstream: https://github.com/leonboe1/GoogleFindMyTools/issues/37
+_MAX_DEVICES_PER_BATCH = 40
+
+
 def refresh_custom_trackers(device_list: DevicesList) -> None:
-    request = UploadPrecomputedPublicKeyIdsRequest()
-    needs_upload = False
+    all_device_eids: list[
+        UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds
+    ] = []
 
     for device in device_list.deviceMetadata:
         # This is a microcontroller
         if is_mcu_tracker(device.information.deviceRegistration):
-            needs_upload = True
-
             new_truncated_ids = (
                 UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds()
             )
@@ -73,19 +78,35 @@ def refresh_custom_trackers(device_list: DevicesList) -> None:
             for next_eid in next_eids:
                 new_truncated_ids.clientList.publicKeyIdInfo.append(next_eid)
 
-            request.deviceEids.append(new_truncated_ids)
+            all_device_eids.append(new_truncated_ids)
 
-    if needs_upload:
-        print(
-            "[UploadPrecomputedPublicKeyIds] Updating your registered "
-            f"{MICRO}C devices..."
-        )
+    if not all_device_eids:
+        return
+
+    total = len(all_device_eids)
+    batches = [
+        all_device_eids[i : i + _MAX_DEVICES_PER_BATCH]
+        for i in range(0, total, _MAX_DEVICES_PER_BATCH)
+    ]
+    num_batches = len(batches)
+
+    print(
+        "[UploadPrecomputedPublicKeyIds] Updating your registered "
+        f"{MICRO}C devices ({total} device(s) in {num_batches} batch(es))..."
+    )
+
+    for batch_idx, batch in enumerate(batches, 1):
+        request = UploadPrecomputedPublicKeyIdsRequest()
+        for device_eids in batch:
+            request.deviceEids.append(device_eids)
         try:
             bytes_data = request.SerializeToString()
             spot_request("UploadPrecomputedPublicKeyIds", bytes_data)
         except Exception as e:
             print(
-                f"[UploadPrecomputedPublicKeyIds] Failed to refresh custom trackers. Please file a bug report. Continuing... {str(e)}"
+                f"[UploadPrecomputedPublicKeyIds] Failed to refresh custom trackers "
+                f"(batch {batch_idx}/{num_batches}). "
+                f"Please file a bug report. Continuing... {str(e)}"
             )
 
 
