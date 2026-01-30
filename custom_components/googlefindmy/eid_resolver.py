@@ -2310,8 +2310,8 @@ class GoogleFindMyEIDResolver:
         it, and persists a :class:`BLEBatteryState` for **every** matched
         device_id (shared-device propagation).
 
-        On first successful decode per device an INFO-level
-        ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates log at
+        On first successful decode per device a DEBUG-level
+        ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates also log at
         DEBUG level only when the battery level changes.
         """
         if not matches:
@@ -2361,9 +2361,9 @@ class GoogleFindMyEIDResolver:
                 prev = self._ble_battery_state.get(match.device_id)
                 self._ble_battery_state[match.device_id] = state
 
-                # First decode per device → INFO probe log
+                # First decode per device → diagnostic probe log
                 if match.device_id not in self._flags_logged_devices:
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x "
                         "xor_mask=0x%02x decoded=0x%02x battery=%s(%d) "
                         "battery_pct=%d uwt_mode=%s observed_frame=%s "
@@ -2393,7 +2393,7 @@ class GoogleFindMyEIDResolver:
                         battery_raw,
                     )
         else:
-            # Cannot decode — log once per device at INFO for diagnostics
+            # Cannot decode — log once per device at DEBUG for diagnostics
             for match in matches:
                 if match.device_id not in self._flags_logged_devices:
                     _max_hex = 40  # noqa: PLR2004
@@ -2402,7 +2402,7 @@ class GoogleFindMyEIDResolver:
                         if length <= _max_hex
                         else raw[:_max_hex].hex() + "..."
                     )
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "FMDN_FLAGS_PROBE device=%s CANNOT_DECODE "
                         "observed_frame=%s payload_len=%d "
                         "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",
