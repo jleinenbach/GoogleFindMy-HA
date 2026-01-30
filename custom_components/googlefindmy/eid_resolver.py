@@ -1456,14 +1456,13 @@ class GoogleFindMyEIDResolver:
                 variants = self._compute_variants(work_item, window)
                 for variant_spec in variants:
                     xor_mask: int | None = None
-                    if not variant_spec.window.semantic_offset:
-                        try:
-                            xor_mask = compute_flags_xor_mask(
-                                variant_spec.key_bytes,
-                                variant_spec.window.timestamp,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
+                    try:
+                        xor_mask = compute_flags_xor_mask(
+                            variant_spec.key_bytes,
+                            variant_spec.window.timestamp,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     for generated in self._generate_eids_from_spec(variant_spec):
                         match = EIDMatch(
                             device_id=work_item.registry_id,
@@ -1478,7 +1477,7 @@ class GoogleFindMyEIDResolver:
                             variant=generated.variant,
                             window=generated.window,
                             advertisement_reversed=generated.is_reversed,
-                            flags_xor_mask=xor_mask if not generated.is_reversed else None,
+                            flags_xor_mask=xor_mask,
                         )
 
         self._lookup, self._lookup_metadata = builder.finalize()
