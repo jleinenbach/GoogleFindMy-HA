@@ -26,7 +26,6 @@ from custom_components.googlefindmy.SpotApi.CreateBleDevice.config import (
 from custom_components.googlefindmy.SpotApi.CreateBleDevice.util import hours_to_seconds
 from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
-
 # Google's server rejects UploadPrecomputedPublicKeyIds requests containing
 # more than 40 devices with "Invalid GRPC payload".  Split into batches.
 # See upstream: https://github.com/leonboe1/GoogleFindMyTools/issues/37
