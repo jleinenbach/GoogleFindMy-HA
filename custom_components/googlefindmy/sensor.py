@@ -498,6 +498,7 @@ async def async_setup_entry(
             return domain_data.get(DATA_EID_RESOLVER)
 
         def _build_entities() -> list[SensorEntity]:
+            """Build sensor entities for visible devices in the current subentry."""
             entities: list[SensorEntity] = []
             resolver = _get_ble_resolver()
             for device in coordinator.get_subentry_snapshot(tracker_scope.subentry_key):
