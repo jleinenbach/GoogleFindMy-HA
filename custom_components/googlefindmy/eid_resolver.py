@@ -35,6 +35,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD_3600,
     EidVariant,
     HeuristicBasis,
+    compute_flags_xor_mask,
     generate_eid_variant,
     generate_heuristic_eid,
 )
@@ -342,7 +343,7 @@ class CacheBuilder:
     lookup: dict[bytes, list[EIDMatch]] = field(default_factory=dict)
     metadata: dict[bytes, dict[str, Any]] = field(default_factory=dict)
 
-    def register_eid(
+    def register_eid(  # noqa: PLR0913
         self,
         eid_bytes: bytes,
         *,
@@ -350,6 +351,7 @@ class CacheBuilder:
         variant: EidVariant,
         window: WindowCandidate,
         advertisement_reversed: bool,
+        flags_xor_mask: int | None = None,
     ) -> None:
         """Register an EID and metadata, supporting multiple matches per EID.
 
@@ -401,7 +403,7 @@ class CacheBuilder:
 
         # Only update metadata if this match is the best (smallest offset)
         if best_match.device_id == match.device_id:
-            self.metadata[eid_bytes] = {
+            meta: dict[str, Any] = {
                 "variant": variant.value,
                 "rotation_timestamp": window.timestamp,
                 "time_offset": match.time_offset,
@@ -409,6 +411,9 @@ class CacheBuilder:
                 "timestamp_bases": timestamp_bases,
                 "advertisement_reversed": advertisement_reversed,
             }
+            if flags_xor_mask is not None:
+                meta["flags_xor_mask"] = flags_xor_mask
+            self.metadata[eid_bytes] = meta
         elif existing_metadata is not None and existing_bases is not None:
             existing_metadata["timestamp_bases"] = existing_bases
 
@@ -648,6 +653,7 @@ class GoogleFindMyEIDResolver:
         init=False, default_factory=dict
     )
     _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
+    _flags_logged_devices: set[str] = field(init=False, default_factory=set)
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -693,6 +699,8 @@ class GoogleFindMyEIDResolver:
             self._learned_heuristic_params = {}
         if not hasattr(self, "_heuristic_miss_log_at"):
             self._heuristic_miss_log_at = {}
+        if not hasattr(self, "_flags_logged_devices"):
+            self._flags_logged_devices = set()
         if not hasattr(self, "_cached_identities"):
             self._cached_identities = []
 
@@ -1447,6 +1455,15 @@ class GoogleFindMyEIDResolver:
             for window in windows:
                 variants = self._compute_variants(work_item, window)
                 for variant_spec in variants:
+                    xor_mask: int | None = None
+                    if not variant_spec.window.semantic_offset:
+                        try:
+                            xor_mask = compute_flags_xor_mask(
+                                variant_spec.key_bytes,
+                                variant_spec.window.timestamp,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     for generated in self._generate_eids_from_spec(variant_spec):
                         match = EIDMatch(
                             device_id=work_item.registry_id,
@@ -1461,6 +1478,7 @@ class GoogleFindMyEIDResolver:
                             variant=generated.variant,
                             window=generated.window,
                             advertisement_reversed=generated.is_reversed,
+                            flags_xor_mask=xor_mask if not generated.is_reversed else None,
                         )
 
         self._lookup, self._lookup_metadata = builder.finalize()
@@ -2206,6 +2224,11 @@ class GoogleFindMyEIDResolver:
                     now=now,
                 )
 
+            # ---------------------------------------------------------
+            # FMDN_FLAGS_PROBE: one-time per-device hashed-flags decode
+            # ---------------------------------------------------------
+            self._log_fmdn_flags_probe(raw, observed_frame, metadata, matches)
+
             return matches, candidate, observed_frame
 
         # =================================================================
@@ -2240,6 +2263,83 @@ class GoogleFindMyEIDResolver:
                 len(self._cached_identities),
             )
         return [], None, None
+
+    # ------------------------------------------------------------------
+    # FMDN_FLAGS_PROBE helper
+    # ------------------------------------------------------------------
+    def _log_fmdn_flags_probe(
+        self,
+        raw: bytes,
+        observed_frame: int | None,
+        metadata: dict[str, Any],
+        matches: list[EIDMatch],
+    ) -> None:
+        """Log decoded FMDN hashed-flags byte once per device (probe only).
+
+        This is a **temporary diagnostic probe** to verify whether real
+        trackers transmit the optional hashed-flags byte and whether our
+        XOR-mask computation correctly decodes it.  Search for
+        ``FMDN_FLAGS_PROBE`` in the Home Assistant log to find output.
+        """
+        if observed_frame != FMDN_FRAME_TYPE:
+            return  # only legacy 0x40 frames carry the hashed-flags byte
+
+        xor_mask = metadata.get("flags_xor_mask")
+        if xor_mask is None:
+            return  # no mask stored → cannot decode
+
+        device_id: str = matches[0].device_id if matches else "<unknown>"
+        if device_id in self._flags_logged_devices:
+            return  # already logged for this device
+
+        # Determine the byte offset of the hashed-flags byte depending on
+        # which payload format was matched by _extract_candidates.
+        length = len(raw)
+        flags_byte: int | None = None
+        if (
+            length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+            and raw[7] == FMDN_FRAME_TYPE
+        ):
+            # Service-data format: [header(7)][frame(1)][EID(20)][flags(1)]
+            flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+        elif (
+            length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+            and raw[0] == FMDN_FRAME_TYPE
+        ):
+            # Raw-header format: [frame(1)][EID(20)][flags(1)]
+            flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+
+        if flags_byte is None:
+            # Payload too short or format not recognised → no flags byte
+            _LOGGER.info(
+                "FMDN_FLAGS_PROBE device=%s payload_len=%d — "
+                "no hashed-flags byte present (payload too short or "
+                "unrecognised format)",
+                device_id,
+                length,
+            )
+            self._flags_logged_devices.add(device_id)
+            return
+
+        decoded = flags_byte ^ xor_mask
+        battery_raw = (decoded >> 5) & 0x03  # bits 5-6
+        uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
+        battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
+        battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
+
+        _LOGGER.info(
+            "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x xor_mask=0x%02x "
+            "decoded=0x%02x battery=%s(%d) uwt_mode=%s payload_len=%d",
+            device_id,
+            flags_byte,
+            xor_mask,
+            decoded,
+            battery_label,
+            battery_raw,
+            uwt_mode,
+            length,
+        )
+        self._flags_logged_devices.add(device_id)
 
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
         """Resolve a scanned payload to a Home Assistant device registry ID.
