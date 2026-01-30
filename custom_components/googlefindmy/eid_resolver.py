@@ -147,6 +147,32 @@ class DecryptionResult:
     metadata: dict[str, Any]
 
 
+@dataclass(slots=True)
+class BLEBatteryState:
+    """Decoded battery state from FMDN hashed-flags BLE advertisement.
+
+    Attributes:
+        battery_level: Raw FMDN value (0=GOOD, 1=LOW, 2=CRITICAL).
+        battery_pct: Mapped percentage (100, 25, 5).
+        uwt_mode: True if Unwanted Tracking mode is active (bit 7).
+        decoded_flags: Fully decoded flags byte (after XOR).
+        observed_at_wall: Wall-clock timestamp of the BLE observation (time.time()).
+    """
+
+    battery_level: int
+    battery_pct: int
+    uwt_mode: bool
+    decoded_flags: int
+    observed_at_wall: float
+
+
+# Mapping from FMDN 2-bit battery level to percentage.
+# Aligned with HA Core convention (cf. homeassistant/components/fitbit/const.py)
+# and HA icon thresholds in homeassistant/helpers/icon.py:
+#   100% → mdi:battery, 25% → mdi:battery-20, 5% → mdi:battery-alert
+FMDN_BATTERY_PCT: dict[int, int] = {0: 100, 1: 25, 2: 5}
+
+
 @runtime_checkable
 class _IdentityProvider(Protocol):
     """Protocol implemented by coordinators that can provide device identities."""
@@ -654,6 +680,9 @@ class GoogleFindMyEIDResolver:
     )
     _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
     _flags_logged_devices: set[str] = field(init=False, default_factory=set)
+    _ble_battery_state: dict[str, BLEBatteryState] = field(
+        init=False, default_factory=dict
+    )
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -701,6 +730,8 @@ class GoogleFindMyEIDResolver:
             self._heuristic_miss_log_at = {}
         if not hasattr(self, "_flags_logged_devices"):
             self._flags_logged_devices = set()
+        if not hasattr(self, "_ble_battery_state"):
+            self._ble_battery_state = {}
         if not hasattr(self, "_cached_identities"):
             self._cached_identities = []
 
@@ -2224,9 +2255,9 @@ class GoogleFindMyEIDResolver:
                 )
 
             # ---------------------------------------------------------
-            # FMDN_FLAGS_PROBE: one-time per-device hashed-flags decode
+            # FMDN BLE battery: decode flags + store per device
             # ---------------------------------------------------------
-            self._log_fmdn_flags_probe(raw, observed_frame, metadata, matches)
+            self._update_ble_battery(raw, observed_frame, metadata, matches)
 
             return matches, candidate, observed_frame
 
@@ -2264,28 +2295,30 @@ class GoogleFindMyEIDResolver:
         return [], None, None
 
     # ------------------------------------------------------------------
-    # FMDN_FLAGS_PROBE helper
+    # FMDN BLE battery decode + store
     # ------------------------------------------------------------------
-    def _log_fmdn_flags_probe(
+    def _update_ble_battery(
         self,
         raw: bytes,
         observed_frame: int | None,
         metadata: dict[str, Any],
         matches: list[EIDMatch],
     ) -> None:
-        """Log decoded FMDN hashed-flags byte once per device (probe only).
+        """Decode the FMDN hashed-flags byte and store battery state.
 
-        This is a **temporary diagnostic probe** to verify whether real
-        trackers transmit the optional hashed-flags byte and whether our
-        XOR-mask computation correctly decodes it.  Search for
-        ``FMDN_FLAGS_PROBE`` in the Home Assistant log to find output.
+        Extracts the optional flags byte from the BLE payload, XOR-decodes
+        it, and persists a :class:`BLEBatteryState` for **every** matched
+        device_id (shared-device propagation).
+
+        On first successful decode per device an INFO-level
+        ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates log at
+        DEBUG level only when the battery level changes.
         """
-        device_id: str = matches[0].device_id if matches else "<unknown>"
-        if device_id in self._flags_logged_devices:
-            return  # already logged for this device
+        if not matches:
+            return
 
         length = len(raw)
-        xor_mask = metadata.get("flags_xor_mask")
+        xor_mask: int | None = metadata.get("flags_xor_mask")
 
         # ---- Determine the hashed-flags byte position ----
         flags_byte: int | None = None
@@ -2302,46 +2335,94 @@ class GoogleFindMyEIDResolver:
             # Raw-header format: [frame(1)][EID(20)][flags(1)]
             flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
 
-        # ---- Can we fully decode? ----
+        # ---- Decode and store ----
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
             battery_raw = (decoded >> 5) & 0x03  # bits 5-6
             uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
+            battery_pct = FMDN_BATTERY_PCT.get(battery_raw, 0)
+            now_wall = time.time()
+
+            state = BLEBatteryState(
+                battery_level=battery_raw,
+                battery_pct=battery_pct,
+                uwt_mode=uwt_mode,
+                decoded_flags=decoded,
+                observed_at_wall=now_wall,
+            )
+
             battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
             battery_label = battery_labels.get(
                 battery_raw, f"UNKNOWN({battery_raw})"
             )
-            _LOGGER.info(
-                "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x xor_mask=0x%02x "
-                "decoded=0x%02x battery=%s(%d) uwt_mode=%s "
-                "observed_frame=%s payload_len=%d",
-                device_id,
-                flags_byte,
-                xor_mask,
-                decoded,
-                battery_label,
-                battery_raw,
-                uwt_mode,
-                f"0x{observed_frame:02x}" if observed_frame is not None else None,
-                length,
-            )
-        else:
-            # Log why we could NOT decode — this is the diagnostic path
-            _max_hex = 40
-            raw_hex = raw.hex() if length <= _max_hex else raw[:_max_hex].hex() + "..."
-            _LOGGER.info(
-                "FMDN_FLAGS_PROBE device=%s CANNOT_DECODE "
-                "observed_frame=%s payload_len=%d "
-                "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",
-                device_id,
-                f"0x{observed_frame:02x}" if observed_frame is not None else None,
-                length,
-                xor_mask is not None,
-                flags_byte is not None,
-                raw_hex,
-            )
 
-        self._flags_logged_devices.add(device_id)
+            # Store for ALL matches (shared-device propagation)
+            for match in matches:
+                prev = self._ble_battery_state.get(match.device_id)
+                self._ble_battery_state[match.device_id] = state
+
+                # First decode per device → INFO probe log
+                if match.device_id not in self._flags_logged_devices:
+                    _LOGGER.info(
+                        "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x "
+                        "xor_mask=0x%02x decoded=0x%02x battery=%s(%d) "
+                        "battery_pct=%d uwt_mode=%s observed_frame=%s "
+                        "payload_len=%d",
+                        match.device_id,
+                        flags_byte,
+                        xor_mask,
+                        decoded,
+                        battery_label,
+                        battery_raw,
+                        battery_pct,
+                        uwt_mode,
+                        f"0x{observed_frame:02x}"
+                        if observed_frame is not None
+                        else None,
+                        length,
+                    )
+                    self._flags_logged_devices.add(match.device_id)
+                elif prev is not None and prev.battery_level != battery_raw:
+                    # Battery level changed → DEBUG log
+                    _LOGGER.debug(
+                        "BLE battery changed device=%s %s(%d)→%s(%d)",
+                        match.device_id,
+                        battery_labels.get(prev.battery_level, "?"),
+                        prev.battery_level,
+                        battery_label,
+                        battery_raw,
+                    )
+        else:
+            # Cannot decode — log once per device at INFO for diagnostics
+            for match in matches:
+                if match.device_id not in self._flags_logged_devices:
+                    _max_hex = 40  # noqa: PLR2004
+                    raw_hex = (
+                        raw.hex()
+                        if length <= _max_hex
+                        else raw[:_max_hex].hex() + "..."
+                    )
+                    _LOGGER.info(
+                        "FMDN_FLAGS_PROBE device=%s CANNOT_DECODE "
+                        "observed_frame=%s payload_len=%d "
+                        "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",
+                        match.device_id,
+                        f"0x{observed_frame:02x}"
+                        if observed_frame is not None
+                        else None,
+                        length,
+                        xor_mask is not None,
+                        flags_byte is not None,
+                        raw_hex,
+                    )
+                    self._flags_logged_devices.add(match.device_id)
+
+    # ------------------------------------------------------------------
+    # Public BLE battery API
+    # ------------------------------------------------------------------
+    def get_ble_battery_state(self, device_id: str) -> BLEBatteryState | None:
+        """Return the last observed BLE battery state for a device, or None."""
+        return self._ble_battery_state.get(device_id)
 
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
         """Resolve a scanned payload to a Home Assistant device registry ID.

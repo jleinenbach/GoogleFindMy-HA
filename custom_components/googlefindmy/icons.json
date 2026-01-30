@@ -44,6 +44,9 @@
       }
     },
     "sensor": {
+      "ble_battery": {
+        "default": "mdi:battery"
+      },
       "last_seen": {
         "default": "mdi:clock-outline"
       },

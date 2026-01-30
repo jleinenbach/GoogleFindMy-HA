@@ -622,6 +622,9 @@
       },
       "stat_fused_updates": {
         "name": "Fusionierte Standort-Updates"
+      },
+      "ble_battery": {
+        "name": "BLE-Akku"
       }
     }
   },
