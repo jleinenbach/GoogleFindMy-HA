@@ -240,8 +240,8 @@ class TestBLEBatteryStateDataclass:
         )
         # Reproduce the log format string from sensor.py _build_entities()
         msg = (
-            "BLE battery sensor created for device=%s (battery=%s%%)"
-            % ("test-dev", state.battery_pct)
+            f"BLE battery sensor created for device={'test-dev'} "
+            f"(battery={state.battery_pct}%)"
         )
         assert "battery=25%" in msg
 
