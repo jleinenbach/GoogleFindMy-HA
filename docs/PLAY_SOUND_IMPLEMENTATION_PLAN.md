@@ -215,34 +215,58 @@ confirmation is optional — the command already went out.
 source. Direct BLE ringing uses HA's built-in bluetooth integration, which wraps
 `bleak` with adapter management, ESPHome proxy routing, and connection retry logic.
 
-### Step 2.1: Add optional `bluetooth` dependency
+### Step 2.1: Add optional bluetooth dependency and FMDN BLE scanner ✅ DONE
 
-**Files:** `manifest.json`
+**Files:** `manifest.json`, `fmdn_finder/ble_scanner.py`, `__init__.py`
+
+#### 2.1a: manifest.json
 
 ```json
 {
-    "dependencies": ["http"],
-    "after_dependencies": ["bluetooth"],
-    "requirements": [
-        "bleak>=0.21.0",
-        "bleak-retry-connector>=3.4.0",
-        ...existing...
-    ]
+    "after_dependencies": ["bluetooth", "recorder"]
 }
 ```
 
 Using `after_dependencies` instead of `dependencies` ensures HA loads the bluetooth
 integration first if available, but does not fail if it's not configured.
 
-Runtime check:
+#### 2.1b: HA-Bluetooth FMDN advertisement listener
+
+A new module `fmdn_finder/ble_scanner.py` registers a callback on HA's built-in
+Bluetooth scanner to capture FMDN advertisements directly (independent of Bermuda):
 
 ```python
-try:
-    from homeassistant.components.bluetooth import async_ble_device_from_address
-    HAS_BLUETOOTH = True
-except ImportError:
-    HAS_BLUETOOTH = False
+# fmdn_finder/ble_scanner.py
+from homeassistant.components.bluetooth import (
+    BluetoothChange, BluetoothScanningMode,
+    BluetoothServiceInfoBleak, async_register_callback,
+)
+
+FEAA_SERVICE_UUID = "0000feaa-0000-1000-8000-00805f9b34fb"  # Eddystone/FMDN
+FE2C_SERVICE_UUID = "0000fe2c-0000-1000-8000-00805f9b34fb"  # Fast Pair
+
+def _fmdn_advertisement_callback(service_info, change):
+    payload = service_info.service_data.get(FEAA_SERVICE_UUID)
+    # or FE2C_SERVICE_UUID — checked for both
+    frame_type = payload[0]  # 0x40 = normal, 0x41 = UTP/separated
+    match = resolver.resolve_eid(payload, ble_address=service_info.address)
+    # → BLEScanInfo stored, MAC+RSSI+frame captured
 ```
+
+**Key properties:**
+- **Always-on** — independent of `FEATURE_FMDN_FINDER_ENABLED` (works without Bermuda)
+- **Zero overhead** — piggybacks on HA's existing scanner (PASSIVE mode)
+- **Graceful degradation** — silently skipped if bluetooth integration not available
+- **Proper lifecycle** — `async_setup_ble_scanner()` / `async_unload_ble_scanner()`
+- **Rate-limited logging** — unresolved EID prefixes logged at most once per 5 minutes
+
+**Data captured per advertisement:**
+| Field | Source | Storage |
+|-------|--------|---------|
+| BLE MAC | `service_info.address` | `BLEScanInfo.ble_address` via `resolve_eid()` |
+| RSSI | `service_info.rssi` | Logged (not stored yet) |
+| Frame type | `payload[0]` (0x40/0x41) | Logged; UWT stored via existing battery decode |
+| Service UUID | FEAA or FE2C | Logged for diagnostics |
 
 ### Step 2.2: Capture current MAC during EID resolution ✅ DONE
 
@@ -271,9 +295,10 @@ def resolve_eid_all(self, eid_bytes: bytes, *, ble_address: str | None = None) -
 **Freshness constraint:** FMDN trackers rotate MAC every ~15 minutes. Only attempt
 BLE ring if `monotonic() - observed_at < 600` (10 minutes).
 
-**Remaining work:** Callers (Bermuda listener, HA scanner) need to pass `ble_address`
-from `BluetoothServiceInfoBleak.address` when calling `resolve_eid()`. The parameter
-is backward-compatible (keyword-only, default `None`).
+**Caller status:**
+- **ble_scanner.py** (HA Bluetooth): Passes `ble_address=service_info.address` ✅
+- **Bermuda listener**: Does NOT call `resolve_eid()` directly (uses state events).
+  Bermuda's own fork would need updating to pass `ble_address` to the resolver API.
 
 ### Step 2.3: Implement FMDN Beacon Actions GATT client
 
@@ -375,10 +400,10 @@ Phase 1.2   Generic protobuf decode attempt
 Phase 1.3  FCM sound callback    Phase 1.4  Define response proto
     |       (async confirmation)     (blocked until samples collected)
     |
-    +-----> Phase 2.1  Add optional bluetooth dependency
+    +-----> Phase 2.1  Bluetooth dep + FMDN BLE scanner ✅ DONE
     |           |
     |           v
-    |       Phase 2.2  Capture MAC from EID resolution  ✅ DONE (infra ready)
+    |       Phase 2.2  BLE scan info storage             ✅ DONE
     |           |
     |           v
     |       Phase 2.3  Implement GATT ring client
@@ -415,7 +440,9 @@ Phase 1.3  FCM sound callback    Phase 1.4  Define response proto
 | 1.2 | New: `PlaySound/response_parser.py` | Generic response decoder (rpc.Status → DeviceUpdate → raw scan) | Pending |
 | 1.3 | `api.py`, `fcm_receiver_ha.py` | FCM sound callback registration + correlation | Pending |
 | 1.4 | `DeviceUpdate.proto`, `DeviceUpdate_pb2.py` | Add `ExecuteActionResponse` (when schema known) | Blocked |
-| 2.1 | `manifest.json` | Add `bluetooth` to `after_dependencies` | Pending |
+| 2.1a | `manifest.json` | Add `bluetooth` to `after_dependencies` | ✅ Done |
+| 2.1b | New: `fmdn_finder/ble_scanner.py` | HA-Bluetooth FMDN advertisement callback | ✅ Done |
+| 2.1b | `__init__.py` | Wire BLE scanner setup/unload | ✅ Done |
 | 2.2 | `eid_resolver.py` | BLEScanInfo dataclass, storage, getter, resolve_eid kwarg | ✅ Done |
 | 2.3 | New: `FMDNCrypto/beacon_actions.py` | GATT ring client | Pending |
 | 2.4 | `api.py` | Cloud + BLE orchestration | Pending |

@@ -7377,13 +7377,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # devices across all loaded config entries via hass.data[DOMAIN][DATA_EID_RESOLVER].
         domain_bucket[DATA_EID_RESOLVER] = eid_resolver
 
-    # Setup FMDN Finder (Bermuda integration listener for location uploads)
-    # This allows Home Assistant to act as a "Finder" in Google's FMDN network,
-    # uploading encrypted location reports for detected FMDN beacons.
-    # Feature is disabled by default via FEATURE_FMDN_FINDER_ENABLED in const.py.
+    # ---- BLE Scanner: optional HA-Bluetooth FMDN advertisement listener ----
+    # Always attempted (independent of FEATURE_FMDN_FINDER_ENABLED).
+    # Collects MAC addresses and frame types for future BLE ringing (Phase 2).
+    # Silently skipped when the bluetooth integration is not loaded.
+    try:
+        from .fmdn_finder.ble_scanner import async_setup_ble_scanner  # noqa: PLC0415
+
+        await async_setup_ble_scanner(hass)
+    except ImportError:
+        _LOGGER.debug("BLE scanner module not available (optional)")
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("BLE scanner setup skipped: %s", err)
+
+    # ---- FMDN Finder: Bermuda listener for location uploads ----
+    # Disabled by default via FEATURE_FMDN_FINDER_ENABLED in const.py.
     if FEATURE_FMDN_FINDER_ENABLED:
         try:
-            from .fmdn_finder import async_setup_fmdn_finder
+            from .fmdn_finder import async_setup_fmdn_finder  # noqa: PLC0415
 
             fmdn_setup_success = await async_setup_fmdn_finder(hass)
             if fmdn_setup_success:
@@ -8117,9 +8128,19 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         except Exception as err:
             _LOGGER.debug("FCM release during parent unload raised: %s", err)
 
+        # Unload BLE scanner (if registered)
+        try:
+            from .fmdn_finder.ble_scanner import async_unload_ble_scanner  # noqa: PLC0415
+
+            await async_unload_ble_scanner(hass)
+        except ImportError:
+            pass
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("BLE scanner unload raised: %s", err)
+
         # Unload FMDN Finder (if enabled)
         try:
-            from .fmdn_finder import async_unload_fmdn_finder
+            from .fmdn_finder import async_unload_fmdn_finder  # noqa: PLC0415
 
             await async_unload_fmdn_finder(hass)
             _LOGGER.debug("FMDN Finder unloaded successfully")
