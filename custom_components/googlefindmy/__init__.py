@@ -8130,7 +8130,9 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
 
         # Unload BLE scanner (if registered)
         try:
-            from .fmdn_finder.ble_scanner import async_unload_ble_scanner  # noqa: PLC0415
+            from .fmdn_finder.ble_scanner import (
+                async_unload_ble_scanner,  # noqa: PLC0415
+            )
 
             await async_unload_ble_scanner(hass)
         except ImportError:
