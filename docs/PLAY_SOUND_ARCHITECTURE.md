@@ -4,8 +4,12 @@
 
 The Play Sound feature allows users to ring a tracked device (FMDN tag, headphones,
 Android phone) from Home Assistant. This document describes the current cloud-only
-implementation, explains why direct BLE ringing does not exist yet, and outlines the
-future architecture that combines both paths.
+implementation, the upstream state (which is identical), and the future architecture
+for direct BLE ringing.
+
+**Key fact:** Neither upstream (leonboe1/GoogleFindMyTools) nor this fork parse the
+Nova API response. Both implementations are fire-and-forget. The response format is
+undocumented by Google and has never been decoded by any known open-source project.
 
 ---
 
@@ -35,60 +39,114 @@ nbe_execute_action.py  create_action_request() + serialize_action_request()
        v
 nova_request.py  async_nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
        |  authenticates (AAS -> ADM token chain)
-       |  POST to Google's Nova endpoint
+       |  POST to https://android.googleapis.com/nova/{NOVA_ACTION_API_SCOPE}
        v
 Google Cloud Server
-       |  routes command via FCM push notification
+       |  routes command via FCM push notification to device
        v
 Target Device rings
+       |  (device sends FCM push back to confirm — see "Two Confirmation Paths")
+       v
+fcm_receiver_ha.py  _handle_notification_async()
+       |  receives DeviceUpdate protobuf via FCM
+       |  BUT: no callback registered for sound events → falls through
+       v
+(Sound confirmation silently lost)
 ```
 
 ### Key Files
 
 | File | Responsibility |
 |------|---------------|
-| `button.py:1043-1130` | `GoogleFindMyPlaySoundButton` — HA button entity, calls service |
-| `button.py:1133-1226` | `GoogleFindMyStopSoundButton` — HA button entity for stop |
-| `api.py:1499-1585` | `async_play_sound()` — entry point, FCM token resolution |
-| `api.py:1587-1684` | `async_stop_sound()` — stop counterpart |
-| `api.py:1438-1456` | `can_play_sound()` — capability check |
-| `api.py:1376-1431` | `is_push_ready()` — FCM transport readiness |
-| `sound_request.py:44-98` | `create_sound_request()` — pure protobuf builder |
-| `nbe_execute_action.py:36-64` | `create_action_request()` — protobuf envelope |
-| `nbe_execute_action.py:66-69` | `serialize_action_request()` — hex serialization |
-| `start_sound_request.py:62-169` | `async_submit_start_sound_request()` — Nova submission |
-| `stop_sound_request.py:63-142` | `async_submit_stop_sound_request()` — Nova submission |
-| `nova_request.py:1202-1632` | `async_nova_request()` — HTTP transport, auth, retry |
+| `button.py` | `GoogleFindMyPlaySoundButton` / `StopSoundButton` — HA button entities |
+| `api.py` | `async_play_sound()` / `async_stop_sound()` — entry point, FCM token resolution |
+| `sound_request.py` | `create_sound_request()` — pure protobuf builder (no I/O) |
+| `nbe_execute_action.py` | `create_action_request()` + `serialize_action_request()` — protobuf envelope |
+| `start_sound_request.py` | `async_submit_start_sound_request()` — Nova submission |
+| `stop_sound_request.py` | `async_submit_stop_sound_request()` — Nova submission |
+| `nova_request.py` | `async_nova_request()` — HTTP transport, auth, retry |
+| `fcm_receiver_ha.py` | FCM push receiver — handles ALL incoming notifications |
 | `_cli_helpers.py` | CLI FCM token resolution for standalone testing |
 
-### Protobuf Structure
+### Protobuf Structure (Request Only — No Response Defined)
 
 ```protobuf
+// DeviceUpdate.proto — only request messages exist
 message ExecuteActionRequest {
-    DeviceScope scope = 1;        // SPOT_DEVICE + canonicId
-    RequestMetadata metadata = 2; // requestUuid, fmdClientUuid, gcmRegistrationId
-    DeviceAction action = 3;      // startSound or stopSound
+    ExecuteActionScope scope = 1;              // SPOT_DEVICE + canonicId
+    ExecuteActionType action = 2;              // startSound or stopSound
+    ExecuteActionRequestMetadata requestMetadata = 3;  // requestUuid, gcmRegistrationId
 }
 
-message DeviceAction {
-    StartSound startSound = 1;    // component = DEVICE_COMPONENT_UNSPECIFIED
-    StopSound stopSound = 2;
+message ExecuteActionType {
+    ExecuteActionLocateTrackerType locateTracker = 30;
+    ExecuteActionSoundType startSound = 31;    // component = DEVICE_COMPONENT_UNSPECIFIED
+    ExecuteActionSoundType stopSound = 32;
 }
+
+// NO ExecuteActionResponse message exists — not in upstream, not here, not in
+// Google's public proto repositories (googleapis/googleapis).
 ```
 
-### What Happens After Submission
+### Two Potential Confirmation Paths (Neither Currently Used)
 
-1. `async_nova_request()` returns `response_hex` (hex-encoded protobuf)
-2. `async_submit_start_sound_request()` returns `(response_hex, request_uuid)`
-3. `api.py` logs success and returns `(True, request_uuid)` to the caller
+There are two distinct mechanisms that could confirm a ring command succeeded:
 
-**Critical gap: The response is never parsed.** The hex payload likely contains a
-Google `rpc.Status` or `ExecuteActionResponse` protobuf, but the code treats any
-non-None response as success. There is no confirmation that:
+#### Path A: Nova HTTP Response (unknown format)
 
-- Google accepted the command
-- The FCM push was delivered
-- The device actually rang
+```
+nova_request.py:1407-1408
+    if status == HTTP_OK:
+        return cast(bytes, content).hex()   # ← raw hex, NEVER PARSED
+```
+
+Google returns a protobuf body on HTTP 200. Its format is unknown:
+- No `ExecuteActionResponse` proto defined anywhere (upstream, Google, or us)
+- `google.internal.spot.v1.SpotService` is deliberately excluded from public APIs
+- `_decode_error_response()` only runs for non-200 statuses
+- `NovaLogicError` is defined but never raised (dead code)
+- Upstream (leonboe1) also ignores this response — return value is discarded
+
+#### Path B: FCM Push Callback (infrastructure exists, not wired for sound)
+
+The LocateTracker flow uses FCM callbacks:
+1. Register callback via `fcm_receiver.async_register_for_location_updates(canonic_id, cb)`
+2. Submit Nova request
+3. Wait for FCM push containing `DeviceUpdate` protobuf with matching `requestUuid`
+
+For sound events, **no callback is registered.** The FCM push arrives via
+`_handle_notification_async()`, but with no registered callback, it falls through
+to `_process_background_update()` which tries to decode it as a location response.
+
+The `DeviceUpdate` protobuf includes `ExecuteActionRequestMetadata.requestUuid` which
+could be matched against the UUID from `start_sound_request()` for correlation.
+
+### What This Means
+
+| What we know | What we don't know |
+|---|---|
+| HTTP 200 = Google accepted the HTTP request | Whether the command reached the device |
+| Response body is non-empty protobuf | The response protobuf schema |
+| FCM push arrives after successful commands | Whether sound-specific FCM pushes differ from location pushes |
+| `requestUuid` is sent and echoed in FCM | Whether the HTTP response also echoes it |
+
+### Upstream Parity
+
+**Our code and upstream are functionally identical for PlaySound:**
+
+| Aspect | Upstream (leonboe1) | This Fork |
+|--------|---------------------|-----------|
+| Nova HTTP response | `return response.content.hex()` — caller discards return value | `return cast(bytes, content).hex()` — caller stores but ignores `_response_hex` |
+| Response parsing | None | None |
+| FCM callback for sound | `lambda x: print(x)` (prints raw hex to stdout) | Not registered |
+| BLE GATT ring code | **None** — only ring key derivation + registration | None |
+| `ExecuteActionResponse` proto | Not defined | Not defined |
+
+**Upstream has no BLE ring implementation.** The ring key derivation in
+`key_derivation.py` and the `ringKey` field in `RegisterBleDeviceRequest` are used
+during device registration to tell Google the ring key. No code exists to use that
+key for direct BLE GATT writes. The BLE ring protocol was independently attempted by
+community members in GitHub Issue #66.
 
 ### Authentication Chain
 
@@ -101,36 +159,40 @@ ADM Token (Android Device Management)
     v  Authorization: Bearer {ADM_TOKEN}
 Nova API Endpoint (NOVA_ACTION_API_SCOPE)
     |
-    v  FCM Push
+    v  FCM Push (device confirms back via FCM)
 Device
 ```
 
 Token management is handled by `AsyncTTLPolicy` in `nova_request.py` with:
 - Proactive refresh before expiry
 - Entry-scoped caching (multi-account safe)
-- Automatic 401 recovery with one retry
+- Automatic 401 recovery with multi-step retry (ADM refresh → AAS+ADM refresh → cooldown)
 
 ---
 
-## What Upstream Has That We Don't: Direct BLE Ringing
+## BLE Ring Protocol (FMDN Specification)
 
 ### FMDN Beacon Actions Characteristic
 
-The FMDN specification defines a GATT characteristic for direct device control:
+The FMDN specification at `developers.google.com/nearby/fast-pair/specifications/extensions/fmdn`
+defines a GATT characteristic for direct device control:
 
 - **UUID:** `FE2C1238-8366-4814-8EB0-01DE32100BEA` (Beacon Actions)
-- **Protocol:** Read nonce -> compute auth -> write command -> read notification
+- **Protocol:** Read nonce → compute auth → write command → read notification
 
 | Data ID | Operation | Description |
 |---------|-----------|-------------|
 | `0x05` | Ring | Start ringing the tracker |
 | `0x06` | Read ringing state | Check if currently ringing |
 
-### BLE Ring Protocol (FMDN Spec)
+**Important:** The FMDN spec documents only the BLE-level protocol. It says nothing
+about server-side APIs, Nova endpoints, or cloud ring commands.
+
+### BLE Ring Protocol Steps
 
 ```
 Step 1: Read Beacon Actions characteristic
-        -> Receive 8-byte random nonce from tracker
+        → Receive 8-byte random nonce from tracker
 
 Step 2: Compute auth key
         ring_key = SHA256(EIK || 0x02)[:8]     # 8-byte truncated
@@ -140,32 +202,37 @@ Step 3: Write to Beacon Actions characteristic
         Payload: [data_id=0x05] [data_len] [8-byte auth_key] [ring_bitmask] [timeout] [volume]
         Where: data_len = len(auth_key) + len(addl_data)  # = 8 + 3 = 11
 
-Step 4: Read notification
-        -> Receive authentication result + status
-        -> GATT response confirms whether command was accepted
+Step 4: Read notification (Table 6 in FMDN spec)
+        → Ring state byte:
+            0x00 = Started successfully
+            0x01 = Failed (auth or hardware)
+            0x02 = Stopped (timeout)
+            0x03 = Stopped (button press)
+            0x04 = Stopped (GATT command)
+        → Components bitmask + remaining time
 ```
 
-### Known Bug in Upstream BLE Implementation (Issue #66)
+### Known Bug in Community BLE Ring Attempt (Issue #66)
 
-The upstream GoogleFindMyTools library has a bug in step 3:
+A community member (mik-laj) attempted direct BLE ringing using a Python script with
+`bleak`. User DefenestratingWizard identified a bug in step 3:
 
 ```
-BUG:     data_len = len(addl_data)              # = 3 (missing auth key length!)
-CORRECT: data_len = len(addl_data) + len(auth_key)  # = 3 + 8 = 11
+BUG:     data_len = len(addl_data)                     # = 3 (missing auth key length!)
+CORRECT: data_len = len(auth_key) + len(addl_data)     # = 8 + 3 = 11
 ```
 
-This causes ATT Error `0x81` (application-level rejection). Our integration is not
-affected because we do not implement BLE GATT ringing. However, if BLE ringing is
-added in the future, this calculation must be correct.
+This causes ATT Error `0x81` (application-level rejection). **Neither upstream
+(leonboe1) nor this fork are affected** — no BLE GATT ring code exists in either
+codebase. The bug exists only in the community member's independent script.
 
-### Why Our Integration Is Cloud-Only
+### Why Neither Codebase Has BLE Ringing
 
-1. **Design context:** HA servers are typically not BLE-adjacent to tracked devices.
-   The Nova cloud API works globally regardless of physical proximity.
-2. **No `bleak` dependency:** The `manifest.json` declares no `bluetooth` dependency
-   and does not include `bleak` or `bleak-retry-connector` in requirements.
-3. **Upstream focus:** The upstream library's BLE code targets CLI/desktop use where
-   a Bluetooth adapter is directly available.
+1. **Upstream is CLI-focused** — designed for OAuth + Nova API interactions, not BLE
+2. **This fork is HA-focused** — HA servers are typically not BLE-adjacent to trackers
+3. **Ring key is registered, not used** — `key_derivation.py` derives the ring key
+   and `create_ble_device.py` sends it to Google during registration, but no code
+   uses it for local BLE commands
 
 ---
 

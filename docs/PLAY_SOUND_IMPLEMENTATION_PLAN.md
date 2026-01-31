@@ -5,39 +5,42 @@
 Transform Play Sound from fire-and-forget cloud-only into a robust two-path system
 with response validation (cloud) and direct BLE ringing (local fallback).
 
+## Context: What Upstream and Google Give Us
+
+Before planning, these facts constrain the design:
+
+1. **No `ExecuteActionResponse` proto exists** — not in upstream, not in Google's
+   public proto repos (`googleapis/googleapis`). The `google.internal.spot.v1.SpotService`
+   namespace is deliberately excluded from public APIs.
+2. **Upstream discards the Nova HTTP response** — `nova_request()` returns hex, but
+   the caller in `start_sound_request.py` never assigns the return value.
+3. **Our code stores but ignores the response** — `_response_hex` is unpacked at
+   `api.py:1538` but never read or validated.
+4. **FCM callback infrastructure exists** — `fcm_receiver_ha.py` can register
+   per-device callbacks (used by LocateTracker), but no callback is registered for
+   sound events. Sound FCM pushes arrive and fall through silently.
+5. **Google's FMDN spec documents only BLE-level ringing** — the Beacon Actions
+   characteristic protocol is well-specified, but the cloud-side API is not.
+6. **Neither upstream nor any known project has BLE GATT ring code** — only community
+   members attempted it independently (Issue #66), finding a `data_len` bug.
+
 ---
 
-## Phase 1: Parse Nova Response (prerequisite for everything else)
+## Phase 1: Response Capture and Parsing
 
-### Problem
+### Step 1.1: Log raw Nova HTTP response and FCM sound pushes
 
-The Nova API returns a protobuf response on HTTP 200, but our code discards it:
+**Files:** `api.py`, `fcm_receiver_ha.py`
 
-```python
-# nova_request.py:1407-1408
-if status == HTTP_OK:
-    return cast(bytes, content).hex()   # raw hex, never parsed
+Two independent data sources must be captured:
 
-# api.py:1538-1540
-_response_hex, request_uuid = result    # _response_hex is ignored
-return (True, request_uuid)             # "True" = HTTP 200, nothing more
-```
-
-There is no `ExecuteActionResponse` message defined in `DeviceUpdate.proto`. The
-response format is unknown and must be reverse-engineered from live traffic.
-
-### Step 1.1: Capture and log the response payload
-
-**Files:** `api.py`
-
-Add structured debug logging of the raw response hex in `async_play_sound()` and
-`async_stop_sound()` so users/developers can inspect what Google returns:
+#### 1.1a: Nova HTTP response hex (in `api.py`)
 
 ```python
-# api.py — async_play_sound()
+# api.py — async_play_sound(), replace lines 1538-1540
 response_hex, request_uuid = result
 _LOGGER.debug(
-    "Play Sound response for %s (uuid=%s): %d bytes: %s",
+    "Play Sound Nova response for %s (uuid=%s): %d bytes: %s",
     device_id,
     request_uuid[:8] if request_uuid else "none",
     len(response_hex) // 2,
@@ -45,71 +48,138 @@ _LOGGER.debug(
 )
 ```
 
-**Acceptance:** Response hex visible in HA debug logs when Play Sound is triggered.
+#### 1.1b: FCM push for sound events (in `fcm_receiver_ha.py`)
 
-### Step 1.2: Attempt generic protobuf decode of the response
-
-**Files:** `api.py` or new `NovaApi/ExecuteAction/PlaySound/response_parser.py`
-
-Since there is no `ExecuteActionResponse` proto definition, try:
-
-1. **google.rpc.Status** — already vendored in `RpcStatus_pb2.py`. If the success
-   response is also an rpc.Status with code=0, we get confirmation for free.
-2. **Raw protobuf field scan** — use `google.protobuf.descriptor_pool` or raw varint
-   parsing to identify field numbers and types without a schema.
-3. **Upstream traffic analysis** — check if GoogleFindMyTools upstream has decoded
-   the response in any branch or issue.
+Currently, FCM notifications with no registered callback fall through to
+`_process_background_update()` which tries to parse them as location responses.
+Add diagnostic logging before the fallthrough:
 
 ```python
+# fcm_receiver_ha.py — _handle_notification_async(), after callback check
+if not cb:
+    _LOGGER.debug(
+        "FCM notification for %s has no registered callback "
+        "(may be sound confirmation): payload_len=%d, hex_prefix=%s",
+        canonic_id[:8],
+        len(hex_string),
+        hex_string[:100],
+    )
+```
+
+**Acceptance:** Both data streams visible in HA debug logs during Play Sound.
+Users with real devices can provide sample payloads for schema analysis.
+
+### Step 1.2: Attempt generic protobuf decode
+
+**Files:** New `NovaApi/ExecuteAction/PlaySound/response_parser.py`
+
+Since the response schema is unknown, the parser must be speculative:
+
+```python
+from enum import Enum
+from dataclasses import dataclass
+
+class ActionStatus(Enum):
+    ACCEPTED = "accepted"        # Server confirmed command routing
+    SUBMITTED = "submitted"      # HTTP 200 but response unparseable
+    REJECTED = "rejected"        # Server returned error in response body
+    UNKNOWN = "unknown"          # Could not determine
+
+@dataclass(frozen=True)
+class ActionResult:
+    status: ActionStatus
+    request_uuid: str | None = None
+    raw_hex: str = ""
+    detail: str = ""
+
 def parse_action_response(response_hex: str) -> ActionResult:
     """Best-effort parse of Nova ExecuteAction response.
 
-    Returns:
-        ActionResult with status (ACCEPTED / REJECTED / UNKNOWN) and
-        optional detail fields.
+    Strategy (ordered by likelihood):
+    1. Try google.rpc.Status — already vendored in RpcStatus_pb2.py.
+       If code=0, that means OK. If code>0, extract error message.
+    2. Try DeviceUpdate — the FCM response format. If the HTTP response
+       echoes the same structure, we get requestUuid for correlation.
+    3. Raw varint field scan — identify field numbers and wire types
+       without a schema. Log discovered structure for future proto def.
+    4. Fall through to SUBMITTED with raw hex for manual inspection.
     """
 ```
 
-**Acceptance:** For a successful Play Sound, the parser returns a structured result.
-For an unknown format, it returns `UNKNOWN` with the raw hex for logging.
+**Why google.rpc.Status first:** It's the standard Google API response wrapper.
+It's already imported in `nova_request.py:259`. If the success response is
+`Status{code: 0}`, we have confirmation with zero reverse engineering.
 
-### Step 1.3: Surface response status to the HA entity
+**Why DeviceUpdate second:** The FCM callback response is a `DeviceUpdate` protobuf.
+If the HTTP response uses the same message type, `parse_device_update_protobuf()`
+already works and we get `requestUuid` matching.
 
-**Files:** `api.py`, `button.py`
+**Acceptance:** Parser returns structured `ActionResult` for any input.
 
-Change `async_play_sound()` return type to carry the parsed result:
+### Step 1.3: Wire FCM callback for sound event correlation
+
+**Files:** `api.py`, `fcm_receiver_ha.py`
+
+This is the higher-value confirmation path. The infrastructure already exists:
 
 ```python
-# Before:
-async def async_play_sound(self, device_id: str) -> tuple[bool, str | None]:
+# Pattern from location_request.py (already working):
+callback = _make_location_callback(...)
+await fcm_receiver.async_register_for_location_updates(canonic_id, callback)
+# ... submit Nova request ...
+await asyncio.wait_for(ctx.event.wait(), timeout=30)
+# ... unregister callback ...
+```
 
-# After:
+For sound events, register a lightweight callback that:
+1. Receives the FCM push containing `DeviceUpdate` with `requestUuid`
+2. Validates `requestUuid` matches the submitted request
+3. Signals an `asyncio.Event` to confirm delivery
+
+```python
+# api.py — async_play_sound() conceptual flow:
 async def async_play_sound(self, device_id: str) -> PlaySoundResult:
-    """Returns PlaySoundResult with .success, .request_uuid, .server_status"""
+    request_uuid = generate_random_uuid()
+
+    # Register short-lived FCM callback for this device
+    confirmation = asyncio.Event()
+    await fcm_receiver.async_register_for_sound_updates(
+        device_id, lambda cid, hex_resp: confirmation.set()
+    )
+
+    try:
+        # Submit cloud command
+        response_hex = await self._submit_sound_request(device_id, request_uuid)
+        nova_result = parse_action_response(response_hex)
+
+        # Wait briefly for FCM confirmation (non-blocking, best-effort)
+        try:
+            await asyncio.wait_for(confirmation.wait(), timeout=10.0)
+            return PlaySoundResult(status=CONFIRMED, ...)
+        except asyncio.TimeoutError:
+            return PlaySoundResult(status=SUBMITTED, ...)  # no FCM ack
+    finally:
+        await fcm_receiver.async_unregister_for_sound_updates(device_id)
 ```
 
-The button entity can then set `extra_state_attributes` with:
-- `last_ring_status`: "accepted" / "submitted" / "rejected" / "error"
-- `last_ring_uuid`: request UUID for correlation
-- `last_ring_timestamp`: ISO timestamp
+**Key difference from LocateTracker:** The sound callback is fire-and-forget with a
+short timeout. LocateTracker blocks for up to 30s waiting for location data. Sound
+confirmation is optional — the command already went out.
 
-**Acceptance:** HA entity attributes reflect whether the command was server-acknowledged.
+**Acceptance:** Play Sound returns `CONFIRMED` when FCM push arrives within timeout,
+`SUBMITTED` when only HTTP 200 was received.
 
-### Step 1.4: Define `ExecuteActionResponse` proto (if structure identified)
+### Step 1.4: Define proto and surface to entity (once schema is known)
 
-**Files:** `ProtoDecoders/DeviceUpdate.proto`, regenerate `DeviceUpdate_pb2.py`
+**Blocked until** sample payloads from step 1.1 are collected and analyzed.
 
-Once the response structure is known from step 1.2, add the message definition:
-
-```protobuf
-message ExecuteActionResponse {
-    int32 status = 1;           // hypothetical
-    string requestUuid = 2;     // echo back
-    // ... discovered fields
-}
-```
-
-**Acceptance:** Response can be parsed into a typed protobuf message.
+**Files (when ready):**
+- `ProtoDecoders/DeviceUpdate.proto` — add `ExecuteActionResponse`
+- `api.py` — change return type to `PlaySoundResult`
+- `button.py` — expose `extra_state_attributes`:
+  - `last_ring_status`: "confirmed" / "submitted" / "rejected" / "error"
+  - `last_ring_uuid`: request UUID
+  - `last_ring_timestamp`: ISO timestamp
 
 ---
 
@@ -117,7 +187,7 @@ message ExecuteActionResponse {
 
 ### Prerequisites
 
-- Phase 1 complete (response parsing established)
+- Phase 1 steps 1.1-1.3 complete (confirmation infrastructure established)
 - Understanding of current BLE MAC from EID resolution
 - `bluetooth` dependency added to `manifest.json`
 
@@ -129,22 +199,20 @@ message ExecuteActionResponse {
 | Active connections | No | Yes (via `bleak-retry-connector`) |
 | ESPHome proxy | RSSI only | Full GATT proxy (active mode) |
 | Purpose | Room presence | Full BLE stack |
+| Used by | This integration (passive EID relay) | SwitchBot, Yale Lock, HomeKit BLE |
 
 **Bermuda is not involved in BLE ringing.** It remains a passive location signal
-source. Direct BLE ringing uses HA's built-in bluetooth integration, which:
+source. Direct BLE ringing uses HA's built-in bluetooth integration, which wraps
+`bleak` with adapter management, ESPHome proxy routing, and connection retry logic.
 
-- Wraps `bleak` (Python BLE library) with HA adapter management
-- Supports transparent routing through ESPHome BLE proxies (active mode)
-- Provides `async_ble_device_from_address()` to resolve BLE devices
-- Is used by SwitchBot, Yale Lock, and other HA integrations for GATT writes
-
-### Step 2.1: Add `bluetooth` dependency
+### Step 2.1: Add optional `bluetooth` dependency
 
 **Files:** `manifest.json`
 
 ```json
 {
-    "dependencies": ["http", "bluetooth"],
+    "dependencies": ["http"],
+    "after_dependencies": ["bluetooth"],
     "requirements": [
         "bleak>=0.21.0",
         "bleak-retry-connector>=3.4.0",
@@ -153,11 +221,10 @@ source. Direct BLE ringing uses HA's built-in bluetooth integration, which:
 }
 ```
 
-**Risk:** This makes the integration depend on a Bluetooth adapter being configured
-in HA. Users without BLE should still work (cloud-only fallback). The `bluetooth`
-dependency must be made optional or the BLE ring path must gracefully degrade.
+Using `after_dependencies` instead of `dependencies` ensures HA loads the bluetooth
+integration first if available, but does not fail if it's not configured.
 
-**Mitigation:** Check `bluetooth` availability at runtime:
+Runtime check:
 
 ```python
 try:
@@ -171,162 +238,122 @@ except ImportError:
 
 **Files:** `eid_resolver.py`
 
-The EID resolver already processes BLE advertisements from Bermuda. Each
-advertisement contains the current (rotated) MAC address. Store it:
+The EID resolver processes BLE advertisements from Bermuda/HA scanner. Each
+advertisement contains the current (rotated) MAC address. Store it alongside the
+EID match:
 
 ```python
-# During EID match:
-match = EIDMatch(
-    device_id=registry_id,
-    canonical_id=canonical_id,
-    ble_address=service_info.address,      # NEW: current MAC
-    ble_address_timestamp=time.time(),     # NEW: when seen
-)
+@dataclass
+class EIDMatch:
+    device_id: str          # registry_id
+    canonical_id: str       # canonical_id
+    ble_address: str | None = None        # NEW: current rotated MAC
+    ble_address_seen: float | None = None # NEW: monotonic timestamp
 ```
 
-**Challenge:** FMDN trackers rotate MAC every ~15 minutes. The stored MAC is valid
-only within the rotation window. A ring attempt with a stale MAC will fail at the
-BLE connection stage (device not found / wrong device).
-
-**Mitigation:** Only attempt BLE ring if `ble_address_timestamp` is < 10 minutes old.
+**Freshness constraint:** FMDN trackers rotate MAC every ~15 minutes. Only attempt
+BLE ring if `monotonic() - ble_address_seen < 600` (10 minutes).
 
 ### Step 2.3: Implement FMDN Beacon Actions GATT client
 
 **Files:** New `FMDNCrypto/beacon_actions.py`
 
-Implement the FMDN ring protocol per the spec:
-
 ```python
 BEACON_ACTIONS_UUID = "FE2C1238-8366-4814-8EB0-01DE32100BEA"
+
+DATA_ID_RING = 0x05
+DATA_ID_READ_RING_STATE = 0x06
+
+class RingState(Enum):
+    STARTED = 0x00
+    FAILED = 0x01
+    STOPPED_TIMEOUT = 0x02
+    STOPPED_BUTTON = 0x03
+    STOPPED_GATT = 0x04
+
+@dataclass(frozen=True)
+class BleRingResult:
+    success: bool
+    state: RingState | None = None
+    detail: str = ""
 
 async def async_ring_via_ble(
     hass: HomeAssistant,
     ble_address: str,
-    ring_key: bytes,        # 8 bytes from key_derivation.py
+    ring_key: bytes,        # 8 bytes from SHA256(EIK || 0x02)[:8]
     *,
-    volume: int = 3,        # 0-3
+    volume: int = 3,        # 0=silent, 3=max
     timeout_ds: int = 100,  # deciseconds (10s default)
     component: int = 0xFF,  # all components
 ) -> BleRingResult:
-    """Ring an FMDN tracker via direct BLE GATT write.
-
-    Protocol:
-        1. Connect to tracker
-        2. Read Beacon Actions characteristic → 8-byte nonce
-        3. Compute one-time auth: HMAC-SHA256(ring_key, nonce || 0x05 || addl)[:8]
-        4. Write ring command: [0x05] [data_len=11] [8B auth] [component] [timeout] [volume]
-        5. Read notification → status byte
-        6. Disconnect
+    """Ring tracker via direct BLE GATT write.
 
     IMPORTANT: data_len = len(auth_key) + len(addl_data) = 8 + 3 = 11
-               (Upstream bug #66 used len(addl_data) only = 3, causing ATT Error 0x81)
+               (Issue #66 bug used len(addl_data)=3, causing ATT Error 0x81)
     """
 ```
 
-**Ring key is already derived** in `key_derivation.py:58`:
-```python
-self.ringing_key = calculate_truncated_sha256(identity_key_bytes, 0x02)  # 8 bytes
-```
+**Ring key derivation** is already in `key_derivation.py:58` — derive on-the-fly
+from EIK at ring time: `SHA256(EIK || 0x02)[:8]`.
 
-Currently only used during device registration. Must be stored/accessible for
-runtime ring operations.
-
-### Step 2.4: Orchestrate cloud + BLE ring with fallback
+### Step 2.4: Orchestrate cloud + BLE ring
 
 **Files:** `api.py`
 
 ```python
 async def async_play_sound(self, device_id: str) -> PlaySoundResult:
-    # 1. Always try cloud first (global reach)
+    # 1. Always try cloud first (global reach, no proximity needed)
     cloud_result = await self._async_play_sound_cloud(device_id)
 
     if cloud_result.confirmed:
         return cloud_result
 
     # 2. If cloud unconfirmed and BLE available, try direct
-    if HAS_BLUETOOTH and self._has_recent_ble_address(device_id):
+    if HAS_BLUETOOTH and self._has_fresh_ble_address(device_id):
         ble_result = await self._async_play_sound_ble(device_id)
-        if ble_result.confirmed:
-            return ble_result
+        if ble_result.success:
+            return PlaySoundResult(
+                status=ActionStatus.CONFIRMED,
+                source="ble",
+                ble_state=ble_result.state,
+            )
 
     # 3. Return best available result
     return cloud_result  # "submitted" but unconfirmed
 ```
-
-**Why cloud first:** Cloud works globally. BLE only works if tracker is in range.
-Most users won't have BLE proximity. Cloud-first means the common case is fast.
-
-**Why BLE fallback matters:** When the tracker is at home (most common "where are my
-keys?" scenario), BLE is faster and provides hardware confirmation.
-
-### Step 2.5: Ring key availability at runtime
-
-**Files:** `coordinator/identity.py`, `api.py`
-
-The ring key must be accessible when `async_play_sound_ble()` is called.
-Options:
-
-1. **Derive on-the-fly** from stored EIK: `SHA256(EIK || 0x02)[:8]`
-   - EIK is already available via `async_retrieve_identity_key()`
-   - Adds ~1ms computation, negligible
-   - Preferred: no additional storage needed
-
-2. **Store during registration:** Already done in `create_ble_device.py:110`
-   but only sent to Google, not stored locally.
-
-**Recommendation:** Option 1 — derive from EIK at ring time.
 
 ---
 
 ## Phase 3: Entity UX improvements (future)
 
 ### Step 3.1: Ring status sensor
-
-Add a `sensor` entity that reflects the ring state:
-
-- `idle` — no active ring
-- `ringing_cloud` — cloud command submitted, awaiting timeout
-- `ringing_ble` — BLE ring confirmed active
-- `failed` — ring attempt failed
+- `idle` / `ringing_cloud` / `ringing_ble` / `confirmed` / `failed`
 
 ### Step 3.2: Component selection for multi-component devices
+- LEFT, RIGHT, CASE via `DeviceComponent` enum (already in proto)
 
-Headphones have LEFT, RIGHT, and CASE components. The proto already supports:
-
-```protobuf
-enum DeviceComponent {
-    DEVICE_COMPONENT_UNSPECIFIED = 0;  // ring all
-    DEVICE_COMPONENT_RIGHT = 1;
-    DEVICE_COMPONENT_LEFT = 2;
-    DEVICE_COMPONENT_CASE = 3;
-}
-```
-
-Add a service parameter or separate buttons for component-specific ringing.
-
-### Step 3.3: Auto-stop and timeout
-
-- BLE ring has explicit timeout (`timeout_ds` parameter)
-- Cloud ring has no known timeout — may ring indefinitely
-- Add HA automation-friendly auto-stop after configurable duration
+### Step 3.3: Auto-stop and configurable timeout
+- BLE: explicit `timeout_ds` parameter
+- Cloud: schedule `async_stop_sound()` after configurable duration
 
 ---
 
 ## Dependency Graph
 
 ```
-Phase 1.1  Capture response hex (logging)
+Phase 1.1a  Log Nova HTTP response hex
+Phase 1.1b  Log FCM sound pushes
+    |           |
+    v           v
+Phase 1.2   Generic protobuf decode attempt
     |
-    v
-Phase 1.2  Decode response format
+    +-------+
+    |       |
+    v       v
+Phase 1.3  FCM sound callback    Phase 1.4  Define response proto
+    |       (async confirmation)     (blocked until samples collected)
     |
-    v
-Phase 1.3  Surface status to entity
-    |
-    v
-Phase 1.4  Define response proto (if applicable)
-    |
-    +-----> Phase 2.1  Add bluetooth dependency
+    +-----> Phase 2.1  Add optional bluetooth dependency
     |           |
     |           v
     |       Phase 2.2  Capture MAC from EID resolution
@@ -338,9 +365,6 @@ Phase 1.4  Define response proto (if applicable)
     +-----> Phase 2.4  Cloud + BLE orchestration
                 |
                 v
-            Phase 2.5  Ring key availability
-                |
-                v
             Phase 3    UX improvements
 ```
 
@@ -350,12 +374,13 @@ Phase 1.4  Define response proto (if applicable)
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
-| Unknown response format | Phase 1.2 blocked | Medium | Generic protobuf scan, raw hex logging |
-| MAC rotation staleness | BLE ring fails | High | 10-min freshness check, cloud fallback |
-| ESPHome proxy connection slots | BLE ring contention | Medium | Short-lived connections only |
-| `bluetooth` as hard dependency | Breaks non-BLE installs | High | Runtime import check, graceful degrade |
-| Ring key not available | BLE ring impossible | Low | Derive from EIK on-the-fly |
-| Upstream bug #66 data_len | ATT Error 0x81 | Eliminated | Correct formula: data_len = 8 + 3 = 11 |
+| Nova response is empty/opaque protobuf | Phase 1.2 inconclusive | Medium | FCM callback (Phase 1.3) provides independent confirmation path |
+| FCM sound push has different format | Phase 1.3 needs adjustment | Low | `DeviceUpdate` is the only FCM message type; sound pushes likely use same structure |
+| MAC rotation staleness | BLE ring fails | High | 10-min freshness check, cloud fallback always runs first |
+| ESPHome proxy connection slots | BLE ring contention | Medium | Short-lived connections (~2s), immediate disconnect |
+| `bluetooth` as hard dependency | Breaks non-BLE installs | High | `after_dependencies` + runtime import check |
+| Ring key not available at runtime | BLE ring impossible | Low | Derive from EIK on-the-fly (~1ms) |
+| Upstream bug #66 data_len | ATT Error 0x81 | Eliminated | Correct formula documented: data_len = 8 + 3 = 11 |
 
 ---
 
@@ -363,12 +388,12 @@ Phase 1.4  Define response proto (if applicable)
 
 | Phase | File | Change |
 |-------|------|--------|
-| 1.1 | `api.py` | Debug-log response hex |
-| 1.2 | New: `PlaySound/response_parser.py` | Generic response decoder |
-| 1.3 | `api.py`, `button.py` | Return/expose parsed status |
-| 1.4 | `DeviceUpdate.proto` | Add `ExecuteActionResponse` |
-| 2.1 | `manifest.json` | Add `bluetooth` dependency |
-| 2.2 | `eid_resolver.py` | Store BLE address on EID match |
+| 1.1a | `api.py` | Debug-log Nova response hex |
+| 1.1b | `fcm_receiver_ha.py` | Debug-log unhandled FCM pushes (sound candidates) |
+| 1.2 | New: `PlaySound/response_parser.py` | Generic response decoder (rpc.Status → DeviceUpdate → raw scan) |
+| 1.3 | `api.py`, `fcm_receiver_ha.py` | FCM sound callback registration + correlation |
+| 1.4 | `DeviceUpdate.proto`, `DeviceUpdate_pb2.py` | Add `ExecuteActionResponse` (when schema known) |
+| 2.1 | `manifest.json` | Add `bluetooth` to `after_dependencies` |
+| 2.2 | `eid_resolver.py` | Store BLE address + timestamp on EID match |
 | 2.3 | New: `FMDNCrypto/beacon_actions.py` | GATT ring client |
 | 2.4 | `api.py` | Cloud + BLE orchestration |
-| 2.5 | `coordinator/identity.py` | Ring key derivation at runtime |
