@@ -199,8 +199,9 @@ Step 2: Compute auth key
         auth_data = HMAC-SHA256(ring_key, nonce || data_id=0x05 || addl_data)[:8]
 
 Step 3: Write to Beacon Actions characteristic
-        Payload: [data_id=0x05] [data_len] [8-byte auth_key] [ring_bitmask] [timeout] [volume]
-        Where: data_len = len(auth_key) + len(addl_data)  # = 8 + 3 = 11
+        Payload: [data_id=0x05] [data_len] [8-byte auth_key] [op_mask(1B)] [timeout(2B BE)] [volume(1B)]
+        Where: addl_data = op_mask + timeout + volume = 4 bytes
+               data_len = len(auth_key) + len(addl_data) = 8 + 4 = 12
 
 Step 4: Read notification (Table 6 in FMDN spec)
         → Ring state byte:

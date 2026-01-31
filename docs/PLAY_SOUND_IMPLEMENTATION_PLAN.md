@@ -14,11 +14,12 @@ Before planning, these facts constrain the design:
    namespace is deliberately excluded from public APIs.
 2. **Upstream discards the Nova HTTP response** — `nova_request()` returns hex, but
    the caller in `start_sound_request.py` never assigns the return value.
-3. **Our code stores but ignores the response** — `_response_hex` is unpacked at
-   `api.py:1538` but never read or validated.
+3. **Our code now logs the response** — `response_hex` is unpacked at
+   `api.py:1538` and logged at DEBUG level (implemented in Phase 1.1a).
 4. **FCM callback infrastructure exists** — `fcm_receiver_ha.py` can register
    per-device callbacks (used by LocateTracker), but no callback is registered for
-   sound events. Sound FCM pushes arrive and fall through silently.
+   sound events. Unhandled FCM pushes are now logged at DEBUG level (Phase 1.1b),
+   but no structured callback exists yet for sound events.
 5. **Google's FMDN spec documents only BLE-level ringing** — the Beacon Actions
    characteristic protocol is well-specified, but the cloud-side API is not.
 6. **Neither upstream nor any known project has BLE GATT ring code** — only community
@@ -28,42 +29,51 @@ Before planning, these facts constrain the design:
 
 ## Phase 1: Response Capture and Parsing
 
-### Step 1.1: Log raw Nova HTTP response and FCM sound pushes
+### Step 1.1: Log raw Nova HTTP response and FCM sound pushes ✅ DONE
 
 **Files:** `api.py`, `fcm_receiver_ha.py`
 
-Two independent data sources must be captured:
+Two independent data sources are now captured:
 
-#### 1.1a: Nova HTTP response hex (in `api.py`)
+#### 1.1a: Nova HTTP response hex (in `api.py`) ✅
+
+Implemented for both Play Sound and Stop Sound:
 
 ```python
-# api.py — async_play_sound(), replace lines 1538-1540
+# api.py — async_play_sound() (lines 1538-1547)
 response_hex, request_uuid = result
+_LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
 _LOGGER.debug(
     "Play Sound Nova response for %s (uuid=%s): %d bytes: %s",
     device_id,
     request_uuid[:8] if request_uuid else "none",
-    len(response_hex) // 2,
-    response_hex[:200],  # first 100 bytes hex
+    len(response_hex) // 2 if response_hex else 0,
+    response_hex[:200] if response_hex else "(empty)",
+)
+
+# api.py — async_stop_sound() (lines 1640-1645)
+_LOGGER.debug(
+    "Stop Sound Nova response for %s: %d bytes: %s",
+    device_id,
+    len(result_hex) // 2 if result_hex else 0,
+    result_hex[:200] if result_hex else "(empty)",
 )
 ```
 
-#### 1.1b: FCM push for sound events (in `fcm_receiver_ha.py`)
+#### 1.1b: FCM push logging for all unhandled events (in `fcm_receiver_ha.py`) ✅
 
-Currently, FCM notifications with no registered callback fall through to
-`_process_background_update()` which tries to parse them as location responses.
-Add diagnostic logging before the fallthrough:
+Universal logging for ALL FCM pushes without a registered callback (not just sound):
 
 ```python
-# fcm_receiver_ha.py — _handle_notification_async(), after callback check
-if not cb:
-    _LOGGER.debug(
-        "FCM notification for %s has no registered callback "
-        "(may be sound confirmation): payload_len=%d, hex_prefix=%s",
-        canonic_id[:8],
-        len(hex_string),
-        hex_string[:100],
-    )
+# fcm_receiver_ha.py — _handle_notification_async() (lines 1150-1160)
+# Fires only in response to user-initiated actions, no log spam.
+_LOGGER.debug(
+    "FCM push for %s has no registered callback "
+    "(may be action confirmation): payload_len=%d, hex_prefix=%s",
+    canonic_id[:8],
+    len(hex_string),
+    hex_string[:120] if hex_string else "(empty)",
+)
 ```
 
 **Acceptance:** Both data streams visible in HA debug logs during Play Sound.
@@ -234,25 +244,36 @@ except ImportError:
     HAS_BLUETOOTH = False
 ```
 
-### Step 2.2: Capture current MAC during EID resolution
+### Step 2.2: Capture current MAC during EID resolution ✅ DONE
 
 **Files:** `eid_resolver.py`
 
 The EID resolver processes BLE advertisements from Bermuda/HA scanner. Each
-advertisement contains the current (rotated) MAC address. Store it alongside the
-EID match:
+advertisement contains the current (rotated) MAC address. The infrastructure to
+capture and store this address is now implemented:
 
 ```python
-@dataclass
-class EIDMatch:
-    device_id: str          # registry_id
-    canonical_id: str       # canonical_id
-    ble_address: str | None = None        # NEW: current rotated MAC
-    ble_address_seen: float | None = None # NEW: monotonic timestamp
+@dataclass(slots=True)
+class BLEScanInfo:
+    ble_address: str             # current rotated MAC
+    observed_at: float           # time.monotonic()
+    observed_at_wall: float      # time.time()
+
+# Storage: _ble_scan_info dict keyed by canonical_id (same pattern as _ble_battery_state)
+# Public API: get_ble_scan_info(canonical_id) -> BLEScanInfo | None
+# Private: _record_ble_scan_info(matches, ble_address) — called from resolve_eid()
+
+# resolve_eid() and resolve_eid_all() accept optional ble_address kwarg:
+def resolve_eid(self, eid_bytes: bytes, *, ble_address: str | None = None) -> EIDMatch | None
+def resolve_eid_all(self, eid_bytes: bytes, *, ble_address: str | None = None) -> list[EIDMatch]
 ```
 
 **Freshness constraint:** FMDN trackers rotate MAC every ~15 minutes. Only attempt
-BLE ring if `monotonic() - ble_address_seen < 600` (10 minutes).
+BLE ring if `monotonic() - observed_at < 600` (10 minutes).
+
+**Remaining work:** Callers (Bermuda listener, HA scanner) need to pass `ble_address`
+from `BluetoothServiceInfoBleak.address` when calling `resolve_eid()`. The parameter
+is backward-compatible (keyword-only, default `None`).
 
 ### Step 2.3: Implement FMDN Beacon Actions GATT client
 
@@ -288,8 +309,9 @@ async def async_ring_via_ble(
 ) -> BleRingResult:
     """Ring tracker via direct BLE GATT write.
 
-    IMPORTANT: data_len = len(auth_key) + len(addl_data) = 8 + 3 = 11
-               (Issue #66 bug used len(addl_data)=3, causing ATT Error 0x81)
+    IMPORTANT: data_len = len(auth_key) + len(addl_data) = 8 + 4 = 12
+               addl_data = [op_mask(1B)] [timeout(2B)] [volume(1B)] = 4 bytes
+               (Issue #66 bug used len(addl_data)=4, causing ATT Error 0x81)
     """
 ```
 
@@ -341,8 +363,8 @@ async def async_play_sound(self, device_id: str) -> PlaySoundResult:
 ## Dependency Graph
 
 ```
-Phase 1.1a  Log Nova HTTP response hex
-Phase 1.1b  Log FCM sound pushes
+Phase 1.1a  Log Nova HTTP response hex                  ✅ DONE
+Phase 1.1b  Log FCM sound pushes                        ✅ DONE
     |           |
     v           v
 Phase 1.2   Generic protobuf decode attempt
@@ -356,7 +378,7 @@ Phase 1.3  FCM sound callback    Phase 1.4  Define response proto
     +-----> Phase 2.1  Add optional bluetooth dependency
     |           |
     |           v
-    |       Phase 2.2  Capture MAC from EID resolution
+    |       Phase 2.2  Capture MAC from EID resolution  ✅ DONE (infra ready)
     |           |
     |           v
     |       Phase 2.3  Implement GATT ring client
@@ -380,20 +402,20 @@ Phase 1.3  FCM sound callback    Phase 1.4  Define response proto
 | ESPHome proxy connection slots | BLE ring contention | Medium | Short-lived connections (~2s), immediate disconnect |
 | `bluetooth` as hard dependency | Breaks non-BLE installs | High | `after_dependencies` + runtime import check |
 | Ring key not available at runtime | BLE ring impossible | Low | Derive from EIK on-the-fly (~1ms) |
-| Upstream bug #66 data_len | ATT Error 0x81 | Eliminated | Correct formula documented: data_len = 8 + 3 = 11 |
+| Upstream bug #66 data_len | ATT Error 0x81 | Eliminated | Correct formula documented: data_len = 8 + 4 = 12 |
 
 ---
 
 ## Files Affected Summary
 
-| Phase | File | Change |
-|-------|------|--------|
-| 1.1a | `api.py` | Debug-log Nova response hex |
-| 1.1b | `fcm_receiver_ha.py` | Debug-log unhandled FCM pushes (sound candidates) |
-| 1.2 | New: `PlaySound/response_parser.py` | Generic response decoder (rpc.Status → DeviceUpdate → raw scan) |
-| 1.3 | `api.py`, `fcm_receiver_ha.py` | FCM sound callback registration + correlation |
-| 1.4 | `DeviceUpdate.proto`, `DeviceUpdate_pb2.py` | Add `ExecuteActionResponse` (when schema known) |
-| 2.1 | `manifest.json` | Add `bluetooth` to `after_dependencies` |
-| 2.2 | `eid_resolver.py` | Store BLE address + timestamp on EID match |
-| 2.3 | New: `FMDNCrypto/beacon_actions.py` | GATT ring client |
-| 2.4 | `api.py` | Cloud + BLE orchestration |
+| Phase | File | Change | Status |
+|-------|------|--------|--------|
+| 1.1a | `api.py` | Debug-log Nova response hex (Play Sound + Stop Sound) | ✅ Done |
+| 1.1b | `fcm_receiver_ha.py` | Debug-log ALL unhandled FCM pushes | ✅ Done |
+| 1.2 | New: `PlaySound/response_parser.py` | Generic response decoder (rpc.Status → DeviceUpdate → raw scan) | Pending |
+| 1.3 | `api.py`, `fcm_receiver_ha.py` | FCM sound callback registration + correlation | Pending |
+| 1.4 | `DeviceUpdate.proto`, `DeviceUpdate_pb2.py` | Add `ExecuteActionResponse` (when schema known) | Blocked |
+| 2.1 | `manifest.json` | Add `bluetooth` to `after_dependencies` | Pending |
+| 2.2 | `eid_resolver.py` | BLEScanInfo dataclass, storage, getter, resolve_eid kwarg | ✅ Done |
+| 2.3 | New: `FMDNCrypto/beacon_actions.py` | GATT ring client | Pending |
+| 2.4 | `api.py` | Cloud + BLE orchestration | Pending |
