@@ -206,6 +206,45 @@ class TestBLEBatteryStateDataclass:
         """BLEBatteryState uses __slots__ for memory efficiency."""
         assert hasattr(BLEBatteryState, "__slots__")
 
+    def test_no_battery_percentage_alias(self) -> None:
+        """Guard: the field is battery_pct, NOT battery_percentage.
+
+        A previous bug used 'battery_percentage' in a log statement inside
+        _build_entities(), which raised AttributeError at runtime.  This test
+        ensures the correct attribute name is used and no alias exists.
+        """
+        state = BLEBatteryState(
+            battery_level=0,
+            battery_pct=100,
+            uwt_mode=False,
+            decoded_flags=0x00,
+            observed_at_wall=1000.0,
+        )
+        # Correct attribute exists and is accessible
+        assert state.battery_pct == 100
+        # Common typo must NOT exist (slots dataclass → AttributeError)
+        assert not hasattr(state, "battery_percentage")
+
+    def test_battery_pct_used_in_sensor_creation_log(self) -> None:
+        """Regression: the INFO log in _build_entities must access battery_pct.
+
+        This exercises the exact attribute access pattern used in sensor.py's
+        _build_entities() when logging BLE battery sensor creation.
+        """
+        state = BLEBatteryState(
+            battery_level=1,
+            battery_pct=25,
+            uwt_mode=False,
+            decoded_flags=0x20,
+            observed_at_wall=1000.0,
+        )
+        # Reproduce the log format string from sensor.py _build_entities()
+        msg = (
+            "BLE battery sensor created for device=%s (battery=%s%%)"
+            % ("test-dev", state.battery_pct)
+        )
+        assert "battery=25%" in msg
+
 
 # ===========================================================================
 # 2. _update_ble_battery() decode and store

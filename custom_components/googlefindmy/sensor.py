@@ -563,7 +563,7 @@ async def async_setup_entry(
                                 "BLE battery sensor created for device=%s "
                                 "(battery=%s%%)",
                                 dev_id,
-                                battery_state.battery_percentage,
+                                battery_state.battery_pct,
                             )
 
             return entities
