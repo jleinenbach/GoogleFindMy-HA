@@ -82,12 +82,16 @@ def _make_resolver() -> GoogleFindMyEIDResolver:
     return resolver
 
 
-def _match(device_id: str = "dev-1") -> EIDMatch:
-    """Create a test EIDMatch."""
+def _match(device_id: str = "dev-1", canonical_id: str | None = None) -> EIDMatch:
+    """Create a test EIDMatch.
+
+    *canonical_id* defaults to *device_id* so that the battery-state
+    storage key (``canonical_id``) matches the test lookup key.
+    """
     return EIDMatch(
         device_id=device_id,
         config_entry_id="entry-1",
-        canonical_id="canonical-1",
+        canonical_id=canonical_id if canonical_id is not None else device_id,
         time_offset=0,
         is_reversed=False,
     )

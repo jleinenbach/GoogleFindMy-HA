@@ -559,6 +559,12 @@ async def async_setup_entry(
                             added_unique_ids.add(bat_uid)
                             known_battery_ids.add(dev_id)
                             entities.append(battery_entity)
+                            _LOGGER.info(
+                                "BLE battery sensor created for device=%s "
+                                "(battery=%s%%)",
+                                dev_id,
+                                battery_state.battery_percentage,
+                            )
 
             return entities
 
