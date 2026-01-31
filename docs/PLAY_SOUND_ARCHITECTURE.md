@@ -313,18 +313,130 @@ the ring key derivation was also corrected — the issue remains open.
 
 ---
 
-## Comparison: Cloud vs. BLE Ringing
+## DULT Non-Owner Sound Protocol (AirGuard)
 
-| Aspect | Cloud (Nova API) | Direct BLE (GATT) |
-|--------|------------------|--------------------|
-| **Latency** | 2-15 seconds (FCM push) | < 1 second |
-| **Range** | Global (any crowdsource reporter) | ~30m BLE range |
-| **Prerequisites** | Google auth + FCM token | BLE adapter in proximity |
-| **Confirmation** | None (fire-and-forget) | GATT response = hardware ack |
-| **Reliability** | Depends on FCM delivery | Direct, deterministic |
-| **HA compatibility** | Works everywhere | Requires `bluetooth` integration |
-| **ESPHome proxy** | N/A | Supported (active mode) |
-| **MAC rotation** | N/A (server-side routing) | Must resolve current MAC from EID |
+### Discovery: AirGuard Uses a Completely Different Protocol
+
+leonboe1's anti-stalking app **AirGuard** (`seemoo-lab/AirGuard`) implements BLE
+ringing for Google FMDN trackers, but it does NOT use the FMDN Beacon Actions
+characteristic. Instead, it uses the **DULT (Detecting Unwanted Location Trackers)**
+protocol, defined in [IETF draft-ietf-dult-accessory-protocol-00](https://datatracker.ietf.org/doc/html/draft-ietf-dult-accessory-protocol-00).
+
+This is a separate GATT service with no authentication — designed for the anti-stalking
+use case where the caller does NOT own the tracker.
+
+### DULT ANOS (Accessory Non-Owner Service) Details
+
+| Attribute | Value |
+|-----------|-------|
+| Service UUID | `15190001-12F4-C226-88ED-2AC5579F2A85` |
+| Characteristic UUID | `8E0C0001-1D68-FB92-BF61-48377421680E` |
+| CCCD Descriptor | `00002902-0000-1000-8000-00805F9B34FB` |
+| Byte Order | **Little endian** (opposite of FMDN Beacon Actions!) |
+| Authentication | **None** |
+| Availability | **Separated state only** (tracker away from owner 8-24 hours) |
+
+### DULT Opcodes (Little-Endian Wire Format)
+
+| Opcode Name | Logical Value | Wire Bytes (LE) | Direction | Required |
+|-------------|--------------|-----------------|-----------|----------|
+| Sound_Start | `0x0300` | `[0x00, 0x03]` | → Accessory (Write) | Yes |
+| Sound_Stop | `0x0301` | `[0x01, 0x03]` | → Accessory (Write) | Yes |
+| Command_Response | `0x0302` | `[0x02, 0x03]` | ← Accessory (Indication) | Yes |
+| Sound_Completed | `0x0303` | `[0x03, 0x03]` | ← Accessory (Indication) | Yes |
+| Get_Identifier | `0x0404` | `[0x04, 0x04]` | → Accessory (Write) | Optional |
+| Get_Model_Name | `0x0005` | `[0x05, 0x00]` | → Accessory (Write) | Optional |
+
+### DULT Command_Response Format
+
+```
+Byte 0-1: Response Opcode 0x0302 → wire [0x02, 0x03]
+Byte 2-3: Echoed CommandOpcode (LE) — which command this responds to
+Byte 4-5: ResponseStatus (LE):
+          0x0000 = Success
+          0x0001 = Invalid_state (already ringing / wrong state)
+          0x0002 = Invalid_configuration
+          0x0003 = Invalid_length
+          0x0004 = Invalid_param
+          0xFFFF = Invalid_command (not in separated state, or unsupported)
+```
+
+### DULT Sound Requirements
+
+- Minimum duration: 5 seconds
+- Maximum duration: 30 seconds (auto-stop by accessory)
+- Recommended: 12 seconds
+- Minimum loudness: 60 Phon peak at 25cm (ISO 532-1:2017)
+
+### AirGuard's GATT Flow (Kotlin)
+
+Source: `seemoo-lab/AirGuard` — `GoogleFindMyNetwork.kt`
+
+```
+1. connectGatt(context, false, callback)
+2. onConnectionStateChange(GATT_SUCCESS, STATE_CONNECTED)
+   → gatt.discoverServices()
+3. onServicesDiscovered()
+   → Find service containing "12F4" (substring match)
+   → Get characteristic 8E0C0001-...
+   → setCharacteristicNotification(true)     // no CCCD descriptor write!
+   → writeCharacteristic([0x00, 0x03])       // DULT Sound_Start
+   → broadcast ACTION_EVENT_RUNNING
+4. onCharacteristicWrite(GATT_SUCCESS)
+   → Handler.postDelayed(5000ms):            // hardcoded 5-second timer
+     → writeCharacteristic([0x01, 0x03])     // DULT Sound_Stop
+5. onCharacteristicWrite(GATT_SUCCESS) for stop
+   → disconnect() + broadcast ACTION_EVENT_COMPLETED
+```
+
+**Weaknesses observed in AirGuard:**
+- No timeout on connection or service discovery
+- CCCD descriptor not written (no actual BLE indications received)
+- Sound_Completed notification from tracker is never read
+- Hardcoded 5-second duration (DULT recommends 12s)
+- No handling if connection drops during the 5s timer
+
+### Why DULT Is NOT Suitable For Us
+
+**We are the owner.** Our trackers will typically be near HA (i.e., near the owner's
+account). In near-owner state, the tracker responds to DULT Sound_Start with
+`Invalid_command (0xFFFF)`.
+
+DULT only works when the tracker enters "separated state" — 8-24 hours away from any
+device logged into the owner's Google account. This is the opposite of our use case.
+
+**We must use FMDN Beacon Actions (authenticated ring)** because:
+1. We have the EIK → can derive the ring key
+2. It works regardless of separated state
+3. It provides proper ring state notifications (started/failed/stopped + reason)
+
+### Three Ring Sources (Confirmed by Nordic SDK)
+
+The Nordic nRF Connect SDK (`nrfconnect/sdk-nrf`) confirms FMDN trackers have
+three independent ring trigger sources:
+
+| Source | SDK Constant | Protocol | Auth |
+|--------|-------------|----------|------|
+| Owner BLE ring | `FMDN_BT_GATT` | FMDN Beacon Actions (`FE2C1238`) | HMAC-SHA256 |
+| Non-owner BLE sound | `DULT_BT_GATT` | DULT ANOS (`15190001-12F4`) | None |
+| Motion auto-ring | `DULT_MOTION_DETECTOR` | Internal (separated state) | N/A |
+
+---
+
+## Comparison: All Three Ring Paths
+
+| Aspect | Cloud (Nova API) | BLE Owner Ring (FMDN) | BLE Non-Owner Sound (DULT) |
+|--------|------------------|-----------------------|---------------------------|
+| **Latency** | 2-15 seconds (FCM) | < 1 second | < 1 second |
+| **Range** | Global | ~30m BLE | ~30m BLE |
+| **Auth** | Google OAuth + FCM | HMAC-SHA256 (ring key) | None |
+| **Availability** | Always | Always (owner has key) | Separated state only |
+| **Confirmation** | None (fire-and-forget) | Ring state notification | Command_Response indication |
+| **Reliability** | FCM delivery dependent | Direct, deterministic | Direct, deterministic |
+| **HA compat** | Works everywhere | Requires `bluetooth` | Requires `bluetooth` |
+| **ESPHome proxy** | N/A | Supported (active mode) | Supported (active mode) |
+| **MAC rotation** | N/A (server routing) | Must know current MAC | Must know current MAC |
+| **Our use case** | **Primary path** | **BLE fallback** | Not applicable (owner ≠ separated) |
 
 ---
 
@@ -452,9 +564,15 @@ The ring key is currently only used during device registration
 | **FMDN** | Find My Device Network — Google's crowdsource tracker protocol |
 | **EIK** | Ephemeral Identity Key — 32-byte root key for tracker crypto |
 | **EID** | Ephemeral Identifier — rotating BLE address derived from EIK |
-| **Beacon Actions** | GATT characteristic for direct tracker commands (ring, UTP) |
+| **Beacon Actions** | FMDN GATT characteristic (`FE2C1238`) for owner-authenticated commands (ring, UTP) |
+| **DULT** | Detecting Unwanted Location Trackers — IETF specification for anti-stalking |
+| **ANOS** | Accessory Non-Owner Service — DULT GATT service (`15190001-12F4`) for unauthenticated commands |
+| **Separated State** | Tracker state when away from owner device for 8-24 hours; enables DULT/UTP features |
 | **GATT** | Generic Attribute Profile — BLE protocol for read/write operations |
+| **CCCD** | Client Characteristic Configuration Descriptor — enables BLE notifications/indications |
 | **ADM** | Android Device Management — Google auth token type |
 | **AAS** | Android Account Sign-In — Google auth token type |
 | **Bermuda** | Third-party HA integration for BLE room presence |
 | **bleak** | Python BLE library used by HA's bluetooth integration |
+| **AirGuard** | Anti-stalking app by seemoo-lab/leonboe1 — uses DULT protocol (not FMDN Beacon Actions) |
+| **Nordic SDK** | nRF Connect SDK — reference implementation for FMDN+DULT tracker firmware |
