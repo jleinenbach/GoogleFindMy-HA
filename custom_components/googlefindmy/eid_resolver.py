@@ -2307,11 +2307,16 @@ class GoogleFindMyEIDResolver:
         """Decode the FMDN hashed-flags byte and store battery state.
 
         Extracts the optional flags byte from the BLE payload, XOR-decodes
-        it, and persists a :class:`BLEBatteryState` for **every** matched
-        device_id (shared-device propagation).
+        it, and persists a :class:`BLEBatteryState` keyed by
+        ``canonical_id`` (the Google API device identifier) for **every**
+        matched device (shared-device propagation).
 
-        On first successful decode per device a DEBUG-level
-        ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates also log at
+        The canonical_id key must match the ``device["id"]`` used by the
+        coordinator snapshot and :class:`GoogleFindMyBLEBatterySensor` so
+        that :meth:`get_ble_battery_state` lookups succeed.
+
+        On first successful decode per device an INFO-level
+        ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates log at
         DEBUG level only when the battery level changes.
         """
         if not matches:
@@ -2356,19 +2361,25 @@ class GoogleFindMyEIDResolver:
                 battery_raw, f"UNKNOWN({battery_raw})"
             )
 
-            # Store for ALL matches (shared-device propagation)
+            # Store for ALL matches (shared-device propagation).
+            # Key by canonical_id (Google API device ID) — this is the same
+            # identifier used by the coordinator snapshot (device["id"]) and
+            # by GoogleFindMyBLEBatterySensor._device_id so that
+            # get_ble_battery_state() lookups succeed.
             for match in matches:
-                prev = self._ble_battery_state.get(match.device_id)
-                self._ble_battery_state[match.device_id] = state
+                storage_key = match.canonical_id or match.device_id
+                prev = self._ble_battery_state.get(storage_key)
+                self._ble_battery_state[storage_key] = state
 
-                # First decode per device → diagnostic probe log
-                if match.device_id not in self._flags_logged_devices:
-                    _LOGGER.debug(
-                        "FMDN_FLAGS_PROBE device=%s flags_byte=0x%02x "
-                        "xor_mask=0x%02x decoded=0x%02x battery=%s(%d) "
-                        "battery_pct=%d uwt_mode=%s observed_frame=%s "
-                        "payload_len=%d",
+                # First decode per device → INFO probe log (once per device)
+                if storage_key not in self._flags_logged_devices:
+                    _LOGGER.info(
+                        "FMDN_FLAGS_PROBE device=%s canonical=%s "
+                        "flags_byte=0x%02x xor_mask=0x%02x decoded=0x%02x "
+                        "battery=%s(%d) battery_pct=%d uwt_mode=%s "
+                        "observed_frame=%s payload_len=%d",
                         match.device_id,
+                        match.canonical_id,
                         flags_byte,
                         xor_mask,
                         decoded,
@@ -2381,12 +2392,12 @@ class GoogleFindMyEIDResolver:
                         else None,
                         length,
                     )
-                    self._flags_logged_devices.add(match.device_id)
+                    self._flags_logged_devices.add(storage_key)
                 elif prev is not None and prev.battery_level != battery_raw:
                     # Battery level changed → DEBUG log
                     _LOGGER.debug(
                         "BLE battery changed device=%s %s(%d)→%s(%d)",
-                        match.device_id,
+                        storage_key,
                         battery_labels.get(prev.battery_level, "?"),
                         prev.battery_level,
                         battery_label,
@@ -2395,7 +2406,8 @@ class GoogleFindMyEIDResolver:
         else:
             # Cannot decode — log once per device at DEBUG for diagnostics
             for match in matches:
-                if match.device_id not in self._flags_logged_devices:
+                storage_key = match.canonical_id or match.device_id
+                if storage_key not in self._flags_logged_devices:
                     _max_hex = 40  # noqa: PLR2004
                     raw_hex = (
                         raw.hex()
@@ -2403,10 +2415,11 @@ class GoogleFindMyEIDResolver:
                         else raw[:_max_hex].hex() + "..."
                     )
                     _LOGGER.debug(
-                        "FMDN_FLAGS_PROBE device=%s CANNOT_DECODE "
-                        "observed_frame=%s payload_len=%d "
+                        "FMDN_FLAGS_PROBE device=%s canonical=%s "
+                        "CANNOT_DECODE observed_frame=%s payload_len=%d "
                         "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",
                         match.device_id,
+                        match.canonical_id,
                         f"0x{observed_frame:02x}"
                         if observed_frame is not None
                         else None,
@@ -2415,13 +2428,18 @@ class GoogleFindMyEIDResolver:
                         flags_byte is not None,
                         raw_hex,
                     )
-                    self._flags_logged_devices.add(match.device_id)
+                    self._flags_logged_devices.add(storage_key)
 
     # ------------------------------------------------------------------
     # Public BLE battery API
     # ------------------------------------------------------------------
     def get_ble_battery_state(self, device_id: str) -> BLEBatteryState | None:
-        """Return the last observed BLE battery state for a device, or None."""
+        """Return the last observed BLE battery state for a device, or None.
+
+        The *device_id* parameter is the **canonical_id** (Google API device
+        identifier, i.e. ``device["id"]`` from the coordinator snapshot),
+        not the HA device-registry ID.
+        """
         return self._ble_battery_state.get(device_id)
 
     def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
