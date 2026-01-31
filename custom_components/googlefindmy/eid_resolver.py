@@ -166,6 +166,26 @@ class BLEBatteryState:
     observed_at_wall: float
 
 
+@dataclass(slots=True)
+class BLEScanInfo:
+    """Last observed BLE scan metadata for a device.
+
+    Stored during EID resolution when a ``ble_address`` is provided by the
+    caller (typically Bermuda or another BLE scanner).  Used by the future
+    BLE ring fallback (Phase 2) to locate the device for a direct GATT
+    connection.
+
+    Attributes:
+        ble_address: Current BLE MAC address (rotates every ~15 min on FMDN).
+        observed_at: Monotonic timestamp (:func:`time.monotonic`) of the scan.
+        observed_at_wall: Wall-clock timestamp (:func:`time.time`) of the scan.
+    """
+
+    ble_address: str
+    observed_at: float
+    observed_at_wall: float
+
+
 # Mapping from FMDN 2-bit battery level to percentage.
 # Aligned with HA Core convention (cf. homeassistant/components/fitbit/const.py)
 # and HA icon thresholds in homeassistant/helpers/icon.py:
@@ -211,11 +231,15 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
         """
         ...
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
+    def resolve_eid(
+        self, eid_bytes: bytes, *, ble_address: str | None = None
+    ) -> EIDMatch | None:
         """Resolve EID bytes to a matching device identity.
 
         Args:
             eid_bytes: Raw EID bytes from a BLE advertisement.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, stored for future direct GATT connections.
 
         Returns:
             EIDMatch with device identity info, or None if no match found.
@@ -225,7 +249,9 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
         """
         ...
 
-    def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
+    def resolve_eid_all(
+        self, eid_bytes: bytes, *, ble_address: str | None = None
+    ) -> list[EIDMatch]:
         """Resolve EID bytes to all matching device identities.
 
         This method supports shared devices: when the same physical tracker
@@ -233,10 +259,20 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
 
         Args:
             eid_bytes: Raw EID bytes from a BLE advertisement.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, stored for future direct GATT connections.
 
         Returns:
             List of EIDMatch entries for all accounts that share this device.
             Empty list if no match found.
+        """
+        ...
+
+    def get_ble_scan_info(self, device_id: str) -> BLEScanInfo | None:
+        """Return last observed BLE scan metadata for a device, or None.
+
+        Args:
+            device_id: The canonical_id (Google API device identifier).
         """
         ...
 
@@ -683,6 +719,9 @@ class GoogleFindMyEIDResolver:
     _ble_battery_state: dict[str, BLEBatteryState] = field(
         init=False, default_factory=dict
     )
+    _ble_scan_info: dict[str, BLEScanInfo] = field(
+        init=False, default_factory=dict
+    )
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -732,6 +771,8 @@ class GoogleFindMyEIDResolver:
             self._flags_logged_devices = set()
         if not hasattr(self, "_ble_battery_state"):
             self._ble_battery_state = {}
+        if not hasattr(self, "_ble_scan_info"):
+            self._ble_scan_info = {}
         if not hasattr(self, "_cached_identities"):
             self._cached_identities = []
 
@@ -2442,20 +2483,76 @@ class GoogleFindMyEIDResolver:
         """
         return self._ble_battery_state.get(device_id)
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
+    # ------------------------------------------------------------------
+    # Public BLE scan info API (Phase 2.2 preparation)
+    # ------------------------------------------------------------------
+    def get_ble_scan_info(self, device_id: str) -> BLEScanInfo | None:
+        """Return last observed BLE scan metadata for a device, or None.
+
+        The *device_id* parameter is the **canonical_id** (Google API device
+        identifier, i.e. ``device["id"]`` from the coordinator snapshot),
+        not the HA device-registry ID.
+
+        The returned :class:`BLEScanInfo` contains the current (rotated) BLE
+        MAC address and the timestamp of the last observation.  FMDN trackers
+        rotate their MAC every ~15 minutes, so callers should check
+        ``observed_at`` freshness before attempting GATT connections.
+        """
+        return self._ble_scan_info.get(device_id)
+
+    def _record_ble_scan_info(
+        self, matches: list[EIDMatch], ble_address: str
+    ) -> None:
+        """Store the BLE address for all matched devices.
+
+        Called from :meth:`resolve_eid` when the caller provides a
+        ``ble_address``.  Uses the same canonical_id keying pattern
+        as :attr:`_ble_battery_state`.
+        """
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        for match in matches:
+            storage_key = match.canonical_id or match.device_id
+            self._ble_scan_info[storage_key] = BLEScanInfo(
+                ble_address=ble_address,
+                observed_at=now_mono,
+                observed_at_wall=now_wall,
+            )
+
+    def resolve_eid(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        eid_bytes: bytes,
+        *,
+        ble_address: str | None = None,
+    ) -> EIDMatch | None:
         """Resolve a scanned payload to a Home Assistant device registry ID.
 
         For shared devices (same tracker across multiple accounts), this returns
         the match with the smallest time_offset (best match).
         Use resolve_eid_all() to get all matches.
+
+        Args:
+            eid_bytes: Raw EID bytes from a BLE advertisement.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, the address is stored for future direct GATT
+                connections (e.g. BLE ring fallback).  This parameter is
+                backward-compatible: existing callers that omit it are
+                unaffected.
         """
         matches, _, _ = self._resolve_eid_internal(eid_bytes)
         if not matches:
             return None
+        if ble_address is not None:
+            self._record_ble_scan_info(matches, ble_address)
         # Return the match with the smallest absolute time_offset (best match)
         return min(matches, key=lambda m: abs(m.time_offset))
 
-    def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
+    def resolve_eid_all(
+        self,
+        eid_bytes: bytes,
+        *,
+        ble_address: str | None = None,
+    ) -> list[EIDMatch]:
         """Resolve a scanned payload to all matching Home Assistant device registry IDs.
 
         This method supports shared devices: when the same physical tracker
@@ -2465,12 +2562,13 @@ class GoogleFindMyEIDResolver:
 
         Args:
             eid_bytes: Raw EID bytes from a BLE advertisement.
-
-        Returns:
-            List of EIDMatch entries for all accounts that share this device.
-            Empty list if no match found.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, the address is stored for future direct GATT
+                connections (e.g. BLE ring fallback).
         """
         matches, _, _ = self._resolve_eid_internal(eid_bytes)
+        if matches and ble_address is not None:
+            self._record_ble_scan_info(matches, ble_address)
         return matches
 
     def _extract_candidates(  # noqa: PLR0912

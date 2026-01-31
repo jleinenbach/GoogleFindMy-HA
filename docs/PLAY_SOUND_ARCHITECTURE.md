@@ -212,19 +212,94 @@ Step 4: Read notification (Table 6 in FMDN spec)
         → Components bitmask + remaining time
 ```
 
-### Known Bug in Community BLE Ring Attempt (Issue #66)
+### Community BLE Ring Attempt — Detailed Analysis (Issue #66)
 
-A community member (mik-laj) attempted direct BLE ringing using a Python script with
-`bleak`. User DefenestratingWizard identified a bug in step 3:
+Source: https://gist.github.com/mik-laj/4c1c363391115ccb14ee856a9c1c12a1
+
+mik-laj published a standalone `bleak`-based ring script (`ring_nearby.py`). The
+script scans for FMDN advertisements, connects via GATT, and writes ring commands.
+DefenestratingWizard identified **two bugs** (both in `data_len` handling):
+
+#### Bug 1: Payload `data_len` field
+
+```python
+# BUG (mik-laj):
+payload = bytes([DATA_ID_RING, len(addl)]) + auth8 + addl
+#                               ^^^^^^^^  = 4 (only addl, missing auth key!)
+
+# CORRECT:
+payload = bytes([DATA_ID_RING, len(auth8) + len(addl)]) + auth8 + addl
+#                               ^^^^^^^^^^^^^^^^^^^^^^^^  = 8 + 4 = 12
+```
+
+#### Bug 2: HMAC input `data_len` (causes wrong auth key!)
+
+```python
+# BUG (mik-laj):
+data_len = len(addl)       # = 4, but HMAC sees wrong length → wrong auth
+
+# CORRECT:
+data_len = len(addl) + 8   # auth key (8B) IS counted in data_len for HMAC too
+```
+
+Both bugs together cause ATT Error `0x81`. Fixing only one is insufficient because
+`data_len` appears in both the wire format AND the HMAC input — a wrong value
+produces both a malformed payload and an incorrect authentication.
+
+#### Verified Wire Format (from Wireshark capture of real Find Hub app)
 
 ```
-BUG:     data_len = len(addl_data)                     # = 3 (missing auth key length!)
-CORRECT: data_len = len(auth_key) + len(addl_data)     # = 8 + 3 = 11
+Ring command (successful, captured from official Google Find Hub app):
+
+  05 0c a7 25 03 f0 6a 9d d4 2a ff 02 58 00
+  ── ── ──────────────────────── ── ───── ──
+  │  │           │                │    │    │
+  │  │           │                │    │    └── volume (0x00 = default)
+  │  │           │                │    └── timeout (0x0258 = 600 deciseconds = 60s)
+  │  │           │                └── op_mask (0xFF = ring all components)
+  │  │           └── 8-byte HMAC-SHA256 one-time auth key
+  │  └── data_len = 0x0c = 12 = 8 (auth) + 4 (addl)
+  └── data_id = 0x05 (Ring)
+
+Nonce/challenge read (from Beacon Actions characteristic):
+
+  01 f3 be eb 39 9d 61 cf a0
+  ── ────────────────────────
+  │           │
+  │           └── 8-byte random nonce
+  └── proto_major = 0x01
 ```
 
-This causes ATT Error `0x81` (application-level rejection). **Neither upstream
-(leonboe1) nor this fork are affected** — no BLE GATT ring code exists in either
-codebase. The bug exists only in the community member's independent script.
+#### Corrected HMAC Computation
+
+```python
+def make_auth(ring_key, proto_major, nonce8, data_id, addl):
+    data_len = len(addl) + 8     # MUST include auth key length
+    msg = bytes([proto_major]) + nonce8 + bytes([data_id, data_len]) + addl
+    return hmac.new(ring_key, msg, hashlib.sha256).digest()[:8]
+```
+
+#### Corrected Payload Construction
+
+```python
+def build_ring_message(ring_key, nonce8, proto_major,
+                       op_mask=0xFF, timeout_s=60.0, volume=0x00):
+    t_ds = min(int(timeout_s * 10), 6000)
+    addl = bytes([op_mask]) + struct.pack(">H", t_ds) + bytes([volume])
+    auth8 = make_auth(ring_key, proto_major, nonce8, 0x05, addl)
+    return bytes([0x05, len(auth8) + len(addl)]) + auth8 + addl
+```
+
+#### Open Question: Ring Key Derivation
+
+mik-laj reported that keys from `FMDNOwnerOperations.generate_keys()` did not match
+the keys observed in the Wireshark capture. He was uncertain whether the EIK (after
+AES decryption with the owner key) or the raw encrypted identity key should be used.
+
+Our code derives: `ring_key = SHA256(decrypted_EIK || 0x02)[:8]`, which matches the
+FMDN spec. mik-laj may have used the encrypted key by mistake (he logged both).
+DefenestratingWizard's fix resolved the `data_len` bug but did not confirm whether
+the ring key derivation was also corrected — the issue remains open.
 
 ### Why Neither Codebase Has BLE Ringing
 
@@ -233,6 +308,7 @@ codebase. The bug exists only in the community member's independent script.
 3. **Ring key is registered, not used** — `key_derivation.py` derives the ring key
    and `create_ble_device.py` sends it to Google during registration, but no code
    uses it for local BLE commands
+4. **Community attempt unfinished** — mik-laj's script has bugs, no confirmed success
 
 ---
 

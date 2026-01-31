@@ -1147,6 +1147,18 @@ class FcmReceiverHA:
                 await self._run_callback_async(cb, canonic_id, hex_string)
                 return
 
+            # Log FCM pushes that have no registered callback (e.g. sound
+            # confirmations, device status updates).  This fires only in
+            # response to a user-initiated action (Play Sound button etc.)
+            # so it does not create log spam during normal operation.
+            _LOGGER.debug(
+                "FCM push for %s has no registered callback "
+                "(may be action confirmation): payload_len=%d, hex_prefix=%s",
+                canonic_id[:8],
+                len(hex_string),
+                hex_string[:120] if hex_string else "(empty)",
+            )
+
             tracked = [
                 c for c in target_coordinators if self._is_tracked(c, canonic_id)
             ]
