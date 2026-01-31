@@ -152,15 +152,15 @@ class BLEBatteryState:
     """Decoded battery state from FMDN hashed-flags BLE advertisement.
 
     Attributes:
-        battery_level: Raw FMDN value (0=GOOD, 1=LOW, 2=CRITICAL).
-        battery_pct: Mapped percentage (100, 25, 5).
+        battery_level: Raw FMDN value (0=GOOD, 1=LOW, 2=CRITICAL, 3=RESERVED).
+        battery_pct: Mapped percentage (100, 25, 5) or None for RESERVED (3).
         uwt_mode: True if Unwanted Tracking mode is active (bit 7).
         decoded_flags: Fully decoded flags byte (after XOR).
         observed_at_wall: Wall-clock timestamp of the BLE observation (time.time()).
     """
 
     battery_level: int
-    battery_pct: int
+    battery_pct: int | None
     uwt_mode: bool
     decoded_flags: int
     observed_at_wall: float
@@ -2386,7 +2386,7 @@ class GoogleFindMyEIDResolver:
             decoded = flags_byte ^ xor_mask
             battery_raw = (decoded >> 5) & 0x03  # bits 5-6
             uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
-            battery_pct = FMDN_BATTERY_PCT.get(battery_raw, 0)
+            battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 
             state = BLEBatteryState(
@@ -2417,7 +2417,7 @@ class GoogleFindMyEIDResolver:
                     _LOGGER.info(
                         "FMDN_FLAGS_PROBE device=%s canonical=%s "
                         "flags_byte=0x%02x xor_mask=0x%02x decoded=0x%02x "
-                        "battery=%s(%d) battery_pct=%d uwt_mode=%s "
+                        "battery=%s(%d) battery_pct=%s uwt_mode=%s "
                         "observed_frame=%s payload_len=%d",
                         match.device_id,
                         match.canonical_id,

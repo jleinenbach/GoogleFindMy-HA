@@ -198,9 +198,14 @@ class TestBLEBatteryStateDataclass:
         """FMDN_BATTERY_PCT should map 0->100, 1->25, 2->5."""
         assert FMDN_BATTERY_PCT == {0: 100, 1: 25, 2: 5}
 
-    def test_battery_pct_unknown_raw_returns_zero(self) -> None:
-        """An unrecognized raw value (3=RESERVED) should map to 0."""
-        assert FMDN_BATTERY_PCT.get(3, 0) == 0
+    def test_battery_pct_reserved_raw_returns_none(self) -> None:
+        """An unrecognized raw value (3=RESERVED) should map to None, not 0.
+
+        A tracker sending battery_raw=3 can still transmit (battery is not
+        physically dead).  Mapping to 0% would be a false positive — the
+        correct representation is None (HA shows 'unknown').
+        """
+        assert FMDN_BATTERY_PCT.get(3) is None
 
     def test_slots_optimization(self) -> None:
         """BLEBatteryState uses __slots__ for memory efficiency."""
@@ -456,8 +461,13 @@ class TestUpdateBLEBattery:
         assert resolver._ble_battery_state["dev-change"].battery_pct == 25
         assert resolver._ble_battery_state["dev-change"].battery_level == 1
 
-    def test_reserved_battery_raw_3_maps_to_0_pct(self) -> None:
-        """Raw battery value 3 (RESERVED) maps to 0% via FMDN_BATTERY_PCT.get fallback."""
+    def test_reserved_battery_raw_3_maps_to_none_pct(self) -> None:
+        """Raw battery value 3 (RESERVED) maps to None via FMDN_BATTERY_PCT.get.
+
+        A device transmitting battery_raw=3 is still operational (it can send
+        RF packets), so 0% would be a false-positive empty-battery alarm.
+        None causes HA to display the sensor as 'unknown'.
+        """
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
@@ -470,7 +480,7 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-reserved")
         assert state is not None
         assert state.battery_level == 3
-        assert state.battery_pct == 0
+        assert state.battery_pct is None
 
     def test_combined_battery_and_uwt(self) -> None:
         """Battery CRITICAL + UWT -> battery_pct=5, uwt_mode=True."""
