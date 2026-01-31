@@ -888,6 +888,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                     "Failed to seed coordinator cache for %s: %s", self.entity_id, err
                 )
 
+            self._sync_location_attrs()
             self.async_write_ha_state()
 
     # ---------------- Device Info + Map Link ----------------
@@ -1028,132 +1029,91 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         else:
             return "current"
 
-    @property
-    def latitude(self) -> float | None:
-        """Return latitude value of the device (float, if known).
+    # ------------------------------------------------------------------
+    # Location attribute synchronisation (HA CachedProperties pattern)
+    # ------------------------------------------------------------------
+    # HA's TrackerEntity uses CachedProperties (backed by propcache) for
+    # latitude, longitude, location_accuracy, and location_name.  The
+    # Entity base class caches extra_state_attributes the same way.
+    # Setting the corresponding _attr_* values is the ONLY reliable way
+    # to invalidate those caches across all HA versions (including
+    # 2026.2+).  We therefore no longer override the properties directly
+    # but recompute all values in _sync_location_attrs() and write the
+    # _attr_* attributes before every async_write_ha_state() call.
+    # ------------------------------------------------------------------
 
-        Returns None if location data is stale (older than stale_threshold),
-        causing HA to show 'unknown' state. Also returns None if accuracy
-        is missing, since HA's zone engine requires all three values
-        (latitude, longitude, accuracy) to be present together.
+    def _sync_location_attrs(self) -> None:
+        """Recompute and publish every TrackerEntity attribute via _attr_*.
+
+        Must be called before *every* ``async_write_ha_state()`` so that
+        HA's ``CachedProperties`` mechanism picks up fresh values.
         """
-        if self._is_location_stale():
-            return None
-        data = self._current_row() or self._last_good_accuracy_data
-        if not data:
-            return None
-        # Guard: accuracy must also be present for a valid GPS location
-        if data.get("accuracy") is None:
-            return None
-        return data.get("latitude")
+        stale = self._is_location_stale()
 
-    @property
-    def longitude(self) -> float | None:
-        """Return longitude value of the device (float, if known).
+        # --- latitude / longitude / location_accuracy ---
+        if stale:
+            self._attr_latitude = None
+            self._attr_longitude = None
+            self._attr_location_accuracy = 0.0
+            self._attr_location_name = None
+        else:
+            data = self._current_row() or self._last_good_accuracy_data
+            if not data or data.get("accuracy") is None:
+                # Accuracy must be present for a valid GPS fix; without it
+                # HA's zone engine raises TypeError on comparison.
+                self._attr_latitude = None
+                self._attr_longitude = None
+                self._attr_location_accuracy = 0.0
+            else:
+                self._attr_latitude = data.get("latitude")
+                self._attr_longitude = data.get("longitude")
+                acc = data.get("accuracy")
+                try:
+                    self._attr_location_accuracy = float(acc) if acc is not None else 0.0
+                except (TypeError, ValueError):
+                    self._attr_location_accuracy = 0.0
 
-        Returns None if location data is stale (older than stale_threshold),
-        causing HA to show 'unknown' state. Also returns None if accuracy
-        is missing, since HA's zone engine requires all three values
-        (latitude, longitude, accuracy) to be present together.
-        """
-        if self._is_location_stale():
-            return None
-        data = self._current_row() or self._last_good_accuracy_data
-        if not data:
-            return None
-        # Guard: accuracy must also be present for a valid GPS location
-        if data.get("accuracy") is None:
-            return None
-        return data.get("longitude")
+            # --- location_name ---
+            name_data = self._current_row()
+            if not name_data:
+                self._attr_location_name = None
+            else:
+                lat = name_data.get("latitude")
+                lon = name_data.get("longitude")
+                sem = name_data.get("semantic_name")
+                if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                    # Coordinates present -> let HA zone engine decide.
+                    self._attr_location_name = None
+                elif isinstance(sem, str) and sem.strip().casefold() in {
+                    "home",
+                    "zuhause",
+                }:
+                    self._attr_location_name = None
+                else:
+                    self._attr_location_name = sem
 
-    @property
-    def location_accuracy(self) -> float | None:
-        """Return accuracy of location in meters.
-
-        Returns None if location data is stale (older than stale_threshold),
-        mirroring the behaviour of latitude/longitude for consistency.
-        """
-        if self._is_location_stale():
-            return None
-        data = self._current_row() or self._last_good_accuracy_data
-        if not data:
-            return None
-        acc = data.get("accuracy")
-        if acc is None:
-            return None
-        try:
-            return float(acc)
-        except (TypeError, ValueError):
-            return None
-
-    @property
-    def location_name(self) -> str | None:
-        """Return a human place label only when it should override zone logic.
-
-        Rules:
-        - If location data is stale, return None for consistency with coordinates.
-        - If we have valid coordinates, let HA compute the zone name.
-        - If we don't have coordinates, fall back to Google's semantic label.
-        - Never override zones with generic 'home' labels from Google.
-        """
-        if self._is_location_stale():
-            return None
-        data = self._current_row()
-        if not data:
-            return None
-
-        lat = data.get("latitude")
-        lon = data.get("longitude")
-        sem = data.get("semantic_name")
-        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-            # Coordinates present -> let HA zone engine decide.
-            return None
-
-        if isinstance(sem, str) and sem.strip().casefold() in {"home", "zuhause"}:
-            return None
-
-        return sem
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra state attributes for diagnostics/UX (sanitized).
-
-        Delegates to the coordinator helper `_as_ha_attributes`, which:
-        - Adds a normalized UTC timestamp mirror (`last_seen_utc`).
-        - Uses `accuracy_m` (float meters) rather than `gps_accuracy` for stability.
-        - Includes source labeling (`source_label`/`source_rank`) for transparency.
-
-        Additionally exposes staleness information:
-        - `location_age`: Seconds since last location update.
-        - `location_status`: 'current', 'aging', 'stale', or 'unknown'.
-        - `last_latitude`/`last_longitude`: Last known coordinates when stale.
-        """
+        # --- extra_state_attributes ---
         row = self._current_row()
-        attributes = _as_ha_attributes(row) or {}
+        attributes: dict[str, Any] = _as_ha_attributes(row) or {}
 
-        # Expose the stable tracker identifier for interoperability with
-        # third-party integrations that cannot rely on rotating MAC addresses.
         attributes["google_device_id"] = self.device_id
 
-        # Add staleness information
         location_age = self._get_location_age()
         if location_age is not None:
             attributes["location_age"] = round(location_age)
         attributes["location_status"] = self._get_location_status()
 
-        # When location is stale, expose last known coordinates in attributes
-        # so they remain available for map views and history
-        if self._is_location_stale():
-            data = self._current_row() or self._last_good_accuracy_data
-            if data:
-                last_lat = data.get("latitude")
-                last_lon = data.get("longitude")
+        if stale:
+            stale_data = self._current_row() or self._last_good_accuracy_data
+            if stale_data:
+                last_lat = stale_data.get("latitude")
+                last_lon = stale_data.get("longitude")
                 if last_lat is not None:
                     attributes["last_latitude"] = last_lat
                 if last_lon is not None:
                     attributes["last_longitude"] = last_lon
 
-        return attributes
+        self._attr_extra_state_attributes = attributes
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -1162,9 +1122,11 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         - Keep the device's human-readable name in sync with the coordinator snapshot.
         - Rely on the coordinator's filtered snapshot for accuracy gating while
           preserving the last known coordinates when new fixes omit location data.
+        - Recompute _attr_* values so HA's CachedProperties caches are invalidated.
         """
         if not self.coordinator_has_device():
             self._last_good_accuracy_data = None
+            self._sync_location_attrs()
             self.async_write_ha_state()
             return
 
@@ -1181,6 +1143,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         device_data = self._current_row()
         if not device_data:
+            self._sync_location_attrs()
             self.async_write_ha_state()
             return
 
@@ -1193,4 +1156,5 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             # Preserve semantic-only updates when no prior location is available.
             self._last_good_accuracy_data = device_data.copy()
 
+        self._sync_location_attrs()
         self.async_write_ha_state()
