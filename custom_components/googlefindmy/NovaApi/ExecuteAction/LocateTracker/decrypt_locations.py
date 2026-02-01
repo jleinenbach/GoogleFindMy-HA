@@ -288,6 +288,26 @@ async def async_retrieve_identity_key(
 
     owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
     owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+
+    # --- Proactive Owner Key Version Mismatch Check ---
+    # If the tracker requires a newer owner key version than what we have cached,
+    # force-refresh the owner key BEFORE attempting decryption to avoid an
+    # unnecessary AES-GCM InvalidTag failure followed by a reactive retry.
+    if (
+        owner_key_version
+        and owner_key_info.version is not None
+        and owner_key_version > owner_key_info.version
+    ):
+        _LOGGER.info(
+            "Owner Key Version mismatch detected: Tracker requires V%s, "
+            "Cache has V%s. Refreshing...",
+            owner_key_version,
+            owner_key_info.version,
+        )
+        owner_key_info = await async_get_owner_key(
+            cache=cache, force_refresh=True
+        )
+
     candidates: list[bytes] = []
     decrypt_errors: list[Exception] = []
 
