@@ -370,9 +370,7 @@ async def async_setup_entry(  # noqa: PLR0915
                     continue
 
                 visible = True
-                is_visible = getattr(
-                    coordinator, "is_device_visible_in_subentry", None
-                )
+                is_visible = getattr(coordinator, "is_device_visible_in_subentry", None)
                 if callable(is_visible):
                     try:
                         visible = bool(is_visible(tracker_key, dev_id))
@@ -401,8 +399,7 @@ async def async_setup_entry(  # noqa: PLR0915
                     known_uwt_ids.add(dev_id)
                     entities.append(uwt_entity)
                     _LOGGER.info(
-                        "UWT-Mode binary sensor created for device=%s "
-                        "(uwt_mode=%s)",
+                        "UWT-Mode binary sensor created for device=%s (uwt_mode=%s)",
                         dev_id,
                         battery_state.uwt_mode,
                     )
@@ -467,9 +464,7 @@ async def async_setup_entry(  # noqa: PLR0915
                     if _subentry_type(sub) == "tracker":
                         data = getattr(sub, "data", None)
                         if isinstance(data, Mapping):
-                            tracker_key = data.get(
-                                "group_key", TRACKER_SUBENTRY_KEY
-                            )
+                            tracker_key = data.get("group_key", TRACKER_SUBENTRY_KEY)
                         break
             _add_tracker_scope(tracker_key, subentry_identifier)
 
@@ -928,10 +923,12 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     entity_description = UWT_MODE_DESC
 
-    _unrecorded_attributes = frozenset({
-        "last_ble_observation",
-        "google_device_id",
-    })
+    _unrecorded_attributes = frozenset(
+        {
+            "last_ble_observation",
+            "google_device_id",
+        }
+    )
 
     def __init__(
         self,

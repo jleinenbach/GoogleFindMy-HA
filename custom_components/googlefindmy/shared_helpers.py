@@ -110,9 +110,7 @@ def safe_fcm_health_snapshots(receiver: Any) -> dict[str, dict[str, Any]]:
         return {}
 
 
-def normalize_fcm_entry_snapshot(
-    entry_id: str, snap: dict[str, Any]
-) -> dict[str, Any]:
+def normalize_fcm_entry_snapshot(entry_id: str, snap: dict[str, Any]) -> dict[str, Any]:
     """Normalize a single FCM health snapshot entry.
 
     Returns a dict with the common fields used by both ``diagnostics.py``

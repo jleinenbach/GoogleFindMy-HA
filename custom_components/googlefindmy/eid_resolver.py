@@ -724,9 +724,7 @@ class GoogleFindMyEIDResolver:
     _ble_battery_state: dict[str, BLEBatteryState] = field(
         init=False, default_factory=dict
     )
-    _ble_scan_info: dict[str, BLEScanInfo] = field(
-        init=False, default_factory=dict
-    )
+    _ble_scan_info: dict[str, BLEScanInfo] = field(init=False, default_factory=dict)
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -2416,9 +2414,7 @@ class GoogleFindMyEIDResolver:
             )
 
             battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
-            battery_label = battery_labels.get(
-                battery_raw, f"UNKNOWN({battery_raw})"
-            )
+            battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
 
             # Store for ALL matches (shared-device propagation).
             # Key by canonical_id (Google API device ID) — this is the same
@@ -2518,9 +2514,7 @@ class GoogleFindMyEIDResolver:
         """
         return self._ble_scan_info.get(device_id)
 
-    def _record_ble_scan_info(
-        self, matches: list[EIDMatch], ble_address: str
-    ) -> None:
+    def _record_ble_scan_info(self, matches: list[EIDMatch], ble_address: str) -> None:
         """Store the BLE address for all matched devices.
 
         Called from :meth:`resolve_eid` when the caller provides a
@@ -2638,8 +2632,7 @@ class GoogleFindMyEIDResolver:
                 ):
                     candidates.append(
                         payload[
-                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                            + LEGACY_EID_LENGTH
+                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
                         ]
                     )
                 elif frame_type == MODERN_FRAME_TYPE:

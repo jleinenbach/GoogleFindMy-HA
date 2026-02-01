@@ -100,14 +100,15 @@ def _build_uwt_sensor(
     sensor.entity_description = UWT_MODE_DESC
     sensor._attr_has_entity_name = True
     sensor._attr_entity_category = None
-    sensor._unrecorded_attributes = frozenset({
-        "last_ble_observation",
-        "google_device_id",
-    })
+    sensor._unrecorded_attributes = frozenset(
+        {
+            "last_ble_observation",
+            "google_device_id",
+        }
+    )
     sensor._fallback_label = device_name
     sensor._attr_unique_id = (
-        f"googlefindmy_{coordinator.config_entry.entry_id}"
-        f"_tracker_{device_id}_uwt_mode"
+        f"googlefindmy_{coordinator.config_entry.entry_id}_tracker_{device_id}_uwt_mode"
     )
     sensor.entity_id = f"binary_sensor.test_{device_id}_uwt_mode"
 
@@ -248,9 +249,7 @@ class TestUWTModeSensorAvailability:
 
     def test_unavailable_when_hidden(self) -> None:
         resolver = _make_resolver_with_state("dev-1")
-        coordinator = _fake_coordinator(
-            device_id="dev-1", present=True, visible=False
-        )
+        coordinator = _fake_coordinator(device_id="dev-1", present=True, visible=False)
         sensor = _build_uwt_sensor(
             device_id="dev-1", coordinator=coordinator, resolver=resolver
         )

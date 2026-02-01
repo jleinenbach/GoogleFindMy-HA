@@ -1582,7 +1582,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             delay = _compute_delay(
                                 attempt, response.headers.get("Retry-After")
                             )
-                            log_fn = _LOGGER.info if retries_used == 0 else _LOGGER.warning
+                            log_fn = (
+                                _LOGGER.info if retries_used == 0 else _LOGGER.warning
+                            )
                             log_fn(
                                 "Nova API request failed (Attempt %d/%d): HTTP %d for %s. "
                                 "Server response: %s. Retrying in %.2f seconds...",

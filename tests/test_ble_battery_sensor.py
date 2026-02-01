@@ -155,11 +155,13 @@ def _build_battery_sensor(
     sensor.entity_description = BLE_BATTERY_DESCRIPTION
     sensor._attr_has_entity_name = True
     sensor._attr_entity_registry_enabled_default = True
-    sensor._unrecorded_attributes = frozenset({
-        "last_ble_observation",
-        "google_device_id",
-        "battery_raw_level",
-    })
+    sensor._unrecorded_attributes = frozenset(
+        {
+            "last_ble_observation",
+            "google_device_id",
+            "battery_raw_level",
+        }
+    )
     sensor._fallback_label = device_name
 
     safe_id = device_id if device_id is not None else "unknown"
@@ -509,9 +511,7 @@ class TestUpdateBLEBattery:
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-frame")
         # Pass a non-None observed_frame to cover the 0x{:02x} formatting branch
-        resolver._update_ble_battery(
-            raw, 0x40, {"flags_xor_mask": xor_mask}, [match]
-        )
+        resolver._update_ble_battery(raw, 0x40, {"flags_xor_mask": xor_mask}, [match])
         state = resolver._ble_battery_state.get("dev-frame")
         assert state is not None
         assert state.battery_pct == 100
@@ -529,7 +529,7 @@ class TestUpdateBLEBattery:
         """CANNOT_DECODE with long payload should truncate raw_hex to 40 bytes."""
         resolver = _make_resolver()
         # Build a long payload that won't match FMDN frame type at position 0 or 7
-        raw = b"\xFF" * 100
+        raw = b"\xff" * 100
         match = _match("dev-long")
         resolver._update_ble_battery(raw, None, {}, [match])
         assert "dev-long" in resolver._flags_logged_devices
@@ -537,7 +537,7 @@ class TestUpdateBLEBattery:
     def test_cannot_decode_short_payload_full_hex(self) -> None:
         """CANNOT_DECODE with short payload should emit full raw hex."""
         resolver = _make_resolver()
-        raw = b"\xAB" * 20
+        raw = b"\xab" * 20
         match = _match("dev-short-hex")
         resolver._update_ble_battery(raw, None, {}, [match])
         assert "dev-short-hex" in resolver._flags_logged_devices
@@ -545,7 +545,7 @@ class TestUpdateBLEBattery:
     def test_second_cannot_decode_same_device_no_double_log(self) -> None:
         """CANNOT_DECODE for an already-logged device should not re-log."""
         resolver = _make_resolver()
-        raw = b"\xAB" * 20
+        raw = b"\xab" * 20
         match = _match("dev-double")
         resolver._update_ble_battery(raw, None, {}, [match])
         assert "dev-double" in resolver._flags_logged_devices
@@ -804,9 +804,7 @@ class TestBLEBatterySensorAvailability:
     def test_unavailable_when_coordinator_hidden(self) -> None:
         """Unavailable when coordinator marks device as not visible."""
         resolver = _make_resolver()
-        coordinator = _fake_coordinator(
-            device_id="dev-1", present=True, visible=False
-        )
+        coordinator = _fake_coordinator(device_id="dev-1", present=True, visible=False)
         sensor = _build_battery_sensor(
             device_id="dev-1",
             coordinator=coordinator,
@@ -954,9 +952,7 @@ class TestBLEBatterySensorCoordinatorUpdate:
     def test_update_without_device_writes_state(self) -> None:
         """When coordinator_has_device is False, still writes state."""
         resolver = _make_resolver()
-        coordinator = _fake_coordinator(
-            device_id="dev-1", present=False, visible=False
-        )
+        coordinator = _fake_coordinator(device_id="dev-1", present=False, visible=False)
         sensor = _build_battery_sensor(
             device_id="dev-1",
             coordinator=coordinator,
