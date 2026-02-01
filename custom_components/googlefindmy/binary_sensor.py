@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 from homeassistant.components.binary_sensor import (
@@ -43,16 +44,20 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import EntityRecoveryManager
 from .const import (
+    DATA_EID_RESOLVER,
     DOMAIN,
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
+    SUBENTRY_TYPE_TRACKER,
+    TRACKER_SUBENTRY_KEY,
     TRANSLATION_KEY_AUTH_STATUS,
     issue_id_for,
 )
 from .coordinator import GoogleFindMyCoordinator, format_epoch_utc
 from .entity import (
+    GoogleFindMyDeviceEntity,
     GoogleFindMyEntity,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
@@ -114,6 +119,12 @@ CONNECTIVITY_DESC = BinarySensorEntityDescription(
     key="connectivity",
     translation_key="connectivity",
     device_class=CONNECTIVITY_DEVICE_CLASS,
+    entity_category=EntityCategory.DIAGNOSTIC,
+)
+
+UWT_MODE_DESC = BinarySensorEntityDescription(
+    key="uwt_mode",
+    translation_key="uwt_mode",
     entity_category=EntityCategory.DIAGNOSTIC,
 )
 
@@ -337,6 +348,125 @@ async def async_setup_entry(  # noqa: PLR0915
         )
         _schedule_service_entities(deduped_entities, True)
 
+    # ---- Per-device tracker scope: UWT-Mode binary sensors ----
+    processed_tracker_identifiers: set[str] = set()
+    known_uwt_ids: set[str] = set()
+
+    def _get_ble_resolver() -> Any:
+        """Return the EID resolver from hass.data, or None."""
+        domain_data = hass.data.get(DOMAIN)
+        if not isinstance(domain_data, dict):
+            return None
+        return domain_data.get(DATA_EID_RESOLVER)
+
+    def _add_tracker_scope(  # noqa: PLR0915
+        tracker_key: str,
+        forwarded_config_id: str | None,
+    ) -> None:
+        """Create per-device UWT binary sensors for a tracker subentry."""
+        tracker_ids = _known_ids_for_type(SUBENTRY_TYPE_TRACKER)
+        sanitized_config_id = ensure_config_subentry_id(
+            entry,
+            "binary_sensor_tracker",
+            forwarded_config_id,
+            known_ids=tracker_ids,
+        )
+        if sanitized_config_id is None:
+            if tracker_ids:
+                return
+            sanitized_config_id = forwarded_config_id or tracker_key
+
+        tracker_identifier = sanitized_config_id or tracker_key
+        if tracker_identifier in processed_tracker_identifiers:
+            return
+        processed_tracker_identifiers.add(tracker_identifier)
+
+        def _schedule_tracker_entities(
+            new_entities: Iterable[BinarySensorEntity],
+            update_before_add: bool = True,
+        ) -> None:
+            schedule_add_entities(
+                coordinator.hass,
+                async_add_entities,
+                entities=new_entities,
+                update_before_add=update_before_add,
+                config_subentry_id=sanitized_config_id,
+                log_owner="Binary sensor setup (tracker)",
+                logger=_LOGGER,
+            )
+
+        def _build_uwt_entities() -> list[BinarySensorEntity]:
+            """Build UWT-Mode binary sensors for devices with BLE data."""
+            entities: list[BinarySensorEntity] = []
+            resolver = _get_ble_resolver()
+            if resolver is None:
+                return entities
+            for device in coordinator.get_subentry_snapshot(tracker_key):
+                dev_id = device.get("id") if isinstance(device, Mapping) else None
+                dev_name = device.get("name") if isinstance(device, Mapping) else None
+                if not dev_id or not dev_name:
+                    continue
+                if dev_id in known_uwt_ids:
+                    continue
+
+                visible = True
+                is_visible = getattr(
+                    coordinator, "is_device_visible_in_subentry", None
+                )
+                if callable(is_visible):
+                    try:
+                        visible = bool(is_visible(tracker_key, dev_id))
+                    except Exception:  # pragma: no cover
+                        visible = True
+                if not visible:
+                    continue
+
+                battery_state = None
+                try:
+                    battery_state = resolver.get_ble_battery_state(dev_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                if battery_state is None:
+                    continue
+
+                uwt_entity = GoogleFindMyUWTModeSensor(
+                    coordinator,
+                    device,
+                    subentry_key=tracker_key,
+                    subentry_identifier=tracker_identifier,
+                )
+                uwt_uid = getattr(uwt_entity, "unique_id", None)
+                if isinstance(uwt_uid, str) and uwt_uid not in added_unique_ids:
+                    added_unique_ids.add(uwt_uid)
+                    known_uwt_ids.add(dev_id)
+                    entities.append(uwt_entity)
+                    _LOGGER.info(
+                        "UWT-Mode binary sensor created for device=%s "
+                        "(uwt_mode=%s)",
+                        dev_id,
+                        battery_state.uwt_mode,
+                    )
+            return entities
+
+        initial = _build_uwt_entities()
+        if initial:
+            _schedule_tracker_entities(initial, True)
+        else:
+            _schedule_tracker_entities([], True)
+
+        @callback
+        def _add_new_uwt_devices() -> None:
+            new_entities = _build_uwt_entities()
+            if new_entities:
+                _LOGGER.debug(
+                    "Binary sensor: dynamically adding %d UWT entity(ies)",
+                    len(new_entities),
+                )
+                _schedule_tracker_entities(new_entities, True)
+
+        unsub = coordinator.async_add_listener(_add_new_uwt_devices)
+        entry.async_on_unload(unsub)
+
     seen_subentries: set[str | None] = set()
 
     @callback
@@ -350,7 +480,7 @@ async def async_setup_entry(  # noqa: PLR0915
             )
 
         subentry_type = _subentry_type(subentry)
-        if subentry_type is not None and subentry_type != "service":
+        if subentry_type is not None and subentry_type not in ("service", "tracker"):
             _LOGGER.debug(
                 "Binary sensor setup skipped for unrelated subentry '%s' (type '%s')",
                 subentry_identifier,
@@ -362,10 +492,26 @@ async def async_setup_entry(  # noqa: PLR0915
             return
         seen_subentries.add(subentry_identifier)
 
-        for scope in _collect_service_scopes(
-            subentry_identifier, forwarded_config_id=subentry_identifier
-        ):
-            _add_scope(scope, subentry_identifier)
+        if subentry_type != "tracker":
+            for scope in _collect_service_scopes(
+                subentry_identifier, forwarded_config_id=subentry_identifier
+            ):
+                _add_scope(scope, subentry_identifier)
+
+        # Per-device UWT sensors for tracker subentries (or untyped).
+        if subentry_type in (None, "tracker"):
+            tracker_key = TRACKER_SUBENTRY_KEY
+            subentries = getattr(entry, "subentries", None)
+            if isinstance(subentries, Mapping):
+                for sub in subentries.values():
+                    if _subentry_type(sub) == "tracker":
+                        data = getattr(sub, "data", None)
+                        if isinstance(data, Mapping):
+                            tracker_key = data.get(
+                                "group_key", TRACKER_SUBENTRY_KEY
+                            )
+                        break
+            _add_tracker_scope(tracker_key, subentry_identifier)
 
     runtime_data = getattr(entry, "runtime_data", None)
 
@@ -798,3 +944,121 @@ class GoogleFindMyConnectivitySensor(GoogleFindMyEntity, BinarySensorEntity):
         """Attach the sensor to the per-entry service device."""
 
         return self.service_device_info(include_subentry_identifier=True)
+
+
+# --------------------------------------------------------------------------------------
+# Per-device UWT-Mode sensor
+# --------------------------------------------------------------------------------------
+class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
+    """Per-device binary sensor indicating FMDN Unwanted Tracking (UWT) mode.
+
+    Semantics:
+        - ``on``  → The tracker has entered UWT / separated state (away from
+          owner for 8-24 hours).  DULT anti-stalking sound becomes available.
+        - ``off`` → Normal operation, tracker is near owner.
+
+    Data source: bit 7 of the FMDN hashed-flags byte, decoded by the EID
+    resolver as :pyattr:`BLEBatteryState.uwt_mode`.
+
+    Created dynamically alongside the BLE battery sensor when the resolver
+    first decodes hashed-flags data for a device.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    entity_description = UWT_MODE_DESC
+
+    _unrecorded_attributes = frozenset({
+        "last_ble_observation",
+        "google_device_id",
+    })
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the UWT-Mode binary sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_uwt_mode",
+            separator="_",
+        )
+
+    def _get_resolver(self) -> Any:
+        """Return the EID resolver from hass.data, or None."""
+        domain_data = self.hass.data.get(DOMAIN)
+        if not isinstance(domain_data, dict):
+            return None
+        return domain_data.get(DATA_EID_RESOLVER)
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when UWT / separated state is active."""
+        resolver = self._get_resolver()
+        if resolver is None:
+            return None
+        state = resolver.get_ble_battery_state(self._device_id)
+        if state is None:
+            return None
+        return state.uwt_mode
+
+    @property
+    def icon(self) -> str:
+        """Return a dynamic icon reflecting UWT state."""
+        return "mdi:shield-alert" if self.is_on else "mdi:shield-check"
+
+    @property
+    def available(self) -> bool:
+        """Return True when the coordinator considers the device present."""
+        if not super().available:
+            return False
+        if not self.coordinator_has_device():
+            return False
+        try:
+            if hasattr(self.coordinator, "is_device_present"):
+                return bool(self.coordinator.is_device_present(self._device_id))
+        except Exception:
+            pass
+        return True
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return diagnostic attributes (excluded from recorder)."""
+        resolver = self._get_resolver()
+        if resolver is None:
+            return None
+        state = resolver.get_ble_battery_state(self._device_id)
+        if state is None:
+            return None
+        return {
+            "last_ble_observation": datetime.fromtimestamp(
+                state.observed_at_wall, tz=UTC
+            ).isoformat(),
+            "google_device_id": self._device_id,
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Refresh Home Assistant state when coordinator data changes."""
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Attach the sensor to the per-device tracker device."""
+        return super().device_info
