@@ -1464,7 +1464,7 @@ class TestBLEBatterySensor:
         attrs = sensor.extra_state_attributes
         assert attrs is not None
         assert attrs["battery_raw_level"] == "LOW"
-        assert attrs["uwt_mode"] is False
+        assert "uwt_mode" not in attrs  # UWT is its own binary sensor now
         assert "last_ble_observation" in attrs
         assert attrs["google_device_id"] == "dev1"
 

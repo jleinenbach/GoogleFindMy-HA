@@ -1277,7 +1277,6 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
     entity_description = BLE_BATTERY_DESCRIPTION
 
     _unrecorded_attributes = frozenset({
-        "uwt_mode",
         "last_ble_observation",
         "google_device_id",
         "battery_raw_level",
@@ -1367,7 +1366,6 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
             return None
         return {
             "battery_raw_level": state.battery_level,
-            "uwt_mode": state.uwt_mode,
             "last_ble_observation": datetime.fromtimestamp(
                 state.observed_at_wall, tz=UTC
             ).isoformat(),

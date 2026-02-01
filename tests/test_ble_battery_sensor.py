@@ -156,7 +156,6 @@ def _build_battery_sensor(
     sensor._attr_has_entity_name = True
     sensor._attr_entity_registry_enabled_default = True
     sensor._unrecorded_attributes = frozenset({
-        "uwt_mode",
         "last_ble_observation",
         "google_device_id",
         "battery_raw_level",
@@ -901,7 +900,7 @@ class TestBLEBatterySensorExtraAttributes:
 
         assert attrs is not None
         assert attrs["battery_raw_level"] == 1
-        assert attrs["uwt_mode"] is True
+        assert "uwt_mode" not in attrs  # UWT is its own binary sensor now
         assert attrs["google_device_id"] == "dev-1"
         assert "last_ble_observation" in attrs
         assert "T" in attrs["last_ble_observation"]
@@ -1284,7 +1283,7 @@ class TestBLEBatterySensorUnrecordedAttributes:
     def test_unrecorded_attrs_defined(self) -> None:
         sensor = _build_battery_sensor()
         assert isinstance(sensor._unrecorded_attributes, frozenset)
-        assert "uwt_mode" in sensor._unrecorded_attributes
+        assert "uwt_mode" not in sensor._unrecorded_attributes  # own entity now
         assert "last_ble_observation" in sensor._unrecorded_attributes
         assert "google_device_id" in sensor._unrecorded_attributes
         assert "battery_raw_level" in sensor._unrecorded_attributes
@@ -1345,7 +1344,7 @@ class TestIntegrationDecodeToEntity:
         attrs = sensor.extra_state_attributes
         assert attrs is not None
         assert attrs["battery_raw_level"] == 2
-        assert attrs["uwt_mode"] is False
+        assert "uwt_mode" not in attrs  # UWT is its own binary sensor now
 
     def test_decode_pipeline_shared_device(self) -> None:
         """Shared device: same tracker across 2 accounts -> both sensors get values."""
