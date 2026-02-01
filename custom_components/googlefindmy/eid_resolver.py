@@ -94,6 +94,11 @@ KNOWN_OFFSET_KEY_LENGTH = 2
 # of clock drift at 1024s rotation.
 LOCK_TRACKING_WINDOW_STEPS = 2
 
+# Maximum wall-clock time (seconds) the EID refresh loop may run before
+# yielding control back to the event loop via ``await asyncio.sleep(0)``.
+# Keeps the main thread responsive under HA's 10 ms watchdog budget.
+_YIELD_BUDGET_SECONDS: float = 0.008
+
 # =============================================================================
 # Heuristic Phone Discovery Configuration
 # =============================================================================
@@ -1512,6 +1517,7 @@ class GoogleFindMyEIDResolver:
         work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
         builder = CacheBuilder()
+        _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
@@ -1551,6 +1557,12 @@ class GoogleFindMyEIDResolver:
                             advertisement_reversed=generated.is_reversed,
                             flags_xor_mask=xor_mask,
                         )
+
+            # Cooperative yield: give the event loop a chance to process
+            # pending callbacks when the CPU budget for this tick is spent.
+            if time.monotonic() >= _yield_deadline:
+                await asyncio.sleep(0)
+                _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         self._lookup, self._lookup_metadata = builder.finalize()
         _LOGGER.debug(
