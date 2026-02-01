@@ -457,6 +457,12 @@ TRANSLATION_KEY_AUTH_STATUS: str = "nova_auth_status"
 # Issue key used for Repairs (translations use the same key).
 ISSUE_AUTH_EXPIRED_KEY: str = "auth_expired"
 
+# Issue/translation keys for common repair issues (keep aligned with translations/*.json).
+ISSUE_MULTIPLE_CONFIG_ENTRIES: str = "multiple_config_entries"
+TRANSLATION_KEY_CACHE_PURGED: str = "cache_purged"
+TRANSLATION_KEY_UNIQUE_ID_COLLISION: str = "unique_id_collision"
+TRANSLATION_KEY_DUPLICATE_ACCOUNT: str = "duplicate_account_entries"
+
 
 def issue_id_for(entry_id: str) -> str:
     """Return a stable Repairs issue_id for a given config entry.
@@ -596,6 +602,10 @@ __all__ = [
     "EVENT_AUTH_OK",
     "TRANSLATION_KEY_AUTH_STATUS",
     "ISSUE_AUTH_EXPIRED_KEY",
+    "ISSUE_MULTIPLE_CONFIG_ENTRIES",
+    "TRANSLATION_KEY_CACHE_PURGED",
+    "TRANSLATION_KEY_UNIQUE_ID_COLLISION",
+    "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
     "issue_id_for",
     "STORAGE_KEY",
     "STORAGE_VERSION",

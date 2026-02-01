@@ -698,6 +698,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             except Exception:  # pragma: no cover - defensive guard
                 pass
 
+        # Fallback: scan domain-level entries bucket for runtimes not yet
+        # discovered via entry.runtime_data.  hass.data[DOMAIN] is compatible
+        # with the HassKey-based DATA_DOMAIN defined in __init__.py.
         entries: dict[str, Any] = hass.data.setdefault(DOMAIN, {}).setdefault(
             "entries", {}
         )
@@ -797,6 +800,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if dev:
             for entry_id in dev.config_entries:
                 entry = _entry_for_id(hass, entry_id)
+                # Prefer entry.runtime_data (2026 standard), then entries bucket.
                 runtime = getattr(entry, "runtime_data", None)
                 if runtime:
                     return runtime, canonical_id
