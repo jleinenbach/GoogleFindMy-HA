@@ -181,6 +181,11 @@ HTTP_RETRY_ELIGIBLE = frozenset(
 )
 
 RECENT_REFRESH_WINDOW_S = 2.0
+# Maximum number of times the 401 handler will wait for a concurrent refresh
+# deadline before giving up.  This prevents infinite loops when the cache
+# deadline is perpetually in the future (e.g., corrupt cache state or clock
+# skew).
+MAX_AUTH_DEADLINE_WAITS = 8
 
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KiB
 
@@ -417,7 +422,6 @@ _STATE: dict[str, Any] = {
     "hass": None,
     "async_refresh_lock": None,
     "async_refresh_lock_loop_id": None,
-    "cache_provider": None,
 }
 
 # Key for storing auth retry deadline in cache (prevents parallel refresh storms)
@@ -452,24 +456,23 @@ def register_cache_provider(provider: Callable[[], Any]) -> None:
     instead of relying on the global cache facade. Uses contextvars to ensure
     concurrent async requests don't interfere with each other.
     """
-    _STATE["cache_provider"] = provider
     _CACHE_PROVIDER.set(provider)
 
 
 def unregister_cache_provider() -> None:
     """Unregister the cache provider for the current context."""
-    _STATE["cache_provider"] = None
     _CACHE_PROVIDER.set(None)
 
 
 def resolve_cache_from_provider() -> TokenCache | None:
-    """Return the cache supplied by the registered provider, if any."""
+    """Return the cache supplied by the registered provider, if any.
+
+    Uses only the context-local ContextVar to ensure strict multi-account
+    isolation.  A global fallback was intentionally removed to prevent
+    cross-account cache leaks when a background task loses its context.
+    """
 
     provider: Callable[[], TokenCache | None] | None = _CACHE_PROVIDER.get()
-    if provider is None:
-        provider = cast(
-            Callable[[], TokenCache | None] | None, _STATE.get("cache_provider")
-        )
     if provider is None:
         return None
     try:
@@ -1379,6 +1382,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             session = async_get_clientsession(hass_ref)
         else:
             # Fallback for environments without a shared session (e.g., standalone scripts).
+            _LOGGER.warning(
+                "Creating ephemeral aiohttp session for Nova request to %s. "
+                "This disables HTTP keep-alive and increases latency. "
+                "Call register_hass() during integration setup to use a shared session.",
+                api_scope,
+            )
             session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
             )
@@ -1387,6 +1396,7 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     try:
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
+        deadline_waits = 0  # Circuit breaker for 401 deadline-wait loops
         while True:
             attempt = retries_used + 1
             try:
@@ -1443,24 +1453,37 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             try:
                                 deadline = float(deadline_raw)
                                 if now < deadline:
-                                    # Another request is handling refresh - wait and retry
-                                    wait_time = min(deadline - now + 1.0, 30.0)
-                                    _LOGGER.info(
-                                        "Nova API: auth refresh in progress by another request. "
-                                        "Waiting %.1fs before retry.",
-                                        wait_time,
-                                    )
-                                    await asyncio.sleep(wait_time)
-                                    # Reload token from cache (may have been refreshed)
-                                    token_key = f"adm_token_{user}"
-                                    if ns_prefix:
-                                        token_key = f"{ns_prefix}adm_token_{user}"
-                                    fresh_token = await _cache_get(token_key)
-                                    if fresh_token:
-                                        headers["Authorization"] = (
-                                            f"Bearer {fresh_token}"
+                                    if deadline_waits >= MAX_AUTH_DEADLINE_WAITS:
+                                        _LOGGER.error(
+                                            "Nova API: circuit breaker tripped after %d deadline waits "
+                                            "for %s. Breaking out of wait loop to proceed with auth retry.",
+                                            deadline_waits,
+                                            api_scope,
                                         )
-                                    continue  # Retry with possibly fresh token
+                                        # Clear the stale deadline to unblock other requests
+                                        await _cache_set(ns_deadline_key, None)
+                                    else:
+                                        # Another request is handling refresh - wait and retry
+                                        wait_time = min(deadline - now + 1.0, 30.0)
+                                        _LOGGER.info(
+                                            "Nova API: auth refresh in progress by another request. "
+                                            "Waiting %.1fs before retry (%d/%d).",
+                                            wait_time,
+                                            deadline_waits + 1,
+                                            MAX_AUTH_DEADLINE_WAITS,
+                                        )
+                                        await asyncio.sleep(wait_time)
+                                        deadline_waits += 1
+                                        # Reload token from cache (may have been refreshed)
+                                        token_key = f"adm_token_{user}"
+                                        if ns_prefix:
+                                            token_key = f"{ns_prefix}adm_token_{user}"
+                                        fresh_token = await _cache_get(token_key)
+                                        if fresh_token:
+                                            headers["Authorization"] = (
+                                                f"Bearer {fresh_token}"
+                                            )
+                                        continue  # Retry with possibly fresh token
                             except (ValueError, TypeError):
                                 pass  # Invalid deadline, proceed normally
 
