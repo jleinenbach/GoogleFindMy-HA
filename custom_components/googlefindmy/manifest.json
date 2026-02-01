@@ -2,6 +2,7 @@
   "domain": "googlefindmy",
   "name": "Google Find My Device",
   "after_dependencies": [
+    "bluetooth",
     "recorder"
   ],
   "codeowners": [

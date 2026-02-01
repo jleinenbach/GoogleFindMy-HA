@@ -466,6 +466,17 @@
           }
         }
       },
+      "uwt_mode": {
+        "name": "Unwanted Tracking Mode",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "Last BLE observation"
+          },
+          "google_device_id": {
+            "name": "Google device ID"
+          }
+        }
+      },
       "nova_auth_status": {
         "name": "Nova API authentication status",
         "state_attributes": {

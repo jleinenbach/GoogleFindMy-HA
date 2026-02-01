@@ -15,6 +15,13 @@
           "off": "mdi:wifi-off"
         }
       },
+      "uwt_mode": {
+        "default": "mdi:shield-check",
+        "state": {
+          "on": "mdi:shield-alert",
+          "off": "mdi:shield-check"
+        }
+      },
       "nova_auth_status": {
         "default": "mdi:account-alert",
         "state": {

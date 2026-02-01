@@ -275,6 +275,10 @@ filterwarnings = [
     # which aiohttp has deprecated. This cannot be fixed in this project.
     # Remove when HA Core addresses this deprecation.
     "ignore:Inheritance class HomeAssistantApplication from web.Application is discouraged:DeprecationWarning:homeassistant.components.http",
+    # Upstream issue in trio: register_random receives a weakref-eligible object
+    # that may be GC'd immediately. Cannot be fixed in this project.
+    # Remove when trio addresses this (see trio issue tracker).
+    "ignore:It looks like `register_random` was passed an object:hypothesis.errors.HypothesisWarning:trio",
 ]
 markers = [
     "hypothesis: Property-based tests using Hypothesis (can be run in isolation with -m hypothesis)",
