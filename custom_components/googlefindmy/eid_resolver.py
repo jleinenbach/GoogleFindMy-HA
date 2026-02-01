@@ -1876,6 +1876,12 @@ class GoogleFindMyEIDResolver:
             and owner_key_info.version is not None
             and owner_key_info.version < identity.owner_key_version
         ):
+            _LOGGER.info(
+                "Owner Key Version mismatch detected: Tracker requires V%s, "
+                "Cache has V%s. Refreshing...",
+                identity.owner_key_version,
+                owner_key_info.version,
+            )
             refreshed = await _fetch(force_refresh=True)
             if refreshed is not None:
                 return refreshed
