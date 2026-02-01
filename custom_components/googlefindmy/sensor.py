@@ -53,8 +53,12 @@ from .entity import (
     GoogleFindMyEntity,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
+    known_ids_for_subentry_type,
     resolve_coordinator,
     schedule_add_entities,
+)
+from .entity import (
+    subentry_type as _subentry_type,
 )
 from .ha_typing import RestoreSensor, SensorEntity, callback
 
@@ -67,24 +71,6 @@ class _Scope(NamedTuple):
     subentry_key: str
     config_subentry_id: str | None
     identifier: str
-
-
-def _subentry_type(subentry: Any | None) -> str | None:
-    """Return the declared subentry type for dispatcher filtering."""
-
-    if subentry is None or isinstance(subentry, str):
-        return None
-
-    declared_type = getattr(subentry, "subentry_type", None)
-    if isinstance(declared_type, str):
-        return declared_type
-
-    data = getattr(subentry, "data", None)
-    if isinstance(data, Mapping):
-        fallback_type = data.get("subentry_type") or data.get("type")
-        if isinstance(fallback_type, str):
-            return fallback_type
-    return None
 
 
 # ----------------------------- Entity Descriptions -----------------------------
@@ -186,33 +172,6 @@ async def async_setup_entry(
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = entry
-
-    def _known_ids_for_type(expected_type: str) -> set[str]:
-        ids: set[str] = set()
-
-        subentries = getattr(entry, "subentries", None)
-        if isinstance(subentries, Mapping):
-            for subentry in subentries.values():
-                if _subentry_type(subentry) == expected_type:
-                    candidate = getattr(subentry, "subentry_id", None) or getattr(
-                        subentry, "entry_id", None
-                    )
-                    if isinstance(candidate, str) and candidate:
-                        ids.add(candidate)
-
-        runtime_data = getattr(entry, "runtime_data", None)
-        subentry_manager = getattr(runtime_data, "subentry_manager", None)
-        managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-        if isinstance(managed_subentries, Mapping):
-            for subentry in managed_subentries.values():
-                if _subentry_type(subentry) == expected_type:
-                    candidate = getattr(subentry, "subentry_id", None) or getattr(
-                        subentry, "entry_id", None
-                    )
-                    if isinstance(candidate, str) and candidate:
-                        ids.add(candidate)
-
-        return ids
 
     def _collect_scopes(
         *,
@@ -324,7 +283,7 @@ async def async_setup_entry(
         )
 
     def _add_service_scope(scope: _Scope, forwarded_config_id: str | None) -> None:
-        service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
+        service_ids = known_ids_for_subentry_type(entry, SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_service",
@@ -430,7 +389,7 @@ async def async_setup_entry(
             candidate_subentry_id = forwarded_config_id
         candidate_subentry_id = candidate_subentry_id or scope.identifier
 
-        tracker_ids = _known_ids_for_type(SUBENTRY_TYPE_TRACKER)
+        tracker_ids = known_ids_for_subentry_type(entry, SUBENTRY_TYPE_TRACKER)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_tracker",

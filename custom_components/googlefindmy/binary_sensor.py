@@ -61,8 +61,13 @@ from .entity import (
     GoogleFindMyEntity,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
+    known_ids_for_subentry_type,
     resolve_coordinator,
+    sanitize_state_text,
     schedule_add_entities,
+)
+from .entity import (
+    subentry_type as _subentry_type,
 )
 from .ha_typing import BinarySensorEntity, callback
 
@@ -77,24 +82,6 @@ class _ServiceScope(NamedTuple):
     subentry_key: str
     config_subentry_id: str | None
     identifier: str
-
-
-def _subentry_type(subentry: Any | None) -> str | None:
-    """Return the declared subentry type for dispatcher filtering."""
-
-    if subentry is None or isinstance(subentry, str):
-        return None
-
-    declared_type = getattr(subentry, "subentry_type", None)
-    if isinstance(declared_type, str):
-        return declared_type
-
-    data = getattr(subentry, "data", None)
-    if isinstance(data, Mapping):
-        fallback_type = data.get("subentry_type") or data.get("type")
-        if isinstance(fallback_type, str):
-            return fallback_type
-    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -147,33 +134,6 @@ async def async_setup_entry(  # noqa: PLR0915
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = entry
-
-    def _known_ids_for_type(expected_type: str) -> set[str]:
-        ids: set[str] = set()
-
-        subentries = getattr(entry, "subentries", None)
-        if isinstance(subentries, Mapping):
-            for subentry in subentries.values():
-                if _subentry_type(subentry) == expected_type:
-                    candidate = getattr(subentry, "subentry_id", None) or getattr(
-                        subentry, "entry_id", None
-                    )
-                    if isinstance(candidate, str) and candidate:
-                        ids.add(candidate)
-
-        runtime_data = getattr(entry, "runtime_data", None)
-        subentry_manager = getattr(runtime_data, "subentry_manager", None)
-        managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-        if isinstance(managed_subentries, Mapping):
-            for subentry in managed_subentries.values():
-                if _subentry_type(subentry) == expected_type:
-                    candidate = getattr(subentry, "subentry_id", None) or getattr(
-                        subentry, "entry_id", None
-                    )
-                    if isinstance(candidate, str) and candidate:
-                        ids.add(candidate)
-
-        return ids
 
     def _collect_service_scopes(
         hint_subentry_id: str | None = None,
@@ -263,7 +223,7 @@ async def async_setup_entry(  # noqa: PLR0915
 
     def _add_scope(scope: _ServiceScope, forwarded_config_id: str | None) -> None:
         nonlocal primary_scope, primary_scheduler
-        service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
+        service_ids = known_ids_for_subentry_type(entry, SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "binary_sensor",
@@ -364,7 +324,7 @@ async def async_setup_entry(  # noqa: PLR0915
         forwarded_config_id: str | None,
     ) -> None:
         """Create per-device UWT binary sensors for a tracker subentry."""
-        tracker_ids = _known_ids_for_type(SUBENTRY_TYPE_TRACKER)
+        tracker_ids = known_ids_for_subentry_type(entry, SUBENTRY_TYPE_TRACKER)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "binary_sensor_tracker",
@@ -817,7 +777,7 @@ class GoogleFindMyAuthStatusSensor(GoogleFindMyEntity, BinarySensorEntity):
             attributes["nova_api_status"] = state
         reason = getattr(status, "reason", None)
         if isinstance(reason, str) and reason:
-            attributes["nova_api_status_reason"] = reason
+            attributes["nova_api_status_reason"] = sanitize_state_text(reason)
         changed_at = getattr(status, "changed_at", None)
         changed_at_iso = format_epoch_utc(changed_at)
         if changed_at_iso is not None:
@@ -829,7 +789,7 @@ class GoogleFindMyAuthStatusSensor(GoogleFindMyEntity, BinarySensorEntity):
             attributes["nova_fcm_status"] = fcm_state
         fcm_reason = getattr(fcm_status, "reason", None)
         if isinstance(fcm_reason, str) and fcm_reason:
-            attributes["nova_fcm_status_reason"] = fcm_reason
+            attributes["nova_fcm_status_reason"] = sanitize_state_text(fcm_reason)
         fcm_changed_at = getattr(fcm_status, "changed_at", None)
         fcm_changed_at_iso = format_epoch_utc(fcm_changed_at)
         if fcm_changed_at_iso is not None:
@@ -935,7 +895,7 @@ class GoogleFindMyConnectivitySensor(GoogleFindMyEntity, BinarySensorEntity):
             fatal_error = fatal_by_entry.get(entry_id)
         fatal_error = fatal_error or getattr(fcm, "_fatal_error", None)
         if isinstance(fatal_error, str) and fatal_error:
-            attributes["fcm_fatal_error"] = fatal_error
+            attributes["fcm_fatal_error"] = sanitize_state_text(fatal_error)
 
         return attributes or None
 

@@ -76,6 +76,13 @@ from .const import (
 )
 from .coordinator import GoogleFindMyCoordinator
 from .ha_typing import CoordinatorEntity, callback
+from .shared_helpers import (  # noqa: F401 - re-exported for platform modules
+    known_ids_for_subentry_type,
+    normalize_fcm_entry_snapshot,
+    safe_fcm_health_snapshots,
+    sanitize_state_text,
+    subentry_type,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
