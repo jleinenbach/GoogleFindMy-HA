@@ -94,6 +94,11 @@ KNOWN_OFFSET_KEY_LENGTH = 2
 # of clock drift at 1024s rotation.
 LOCK_TRACKING_WINDOW_STEPS = 2
 
+# Maximum wall-clock time (seconds) the EID refresh loop may run before
+# yielding control back to the event loop via ``await asyncio.sleep(0)``.
+# Keeps the main thread responsive under HA's 10 ms watchdog budget.
+_YIELD_BUDGET_SECONDS: float = 0.008
+
 # =============================================================================
 # Heuristic Phone Discovery Configuration
 # =============================================================================
@@ -719,9 +724,7 @@ class GoogleFindMyEIDResolver:
     _ble_battery_state: dict[str, BLEBatteryState] = field(
         init=False, default_factory=dict
     )
-    _ble_scan_info: dict[str, BLEScanInfo] = field(
-        init=False, default_factory=dict
-    )
+    _ble_scan_info: dict[str, BLEScanInfo] = field(init=False, default_factory=dict)
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -1512,6 +1515,7 @@ class GoogleFindMyEIDResolver:
         work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
         builder = CacheBuilder()
+        _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
@@ -1551,6 +1555,12 @@ class GoogleFindMyEIDResolver:
                             advertisement_reversed=generated.is_reversed,
                             flags_xor_mask=xor_mask,
                         )
+
+            # Cooperative yield: give the event loop a chance to process
+            # pending callbacks when the CPU budget for this tick is spent.
+            if time.monotonic() >= _yield_deadline:
+                await asyncio.sleep(0)
+                _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         self._lookup, self._lookup_metadata = builder.finalize()
         _LOGGER.debug(
@@ -2404,9 +2414,7 @@ class GoogleFindMyEIDResolver:
             )
 
             battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
-            battery_label = battery_labels.get(
-                battery_raw, f"UNKNOWN({battery_raw})"
-            )
+            battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
 
             # Store for ALL matches (shared-device propagation).
             # Key by canonical_id (Google API device ID) — this is the same
@@ -2506,9 +2514,7 @@ class GoogleFindMyEIDResolver:
         """
         return self._ble_scan_info.get(device_id)
 
-    def _record_ble_scan_info(
-        self, matches: list[EIDMatch], ble_address: str
-    ) -> None:
+    def _record_ble_scan_info(self, matches: list[EIDMatch], ble_address: str) -> None:
         """Store the BLE address for all matched devices.
 
         Called from :meth:`resolve_eid` when the caller provides a
@@ -2626,8 +2632,7 @@ class GoogleFindMyEIDResolver:
                 ):
                     candidates.append(
                         payload[
-                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
-                            + LEGACY_EID_LENGTH
+                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
                         ]
                     )
                 elif frame_type == MODERN_FRAME_TYPE:

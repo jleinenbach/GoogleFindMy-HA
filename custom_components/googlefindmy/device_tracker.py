@@ -1069,7 +1069,9 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 self._attr_longitude = data.get("longitude")
                 acc = data.get("accuracy")
                 try:
-                    self._attr_location_accuracy = float(acc) if acc is not None else 0.0
+                    self._attr_location_accuracy = (
+                        float(acc) if acc is not None else 0.0
+                    )
                 except (TypeError, ValueError):
                     self._attr_location_accuracy = 0.0
 

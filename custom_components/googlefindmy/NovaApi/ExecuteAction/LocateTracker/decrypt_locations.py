@@ -304,9 +304,7 @@ async def async_retrieve_identity_key(
             owner_key_version,
             owner_key_info.version,
         )
-        owner_key_info = await async_get_owner_key(
-            cache=cache, force_refresh=True
-        )
+        owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
 
     candidates: list[bytes] = []
     decrypt_errors: list[Exception] = []

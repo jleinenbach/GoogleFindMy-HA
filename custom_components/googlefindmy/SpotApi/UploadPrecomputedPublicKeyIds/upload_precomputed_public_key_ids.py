@@ -33,9 +33,7 @@ _MAX_DEVICES_PER_BATCH = 40
 
 
 def refresh_custom_trackers(device_list: DevicesList) -> None:
-    all_device_eids: list[
-        UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds
-    ] = []
+    all_device_eids: list[UploadPrecomputedPublicKeyIdsRequest.DevicePublicKeyIds] = []
 
     for device in device_list.deviceMetadata:
         # This is a microcontroller

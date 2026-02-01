@@ -213,7 +213,9 @@ class PollingOperations:
           **return None** and are safe to run on the HA loop.
         """
         if kwargs:
-            self.hass.loop.call_soon_threadsafe(functools.partial(func, *args, **kwargs))
+            self.hass.loop.call_soon_threadsafe(
+                functools.partial(func, *args, **kwargs)
+            )
         else:
             self.hass.loop.call_soon_threadsafe(func, *args)
 

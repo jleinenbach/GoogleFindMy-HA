@@ -47,7 +47,10 @@ class TestListDevices:
     """list_devices() dispatches to _async_cli_main and handles errors."""
 
     @mock.patch("custom_components.googlefindmy.main.asyncio")
-    @mock.patch("custom_components.googlefindmy.main._async_cli_main", new_callable=mock.MagicMock)
+    @mock.patch(
+        "custom_components.googlefindmy.main._async_cli_main",
+        new_callable=mock.MagicMock,
+    )
     def test_happy_path_with_entry_id(
         self, mock_cli: mock.MagicMock, mock_asyncio: mock.MagicMock
     ) -> None:
@@ -58,7 +61,10 @@ class TestListDevices:
         mock_asyncio.run.assert_called_once()
 
     @mock.patch("custom_components.googlefindmy.main.asyncio")
-    @mock.patch("custom_components.googlefindmy.main._async_cli_main", new_callable=mock.MagicMock)
+    @mock.patch(
+        "custom_components.googlefindmy.main._async_cli_main",
+        new_callable=mock.MagicMock,
+    )
     def test_entry_id_from_env(
         self,
         mock_cli: mock.MagicMock,
@@ -73,7 +79,10 @@ class TestListDevices:
         mock_asyncio.run.assert_called_once()
 
     @mock.patch("custom_components.googlefindmy.main.asyncio")
-    @mock.patch("custom_components.googlefindmy.main._async_cli_main", new_callable=mock.MagicMock)
+    @mock.patch(
+        "custom_components.googlefindmy.main._async_cli_main",
+        new_callable=mock.MagicMock,
+    )
     def test_no_entry_id(
         self,
         mock_cli: mock.MagicMock,
@@ -87,7 +96,10 @@ class TestListDevices:
         mock_cli.assert_called_once_with(None)
         mock_asyncio.run.assert_called_once()
 
-    @mock.patch("custom_components.googlefindmy.main._async_cli_main", new_callable=mock.MagicMock)
+    @mock.patch(
+        "custom_components.googlefindmy.main._async_cli_main",
+        new_callable=mock.MagicMock,
+    )
     def test_keyboard_interrupt(
         self, mock_cli: mock.MagicMock, capsys: pytest.CaptureFixture[str]
     ) -> None:
@@ -99,7 +111,10 @@ class TestListDevices:
 
         assert "Exiting." in capsys.readouterr().out
 
-    @mock.patch("custom_components.googlefindmy.main._async_cli_main", new_callable=mock.MagicMock)
+    @mock.patch(
+        "custom_components.googlefindmy.main._async_cli_main",
+        new_callable=mock.MagicMock,
+    )
     def test_generic_exception(
         self, mock_cli: mock.MagicMock, capsys: pytest.CaptureFixture[str]
     ) -> None:

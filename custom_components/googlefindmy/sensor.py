@@ -1235,11 +1235,13 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
     _attr_entity_registry_enabled_default = True
     entity_description = BLE_BATTERY_DESCRIPTION
 
-    _unrecorded_attributes = frozenset({
-        "last_ble_observation",
-        "google_device_id",
-        "battery_raw_level",
-    })
+    _unrecorded_attributes = frozenset(
+        {
+            "last_ble_observation",
+            "google_device_id",
+            "battery_raw_level",
+        }
+    )
 
     def __init__(
         self,
