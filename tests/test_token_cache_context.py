@@ -49,7 +49,7 @@ async def test_context_provider_overrides_default_cache(
     monkeypatch.setattr(
         nova_request,
         "_STATE",
-        {"hass": None, "async_refresh_lock": None, "cache_provider": None},
+        {"hass": None, "async_refresh_lock": None},
         raising=False,
     )
     nova_request.register_cache_provider(lambda: provider_cache)
