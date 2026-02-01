@@ -54,7 +54,12 @@ def test_repairs_hooks_and_translations(integration_root: Path) -> None:
     init_text = (integration_root / "__init__.py").read_text(encoding="utf-8")
     assert "issue_registry" in init_text
     assert "ir.async_create_issue" in init_text
-    assert "duplicate_account_entries" in init_text
+    # The literal was extracted to const.TRANSLATION_KEY_DUPLICATE_ACCOUNT;
+    # accept either the raw string or the constant name in the source.
+    assert (
+        "duplicate_account_entries" in init_text
+        or "TRANSLATION_KEY_DUPLICATE_ACCOUNT" in init_text
+    )
 
     translations = json.loads(
         (integration_root / "translations" / "en.json").read_text(encoding="utf-8")

@@ -119,7 +119,8 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     """
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    # Initialize caches
+    # Initialize caches.  hass.data[DOMAIN] is compatible with the
+    # HassKey-based DATA_DOMAIN defined in __init__.py.
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_DEBOUNCE, {})

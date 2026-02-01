@@ -261,6 +261,7 @@ def _cloud_discovery_runtime(
                 _LOGGER.debug("Cloud discovery runtime lookup failed", exc_info=True)
 
     if runtime_owner is None:
+        # hass.data[DOMAIN] is compatible with HassKey-based DATA_DOMAIN in __init__.
         domain_data = hass.data.setdefault(DOMAIN, {})
         runtime_owner = domain_data.get("cloud_discovery_runtime_owner")
         if not isinstance(runtime_owner, SimpleNamespace):

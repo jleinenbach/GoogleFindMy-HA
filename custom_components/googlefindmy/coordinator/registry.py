@@ -363,6 +363,7 @@ class RegistryOperations:
             return
 
         try:
+            # hass.data[DOMAIN] is compatible with HassKey-based DATA_DOMAIN in __init__.
             bucket = hass.data.setdefault(DOMAIN, {})
             owner_index: dict[str, str] = bucket.setdefault("device_owner_index", {})
         except Exception as err:  # noqa: BLE001 - defensive guard
