@@ -68,14 +68,20 @@ def test_all_translations_have_same_structure_as_reference() -> None:
         if missing_keys:
             # Limit output for readability
             missing_sample = sorted(missing_keys)[:10]
-            suffix = f" (and {len(missing_keys) - 10} more)" if len(missing_keys) > 10 else ""
+            suffix = (
+                f" (and {len(missing_keys) - 10} more)"
+                if len(missing_keys) > 10
+                else ""
+            )
             errors.append(
                 f"{lang}.json is MISSING {len(missing_keys)} keys: {missing_sample}{suffix}"
             )
 
         if extra_keys:
             extra_sample = sorted(extra_keys)[:10]
-            suffix = f" (and {len(extra_keys) - 10} more)" if len(extra_keys) > 10 else ""
+            suffix = (
+                f" (and {len(extra_keys) - 10} more)" if len(extra_keys) > 10 else ""
+            )
             errors.append(
                 f"{lang}.json has {len(extra_keys)} EXTRA keys: {extra_sample}{suffix}"
             )
@@ -96,7 +102,9 @@ def test_all_expected_languages_present() -> None:
     actual_languages = {f.stem for f in translation_files}
 
     missing_languages = expected_languages - actual_languages
-    assert not missing_languages, f"Missing translation files: {sorted(missing_languages)}"
+    assert not missing_languages, (
+        f"Missing translation files: {sorted(missing_languages)}"
+    )
 
 
 def test_translation_files_are_valid_json() -> None:
@@ -108,19 +116,24 @@ def test_translation_files_are_valid_json() -> None:
             pytest.fail(f"{translation_path.name} is invalid JSON: {e}")
 
 
-def test_translation_title_key_exists_in_all() -> None:
-    """Ensure the 'title' key exists in all translation files."""
+def test_translation_title_key_not_at_root() -> None:
+    """Ensure the deprecated root-level 'title' is NOT present in translation files.
+
+    Home Assistant now auto-generates the title from manifest.json, so having
+    a root-level 'title' key would be redundant and triggers hassfest warnings.
+    """
     for translation_path in _get_translation_files():
         data = _load_translation(translation_path)
-        assert "title" in data, f"{translation_path.name} is missing 'title' key"
+        assert "title" not in data, (
+            f"{translation_path.name} has deprecated root-level 'title' key"
+        )
 
 
 @pytest.mark.parametrize("translation_file", _get_translation_files())
 def test_no_empty_string_values(translation_file: Path) -> None:
     """Ensure no translation values are empty strings."""
-    def find_empty_values(
-        data: dict[str, Any], path: str = ""
-    ) -> list[str]:
+
+    def find_empty_values(data: dict[str, Any], path: str = "") -> list[str]:
         """Find all keys with empty string values."""
         empty_paths: list[str] = []
         for key, value in data.items():
@@ -137,10 +150,10 @@ def test_no_empty_string_values(translation_file: Path) -> None:
     # Allow certain keys to be intentionally empty (like abort/error sections)
     # Filter out known empty sections
     critical_empty = [
-        p for p in empty_values
+        p
+        for p in empty_values
         if not any(
-            p.endswith(suffix)
-            for suffix in (".abort", ".error", "abort", "error")
+            p.endswith(suffix) for suffix in (".abort", ".error", "abort", "error")
         )
     ]
 

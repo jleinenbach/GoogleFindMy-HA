@@ -55,11 +55,16 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
 def _make_add_entities(hass: HomeAssistant, loop: asyncio.AbstractEventLoop):
     added: list[tuple[Any, str | None]] = []
     pending: list[asyncio.Task[Any]] = []
+    entity_counter = [0]  # Mutable counter to track entity IDs
 
     def _async_add_entities(entities: list[Any], **kwargs: Any) -> None:
         config_subentry_id = kwargs.get("config_subentry_id")
         for entity in entities:
             entity.hass = hass
+            # Simulate HA platform setting entity_id before async_added_to_hass
+            if not hasattr(entity, "entity_id") or entity.entity_id is None:
+                entity_counter[0] += 1
+                entity.entity_id = f"device_tracker.stub_{entity_counter[0]}"
             added.append((entity, config_subentry_id))
             if hasattr(entity, "async_added_to_hass"):
                 pending.append(loop.create_task(entity.async_added_to_hass()))

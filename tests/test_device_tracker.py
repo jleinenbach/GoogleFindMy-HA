@@ -190,7 +190,8 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
 
     asyncio.run(_exercise())
 
-    assert coordinator.lookup_calls == ["tracker-1"]
+    # Both main tracker and last location call find_tracker_entity_entry
+    assert coordinator.lookup_calls == ["tracker-1", "tracker-1"]
     # Should have 2 entities per device: main tracker + last location
     assert added and len(added[-1]) == 2
     # First entity is the main tracker
@@ -290,7 +291,8 @@ def test_initial_snapshot_hydrates_registry_tracker(
         last_location_entity.unique_id
         == "entry-1:tracker-subentry:tracker-1:last_location"
     )
-    assert coordinator.lookup_calls == ["tracker-1"]
+    # Both main tracker and last location call find_tracker_entity_entry
+    assert coordinator.lookup_calls == ["tracker-1", "tracker-1"]
 
 
 def test_device_tracker_avoids_duplicate_accuracy_logs(
