@@ -2330,15 +2330,22 @@ class ConfigFlow(
     @_typed_callback
     def async_get_supported_subentry_types(
         cls,
-        _config_entry: ConfigEntry,
-    ) -> dict[str, Callable[[], ConfigSubentryFlow]]:
-        """Disable manual subentry creation via the config entry UI."""
+        config_entry: ConfigEntry,
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return supported subentry types with their handler classes.
 
-        # Subentries are provisioned programmatically by the integration
-        # coordinator. Returning an empty mapping prevents Home Assistant from
-        # displaying "Add subentry" menu items that would otherwise surface
-        # unsupported manual entry points in the UI.
-        return {}
+        Home Assistant uses these class types to:
+        1. Check for supported features (e.g., hasattr for async_step_reconfigure)
+        2. Instantiate handlers when users initiate subentry flows
+
+        The handler classes inherit from ConfigSubentryFlow and will receive
+        the config_entry context from Home Assistant's flow manager.
+        """
+        return {
+            SUBENTRY_TYPE_HUB: HubSubentryFlowHandler,
+            SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
+            SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
+        }
 
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
@@ -2698,20 +2705,25 @@ class ConfigFlow(
         config_entry = cast(ConfigEntry, config_entry_obj)
 
         supported_types = type(self).async_get_supported_subentry_types(config_entry)
-        factory = supported_types.get(SUBENTRY_TYPE_HUB)
-        if factory is None:
+        handler_class = supported_types.get(SUBENTRY_TYPE_HUB)
+        if handler_class is None:
             _LOGGER.error(
                 "Add Hub flow unavailable: hub subentry type not supported (entry_id=%s)",
                 config_entry.entry_id,
             )
             return self.async_abort(reason="not_supported")
 
-        handler = factory()
+        # Instantiate handler with config_entry for direct invocation
+        # (HA's flow manager would do this differently, but async_step_hub
+        # is a manual entry point that bypasses the normal flow manager)
+        handler = handler_class(config_entry)
         _LOGGER.info(
             "Add Hub flow requested; provisioning hub subentry (entry_id=%s)",
             config_entry.entry_id,
         )
+        # Provide runtime context expected by ConfigSubentryFlow methods
         setattr(handler, "hass", hass)
+        setattr(handler, "context", {"entry_id": config_entry.entry_id})
         result = handler.async_step_user(user_input)
         return await self._async_resolve_flow_result(result)
 
@@ -4337,13 +4349,25 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
     _group_key: str
     _subentry_type: str
     _features: tuple[str, ...]
+    _config_entry_cache: ConfigEntry | None
 
     def __init__(
         self,
         config_entry: ConfigEntry | None = None,
         subentry: ConfigSubentry | None = None,
     ) -> None:
+        """Initialize the subentry flow handler.
+
+        Home Assistant 2026.x may instantiate handlers without passing config_entry
+        in the constructor. The flow manager sets up context (including access to
+        the parent config entry via _get_entry()) after instantiation.
+
+        We support both patterns:
+        1. Direct instantiation with config_entry (legacy/manual usage)
+        2. HA flow manager instantiation (config_entry accessed via _get_entry())
+        """
         super_init = cast(Callable[..., None], super().__init__)
+        self._config_entry_cache = None
 
         if config_entry is not None and subentry is not None:
             try:
@@ -4374,18 +4398,52 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         if subentry is not None and not hasattr(self, "subentry"):
             setattr(self, "subentry", subentry)
 
-        existing_entry = getattr(self, "config_entry", None)
-        if existing_entry is None and config_entry is not None:
-            setattr(self, "config_entry", config_entry)
-            existing_entry = config_entry
+        # Cache config_entry if provided directly; lazy resolution via
+        # the config_entry property handles HA flow manager instantiation
+        if config_entry is not None:
+            self._config_entry_cache = config_entry
 
-        if existing_entry is None:
-            raise RuntimeError(
-                f"{type(self).__name__} missing 'config_entry' after initialization; "
-                "factory/constructor signature mismatch"
-            )
+    @property
+    def config_entry(self) -> ConfigEntry:
+        """Return the parent config entry, resolving lazily if needed.
 
-        self.config_entry = cast(ConfigEntry, existing_entry)
+        Home Assistant 2026.x provides _get_entry() on ConfigSubentryFlow to
+        access the parent config entry. We try multiple resolution strategies
+        for compatibility across HA versions.
+        """
+        # Check cached value first
+        if self._config_entry_cache is not None:
+            return self._config_entry_cache
+
+        # Try the instance attribute (may be set by HA or super().__init__)
+        cached = getattr(self, "_config_entry", None)
+        if cached is not None:
+            self._config_entry_cache = cached
+            return cached
+
+        # Try HA 2026.x _get_entry() method
+        get_entry_method = getattr(self, "_get_entry", None)
+        if callable(get_entry_method):
+            try:
+                entry = get_entry_method()
+                if entry is not None:
+                    self._config_entry_cache = entry
+                    return entry
+            except Exception:  # noqa: BLE001 - defensive, HA internals may vary
+                pass
+
+        raise RuntimeError(
+            f"{type(self).__name__} cannot resolve config_entry; "
+            "ensure the handler is instantiated via Home Assistant's flow manager "
+            "or provide config_entry in the constructor"
+        )
+
+    @config_entry.setter
+    def config_entry(self, value: ConfigEntry) -> None:
+        """Set the parent config entry."""
+        self._config_entry_cache = value
+        # Also set on instance for compatibility
+        object.__setattr__(self, "_config_entry", value)
 
     @property
     def _entry_id(self) -> str:
