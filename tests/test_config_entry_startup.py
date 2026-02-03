@@ -79,9 +79,17 @@ async def test_device_trackers_populate_after_initial_refresh(
     await device_tracker.async_setup_entry(hass, entry, _async_add_entities)
 
     assert added_entities, "Tracker entities should be created on startup"
-    tracker = added_entities[0]
-    assert getattr(tracker, "device_id", None) == "tracker-1"
-    assert tracker.unique_id.endswith(":tracker-1")
+    # Should have 2 entities per device: main tracker + last location
+    assert len(added_entities) == 2
+    # First entity should be the main tracker (without :last_location suffix)
+    main_tracker = added_entities[0]
+    assert getattr(main_tracker, "device_id", None) == "tracker-1"
+    assert main_tracker.unique_id.endswith(":tracker-1")
+    assert not main_tracker.unique_id.endswith(":last_location")
+    # Second entity should be the last location tracker
+    last_location = added_entities[1]
+    assert getattr(last_location, "device_id", None) == "tracker-1"
+    assert last_location.unique_id.endswith(":tracker-1:last_location")
     assert getattr(entry.runtime_data.coordinator, "first_refresh_calls", 0) == 1
 
     # Coordinator snapshot should reflect the first refresh payload for subsequent scans.

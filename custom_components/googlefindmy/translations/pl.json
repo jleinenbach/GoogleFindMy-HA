@@ -1,5 +1,4 @@
 {
-  "title": "Google Find My Device",
   "device": {
     "google_find_hub_service": {
       "name": "Usługa huba Google Find"
@@ -260,7 +259,6 @@
         "data": {
           "location_poll_interval": "Interwał odpytywania lokalizacji (s)",
           "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
-          "stale_threshold_enabled": "Włącz próg nieaktualności",
           "stale_threshold": "Próg nieaktualności (s)",
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
@@ -271,8 +269,7 @@
           "subentry": "Grupa funkcji"
         },
         "data_description": {
-          "stale_threshold_enabled": "Po włączeniu status trackera zmieni się na nieznany po upływie progu nieaktualności bez aktualizacji. Po wyłączeniu tracker zawsze pokazuje ostatnią znaną lokalizację.",
-          "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Ostatnie znane współrzędne pozostają dostępne w atrybutach. Domyślnie: 1800 (30 minut).",
+          "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Użyj encji 'Ostatnia lokalizacja', aby zawsze widzieć ostatnią znaną pozycję. Domyślnie: 1800 (30 minut).",
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
           "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie obszary o dużym ruchu lub Wszystkie obszary w trybie crowdsourcingu).",
@@ -558,6 +555,59 @@
           },
           "last_longitude": {
             "name": "Ostatnia znana długość geograficzna"
+          }
+        }
+      },
+      "last_location": {
+        "name": "Ostatnia lokalizacja",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nazwa urządzenia"
+          },
+          "device_id": {
+            "name": "ID urządzenia"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Etykieta semantyczna"
+          },
+          "battery_level": {
+            "name": "Poziom baterii"
+          },
+          "last_seen": {
+            "name": "Ostatnio widziany (zgłoszone)"
+          },
+          "last_seen_utc": {
+            "name": "Ostatnio widziany (UTC)"
+          },
+          "source_label": {
+            "name": "Etykieta źródła"
+          },
+          "source_rank": {
+            "name": "Ranga źródła"
+          },
+          "is_own_report": {
+            "name": "Raport własnego urządzenia"
+          },
+          "latitude": {
+            "name": "Szerokość geograficzna"
+          },
+          "longitude": {
+            "name": "Długość geograficzna"
+          },
+          "accuracy_m": {
+            "name": "Dokładność (m)"
+          },
+          "altitude_m": {
+            "name": "Wysokość (m)"
+          },
+          "location_age": {
+            "name": "Wiek lokalizacji (s)"
+          },
+          "location_status": {
+            "name": "Status lokalizacji"
           }
         }
       }

@@ -85,6 +85,9 @@
     "device_tracker": {
       "device": {
         "default": "mdi:cellphone"
+      },
+      "last_location": {
+        "default": "mdi:map-marker-path"
       }
     }
   }

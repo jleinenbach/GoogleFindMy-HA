@@ -67,6 +67,7 @@ from typing import (
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
+import voluptuous as vol
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 
@@ -585,18 +586,13 @@ else:
 _GOOGLE_HOME_FILTER_CLASS: type[Any] | None = None
 _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED = False
 
-try:
-    # Helper name has been `config_entry_only_config_schema` since Core 2023.7
-    # (renamed from `no_yaml_config_schema`). Retain fallbacks solely so legacy
-    # tests lacking the helper keep importing this module without exploding.
-    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-except AttributeError:
-    try:
-        CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-    except AttributeError:  # pragma: no cover - kept for legacy tests without helpers
-        import voluptuous as vol
-
-        CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
+# Declare that this integration is config-entry-only (no YAML configuration).
+# Use getattr fallback for older HA versions lacking config_entry_only_config_schema.
+CONFIG_SCHEMA: vol.Schema = getattr(
+    cv,
+    "config_entry_only_config_schema",
+    lambda domain: vol.Schema({domain: vol.Schema({})}),
+)(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
 
