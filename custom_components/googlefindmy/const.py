@@ -194,11 +194,22 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 
 # Stale threshold: After this many seconds without a location update,
-# the tracker state becomes "unknown" (default: 2 hours = 7200 seconds)
-# This should be at least 2x the maximum configurable poll interval (3600s)
-# to avoid false staleness when users set longer poll intervals.
-DEFAULT_STALE_THRESHOLD: int = 7200
-DEFAULT_STALE_THRESHOLD_ENABLED: bool = False
+# the tracker state becomes "unknown".
+#
+# Based on real-world FMDN tracker update intervals:
+# - Typical update interval: 2-4 minutes (median ~3.4 min)
+# - 95th percentile: ~8 minutes
+# - 99th percentile: ~14 minutes
+#
+# Note: EID rotation (1024s) is NOT relevant here. When participating in the
+# FMDN network, we receive updates from smartphones that see the tracker.
+# The update frequency depends on smartphone density and tracker visibility,
+# not on EID rotation.
+#
+# Default: 1800 seconds (30 minutes) - conservative value for "really gone"
+# Minimum: 300 seconds (5 minutes) - allows ~2-3 typical update cycles
+DEFAULT_STALE_THRESHOLD: int = 1800
+DEFAULT_STALE_THRESHOLD_ENABLED: bool = True
 
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
@@ -381,7 +392,7 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
     },
     OPT_STALE_THRESHOLD: {
         "type": "int",
-        "min": 60,
+        "min": 300,  # 5 minutes - allows ~2-3 typical FMDN update cycles
         "max": 86400,  # max 24 hours
         "step": 60,
     },
