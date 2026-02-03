@@ -1,5 +1,4 @@
 {
-  "title": "Google Encontre Meu Dispositivo",
   "device": {
     "google_find_hub_service": {
       "name": "Serviço Google Find Hub"
