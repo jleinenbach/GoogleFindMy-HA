@@ -585,18 +585,9 @@ else:
 _GOOGLE_HOME_FILTER_CLASS: type[Any] | None = None
 _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED = False
 
-try:
-    # Helper name has been `config_entry_only_config_schema` since Core 2023.7
-    # (renamed from `no_yaml_config_schema`). Retain fallbacks solely so legacy
-    # tests lacking the helper keep importing this module without exploding.
-    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-except AttributeError:
-    try:
-        CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-    except AttributeError:  # pragma: no cover - kept for legacy tests without helpers
-        import voluptuous as vol
-
-        CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
+# Declare that this integration is config-entry-only (no YAML configuration).
+# This satisfies hassfest [CONFIG_SCHEMA] validation.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
 
