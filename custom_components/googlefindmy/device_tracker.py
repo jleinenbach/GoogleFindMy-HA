@@ -399,7 +399,9 @@ async def async_setup_entry(
                     subentry_key=tracker_subentry_key,
                     subentry_identifier=tracker_subentry_identifier_str,
                 )
-                last_location_unique_id = getattr(last_location_entity, "unique_id", None)
+                last_location_unique_id = getattr(
+                    last_location_entity, "unique_id", None
+                )
                 if isinstance(last_location_unique_id, str):
                     if last_location_unique_id not in added_unique_ids:
                         added_unique_ids.add(last_location_unique_id)
