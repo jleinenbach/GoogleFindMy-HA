@@ -2330,22 +2330,20 @@ class ConfigFlow(
     @_typed_callback
     def async_get_supported_subentry_types(
         cls,
-        config_entry: ConfigEntry,
+        _config_entry: ConfigEntry,
     ) -> dict[str, type[ConfigSubentryFlow]]:
-        """Return supported subentry types with their handler classes.
+        """Return an empty mapping to hide subentry UI elements.
 
-        Home Assistant uses these class types to:
-        1. Check for supported features (e.g., hasattr for async_step_reconfigure)
-        2. Instantiate handlers when users initiate subentry flows
+        Subentries (hub, service, tracker feature groups) are provisioned
+        programmatically by the integration coordinator, NOT manually by users.
+        Returning an empty dict prevents Home Assistant from displaying
+        "Add subentry" buttons (+ Add hub feature group, + Add service feature
+        group) in the config entry UI.
 
-        The handler classes inherit from ConfigSubentryFlow and will receive
-        the config_entry context from Home Assistant's flow manager.
+        The async_step_hub entry point (for "Hub hinzufügen" / "Add Hub")
+        instantiates handlers directly without relying on this mapping.
         """
-        return {
-            SUBENTRY_TYPE_HUB: HubSubentryFlowHandler,
-            SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
-            SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
-        }
+        return {}
 
     async def async_step_discovery(
         self, discovery_info: Mapping[str, Any] | None
@@ -2704,19 +2702,12 @@ class ConfigFlow(
 
         config_entry = cast(ConfigEntry, config_entry_obj)
 
-        supported_types = type(self).async_get_supported_subentry_types(config_entry)
-        handler_class = supported_types.get(SUBENTRY_TYPE_HUB)
-        if handler_class is None:
-            _LOGGER.error(
-                "Add Hub flow unavailable: hub subentry type not supported (entry_id=%s)",
-                config_entry.entry_id,
-            )
-            return self.async_abort(reason="not_supported")
-
-        # Instantiate handler with config_entry for direct invocation
-        # (HA's flow manager would do this differently, but async_step_hub
-        # is a manual entry point that bypasses the normal flow manager)
-        handler = handler_class(config_entry)
+        # Instantiate HubSubentryFlowHandler directly - we don't use
+        # async_get_supported_subentry_types here because that method
+        # intentionally returns {} to hide subentry UI buttons.
+        # The "Add Hub" flow is a special entry point that bypasses the
+        # normal HA subentry flow manager.
+        handler = HubSubentryFlowHandler(config_entry)
         _LOGGER.info(
             "Add Hub flow requested; provisioning hub subentry (entry_id=%s)",
             config_entry.entry_id,
