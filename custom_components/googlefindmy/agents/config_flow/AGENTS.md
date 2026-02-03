@@ -63,4 +63,75 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 ## Cross-reference checklist
 
-* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide’s subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.
+* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide's subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.
+
+## Subentry handler registration (HA 2026.x compatibility)
+
+### `async_get_supported_subentry_types` must return class types
+
+**Critical:** Home Assistant expects `async_get_supported_subentry_types` to return `dict[str, type[ConfigSubentryFlow]]` — actual class types, NOT factory functions (lambdas).
+
+**Why this matters:**
+1. HA calls `hasattr(handler_class, "async_step_reconfigure")` to check feature support
+2. Lambdas don't have class methods, so feature detection fails silently
+3. The "Invalid handler specified" error can occur when handler registration is broken
+
+**Correct implementation:**
+```python
+@classmethod
+@callback
+def async_get_supported_subentry_types(
+    cls,
+    config_entry: ConfigEntry,
+) -> dict[str, type[ConfigSubentryFlow]]:
+    """Return handler classes (not factories)."""
+    return {
+        SUBENTRY_TYPE_HUB: HubSubentryFlowHandler,      # Class, not lambda
+        SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
+        SUBENTRY_TYPE_TRACKER: TrackerSubentryFlowHandler,
+    }
+```
+
+**Wrong implementation (causes silent failures):**
+```python
+# DON'T DO THIS - lambdas break hasattr() checks
+return {
+    SUBENTRY_TYPE_HUB: lambda: HubSubentryFlowHandler(config_entry),
+}
+```
+
+### Lazy `config_entry` resolution for HA flow manager compatibility
+
+HA 2026.x may instantiate subentry handlers WITHOUT passing `config_entry` in the constructor. The flow manager sets up context (including `_get_entry()` method) AFTER instantiation.
+
+**Solution:** Use a property with lazy resolution:
+```python
+@property
+def config_entry(self) -> ConfigEntry:
+    # 1. Check our cache first
+    if self._config_entry_cache is not None:
+        return self._config_entry_cache
+
+    # 2. Try HA's _get_entry() method (HA 2026.x)
+    get_entry_method = getattr(self, "_get_entry", None)
+    if callable(get_entry_method):
+        entry = get_entry_method()
+        if entry is not None:
+            self._config_entry_cache = entry
+            return entry
+
+    raise RuntimeError("Cannot resolve config_entry")
+```
+
+### Test expectations must match implementation
+
+When updating `async_get_supported_subentry_types` to return handlers instead of an empty dict, update ALL related tests:
+- `tests/test_config_flow_basic.py`
+- `tests/test_config_flow_hub_entry.py`
+- `tests/test_config_flow_subentry_sync.py`
+
+Tests should verify:
+1. All subentry types are registered
+2. Values are class types (not factories)
+3. Hub flow creates entries (not aborts)
+

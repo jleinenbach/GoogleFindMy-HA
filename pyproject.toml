@@ -68,8 +68,9 @@ hypothesis = ">=6.100.0"
 
 # Home Assistant testing - ALWAYS use latest version (no upper bound)
 # This ensures we test against the latest HA compatibility
+# NOTE: This integration requires HA 2025.8+ for ConfigSubentryFlow support
 pytest-homeassistant-custom-component = ">=0.13"
-homeassistant = ">=2025.9.0"
+homeassistant = ">=2025.8.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
