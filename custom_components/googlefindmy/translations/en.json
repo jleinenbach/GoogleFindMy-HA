@@ -260,7 +260,6 @@
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
-          "stale_threshold_enabled": "Enable stale threshold",
           "stale_threshold": "Stale threshold (s)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
@@ -271,8 +270,7 @@
           "subentry": "Feature group"
         },
         "data_description": {
-          "stale_threshold_enabled": "When enabled, the tracker state becomes unknown after the stale threshold time without updates. When disabled, the tracker always shows the last known location.",
-          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Last known coordinates remain available in attributes. Default: 1800 (30 minutes).",
+          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Use the 'Last Location' entity to always see the last known position. Default: 1800 (30 minutes).",
           "delete_caches_on_remove": "Remove cached tokens and device metadata when this entry is deleted.",
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
           "contributor_mode": "Choose how your device contributes to Google's network (High-traffic areas by default, or All areas for crowdsourced reporting).",
@@ -558,6 +556,59 @@
           },
           "last_longitude": {
             "name": "Last known longitude"
+          }
+        }
+      },
+      "last_location": {
+        "name": "Last Location",
+        "state_attributes": {
+          "device_name": {
+            "name": "Device name"
+          },
+          "device_id": {
+            "name": "Device ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantic label"
+          },
+          "battery_level": {
+            "name": "Battery level"
+          },
+          "last_seen": {
+            "name": "Last seen (reported)"
+          },
+          "last_seen_utc": {
+            "name": "Last seen (UTC)"
+          },
+          "source_label": {
+            "name": "Source label"
+          },
+          "source_rank": {
+            "name": "Source rank"
+          },
+          "is_own_report": {
+            "name": "Own-device report"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Accuracy (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Location age (s)"
+          },
+          "location_status": {
+            "name": "Location status"
           }
         }
       }

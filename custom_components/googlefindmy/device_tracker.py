@@ -45,10 +45,8 @@ from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
     DEFAULT_STALE_THRESHOLD,
-    DEFAULT_STALE_THRESHOLD_ENABLED,
     DOMAIN,
     OPT_STALE_THRESHOLD,
-    OPT_STALE_THRESHOLD_ENABLED,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
@@ -380,6 +378,8 @@ async def async_setup_entry(
                     continue
                 if dev_id in known_ids:
                     continue
+
+                # Create main tracker entity (with stale detection)
                 entity = GoogleFindMyDeviceTracker(
                     coordinator,
                     dict(device),
@@ -391,6 +391,20 @@ async def async_setup_entry(
                     if unique_id in added_unique_ids:
                         continue
                     added_unique_ids.add(unique_id)
+
+                # Create last location tracker entity (always shows last known location)
+                last_location_entity = GoogleFindMyLastLocationTracker(
+                    coordinator,
+                    dict(device),
+                    subentry_key=tracker_subentry_key,
+                    subentry_identifier=tracker_subentry_identifier_str,
+                )
+                last_location_unique_id = getattr(last_location_entity, "unique_id", None)
+                if isinstance(last_location_unique_id, str):
+                    if last_location_unique_id not in added_unique_ids:
+                        added_unique_ids.add(last_location_unique_id)
+                        to_add.append(last_location_entity)
+
                 known_ids.add(dev_id)
                 to_add.append(entity)
             return to_add
@@ -577,11 +591,20 @@ async def async_setup_entry(
                         continue
                     if not _is_visible(dev_id) or not _is_enabled(dev_id):
                         continue
+                    # Main tracker entity
                     expected.add(
                         GoogleFindMyDeviceEntity.join_parts(
                             entry_id,
                             tracker_subentry_identifier_str,
                             dev_id,
+                        )
+                    )
+                    # Last location tracker entity
+                    expected.add(
+                        GoogleFindMyDeviceEntity.join_parts(
+                            entry_id,
+                            tracker_subentry_identifier_str,
+                            f"{dev_id}:last_location",
                         )
                     )
                 return expected
@@ -608,21 +631,38 @@ async def async_setup_entry(
                         continue
                     if not _is_visible(dev_id) or not _is_enabled(dev_id):
                         continue
+
+                    # Main tracker entity
                     unique_id = GoogleFindMyDeviceEntity.join_parts(
                         entry_id,
                         tracker_subentry_identifier_str,
                         dev_id,
                     )
-                    if unique_id not in missing:
-                        continue
-                    built.append(
-                        GoogleFindMyDeviceTracker(
-                            coordinator,
-                            dict(device),
-                            subentry_key=tracker_subentry_key,
-                            subentry_identifier=tracker_subentry_identifier_str,
+                    if unique_id in missing:
+                        built.append(
+                            GoogleFindMyDeviceTracker(
+                                coordinator,
+                                dict(device),
+                                subentry_key=tracker_subentry_key,
+                                subentry_identifier=tracker_subentry_identifier_str,
+                            )
                         )
+
+                    # Last location tracker entity
+                    last_location_unique_id = GoogleFindMyDeviceEntity.join_parts(
+                        entry_id,
+                        tracker_subentry_identifier_str,
+                        f"{dev_id}:last_location",
                     )
+                    if last_location_unique_id in missing:
+                        built.append(
+                            GoogleFindMyLastLocationTracker(
+                                coordinator,
+                                dict(device),
+                                subentry_key=tracker_subentry_key,
+                                subentry_identifier=tracker_subentry_identifier_str,
+                            )
+                        )
                 return built
 
             recovery_manager.register_device_tracker_platform(
@@ -787,6 +827,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     # Default to enabled in the registry for per-device trackers
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
+    _attr_attribution: str | None = None  # Set in __init__ with account email
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
@@ -831,6 +872,10 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # With has_entity_name=False we must set the entity's name ourselves.
         # If name is missing during cold boot, HA will show the entity_id; that's fine.
         self._attr_name = self._display_name(device.get("name"))
+
+        # Attribution for data source identification (helps distinguish from Bermuda etc.)
+        email = _extract_email_from_entry(coordinator.config_entry)
+        self._attr_attribution = f"FMDN ({email})" if email else "FMDN"
 
         # Persist a "last good" fix to keep map position usable when current accuracy is filtered
         self._last_good_accuracy_data: dict[str, Any] | None = None
@@ -965,16 +1010,12 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         return self._last_good_accuracy_data is not None
 
     def _is_stale_threshold_enabled(self) -> bool:
-        """Return True if the stale threshold feature is enabled."""
-        entry = getattr(self.coordinator, "config_entry", None)
-        if entry is None:
-            return DEFAULT_STALE_THRESHOLD_ENABLED
-        options = getattr(entry, "options", {})
-        if not isinstance(options, Mapping):
-            return DEFAULT_STALE_THRESHOLD_ENABLED
-        return bool(
-            options.get(OPT_STALE_THRESHOLD_ENABLED, DEFAULT_STALE_THRESHOLD_ENABLED)
-        )
+        """Return True - stale threshold is always enabled.
+
+        Users who need the last known location should use the
+        "Last Location" entity instead of disabling stale detection.
+        """
+        return True
 
     def _get_stale_threshold(self) -> int:
         """Return the configured stale threshold in seconds."""
@@ -1006,8 +1047,6 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
     def _is_location_stale(self) -> bool:
         """Return True if the location data is considered stale."""
-        if not self._is_stale_threshold_enabled():
-            return False  # Stale threshold feature is disabled
         age = self._get_location_age()
         if age is None:
             return False  # No age information, assume not stale
@@ -1019,8 +1058,6 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         age = self._get_location_age()
         if age is None:
             return "unknown"
-        if not self._is_stale_threshold_enabled():
-            return "current"  # Stale threshold feature is disabled
         threshold = self._get_stale_threshold()
         if age > threshold:
             return "stale"
@@ -1160,3 +1197,62 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         self._sync_location_attrs()
         self.async_write_ha_state()
+
+
+class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
+    """Tracker that always shows last known location, never goes stale.
+
+    This entity is useful for:
+    - Automations that need the last known position even when the device is offline
+    - Map visualizations that should always show the device's last position
+    - Users who want to track "where was it last seen" instead of "is it here now"
+    """
+
+    _attr_translation_key = "last_location"
+    _attr_entity_registry_enabled_default = True
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the last location tracker entity."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+
+        # Override unique_id with :last_location suffix
+        entry_id = self.entry_id
+        dev_id = self.device_id
+        self._attr_unique_id = self.build_unique_id(
+            entry_id,
+            subentry_identifier,
+            f"{dev_id}:last_location",
+        )
+
+        # Override name with "Last Location" suffix
+        base_name = self._display_name(device.get("name"))
+        self._attr_name = f"{base_name} Last Location"
+
+    def _is_location_stale(self) -> bool:
+        """Never stale - always show last known location."""
+        return False
+
+    def _get_location_status(self) -> str:
+        """Return location status - always shows 'last_known' when data is aged."""
+        age = self._get_location_age()
+        if age is None:
+            return "unknown"
+        threshold = self._get_stale_threshold()
+        if age > threshold:
+            return "last_known"
+        elif age > threshold / 2:
+            return "aging"
+        else:
+            return "current"

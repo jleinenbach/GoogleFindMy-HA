@@ -260,7 +260,6 @@
         "data": {
           "location_poll_interval": "Locatie-pollinginterval (s)",
           "device_poll_delay": "Apparaat-pollingvertraging (s)",
-          "stale_threshold_enabled": "Verouderingsdrempel inschakelen",
           "stale_threshold": "Verouderingsdrempel (s)",
           "google_home_filter_enabled": "Google Home-apparaten filteren",
           "google_home_filter_keywords": "Filtertrefwoorden (kommagescheiden)",
@@ -271,8 +270,7 @@
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "stale_threshold_enabled": "Indien ingeschakeld, wordt de trackerstatus onbekend na de drempeltijd zonder updates. Indien uitgeschakeld, toont de tracker altijd de laatst bekende locatie.",
-          "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de trackerstatus 'onbekend'. Laatst bekende coördinaten blijven beschikbaar in attributen. Standaard: 7200 (2 uur).",
+          "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de trackerstatus 'onbekend'. Gebruik de entiteit 'Laatste locatie' om altijd de laatst bekende positie te zien. Standaard: 1800 (30 minuten).",
           "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
           "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
           "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard drukbezochte gebieden, of Alle gebieden voor crowdsourced rapportage).",
@@ -558,6 +556,59 @@
           },
           "last_longitude": {
             "name": "Laatst bekende lengtegraad"
+          }
+        }
+      },
+      "last_location": {
+        "name": "Laatste locatie",
+        "state_attributes": {
+          "device_name": {
+            "name": "Apparaatnaam"
+          },
+          "device_id": {
+            "name": "Apparaat-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantisch label"
+          },
+          "battery_level": {
+            "name": "Batterijniveau"
+          },
+          "last_seen": {
+            "name": "Laatst gezien (gerapporteerd)"
+          },
+          "last_seen_utc": {
+            "name": "Laatst gezien (UTC)"
+          },
+          "source_label": {
+            "name": "Bronlabel"
+          },
+          "source_rank": {
+            "name": "Bronrang"
+          },
+          "is_own_report": {
+            "name": "Eigen apparaatrapport"
+          },
+          "latitude": {
+            "name": "Breedtegraad"
+          },
+          "longitude": {
+            "name": "Lengtegraad"
+          },
+          "accuracy_m": {
+            "name": "Nauwkeurigheid (m)"
+          },
+          "altitude_m": {
+            "name": "Hoogte (m)"
+          },
+          "location_age": {
+            "name": "Leeftijd locatie (s)"
+          },
+          "location_status": {
+            "name": "Locatiestatus"
           }
         }
       }
