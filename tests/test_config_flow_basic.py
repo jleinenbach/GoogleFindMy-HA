@@ -35,15 +35,10 @@ def test_flow_module_import_and_handler_registry() -> None:
     assert getattr(handler, "domain", None) == DOMAIN
 
 
-def test_supported_subentry_types_returns_handler_classes() -> None:
-    """Config flow should expose subentry handler classes for HA 2026.x compatibility."""
+def test_supported_subentry_types_returns_empty_to_hide_ui() -> None:
+    """Config flow should return empty dict to hide subentry UI buttons."""
 
     from custom_components.googlefindmy import config_flow  # noqa: PLC0415
-    from custom_components.googlefindmy.const import (
-        SUBENTRY_TYPE_HUB,
-        SUBENTRY_TYPE_SERVICE,
-        SUBENTRY_TYPE_TRACKER,
-    )
 
     entry = SimpleNamespace(
         entry_id="entry-test",
@@ -54,19 +49,10 @@ def test_supported_subentry_types_returns_handler_classes() -> None:
 
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)  # type: ignore[arg-type]
 
-    # Verify all three subentry types are registered
-    assert SUBENTRY_TYPE_HUB in mapping, "Hub subentry type should be registered"
-    assert SUBENTRY_TYPE_SERVICE in mapping, (
-        "Service subentry type should be registered"
-    )
-    assert SUBENTRY_TYPE_TRACKER in mapping, (
-        "Tracker subentry type should be registered"
-    )
-
-    # Verify they are class types (not factory functions)
-    assert mapping[SUBENTRY_TYPE_HUB] is config_flow.HubSubentryFlowHandler
-    assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
-    assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
+    # Must return empty dict to hide "Add hub feature group" and
+    # "Add service feature group" buttons in the HA config entry UI.
+    # Subentries are provisioned programmatically, not manually by users.
+    assert mapping == {}, "UI should not expose manual subentry buttons"
 
 
 def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:
