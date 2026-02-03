@@ -169,7 +169,8 @@ def test_scanner_triggers_cloud_discovery(
     async def _exercise() -> None:
         await device_tracker.async_setup_entry(hass, entry, _capture_entities)
 
-        assert added and len(added[0]) == 1
+        # Should have 2 entities per device: main tracker + last location
+        assert added and len(added[0]) == 2
 
         for task in scheduled:
             await task
@@ -177,9 +178,15 @@ def test_scanner_triggers_cloud_discovery(
     asyncio.run(_exercise())
 
     identifier = coordinator.stable_subentry_identifier(key=TRACKER_SUBENTRY_KEY)
+    # First entity is the main tracker
     tracker_entity = added[0][0]
     assert tracker_entity.subentry_key == TRACKER_SUBENTRY_KEY
     assert identifier in tracker_entity.unique_id
+    assert not tracker_entity.unique_id.endswith(":last_location")
+    # Second entity is the last location tracker
+    last_location_entity = added[0][1]
+    assert last_location_entity.subentry_key == TRACKER_SUBENTRY_KEY
+    assert last_location_entity.unique_id.endswith(":last_location")
 
     assert triggered_calls, "scanner should schedule cloud discovery"
     call = triggered_calls[0]

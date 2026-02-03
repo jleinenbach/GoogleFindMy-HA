@@ -392,6 +392,10 @@ async def async_setup_entry(
                         continue
                     added_unique_ids.add(unique_id)
 
+                # Add main tracker entity first
+                known_ids.add(dev_id)
+                to_add.append(entity)
+
                 # Create last location tracker entity (always shows last known location)
                 last_location_entity = GoogleFindMyLastLocationTracker(
                     coordinator,
@@ -406,9 +410,6 @@ async def async_setup_entry(
                     if last_location_unique_id not in added_unique_ids:
                         added_unique_ids.add(last_location_unique_id)
                         to_add.append(last_location_entity)
-
-                known_ids.add(dev_id)
-                to_add.append(entity)
             return to_add
 
         @callback

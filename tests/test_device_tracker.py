@@ -191,10 +191,19 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
     asyncio.run(_exercise())
 
     assert coordinator.lookup_calls == ["tracker-1"]
-    assert added and len(added[-1]) == 1
+    # Should have 2 entities per device: main tracker + last location
+    assert added and len(added[-1]) == 2
+    # First entity is the main tracker
     tracker_entity = added[-1][0]
     assert tracker_entity.unique_id == "entry-1:tracker-subentry:tracker-1"
     assert tracker_entity.device_id == "tracker-1"
+    # Second entity is the last location tracker
+    last_location_entity = added[-1][1]
+    assert (
+        last_location_entity.unique_id
+        == "entry-1:tracker-subentry:tracker-1:last_location"
+    )
+    assert last_location_entity.device_id == "tracker-1"
     assert entry._callbacks, "async_on_unload should register cleanup callbacks"
     for task in scheduled:
         assert task.done()
@@ -270,9 +279,17 @@ def test_initial_snapshot_hydrates_registry_tracker(
         device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities)
     )
 
-    assert added and len(added[0]) == 1
+    # Should have 2 entities per device: main tracker + last location
+    assert added and len(added[0]) == 2
+    # First entity is the main tracker
     tracker_entity = added[0][0]
     assert tracker_entity.unique_id == "entry-1:tracker-subentry:tracker-1"
+    # Second entity is the last location tracker
+    last_location_entity = added[0][1]
+    assert (
+        last_location_entity.unique_id
+        == "entry-1:tracker-subentry:tracker-1:last_location"
+    )
     assert coordinator.lookup_calls == ["tracker-1"]
 
 

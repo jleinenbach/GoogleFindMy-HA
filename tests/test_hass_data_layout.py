@@ -1555,8 +1555,41 @@ async def test_programmatic_subentry_creation_triggers_setup_and_entities(
         def device_info(self) -> Any:
             return self._device_info
 
+    class _StubLastLocationTracker:
+        def __init__(
+            self,
+            coordinator: Any,
+            device: dict[str, Any],
+            *,
+            subentry_key: str,
+            subentry_identifier: str,
+        ) -> None:
+            del subentry_key
+            device_id = device.get("id", "device")
+            self.entity_id = f"device_tracker.{device_id}_last_location"
+            self._attr_unique_id = f"{coordinator.config_entry.entry_id}:{subentry_identifier}:{device_id}:last_location"
+            self._device_info = SimpleNamespace(
+                id=f"{coordinator.config_entry.entry_id}:{device_id}",
+                identifiers={
+                    (DOMAIN, f"{coordinator.config_entry.entry_id}:{device_id}")
+                },
+                config_entries={coordinator.config_entry.entry_id},
+                config_subentry_id=subentry_identifier,
+            )
+
+        @property
+        def unique_id(self) -> str:
+            return self._attr_unique_id
+
+        @property
+        def device_info(self) -> Any:
+            return self._device_info
+
     monkeypatch.setattr(device_tracker, "schedule_add_entities", _schedule_add_entities)
     monkeypatch.setattr(device_tracker, "GoogleFindMyDeviceTracker", _StubDeviceTracker)
+    monkeypatch.setattr(
+        device_tracker, "GoogleFindMyLastLocationTracker", _StubLastLocationTracker
+    )
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry)
