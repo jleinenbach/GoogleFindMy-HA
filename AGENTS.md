@@ -365,6 +365,36 @@ Prefer the executable name when it is available; fall back to the module form wh
 * **Synchronization points:** Keep `custom_components/googlefindmy/manifest.json`, `custom_components/googlefindmy/requirements.txt`, `pyproject.toml`, and `custom_components/googlefindmy/requirements-dev.txt` aligned. When bumping versions, check whether other files (for example, `hacs.json` or helpers under `script/`) must change as well.
 * **Upgrade workflow:** With internet access, perform dependency maintenance via `pip install`, `pip-compile`, `pip-audit`, `poetry update` (if relevant), and `python -m pip list --outdated`. Afterwards rerun tests/linters and document the outcomes.
 * **Change notes:** Record adjusted minimum versions or dropped legacy releases in the PR description and, when needed, in `CHANGELOG.md` or `README.md`.
+
+### Poetry lock file management
+
+**Critical:** After ANY change to `pyproject.toml`, regenerate `poetry.lock` with `poetry lock` before committing. CI will fail with "pyproject.toml changed significantly since poetry.lock was last generated" if the content-hash doesn't match.
+
+**Correct workflow:**
+```bash
+# 1. Edit pyproject.toml (e.g., change dependency version)
+# 2. Regenerate lock file
+poetry lock
+
+# 3. Verify lock is in sync
+poetry check
+
+# 4. Commit BOTH files together
+git add pyproject.toml poetry.lock
+git commit -m "chore: update dependency X to version Y"
+```
+
+**Common mistakes to avoid:**
+- Committing `pyproject.toml` without regenerating `poetry.lock`
+- Running `poetry install` without first running `poetry lock` after `pyproject.toml` changes
+- Using `--no-update` flag when dependencies need updating
+
+**CI failure pattern:**
+```
+pyproject.toml changed significantly since poetry.lock was last generated.
+Run `poetry lock` to fix the lock file.
+```
+
 * **Manifest compatibility (Jan 2025):** The shared CI still ships a `script.hassfest` build that rejects the `homeassistant` manifest key. Until upstream relaxes the schema for custom integrations, do **not** add `"homeassistant": "<version>"` to `custom_components/googlefindmy/manifest.json` or `hacs.json`. Track the minimum supported Home Assistant core release in documentation/tests instead.
 
 ## Maintenance mode
