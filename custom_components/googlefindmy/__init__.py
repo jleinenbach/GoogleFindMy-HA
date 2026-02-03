@@ -67,6 +67,7 @@ from typing import (
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
+import voluptuous as vol
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 
@@ -586,8 +587,12 @@ _GOOGLE_HOME_FILTER_CLASS: type[Any] | None = None
 _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED = False
 
 # Declare that this integration is config-entry-only (no YAML configuration).
-# This satisfies hassfest [CONFIG_SCHEMA] validation.
-CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+# Use getattr fallback for older HA versions lacking config_entry_only_config_schema.
+CONFIG_SCHEMA: vol.Schema = getattr(
+    cv,
+    "config_entry_only_config_schema",
+    lambda domain: vol.Schema({domain: vol.Schema({})}),
+)(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
 
