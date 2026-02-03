@@ -815,13 +815,27 @@ async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None
     assert hass.config_entries.removed == []
 
 
-def test_supported_subentry_types_disable_manual_additions() -> None:
-    """Config flow should not expose manual subentry factories to Home Assistant."""
+def test_supported_subentry_types_returns_handler_classes() -> None:
+    """Config flow should expose subentry handler classes for HA 2026.x compatibility."""
+
+    from custom_components.googlefindmy.const import (
+        SUBENTRY_TYPE_HUB,
+        SUBENTRY_TYPE_SERVICE,
+        SUBENTRY_TYPE_TRACKER,
+    )
 
     entry = _EntryStub()
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
 
-    assert mapping == {}
+    # All three subentry types should be registered
+    assert SUBENTRY_TYPE_HUB in mapping
+    assert SUBENTRY_TYPE_SERVICE in mapping
+    assert SUBENTRY_TYPE_TRACKER in mapping
+
+    # Verify they are the correct handler classes
+    assert mapping[SUBENTRY_TYPE_HUB] is config_flow.HubSubentryFlowHandler
+    assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
+    assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
 
 
 @pytest.mark.asyncio

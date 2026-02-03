@@ -39,11 +39,11 @@ class _SubentrySupportToggle(Protocol):
     "simulate_legacy_core",
     [False, True],
 )
-def test_supported_subentry_types_disable_manual_hub_additions(
+def test_supported_subentry_types_returns_handlers(
     subentry_support: _SubentrySupportToggle,
     simulate_legacy_core: bool,
 ) -> None:
-    """Manual hub creation should remain disabled on modern and legacy cores."""
+    """Subentry handlers should be registered for HA 2026.x compatibility."""
 
     if simulate_legacy_core:
         subentry_support.as_legacy()
@@ -54,19 +54,24 @@ def test_supported_subentry_types_disable_manual_hub_additions(
         SimpleNamespace()
     )
 
-    assert mapping == {}
-    assert SUBENTRY_TYPE_HUB not in mapping
-    assert SUBENTRY_TYPE_SERVICE not in mapping
-    assert SUBENTRY_TYPE_TRACKER not in mapping
+    # All three subentry types should be registered
+    assert SUBENTRY_TYPE_HUB in mapping
+    assert SUBENTRY_TYPE_SERVICE in mapping
+    assert SUBENTRY_TYPE_TRACKER in mapping
+
+    # Verify they are the correct handler classes
+    assert mapping[SUBENTRY_TYPE_HUB] is config_flow.HubSubentryFlowHandler
+    assert mapping[SUBENTRY_TYPE_SERVICE] is config_flow.ServiceSubentryFlowHandler
+    assert mapping[SUBENTRY_TYPE_TRACKER] is config_flow.TrackerSubentryFlowHandler
 
 
 @pytest.mark.asyncio
-async def test_hub_flow_aborts_when_manual_addition_requested(
+async def test_hub_flow_creates_entry_when_requested(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Manual hub entry point should abort because the flow is disabled."""
+    """Hub entry point should create a subentry with proper handler registration."""
 
-    caplog.set_level(logging.ERROR)
+    caplog.set_level(logging.INFO)
 
     entry = SimpleNamespace(entry_id="entry-123", data={}, options={}, subentries={})
 
@@ -93,10 +98,10 @@ async def test_hub_flow_aborts_when_manual_addition_requested(
     if inspect.isawaitable(result):
         result = await result
 
-    assert result["type"] == "abort"
-    assert result["reason"] == "not_supported"
+    # Flow should create an entry (not abort)
+    assert result["type"] == "create_entry"
     assert any(
-        "hub subentry type not supported" in record.getMessage()
+        "Hub subentry flow requested" in record.getMessage()
         for record in caplog.records
     )
 
