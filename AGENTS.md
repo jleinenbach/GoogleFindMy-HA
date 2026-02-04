@@ -758,6 +758,12 @@ artifacts remain exempt when explicitly flagged by repo configuration).
 * Repairs/Diagnostics: provide both; redact aggressively.
 * Storage: use `helpers.storage.Store` for tokens/state; throttle writes (batch/merge).
 * System health: prefer the `SystemHealthRegistration` helper (`homeassistant.components.system_health.SystemHealthRegistration`) when available and keep the legacy component import only as a guarded fallback.
+* **Entity naming** (HA Best Practice, ref: [Adopting a new way to name entities](https://developers.home-assistant.io/blog/2022/07/10/entity_naming/)):
+  - Always set `_attr_has_entity_name = True` on entity classes.
+  - **Primary entity** (represents the device itself): set `_attr_name = None` so it inherits only the device name (e.g., "Galaxy S25 Ultra").
+  - **Secondary entities** (additional features): use `translation_key` with a `name` in translations; HA auto-composes the friendly name as "Device Name + Translation" (e.g., "Galaxy S25 Ultra Last location").
+  - **Translation files**: for the primary entity's `translation_key`, **omit** the `"name"` key entirely (presence of `"name"` would append a suffix); for secondary entities, **include** the `"name"` key with the suffix text.
+  - Never set `_attr_name` dynamically at runtime (e.g., in coordinator update callbacks) when using `has_entity_name=True`—the device registry is the single source of truth for the device name.
 
 ### 11.8 Release & operations
 
