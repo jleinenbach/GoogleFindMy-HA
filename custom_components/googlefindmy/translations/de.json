@@ -745,5 +745,13 @@
       "fcm": "FCM-Empfänger",
       "fcm_lock_contention_count": "FCM-Sperrkonflikte"
     }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Nur stark frequentierte Bereiche",
+        "in_all_areas": "Alle Bereiche (Crowdsourcing)"
+      }
+    }
   }
 }

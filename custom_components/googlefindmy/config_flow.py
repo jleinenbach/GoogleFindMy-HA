@@ -5414,10 +5414,21 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             _register(vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS), str)
         if OPT_ENABLE_STATS_ENTITIES is not None:
             _register(vol.Optional(OPT_ENABLE_STATS_ENTITIES), bool)
-        _register(
-            vol.Optional(OPT_CONTRIBUTOR_MODE),
-            vol.In([CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]),
-        )
+        if selector is not None:
+            _register(
+                vol.Optional(OPT_CONTRIBUTOR_MODE),
+                selector({
+                    "select": {
+                        "options": [CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS],
+                        "translation_key": "contributor_mode",
+                    }
+                }),
+            )
+        else:
+            _register(
+                vol.Optional(OPT_CONTRIBUTOR_MODE),
+                vol.In([CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]),
+            )
         _register(
             vol.Optional(OPT_STALE_THRESHOLD),
             vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),

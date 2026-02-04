@@ -745,5 +745,13 @@
       "fcm": "FCM receiver",
       "fcm_lock_contention_count": "FCM lock contention count"
     }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "High-traffic areas only",
+        "in_all_areas": "All areas (crowdsourcing)"
+      }
+    }
   }
 }

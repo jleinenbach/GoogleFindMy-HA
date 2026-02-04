@@ -745,5 +745,13 @@
       "fcm": "Odbiornik FCM",
       "fcm_lock_contention_count": "Liczba konfliktów blokady FCM"
     }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Tylko obszary o dużym ruchu",
+        "in_all_areas": "Wszystkie obszary (crowdsourcing)"
+      }
+    }
   }
 }

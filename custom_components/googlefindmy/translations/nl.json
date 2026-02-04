@@ -745,5 +745,13 @@
       "fcm": "FCM-ontvanger",
       "fcm_lock_contention_count": "FCM lock-contentieteller"
     }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Alleen drukke gebieden",
+        "in_all_areas": "Alle gebieden (crowdsourcing)"
+      }
+    }
   }
 }

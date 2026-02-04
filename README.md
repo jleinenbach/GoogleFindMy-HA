@@ -204,8 +204,7 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `semantic_locations` | none | - | User-defined semantic location zones (managed via a dedicated options flow step). |
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
-| `stale_threshold` | 7200 | seconds | After this many seconds without a location update, the tracker state becomes `unknown`. |
-| `stale_threshold_enabled` | false | toggle | Enables the stale-threshold check that marks trackers as `unknown` after prolonged silence. |
+| `stale_threshold` | 1800 | seconds | After this many seconds (default: 30 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
 
 ### Google Home filter behavior
 
