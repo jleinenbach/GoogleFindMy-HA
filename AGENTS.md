@@ -764,6 +764,10 @@ artifacts remain exempt when explicitly flagged by repo configuration).
   - **Secondary entities** (additional features): use `translation_key` with a `name` in translations; HA auto-composes the friendly name as "Device Name + Translation" (e.g., "Galaxy S25 Ultra Last location").
   - **Translation files**: for the primary entity's `translation_key`, **omit** the `"name"` key entirely (presence of `"name"` would append a suffix); for secondary entities, **include** the `"name"` key with the suffix text.
   - Never set `_attr_name` dynamically at runtime (e.g., in coordinator update callbacks) when using `has_entity_name=True`—the device registry is the single source of truth for the device name.
+  - **CRITICAL: `_attr_name = None` vs. attribute not set** — These behave differently with `has_entity_name=True`:
+    - `_attr_name = None` (explicitly set) → entity inherits **only** the device name, no suffix
+    - `_attr_name` **not set** (attribute doesn't exist) → name comes from `translation_key`
+    - If a parent class sets `_attr_name = None` in `__init__()` and a child class needs the translation-based name, the child must **delete** the attribute after `super().__init__()`: `del self._attr_name`
 
 ### 11.8 Release & operations
 

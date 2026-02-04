@@ -1233,9 +1233,13 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
             f"{dev_id}:last_location",
         )
 
-        # With has_entity_name=True (inherited) and translation_key="last_location",
-        # the entity name is automatically composed as "<device_name> <translated_suffix>"
-        # e.g. "Galaxy S25 Ultra Last location". Do NOT override _attr_name here.
+        # CRITICAL: Remove the _attr_name = None that was set by the parent class.
+        # With has_entity_name=True:
+        #   - _attr_name = None → entity inherits ONLY device name (no suffix)
+        #   - _attr_name not set → name comes from translation_key ("last_location")
+        # We need the latter behavior so HA composes "<device_name> <translation_suffix>"
+        # e.g. "Galaxy S25 Ultra Letzter Standort"
+        del self._attr_name
 
     def _is_location_stale(self) -> bool:
         """Never stale - always show last known location."""
