@@ -745,5 +745,13 @@
       "fcm": "Receptor FCM",
       "fcm_lock_contention_count": "Contagem de contenção de bloqueio do FCM"
     }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Apenas áreas de alto tráfego",
+        "in_all_areas": "Todas as áreas (crowdsourcing)"
+      }
+    }
   }
 }
