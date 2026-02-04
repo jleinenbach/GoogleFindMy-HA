@@ -272,7 +272,7 @@
           "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Użyj encji 'Ostatnia lokalizacja', aby zawsze widzieć ostatnią znaną pozycję. Domyślnie: 1800 (30 minut).",
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
-          "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie obszary o dużym ruchu lub Wszystkie obszary w trybie crowdsourcingu).",
+          "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie Wszystkie obszary w trybie crowdsourcingu lub tylko obszary o dużym ruchu).",
           "subentry": "Zapisz te opcje w wybranej grupie funkcji. Zobacz [Podpozycje i grupy funkcji]({subentries_docs_url}), aby poznać przykłady."
         }
       },
@@ -500,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Urządzenie",
         "state_attributes": {
           "device_name": {
             "name": "Nazwa urządzenia"

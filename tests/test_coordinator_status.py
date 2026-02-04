@@ -394,7 +394,10 @@ def test_push_updated_keeps_known_name_for_blank_snapshots(
     entity.entity_id = "device_tracker.googlefindmy_dev_1"
     entity._handle_coordinator_update()
 
-    assert entity._attr_name == "Pixel 9"
+    # With has_entity_name=True, _attr_name is None; the entity name is derived
+    # from the device registry. The coordinator cache preserves the display name.
+    assert entity._attr_name is None
+    assert entity._attr_has_entity_name is True
     assert entity.subentry_key == TRACKER_SUBENTRY_KEY
     assert subentry_identifier in entity.unique_id
 
