@@ -821,8 +821,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     """Representation of a Google Find My Device tracker."""
 
     # Convention: trackers represent the device itself; the entity name
-    # should not have a suffix and will track the device name.
-    _attr_has_entity_name = False
+    # inherits from the device name via has_entity_name=True.
+    _attr_has_entity_name = True
     _attr_source_type = SourceType.GPS
     _attr_entity_category: EntityCategory | None = (
         None  # ensure tracker is not diagnostic
@@ -872,9 +872,10 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             dev_id,
         )
 
-        # With has_entity_name=False we must set the entity's name ourselves.
-        # If name is missing during cold boot, HA will show the entity_id; that's fine.
-        self._attr_name = self._display_name(device.get("name"))
+        # With has_entity_name=True, setting name to None means the entity
+        # inherits only the device name (no suffix). The translation_key "device"
+        # is used for state attributes but not for the entity name itself.
+        self._attr_name = None
 
         # Attribution for data source identification (helps distinguish from Bermuda etc.)
         email = _extract_email_from_entry(coordinator.config_entry)
@@ -1173,15 +1174,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             return
 
         self.refresh_device_label_from_coordinator(log_prefix="DeviceTracker")
-        desired_display = self._display_name(self._device.get("name"))
-        if self._attr_name != desired_display:
-            _LOGGER.debug(
-                "Updating entity name for %s: '%s' -> '%s'",
-                self.entity_id,
-                self._attr_name,
-                desired_display,
-            )
-            self._attr_name = desired_display
+        # With has_entity_name=True, the entity name is derived from the device
+        # registry name. No need to manually update _attr_name here.
 
         device_data = self._current_row()
         if not device_data:
@@ -1239,9 +1233,9 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
             f"{dev_id}:last_location",
         )
 
-        # Override name with "Last Location" suffix
-        base_name = self._display_name(device.get("name"))
-        self._attr_name = f"{base_name} Last Location"
+        # With has_entity_name=True (inherited) and translation_key="last_location",
+        # the entity name is automatically composed as "<device_name> <translated_suffix>"
+        # e.g. "Galaxy S25 Ultra Last location". Do NOT override _attr_name here.
 
     def _is_location_stale(self) -> bool:
         """Never stale - always show last known location."""

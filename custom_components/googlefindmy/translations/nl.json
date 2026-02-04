@@ -500,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Apparaat",
         "state_attributes": {
           "device_name": {
             "name": "Apparaatnaam"
