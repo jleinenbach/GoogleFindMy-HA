@@ -286,7 +286,7 @@ markers = [
 ]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.13"
 warn_unused_ignores = true
 show_error_codes = true
 mypy_path = ["."]

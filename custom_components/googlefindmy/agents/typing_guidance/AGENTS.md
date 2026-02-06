@@ -50,6 +50,114 @@ except ImportError:  # Pre-2025.5 HA builds do not expose the helper.
 
 The dynamically created fallback must inherit from an existing Home Assistant error (usually `HomeAssistantError`) and be assigned immediately after the guarded import so downstream modules can reference the shared symbol without additional `# type: ignore` comments. Prefer short inline comments that state which Home Assistant versions lack the helper so future contributors know when the guard can be removed.
 
+## Coordinator mixin typing — `_MixinBase` pattern
+
+The coordinator uses a **mixin composition pattern**: six Operations classes
+(`RegistryOperations`, `SubentryOperations`, `LocateOperations`,
+`IdentityOperations`, `PollingOperations`, `CacheOperations`) are composed into
+the final `GoogleFindMyCoordinator` via multiple inheritance.
+
+### Problem
+
+Mypy cannot resolve cross-mixin attribute and method references (e.g.
+`self.hass`, `self.config_entry`, or a call from `PollingOperations` into a
+`CacheOperations` method) because each mixin class does not individually
+inherit from the coordinator or `DataUpdateCoordinator`.
+
+The earlier workaround — annotating `self: GoogleFindMyCoordinator` on every
+mixin method — is rejected by mypy `--strict` with `[misc]` errors because
+`GoogleFindMyCoordinator` is a *subtype* (child) of each mixin, not a
+*supertype* (parent), violating mypy's requirement that the self-type
+annotation must be a supertype of the enclosing class.
+
+### Solution
+
+`coordinator/_mixin_typing.py` defines `_MixinBase`, a **type-declaration-only
+base class** that declares the union of all attributes and method signatures
+from `DataUpdateCoordinator`, `GoogleFindMyCoordinator.__init__`, and every
+cross-mixin method. All six mixin classes inherit from `_MixinBase`:
+
+```python
+from ._mixin_typing import _MixinBase
+
+class RegistryOperations(_MixinBase):
+    ...
+```
+
+At runtime `_MixinBase` is essentially empty: attribute annotations create no
+instance state, and method stubs raise `NotImplementedError` (immediately
+shadowed by the real implementations in the composed class hierarchy). Mypy,
+however, gains full visibility into the coordinator interface when type-checking
+any mixin.
+
+### Maintenance rules
+
+* When adding a **new attribute** to `GoogleFindMyCoordinator.__init__`, add a
+  matching annotation to `_MixinBase`.
+* When adding a **new method** that is called across mixin boundaries, add a
+  stub to `_MixinBase` with the same signature and `raise NotImplementedError`.
+* Keep `_MixinBase` free of any runtime logic — it exists purely for static
+  analysis.
+
+## Explicit re-export pattern
+
+Under `mypy --strict` (specifically `no_implicit_reexport`), a bare
+`from .module import x` is **not** considered a public re-export. Modules that
+re-export symbols for use by other packages must use the explicit form:
+
+```python
+from .shared_helpers import (
+    known_ids_for_subentry_type as known_ids_for_subentry_type,
+    normalize_fcm_entry_snapshot as normalize_fcm_entry_snapshot,
+)
+```
+
+The `as x` suffix signals to mypy that the import is intentionally public.
+Without it, downstream imports trigger `[attr-defined]` errors.
+
+## `cast()` for Home Assistant API returns
+
+Because `pyproject.toml` sets `follow_imports = "skip"` for all `homeassistant`
+modules, every HA API call returns `Any` from mypy's perspective. When
+`warn_return_any` is active (included in `--strict`), returning such values
+from typed functions triggers `[no-any-return]`. Use `cast()` to assert the
+expected type:
+
+```python
+from typing import cast
+
+result: str = await hass.async_add_executor_job(_get_local_ip_sync)
+return result
+```
+
+Or for optional lookups:
+
+```python
+return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+```
+
+Prefer `cast()` over `# type: ignore[no-any-return]` so the expected type is
+documented and future regressions are caught if the return type changes.
+
+## Exception variable scoping
+
+Python 3 deletes exception variables after the `except` block exits. Do not
+reuse the same variable name for a manually constructed exception within the
+same scope:
+
+```python
+# BAD — auth_exc is deleted after the except block
+except ConfigEntryAuthFailed as auth_exc:
+    ...
+auth_exc = ConfigEntryAuthFailed("manual reason")  # NameError at runtime
+
+# GOOD — use a different name
+except ConfigEntryAuthFailed as auth_exc:
+    ...
+reauth_exc = ConfigEntryAuthFailed("manual reason")
+```
+
 ## Cross-reference checklist
 
+* [`coordinator/_mixin_typing.py`](../../coordinator/_mixin_typing.py) — Canonical `_MixinBase` type-declaration base for coordinator mixins.
 * [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Documents where these strict-mypy fallbacks are applied in the runtime, including the new subentry cross-link list. Keep the handbook and this guide synchronized whenever typing guards or iterator requirements change.
