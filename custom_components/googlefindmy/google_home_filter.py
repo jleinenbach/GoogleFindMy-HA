@@ -40,7 +40,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from collections.abc import Callable as TypingCallable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.components.zone import DOMAIN as ZONE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
@@ -84,7 +84,7 @@ def callback(
 ) -> TypingCallable[[GoogleHomeFilter, Event | None], None]:
     """Typed wrapper around Home Assistant's callback decorator."""
 
-    return ha_callback(func)  # type: ignore[return-value]
+    return cast("TypingCallable[[GoogleHomeFilter, Event | None], None]", ha_callback(func))
 
 
 # Keep local names for zone attributes to avoid fragile imports.

@@ -222,7 +222,7 @@ ignore = ["E501"]
     "PLC0415",
     "PLR2004",
 ]
-"custom_components/googlefindmy/entity.py" = ["PLR0913"]
+"custom_components/googlefindmy/entity.py" = ["PLR0913", "PLC0414"]
 "custom_components/googlefindmy/get_oauth_token.py" = ["PLC0415"]
 "custom_components/googlefindmy/google_home_filter.py" = ["PLC0415", "PLR0911"]
 "custom_components/googlefindmy/ha_typing.py" = ["UP047", "UP046"]
@@ -321,67 +321,9 @@ module = [
 ]
 ignore_missing_imports = true
 
-# Coordinator mixin modules use self: "GoogleFindMyCoordinator" pattern
-# which mypy doesn't handle well with the [misc] error code
-[[tool.mypy.overrides]]
-module = [
-    "custom_components.googlefindmy.coordinator.registry",
-    "custom_components.googlefindmy.coordinator.subentry",
-    "custom_components.googlefindmy.coordinator.locate",
-    "custom_components.googlefindmy.coordinator.identity",
-    "custom_components.googlefindmy.coordinator.polling",
-    "custom_components.googlefindmy.coordinator.cache",
-]
-disable_error_code = [
-    "misc",
-    "assignment",      # SimpleNamespace fallback assignment
-    "arg-type",        # Awaitable vs Coroutine variance
-]
-
 [[tool.mypy.overrides]]
 module = ["tests.test_fcm_receiver_guard"]
 ignore_errors = false
-
-# HomeAssistant API compatibility: FlowResult generics, Entity covariance,
-# and TypedDict issues that require HA upstream type improvements to fix.
-# These are checked manually and don't affect runtime behavior.
-[[tool.mypy.overrides]]
-module = [
-    "custom_components.googlefindmy",
-    "custom_components.googlefindmy.config_flow",
-    "custom_components.googlefindmy.map_view",
-    "custom_components.googlefindmy.entity",
-    "custom_components.googlefindmy.sensor",
-    "custom_components.googlefindmy.services",
-    "custom_components.googlefindmy.button",
-    "custom_components.googlefindmy.location_recorder",
-    "custom_components.googlefindmy.google_home_filter",
-    "custom_components.googlefindmy.device_tracker",
-    "custom_components.googlefindmy.binary_sensor",
-    "custom_components.googlefindmy.discovery",
-    "custom_components.googlefindmy.eid_resolver",
-    "custom_components.googlefindmy.ha_typing",
-    "custom_components.googlefindmy.system_health",
-]
-disable_error_code = [
-    "arg-type",        # Entity subtype covariance issues
-    "assignment",      # FlowResult generic assignment
-    "empty-body",      # Protocol stubs without implementation
-    "func-returns-value",  # Void function return expectations
-    "misc",            # Complex HA type inference issues
-    "no-any-return",   # Dynamic return types in HA APIs
-    "override",        # ConfigFlow return type covariance
-    "redundant-cast",  # Casts needed for older HA versions
-    "return-value",    # FlowResult return type variance
-    "type-var",        # Store type variance
-    "typeddict-item",  # FlowResult TypedDict fields
-    "typeddict-unknown-key",  # HA TypedDict extensions
-    "union-attr",      # State | dict union access
-    "attr-defined",    # Optional HA const imports
-    "var-annotated",   # Store type inference
-    "unused-ignore",   # Cross-version compatibility ignores
-    "truthy-function", # Recorder get_instance pattern
-]
 
 [tool.coverage.run]
 branch = true

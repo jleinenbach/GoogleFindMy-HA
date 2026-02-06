@@ -3,6 +3,16 @@
 This package contains the GoogleFindMyCoordinator class and related components.
 All public symbols are re-exported here for backwards compatibility.
 
+Architecture:
+    The coordinator uses a mixin composition pattern.  Six Operations classes
+    (RegistryOperations, SubentryOperations, LocateOperations,
+    IdentityOperations, PollingOperations, CacheOperations) are composed into
+    GoogleFindMyCoordinator via multiple inheritance.
+
+    All mixins inherit from ``_MixinBase`` (defined in ``_mixin_typing.py``),
+    a type-declaration-only base class that gives mypy visibility into the full
+    coordinator interface without introducing runtime overhead.
+
 Usage (unchanged):
     from .coordinator import GoogleFindMyCoordinator
 """
@@ -30,7 +40,7 @@ from .helpers.stats import (
     StatusSnapshot,
 )
 
-# Operations classes - currently empty, will be filled in Phases 2-6
+# Operations mixin classes (all inherit from _MixinBase for strict typing)
 from .identity import IdentityOperations
 from .locate import LocateOperations
 

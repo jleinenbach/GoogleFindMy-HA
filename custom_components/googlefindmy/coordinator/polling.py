@@ -38,7 +38,7 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from statistics import mean, stdev
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.core import Event
@@ -55,6 +55,7 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
+from ._mixin_typing import _MixinBase
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
@@ -98,11 +99,8 @@ _PUSH_NOT_READY_TIMEOUT_S = 15
 # Predictive polling buffer to avoid requesting data before it is available server-side
 _PREDICTION_BUFFER_S = 45
 
-if TYPE_CHECKING:
-    from .main import GoogleFindMyCoordinator
 
-
-class PollingOperations:
+class PollingOperations(_MixinBase):
     """Polling operations mixin for GoogleFindMyCoordinator.
 
     This class contains methods that manage the polling lifecycle,
@@ -126,7 +124,7 @@ class PollingOperations:
     _startup_complete: bool
 
     def _set_api_status(
-        self: GoogleFindMyCoordinator, status: str, *, reason: str | None = None
+        self, status: str, *, reason: str | None = None
     ) -> None:
         """Update the API polling status and notify listeners if it changed."""
         if status == self._api_status_state and reason == self._api_status_reason:
@@ -143,7 +141,7 @@ class PollingOperations:
             pass
 
     def _set_fcm_status(
-        self: GoogleFindMyCoordinator, status: str, *, reason: str | None = None
+        self, status: str, *, reason: str | None = None
     ) -> None:
         """Update the push transport status while avoiding noisy churn."""
         if status == self._fcm_status_state and reason == self._fcm_status_reason:
@@ -159,7 +157,7 @@ class PollingOperations:
             pass
 
     @property
-    def api_status(self: GoogleFindMyCoordinator) -> StatusSnapshot:
+    def api_status(self) -> StatusSnapshot:
         """Return a snapshot describing the current API polling health."""
         return StatusSnapshot(
             state=self._api_status_state,
@@ -168,7 +166,7 @@ class PollingOperations:
         )
 
     @property
-    def fcm_status(self: GoogleFindMyCoordinator) -> StatusSnapshot:
+    def fcm_status(self) -> StatusSnapshot:
         """Return a snapshot describing the current push transport health."""
         return StatusSnapshot(
             state=self._fcm_status_state,
@@ -177,21 +175,21 @@ class PollingOperations:
         )
 
     @property
-    def is_fcm_connected(self: GoogleFindMyCoordinator) -> bool:
+    def is_fcm_connected(self) -> bool:
         """Convenience boolean for entities relying on push transport availability."""
         return self._fcm_status_state == FcmStatus.CONNECTED
 
     @property
-    def consecutive_timeouts(self: GoogleFindMyCoordinator) -> int:
+    def consecutive_timeouts(self) -> int:
         """Return the number of consecutive poll timeouts."""
         return self._consecutive_timeouts
 
     @property
-    def last_poll_result(self: GoogleFindMyCoordinator) -> str | None:
+    def last_poll_result(self) -> str | None:
         """Return the last recorded poll result ("success"/"failed")."""
         return self._last_poll_result
 
-    def _is_on_hass_loop(self: GoogleFindMyCoordinator) -> bool:
+    def _is_on_hass_loop(self) -> bool:
         """Return True if currently executing on the HA event loop thread."""
         loop = self.hass.loop
         try:
@@ -200,7 +198,7 @@ class PollingOperations:
             return False
 
     def _run_on_hass_loop(
-        self: GoogleFindMyCoordinator,
+        self,
         func: Callable[..., None],
         *args: Any,
         **kwargs: Any,
@@ -220,7 +218,7 @@ class PollingOperations:
             self.hass.loop.call_soon_threadsafe(func, *args)
 
     def _dispatch_async_request_refresh(
-        self: GoogleFindMyCoordinator, *, task_name: str, log_context: str
+        self, *, task_name: str, log_context: str
     ) -> None:
         """Invoke ``async_request_refresh`` safely regardless of its implementation."""
         fn = getattr(self, "async_request_refresh", None)
@@ -243,7 +241,7 @@ class PollingOperations:
             self._run_on_hass_loop(_invoke)
 
     def _schedule_short_retry(
-        self: GoogleFindMyCoordinator, delay_s: float = 5.0
+        self, delay_s: float = 5.0
     ) -> None:
         """Schedule a short, coalesced refresh instead of shifting the poll baseline.
 
@@ -287,7 +285,7 @@ class PollingOperations:
         else:
             self._run_on_hass_loop(_do_schedule)
 
-    async def _handle_dr_event(self: GoogleFindMyCoordinator, _event: Event) -> None:
+    async def _handle_dr_event(self, _event: Event) -> None:
         """Handle Device Registry changes by rebuilding poll targets (rare)."""
         self._reindex_poll_targets_from_device_registry()
         # After changes, request a refresh so the next tick uses the new target sets.
@@ -297,7 +295,7 @@ class PollingOperations:
         )
 
     def _compute_type_cooldown_seconds(
-        self: GoogleFindMyCoordinator, report_hint: str | None
+        self, report_hint: str | None
     ) -> int:
         """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
 
@@ -325,7 +323,7 @@ class PollingOperations:
         return max(base_cooldown, effective_poll)
 
     def _apply_report_type_cooldown(
-        self: GoogleFindMyCoordinator, device_id: str, report_hint: str | None
+        self, device_id: str, report_hint: str | None
     ) -> None:
         """Apply a per-device **poll** cooldown based on the crowdsourced report type.
 
@@ -355,7 +353,7 @@ class PollingOperations:
 
     # -------------------- Public read-only state for diagnostics/UI --------------------
     @property
-    def is_polling(self: GoogleFindMyCoordinator) -> bool:
+    def is_polling(self) -> bool:
         """Expose current polling state (public read-only API).
 
         Returns:
@@ -364,7 +362,7 @@ class PollingOperations:
         return self._is_polling
 
     def get_fcm_acquire_duration_seconds(
-        self: GoogleFindMyCoordinator,
+        self,
     ) -> float | None:
         """Duration between 'setup_start_monotonic' and 'fcm_acquired_monotonic'."""
         from .helpers.stats import get_duration as _get_duration_impl
@@ -375,13 +373,13 @@ class PollingOperations:
         )
 
     def get_last_poll_duration_seconds(
-        self: GoogleFindMyCoordinator,
+        self,
     ) -> float | None:
         """Duration of the most recent sequential polling cycle (if recorded)."""
         return self._get_duration("last_poll_start_mono", "last_poll_end_mono")
 
     # -------------------- FCM readiness checks --------------------
-    def _is_fcm_ready_soft(self: GoogleFindMyCoordinator) -> bool:
+    def _is_fcm_ready_soft(self) -> bool:
         """Return True if push transport appears ready (no awaits, no I/O).
 
         Priority order:
@@ -426,7 +424,7 @@ class PollingOperations:
         except Exception:
             return False
 
-    def _note_fcm_deferral(self: GoogleFindMyCoordinator, now_mono: float) -> None:
+    def _note_fcm_deferral(self, now_mono: float) -> None:
         """Advance a quiet escalation timeline while FCM is not ready.
 
         FIX: Use less aggressive log levels to reduce log spam (#124).
@@ -467,7 +465,7 @@ class PollingOperations:
                 reason="Push transport not connected after prolonged wait",
             )
 
-    def _clear_fcm_deferral(self: GoogleFindMyCoordinator) -> None:
+    def _clear_fcm_deferral(self) -> None:
         """Clear the escalation timeline once FCM becomes ready (log once)."""
         if self._fcm_defer_started_mono:
             _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
@@ -476,7 +474,7 @@ class PollingOperations:
         self._set_fcm_status(FcmStatus.CONNECTED)
 
     # -------------------- Poll timing prediction --------------------
-    def _get_predicted_poll_time(self: GoogleFindMyCoordinator) -> float | None:
+    def _get_predicted_poll_time(self) -> float | None:
         """Predict the earliest next update time based on device histories."""
 
         history_store = getattr(self, "_device_update_history", None)
@@ -506,7 +504,7 @@ class PollingOperations:
 
     # -------------------- Push transport error handling --------------------
     def _note_push_transport_problem(
-        self: GoogleFindMyCoordinator, cooldown_s: int = 90
+        self, cooldown_s: int = 90
     ) -> None:
         """Enter a temporary cooldown after a push transport failure to avoid spamming.
 
@@ -523,14 +521,14 @@ class PollingOperations:
             reason=f"Push transport recovering from error (cooldown {cooldown_s}s)",
         )
 
-    def force_poll_due(self: GoogleFindMyCoordinator) -> None:
+    def force_poll_due(self) -> None:
         """Force the next poll to be due immediately (no private access required externally)."""
         effective_interval = max(self.location_poll_interval, self.min_poll_interval)
         # Move the baseline back so that (now - _last_poll_mono) >= effective_interval
         self._last_poll_mono = time.monotonic() - float(effective_interval)
 
     # ---------------------------- HA Coordinator ----------------------------
-    async def _async_update_data(self: GoogleFindMyCoordinator) -> list[dict[str, Any]]:
+    async def _async_update_data(self) -> list[dict[str, Any]]:
         """Provide cached device data; trigger background poll if due.
 
         Discovery semantics:
@@ -989,7 +987,7 @@ class PollingOperations:
 
     # ---------------------------- Polling Cycle -----------------------------
     async def _async_start_poll_cycle(
-        self: GoogleFindMyCoordinator,
+        self,
         devices: list[dict[str, Any]],
         *,
         force: bool = False,
@@ -1309,11 +1307,11 @@ class PollingOperations:
                         cycle_failed = True
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
-                        auth_exc = ConfigEntryAuthFailed(
+                        reauth_exc = ConfigEntryAuthFailed(
                             "Google session invalid; re-authentication required"
                         )
-                        last_exception = auth_exc
-                        raise auth_exc from auth_err
+                        last_exception = reauth_exc
+                        raise reauth_exc from auth_err
                     except SpotApiEmptyResponseError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -1326,11 +1324,11 @@ class PollingOperations:
                         cycle_failed = True
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
-                        auth_exc = ConfigEntryAuthFailed(
+                        reauth_exc = ConfigEntryAuthFailed(
                             "Google session invalid; re-authentication required"
                         )
-                        last_exception = auth_exc
-                        raise auth_exc
+                        last_exception = reauth_exc
+                        raise reauth_exc
                     except NovaAuthPermanentError as perm_err:
                         # Permanent auth failure (AAS token invalid) - immediate reauth
                         _LOGGER.error(
@@ -1346,11 +1344,11 @@ class PollingOperations:
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
                         self._consecutive_transient_auth_failures = 0
-                        auth_exc = ConfigEntryAuthFailed(
+                        reauth_exc = ConfigEntryAuthFailed(
                             "Google credentials invalid; re-authentication required"
                         )
-                        last_exception = auth_exc
-                        raise auth_exc from perm_err
+                        last_exception = reauth_exc
+                        raise reauth_exc from perm_err
                     except NovaAuthError as transient_err:
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
@@ -1375,11 +1373,11 @@ class PollingOperations:
                             cycle_failed = True
                             self._last_poll_result = "failed"
                             self._consecutive_timeouts = 0
-                            auth_exc = ConfigEntryAuthFailed(
+                            reauth_exc = ConfigEntryAuthFailed(
                                 f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
                             )
-                            last_exception = auth_exc
-                            raise auth_exc from transient_err
+                            last_exception = reauth_exc
+                            raise reauth_exc from transient_err
 
                         # Not yet at threshold - log warning and continue to next device
                         _LOGGER.warning(
