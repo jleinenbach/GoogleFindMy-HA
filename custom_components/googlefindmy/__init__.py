@@ -8476,4 +8476,5 @@ async def async_get_local_ip(hass: HomeAssistant) -> str:
     Delegates the blocking socket call to the HA executor so the event loop is
     never stalled by DNS resolution or network timeouts.
     """
-    return await hass.async_add_executor_job(_get_local_ip_sync)
+    result: str = await hass.async_add_executor_job(_get_local_ip_sync)
+    return result

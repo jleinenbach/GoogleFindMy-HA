@@ -19,7 +19,7 @@ import logging
 import math
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
@@ -35,9 +35,6 @@ from ..NovaApi.nova_request import (
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
-if TYPE_CHECKING:
-    from .main import GoogleFindMyCoordinator
-
 _LOGGER = logging.getLogger(__name__)
 
 # Cooldown guardrails for owner purge window
@@ -50,7 +47,10 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
-class LocateOperations:
+from ._mixin_typing import _MixinBase
+
+
+class LocateOperations(_MixinBase):
     """Locate operations mixin for GoogleFindMyCoordinator.
 
     This class contains methods that handle device location requests,
@@ -61,7 +61,7 @@ class LocateOperations:
     _is_polling: bool
 
     def _normalize_coords(
-        self: GoogleFindMyCoordinator,
+        self,
         payload: dict[str, Any],
         *,
         device_label: str | None = None,
@@ -140,7 +140,7 @@ class LocateOperations:
 
         return True
 
-    def can_play_sound(self: GoogleFindMyCoordinator, device_id: str) -> bool:
+    def can_play_sound(self, device_id: str) -> bool:
         """Return True if 'Play Sound' should be enabled for the device.
 
         **No network in availability path.**
@@ -197,7 +197,7 @@ class LocateOperations:
         return True
 
     # ---------------------------- Public control / Locate gating ------------
-    def _get_device_lock(self: GoogleFindMyCoordinator, device_id: str) -> asyncio.Lock:
+    def _get_device_lock(self, device_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific device.
 
         This prevents race conditions when multiple concurrent locate requests
@@ -207,7 +207,7 @@ class LocateOperations:
             self._device_action_locks[device_id] = asyncio.Lock()
         return self._device_action_locks[device_id]
 
-    def can_request_location(self: GoogleFindMyCoordinator, device_id: str) -> bool:
+    def can_request_location(self, device_id: str) -> bool:
         """Return True if a manual 'Locate now' request is currently allowed.
 
         Gate conditions:
@@ -237,7 +237,7 @@ class LocateOperations:
 
     # ---------------------------- Passthrough API ---------------------------
     async def async_locate_device(
-        self: GoogleFindMyCoordinator, device_id: str
+        self, device_id: str
     ) -> dict[str, Any]:
         """Locate a device using the native async API (no executor).
 
@@ -572,7 +572,7 @@ class LocateOperations:
                 # Push an update so buttons/entities can refresh availability
                 self.async_set_updated_data(self.data)
 
-    async def async_play_sound(self: GoogleFindMyCoordinator, device_id: str) -> bool:
+    async def async_play_sound(self, device_id: str) -> bool:
         """Play sound on a device using the native async API (no executor).
 
         Guard with can_play_sound(); on failure, start a short cooldown to avoid repeated errors.
@@ -640,7 +640,7 @@ class LocateOperations:
             return False
 
     async def async_stop_sound(
-        self: GoogleFindMyCoordinator,
+        self,
         device_id: str,
         request_uuid: str | None = None,
     ) -> bool:

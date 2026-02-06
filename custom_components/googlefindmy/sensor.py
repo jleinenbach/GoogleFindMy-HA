@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -61,6 +61,9 @@ from .entity import (
     subentry_type as _subentry_type,
 )
 from .ha_typing import RestoreSensor, SensorEntity, callback
+
+if TYPE_CHECKING:
+    from .eid_resolver import GoogleFindMyEIDResolver
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -449,12 +452,12 @@ async def async_setup_entry(
         if tracker_scheduler is None:
             tracker_scheduler = _schedule_tracker_entities
 
-        def _get_ble_resolver() -> Any:
+        def _get_ble_resolver() -> GoogleFindMyEIDResolver | None:
             """Return the EID resolver from hass.data, or None."""
             domain_data = hass.data.get(DOMAIN)
             if not isinstance(domain_data, dict):
                 return None
-            return domain_data.get(DATA_EID_RESOLVER)
+            return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
 
         def _build_entities() -> list[SensorEntity]:
             """Build sensor entities for visible devices in the current subentry."""
@@ -1271,18 +1274,18 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
         )
         self._attr_native_value: int | None = None
 
-    def _get_resolver(self) -> Any:
+    def _get_resolver(self) -> GoogleFindMyEIDResolver | None:
         """Return the EID resolver from hass.data, or None."""
         domain_data = self.hass.data.get(DOMAIN)
         if not isinstance(domain_data, dict):
             return None
-        return domain_data.get(DATA_EID_RESOLVER)
+        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
 
     @property
     def native_value(self) -> int | None:
         """Return battery percentage from resolver, or restored value."""
         resolver = self._get_resolver()
-        if resolver is None:
+        if resolver is None or self._device_id is None:
             return self._attr_native_value
         state = resolver.get_ble_battery_state(self._device_id)
         if state is None:
@@ -1303,7 +1306,7 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
             return False
 
         try:
-            if hasattr(self.coordinator, "is_device_present"):
+            if self._device_id is not None and hasattr(self.coordinator, "is_device_present"):
                 raw = self.coordinator.is_device_present(self._device_id)
                 present = bool(raw) if not isinstance(raw, bool) else raw
                 if present:
@@ -1320,7 +1323,7 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return diagnostic attributes (excluded from recorder)."""
         resolver = self._get_resolver()
-        if resolver is None:
+        if resolver is None or self._device_id is None:
             return None
         state = resolver.get_ble_battery_state(self._device_id)
         if state is None:
@@ -1344,7 +1347,7 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
 
         # Update cached native_value from resolver for restore persistence
         resolver = self._get_resolver()
-        if resolver is not None:
+        if resolver is not None and self._device_id is not None:
             state = resolver.get_ble_battery_state(self._device_id)
             if state is not None:
                 self._attr_native_value = state.battery_pct
@@ -1366,7 +1369,7 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
             )
             value = None
 
-        if value in (None, "unknown", "unavailable"):
+        if value is None or value in ("unknown", "unavailable"):
             return
 
         try:

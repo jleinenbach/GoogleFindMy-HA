@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
@@ -70,6 +70,9 @@ from .entity import (
     subentry_type as _subentry_type,
 )
 from .ha_typing import BinarySensorEntity, callback
+
+if TYPE_CHECKING:
+    from .eid_resolver import GoogleFindMyEIDResolver
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -312,12 +315,12 @@ async def async_setup_entry(  # noqa: PLR0915
     processed_tracker_identifiers: set[str] = set()
     known_uwt_ids: set[str] = set()
 
-    def _get_ble_resolver() -> Any:
+    def _get_ble_resolver() -> GoogleFindMyEIDResolver | None:
         """Return the EID resolver from hass.data, or None."""
         domain_data = hass.data.get(DOMAIN)
         if not isinstance(domain_data, dict):
             return None
-        return domain_data.get(DATA_EID_RESOLVER)
+        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
 
     def _add_tracker_scope(  # noqa: PLR0915
         tracker_key: str,
@@ -957,18 +960,18 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
             separator="_",
         )
 
-    def _get_resolver(self) -> Any:
+    def _get_resolver(self) -> GoogleFindMyEIDResolver | None:
         """Return the EID resolver from hass.data, or None."""
         domain_data = self.hass.data.get(DOMAIN)
         if not isinstance(domain_data, dict):
             return None
-        return domain_data.get(DATA_EID_RESOLVER)
+        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
 
     @property
     def is_on(self) -> bool | None:
         """Return True when UWT / separated state is active."""
         resolver = self._get_resolver()
-        if resolver is None:
+        if resolver is None or self._device_id is None:
             return None
         state = resolver.get_ble_battery_state(self._device_id)
         if state is None:
@@ -988,7 +991,7 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
         if not self.coordinator_has_device():
             return False
         try:
-            if hasattr(self.coordinator, "is_device_present"):
+            if self._device_id is not None and hasattr(self.coordinator, "is_device_present"):
                 return bool(self.coordinator.is_device_present(self._device_id))
         except Exception:
             pass
@@ -998,7 +1001,7 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Return diagnostic attributes (excluded from recorder)."""
         resolver = self._get_resolver()
-        if resolver is None:
+        if resolver is None or self._device_id is None:
             return None
         state = resolver.get_ble_battery_state(self._device_id)
         if state is None:

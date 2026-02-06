@@ -21,7 +21,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ..const import DATA_EID_RESOLVER, DOMAIN
 from .helpers.cache import (
@@ -118,11 +118,10 @@ def _normalize_metadata_keys(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-if TYPE_CHECKING:
-    from .main import GoogleFindMyCoordinator
+from ._mixin_typing import _MixinBase
 
 
-class CacheOperations:
+class CacheOperations(_MixinBase):
     """Cache operations mixin for GoogleFindMyCoordinator.
 
     This class contains methods that manage the device location cache,
@@ -130,7 +129,7 @@ class CacheOperations:
     """
 
     def get_device_location_data(
-        self: GoogleFindMyCoordinator, device_id: str
+        self, device_id: str
     ) -> dict[str, Any] | None:
         """Return the cached location data for a single device (copy)."""
         raw = self._device_location_data.get(device_id)
@@ -139,7 +138,7 @@ class CacheOperations:
         return dict(raw)
 
     def prime_device_location_cache(
-        self: GoogleFindMyCoordinator, device_id: str, data: dict[str, Any]
+        self, device_id: str, data: dict[str, Any]
     ) -> None:
         """Prime the internal location cache with externally-provided data.
 
@@ -156,13 +155,13 @@ class CacheOperations:
             self._device_location_data[device_id] = dict(data)
 
     def seed_device_last_seen(
-        self: GoogleFindMyCoordinator, device_id: str, timestamp: float
+        self, device_id: str, timestamp: float
     ) -> None:
         """Seed a device's last-seen timestamp for cache initialization."""
         self._present_last_seen[device_id] = timestamp
 
     def _track_device_interval(
-        self: GoogleFindMyCoordinator, device_id: str, last_seen: float | None
+        self, device_id: str, last_seen: float | None
     ) -> None:
         """Track last_seen history to predict future poll targets."""
         if last_seen is None:
@@ -179,7 +178,7 @@ class CacheOperations:
             history.append(last_seen)
 
     def _persist_anchor_metadata(
-        self: GoogleFindMyCoordinator,
+        self,
         device_id: str,
         payload: dict[str, Any],
         *,
@@ -263,7 +262,7 @@ class CacheOperations:
                     hass_obj.async_create_task(refresh_coro())
 
     def update_device_cache(
-        self: GoogleFindMyCoordinator,
+        self,
         device_id: str,
         location_data: dict[str, Any],
         *,
@@ -508,7 +507,7 @@ class CacheOperations:
                 schedule_fn()
 
     def _propagate_location_to_shared_devices(
-        self: GoogleFindMyCoordinator,
+        self,
         source_device_id: str,
         location: dict[str, Any],
     ) -> None:
@@ -587,7 +586,7 @@ class CacheOperations:
             )
 
     def _is_significant_update(
-        self: GoogleFindMyCoordinator,
+        self,
         device_id: str,
         new_data: dict[str, Any],
     ) -> bool:
@@ -703,7 +702,7 @@ class CacheOperations:
         return True
 
     def _merge_with_existing_cache_row(
-        self: GoogleFindMyCoordinator,
+        self,
         device_id: str,
         incoming: dict[str, Any],
     ) -> dict[str, Any]:
@@ -732,7 +731,7 @@ class CacheOperations:
         return merged
 
     def _haversine_distance(
-        self: GoogleFindMyCoordinator,
+        self,
         lat1: float,
         lon1: float,
         lat2: float,
@@ -742,7 +741,7 @@ class CacheOperations:
         return _haversine_distance_impl(lat1, lon1, lat2, lon2)
 
     def _apply_weighted_location_fusion(
-        self: GoogleFindMyCoordinator,
+        self,
         device_id: str,
         new_data: dict[str, Any],
     ) -> bool:
