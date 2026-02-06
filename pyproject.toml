@@ -222,7 +222,7 @@ ignore = ["E501"]
     "PLC0415",
     "PLR2004",
 ]
-"custom_components/googlefindmy/entity.py" = ["PLR0913"]
+"custom_components/googlefindmy/entity.py" = ["PLR0913", "PLC0414"]
 "custom_components/googlefindmy/get_oauth_token.py" = ["PLC0415"]
 "custom_components/googlefindmy/google_home_filter.py" = ["PLC0415", "PLR0911"]
 "custom_components/googlefindmy/ha_typing.py" = ["UP047", "UP046"]

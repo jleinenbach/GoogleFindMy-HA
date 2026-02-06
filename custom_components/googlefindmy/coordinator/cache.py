@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..const import DATA_EID_RESOLVER, DOMAIN
+from ._mixin_typing import _MixinBase
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
 )
@@ -116,9 +117,6 @@ def _normalize_metadata_keys(data: dict[str, Any]) -> dict[str, Any]:
         if normalized_key not in result:
             result[normalized_key] = value
     return result
-
-
-from ._mixin_typing import _MixinBase
 
 
 class CacheOperations(_MixinBase):

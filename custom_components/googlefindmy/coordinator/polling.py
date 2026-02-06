@@ -55,6 +55,7 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
+from ._mixin_typing import _MixinBase
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
@@ -97,9 +98,6 @@ _PUSH_NOT_READY_TIMEOUT_S = 15
 
 # Predictive polling buffer to avoid requesting data before it is available server-side
 _PREDICTION_BUFFER_S = 45
-
-
-from ._mixin_typing import _MixinBase
 
 
 class PollingOperations(_MixinBase):

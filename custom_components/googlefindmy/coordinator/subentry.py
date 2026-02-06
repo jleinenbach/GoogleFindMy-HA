@@ -28,6 +28,7 @@ from ..const import (
     TRACKER_SUBENTRY_KEY,
     TRACKER_SUBENTRY_TRANSLATION_KEY,
 )
+from ._mixin_typing import _MixinBase
 from .helpers.subentry import (
     detect_missing_core_subentry_keys as _detect_missing_core_keys_impl,
 )
@@ -102,7 +103,6 @@ def _sanitize_subentry_identifier(candidate: Any) -> str | None:
 
 
 # --- SubentryOperations mixin ------------------------------------------------
-from ._mixin_typing import _MixinBase
 
 
 class SubentryOperations(_MixinBase):

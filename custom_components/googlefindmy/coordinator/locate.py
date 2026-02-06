@@ -33,6 +33,7 @@ from ..NovaApi.nova_request import (
     NovaRateLimitError,
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
+from ._mixin_typing import _MixinBase
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
 _LOGGER = logging.getLogger(__name__)
@@ -45,9 +46,6 @@ _COOLDOWN_OWNER_MAX_S = 600.0
 def _clamp(value: float, min_val: float, max_val: float) -> float:
     """Clamp a value between min and max."""
     return max(min_val, min(max_val, value))
-
-
-from ._mixin_typing import _MixinBase
 
 
 class LocateOperations(_MixinBase):

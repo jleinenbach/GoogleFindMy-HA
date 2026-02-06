@@ -78,9 +78,17 @@ from .coordinator import GoogleFindMyCoordinator
 from .ha_typing import CoordinatorEntity, callback
 from .shared_helpers import (  # noqa: F401 - re-exported for platform modules
     known_ids_for_subentry_type as known_ids_for_subentry_type,
+)
+from .shared_helpers import (
     normalize_fcm_entry_snapshot as normalize_fcm_entry_snapshot,
+)
+from .shared_helpers import (
     safe_fcm_health_snapshots as safe_fcm_health_snapshots,
+)
+from .shared_helpers import (
     sanitize_state_text as sanitize_state_text,
+)
+from .shared_helpers import (
     subentry_type as subentry_type,
 )
 

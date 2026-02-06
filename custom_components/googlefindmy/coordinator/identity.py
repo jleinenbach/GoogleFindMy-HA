@@ -29,6 +29,7 @@ from ..const import (
     issue_id_for,
 )
 from ..KeyBackup.cloud_key_decryptor import decrypt_eik
+from ._mixin_typing import _MixinBase
 from .helpers.identity import (
     extract_pair_date as _extract_pair_date_impl,
 )
@@ -59,9 +60,6 @@ if TYPE_CHECKING:
     from .main import DeviceIdentity
 
 _LOGGER = logging.getLogger(__name__)
-
-
-from ._mixin_typing import _MixinBase
 
 
 class IdentityOperations(_MixinBase):

@@ -54,6 +54,7 @@ from ..const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from ._mixin_typing import _MixinBase
 from .helpers.registry import (
     build_canonical_unique_id as _build_canonical_unique_id_impl,
 )
@@ -107,9 +108,6 @@ from .helpers.subentry import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-
-from ._mixin_typing import _MixinBase
 
 
 class RegistryOperations(_MixinBase):
