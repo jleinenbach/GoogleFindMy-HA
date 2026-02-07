@@ -9,7 +9,11 @@ At **runtime** the class is essentially empty:
 - Attribute annotations (without assignment) are stored in ``__annotations__``
   but create no instance state.
 - Method stubs raise ``NotImplementedError``; they are overridden by the real
-  implementations provided by the mixin classes or the main coordinator.
+  implementations provided by the mixin classes or the main coordinator,
+  which precede ``_MixinBase`` in the MRO.
+- Methods from ``DataUpdateCoordinator`` are guarded by ``TYPE_CHECKING``
+  because ``_MixinBase`` precedes ``DataUpdateCoordinator`` in the MRO and
+  concrete stubs would shadow the real implementations at runtime.
 
 Why this is needed:
 - The mixin pattern relies on each Operations class being composed into the
@@ -106,14 +110,19 @@ class _MixinBase:
     # ------------------------------------------------------------------
     # Methods from DataUpdateCoordinator
     # ------------------------------------------------------------------
-    def async_set_updated_data(self, data: list[dict[str, Any]]) -> None:
-        raise NotImplementedError
+    # NOTE: async_set_updated_data, async_request_refresh, and
+    # async_set_update_error must NOT be defined here at runtime.
+    # _MixinBase precedes DataUpdateCoordinator in the MRO, so any
+    # concrete stub here would shadow the real implementations and
+    # raise NotImplementedError at runtime.  We guard them with
+    # TYPE_CHECKING so mypy can still see the signatures.
+    if TYPE_CHECKING:
 
-    async def async_request_refresh(self) -> None:
-        raise NotImplementedError
+        def async_set_updated_data(self, data: list[dict[str, Any]]) -> None: ...
 
-    def async_set_update_error(self, error: Exception) -> None:
-        raise NotImplementedError
+        async def async_request_refresh(self) -> None: ...
+
+        def async_set_update_error(self, error: Exception) -> None: ...
 
     # ------------------------------------------------------------------
     # Methods from GoogleFindMyCoordinator (main.py)
