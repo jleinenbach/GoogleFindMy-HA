@@ -33,7 +33,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from .geo import haversine_distance
+from .geo import haversine_distance, safe_accuracy
 from .subentry import format_epoch_utc, normalize_epoch_seconds
 
 __all__ = [
@@ -112,9 +112,6 @@ SOURCE_PRIORITY: dict[str, int] = {
     "cache": 2,
     "unknown": 0,
 }
-
-# Default significant change threshold in meters
-_DEFAULT_SIGNIFICANT_CHANGE_M = 50.0
 
 # Epsilon for timestamp comparison (floating point tolerance)
 _TIMESTAMP_EPSILON = 0.001
@@ -553,7 +550,6 @@ def fill_missing_coordinates(
 def merge_cache_row(
     existing: dict[str, Any] | None,
     incoming: dict[str, Any],
-    significant_change_meters: float = _DEFAULT_SIGNIFICANT_CHANGE_M,
 ) -> dict[str, Any]:
     """Merge incoming location data with existing cache row.
 
@@ -563,10 +559,21 @@ def merge_cache_row(
     3. Preserve monotonic timestamps
     4. Fill missing coordinates from existing
 
+    When timestamp-based ordering is inconclusive (``should_allow_location_update``
+    returns ``None``), an **accuracy-adaptive significance threshold** decides
+    whether the positional change is real or measurement noise.  The threshold
+    is ``0.5 * sqrt(acc_existing² + acc_incoming²)`` -- the combined standard
+    deviation of two independent Gaussian position errors, scaled by 0.5 so
+    that genuine movement is accepted quickly while jitter is suppressed.
+
+    Practical examples:
+    - GPS 10 m + GPS 10 m  →  threshold ≈  7 m  (fine-grained updates)
+    - BLE 200 m + BLE 200 m →  threshold ≈ 141 m  (only real jumps)
+    - GNSS 2 m + GNSS 2 m  →  threshold ≈  1.4 m (near-realtime)
+
     Args:
         existing: Existing cache entry (or None).
         incoming: Incoming location data.
-        significant_change_meters: Distance threshold for significant change.
 
     Returns:
         Merged cache row dictionary.
@@ -603,7 +610,22 @@ def merge_cache_row(
                 dist = haversine_distance(
                     existing_lat, existing_lon, incoming_lat, incoming_lon
                 )
-                allow_update = dist > significant_change_meters
+                # Accuracy-adaptive significance: movement must exceed
+                # the combined measurement uncertainty to be real.
+                # sqrt(a1² + a2²) is the joint std-dev of two independent
+                # Gaussian-distributed position errors.  Factor 0.5 keeps
+                # us permissive enough for genuine movement while still
+                # suppressing jitter.
+                existing_acc = safe_accuracy(
+                    _coerce_float(existing.get("accuracy"))
+                )
+                incoming_acc = safe_accuracy(
+                    _coerce_float(incoming.get("accuracy"))
+                )
+                adaptive_threshold = (
+                    math.sqrt(existing_acc**2 + incoming_acc**2) * 0.5
+                )
+                allow_update = dist > adaptive_threshold
             except Exception:
                 allow_update = False
         else:
