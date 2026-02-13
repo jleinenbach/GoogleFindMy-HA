@@ -434,8 +434,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
-        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii"))
-        salt = urlsafe_b64decode(salt_str.encode("ascii"))
+        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii") + b"=" * (-len(crypto_key_str) % 4))
+        salt = urlsafe_b64decode(salt_str.encode("ascii") + b"=" * (-len(salt_str) % 4))
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
@@ -446,8 +446,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
             raise ValueError("Invalid key values in credential payload")
 
-        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"========")
-        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"========")
+        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"=" * (-len(private_value) % 4))
+        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4))
         privkey = load_der_private_key(der_data, password=None)
         decrypted = http_decrypt(
             raw_data,
