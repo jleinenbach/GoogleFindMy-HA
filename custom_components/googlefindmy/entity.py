@@ -572,12 +572,22 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
                 self._base_url_warning_emitted = True
             return None
 
-        if not self._base_url_warning_emitted and not self.hass.config.external_url:
-            _LOGGER.info(
-                "Using internal URL for map view links; "
-                "set an external URL in Home Assistant settings for remote access",
-            )
-            self._base_url_warning_emitted = True
+        if not self._base_url_warning_emitted:
+            try:
+                internal_url = get_url(
+                    self.hass,
+                    allow_external=False,
+                    allow_cloud=False,
+                    allow_internal=True,
+                )
+            except (HomeAssistantError, NoURLAvailableError):
+                internal_url = None
+            if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+                _LOGGER.info(
+                    "Using internal URL for map view links; "
+                    "set an external URL in Home Assistant settings for remote access",
+                )
+                self._base_url_warning_emitted = True
 
         return base_url.rstrip("/")
 

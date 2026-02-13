@@ -7575,7 +7575,13 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
         )
         return
 
-    if not hass.config.external_url:
+    try:
+        internal_url = get_url(
+            hass, allow_external=False, allow_cloud=False, allow_internal=True,
+        )
+    except (HomeAssistantError, NoURLAvailableError):
+        internal_url = None
+    if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
         _LOGGER.info(
             "Using internal URL for map view links; "
             "set an external URL in Home Assistant settings for remote access",
