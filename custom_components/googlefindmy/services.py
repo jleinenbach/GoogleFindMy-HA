@@ -1003,20 +1003,26 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 hass,
                 prefer_external=True,
                 allow_cloud=True,
-                allow_internal=False,
+                allow_internal=True,
             )
         except (HomeAssistantError, NoURLAvailableError) as err:
             _LOGGER.warning(
-                "Skipping configuration URL refresh; external URL unavailable: %s",
+                "Skipping configuration URL refresh; no reachable URL available: %s",
                 err,
             )
             return
 
         if not base_url:
             _LOGGER.warning(
-                "Skipping configuration URL refresh; external URL unavailable",
+                "Skipping configuration URL refresh; no reachable URL available",
             )
             return
+
+        if not hass.config.external_url:
+            _LOGGER.info(
+                "Using internal URL for map view links; "
+                "set an external URL in Home Assistant settings for remote access",
+            )
 
         entries = hass.config_entries.async_entries(DOMAIN)
         entries_by_id = {entry.entry_id: entry for entry in entries}
