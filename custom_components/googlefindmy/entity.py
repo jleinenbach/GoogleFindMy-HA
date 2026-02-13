@@ -542,7 +542,7 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         return self._DEFAULT_DEVICE_LABEL
 
     def _resolve_absolute_base_url(self) -> str | None:
-        """Return the Home Assistant external base URL when available."""
+        """Return the Home Assistant base URL (prefers external, falls back to internal)."""
 
         try:
             base_url = cast(
@@ -551,13 +551,13 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
                     self.hass,
                     prefer_external=True,
                     allow_cloud=True,
-                    allow_internal=False,
+                    allow_internal=True,
                 ),
             )
         except (HomeAssistantError, NoURLAvailableError) as err:
             if not self._base_url_warning_emitted:
                 _LOGGER.warning(
-                    "Unable to resolve external URL; set the External URL in Home Assistant settings: %s",
+                    "Unable to resolve any Home Assistant URL for map view: %s",
                     err,
                 )
                 self._base_url_warning_emitted = True
@@ -566,11 +566,28 @@ class GoogleFindMyDeviceEntity(GoogleFindMyEntity):
         if not base_url or "://" not in base_url:
             if not self._base_url_warning_emitted:
                 _LOGGER.warning(
-                    "Unable to resolve external URL; set the External URL in Home Assistant settings: %s",
+                    "Unable to resolve any Home Assistant URL for map view: %s",
                     base_url,
                 )
                 self._base_url_warning_emitted = True
             return None
+
+        if not self._base_url_warning_emitted:
+            try:
+                internal_url = get_url(
+                    self.hass,
+                    allow_external=False,
+                    allow_cloud=False,
+                    allow_internal=True,
+                )
+            except (HomeAssistantError, NoURLAvailableError):
+                internal_url = None
+            if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+                _LOGGER.info(
+                    "Using internal URL for map view links; "
+                    "set an external URL in Home Assistant settings for remote access",
+                )
+                self._base_url_warning_emitted = True
 
         return base_url.rstrip("/")
 

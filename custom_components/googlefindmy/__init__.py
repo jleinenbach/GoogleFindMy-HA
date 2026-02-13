@@ -7559,21 +7559,33 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
                 hass,
                 prefer_external=True,
                 allow_cloud=True,
-                allow_internal=False,
+                allow_internal=True,
             ),
         )
     except (HomeAssistantError, NoURLAvailableError) as err:
         _LOGGER.warning(
-            "Skipping configuration URL refresh; external URL unavailable: %s",
+            "Skipping configuration URL refresh; no reachable URL available: %s",
             err,
         )
         return
 
     if not base_url or "://" not in base_url:
         _LOGGER.warning(
-            "Skipping configuration URL refresh; external URL unavailable",
+            "Skipping configuration URL refresh; no reachable URL available",
         )
         return
+
+    try:
+        internal_url = get_url(
+            hass, allow_external=False, allow_cloud=False, allow_internal=True,
+        )
+    except (HomeAssistantError, NoURLAvailableError):
+        internal_url = None
+    if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+        _LOGGER.info(
+            "Using internal URL for map view links; "
+            "set an external URL in Home Assistant settings for remote access",
+        )
 
     base_url = base_url.rstrip("/")
 
