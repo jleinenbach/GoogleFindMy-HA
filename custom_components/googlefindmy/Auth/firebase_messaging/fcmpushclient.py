@@ -470,6 +470,20 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             return ""
         raise RuntimeError(f"couldn't find in app_data {key}")
 
+    @staticmethod
+    def _extract_header_param(header: str, param: str) -> str:
+        """Extract a named parameter from a semicolon-separated header value.
+
+        FCM headers like crypto-key and encryption use the format
+        ``key=value;key2=value2``.  Blindly slicing off a fixed prefix
+        breaks when extra parameters (e.g. ``p256ecdsa=...``) are present.
+        """
+        for part in header.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == param:
+                return value
+        raise ValueError(f"Parameter '{param}' not found in header: {header}")
+
     def _handle_data_message(
         self,
         msg: DataMessageStanza,
@@ -487,8 +501,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         ):
             # The deleted_messages message does not contain data.
             return
-        crypto_key = self._app_data_by_key(msg, "crypto-key")[3:]  # strip dh=
-        salt = self._app_data_by_key(msg, "encryption")[5:]  # strip salt=
+        crypto_key = self._extract_header_param(
+            self._app_data_by_key(msg, "crypto-key"), "dh"
+        )
+        salt = self._extract_header_param(
+            self._app_data_by_key(msg, "encryption"), "salt"
+        )
         subtype = self._app_data_by_key(msg, "subtype")
         if TYPE_CHECKING:
             assert self.credentials
