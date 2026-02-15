@@ -398,7 +398,9 @@ class TestProtobufSerializationRoundTrip:
     # -- ProtoDecoders: LocationReportsUpload_pb2 ----------------------------
 
     def test_location_reports_upload_roundtrip(self) -> None:
-        from custom_components.googlefindmy.ProtoDecoders import LocationReportsUpload_pb2
+        from custom_components.googlefindmy.ProtoDecoders import (
+            LocationReportsUpload_pb2,
+        )
 
         upload = LocationReportsUpload_pb2.LocationReportsUpload()
         upload.random1 = 42
@@ -425,15 +427,13 @@ class TestProtobufSerializationRoundTrip:
 
     def test_rpc_status_roundtrip_with_details(self) -> None:
         from custom_components.googlefindmy.ProtoDecoders import RpcStatus_pb2
-        from google.protobuf import any_pb2
 
         status = RpcStatus_pb2.Status()
         status.code = 7
         status.message = "PERMISSION_DENIED"
-        detail = any_pb2.Any()
+        detail = status.details.add()
         detail.type_url = "type.googleapis.com/some.Error"
         detail.value = b"\x08\x01"
-        status.details.append(detail)
         data = status.SerializeToString()
         assert len(data) > 0
         status2 = RpcStatus_pb2.Status()
@@ -518,7 +518,9 @@ class TestProtobufSerializationRoundTrip:
         assert payload2.checkin.chrome_build.chrome_version == "120.0.6099.71"
 
     def test_checkin_response_roundtrip(self) -> None:
-        from custom_components.googlefindmy.Auth.firebase_messaging.proto import checkin_pb2
+        from custom_components.googlefindmy.Auth.firebase_messaging.proto import (
+            checkin_pb2,
+        )
 
         resp = checkin_pb2.AndroidCheckinResponse()
         resp.stats_ok = True
