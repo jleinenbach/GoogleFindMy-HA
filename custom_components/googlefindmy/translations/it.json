@@ -1,5 +1,4 @@
 {
-  "title": "Google Find My Device",
   "device": {
     "google_find_hub_service": {
       "name": "Servizio hub Google Find"
@@ -98,9 +97,9 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
-      "entry_type": "Hub feature group",
+      "entry_type": "Gruppo di funzionalità dell'hub",
       "initiate_flow": {
-        "user": "Add hub feature group"
+        "user": "Aggiungi gruppo di funzionalità dell'hub"
       },
       "step": {
         "user": {
@@ -117,9 +116,9 @@
     },
     "service": {
       "title": "Servizio Google Find Hub",
-      "entry_type": "Service feature group",
+      "entry_type": "Gruppo di funzionalità del servizio",
       "initiate_flow": {
-        "user": "Add service feature group"
+        "user": "Aggiungi gruppo di funzionalità del servizio"
       },
       "step": {
         "user": {
@@ -136,9 +135,9 @@
     },
     "core_tracking": {
       "title": "Dispositivi Google Find My",
-      "entry_type": "Device feature group",
+      "entry_type": "Gruppo di funzionalità dei dispositivi",
       "initiate_flow": {
-        "user": "Add device feature group"
+        "user": "Aggiungi gruppo di funzionalità dei dispositivi"
       },
       "step": {
         "user": {
@@ -163,26 +162,26 @@
           "credentials": "Aggiorna credenziali",
           "settings": "Modifica impostazioni",
           "visibility": "Visibilità dei dispositivi",
-          "semantic_locations": "Semantic locations",
+          "semantic_locations": "Posizioni semantiche",
           "repairs": "Riparazioni dei gruppi di funzionalità"
         }
       },
       "semantic_locations_menu": {
-        "title": "Semantic locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Posizioni semantiche",
+        "description": "Gestisci le sostituzioni delle posizioni semantiche. Corrispondenze esistenti:\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_location_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Aggiungi posizione semantica",
+          "semantic_location_edit": "Modifica posizione semantica",
+          "semantic_locations_delete": "Elimina posizione semantica"
         }
       },
       "semantic_locations": {
-        "title": "Semantic Locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Posizioni semantiche",
+        "description": "Gestisci le sostituzioni delle posizioni semantiche. Corrispondenze esistenti:\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_locations_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Aggiungi posizione semantica",
+          "semantic_locations_edit": "Modifica posizione semantica",
+          "semantic_locations_delete": "Elimina posizione semantica"
         }
       },
       "semantic_locations_add": {
@@ -199,10 +198,10 @@
         }
       },
       "semantic_locations_edit": {
-        "title": "Choose semantic location",
-        "description": "Select a semantic location to edit.",
+        "title": "Scegli posizione semantica",
+        "description": "Seleziona una posizione semantica da modificare.",
         "data": {
-          "semantic_location": "Semantic location"
+          "semantic_location": "Posizione semantica"
         }
       },
       "semantic_location_edit": {
@@ -232,10 +231,10 @@
         }
       },
       "semantic_locations_delete": {
-        "title": "Delete semantic locations",
-        "description": "Select semantic locations to delete.",
+        "title": "Elimina posizioni semantiche",
+        "description": "Seleziona le posizioni semantiche da eliminare.",
         "data": {
-          "semantic_locations": "Semantic locations"
+          "semantic_locations": "Posizioni semantiche"
         }
       },
       "credentials": {
@@ -251,12 +250,12 @@
           "subentry": "Gruppo di funzionalità"
         },
         "data_description": {
-          "subentry": "Applica gli aggiornamenti delle credenziali al gruppo di funzionalità selezionato. Consulta la sezione [Sotto-voci e gruppi di funzionalità](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per conoscere i flussi disponibili."
+          "subentry": "Applica gli aggiornamenti delle credenziali al gruppo di funzionalità selezionato. Consulta la sezione [Sotto-voci e gruppi di funzionalità]({subentries_docs_url}) per conoscere i flussi disponibili."
         }
       },
       "settings": {
         "title": "Opzioni",
-        "description": "Regola le impostazioni di localizzazione:\n• Intervallo di polling posizione: frequenza con cui interrogare le posizioni (60–3600 secondi)\n• Ritardo tra i polling dei dispositivi: intervallo tra le richieste per dispositivo (1–60 secondi)\n• Soglia di obsolescenza: dopo questo tempo senza aggiornamenti, lo stato del tracker diventa sconosciuto\n\nFiltro Google Home:\n• Abilita per associare i rilevamenti dei dispositivi Google Home alla zona Casa\n• Le parole chiave supportano corrispondenze parziali (separate da virgole)\n• Esempio: \"nest\" corrisponde a \"Kitchen Nest Mini\"",
+        "description": "Regola le impostazioni di localizzazione:\n• Intervallo di polling della posizione: Frequenza di polling delle posizioni (60–3600 secondi)\n• Ritardo di polling dei dispositivi: Ritardo tra i polling dei dispositivi (1–60 secondi)\n• Soglia di obsolescenza: Dopo questo tempo senza aggiornamenti, lo stato del tracker diventa sconosciuto\n\nFiltro Google Home:\n• Attiva per associare i rilevamenti dei dispositivi Google Home alla zona Casa\n• Le parole chiave supportano la corrispondenza parziale (separate da virgola)\n• Esempio: \"nest\" corrisponde a \"Kitchen Nest Mini\"",
         "data": {
           "location_poll_interval": "Intervallo di polling posizione (s)",
           "device_poll_delay": "Ritardo tra interrogazioni dei dispositivi (s)",
@@ -270,11 +269,11 @@
           "subentry": "Gruppo di funzionalità"
         },
         "data_description": {
-          "stale_threshold": "Dopo questo numero di secondi senza aggiornamento di posizione, lo stato del tracker diventa sconosciuto. Le ultime coordinate note rimangono disponibili negli attributi. Predefinito: 1800 (30 minuti).",
+          "stale_threshold": "Dopo questo numero di secondi senza aggiornamento di posizione, lo stato del tracker diventa sconosciuto. Usa l'entità 'Ultima posizione' per vedere sempre l'ultima posizione nota. Predefinito: 1800 (30 minuti).",
           "delete_caches_on_remove": "Elimina i token memorizzati in cache e i metadati dei dispositivi quando questa voce viene rimossa.",
           "map_view_token_expiration": "Se abilitato, i token della vista mappa scadono dopo 1 settimana. Se disabilitato (predefinito), non scadono.",
-          "contributor_mode": "Scegli come il dispositivo contribuisce alla rete di Google (per impostazione predefinita Aree ad alto traffico oppure Tutte le aree per un contributo collaborativo).",
-          "subentry": "Salva queste opzioni nel gruppo di funzionalità selezionato. Consulta [Sotto-voci e gruppi di funzionalità](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per esempi pratici."
+          "contributor_mode": "Scegli come il dispositivo contribuisce alla rete di Google (per impostazione predefinita Tutte le aree per un contributo collaborativo oppure solo Aree ad alto traffico).",
+          "subentry": "Salva queste opzioni nel gruppo di funzionalità selezionato. Consulta [Sotto-voci e gruppi di funzionalità]({subentries_docs_url}) per esempi pratici."
         }
       },
       "visibility": {
@@ -285,7 +284,7 @@
           "subentry": "Gruppo di funzionalità"
         },
         "data_description": {
-          "subentry": "I dispositivi ripristinati vengono assegnati al gruppo di funzionalità scelto. Consulta [Sotto-voci e gruppi di funzionalità](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) per ulteriori indicazioni."
+          "subentry": "I dispositivi ripristinati vengono assegnati al gruppo di funzionalità scelto. Consulta [Sotto-voci e gruppi di funzionalità]({subentries_docs_url}) per ulteriori indicazioni."
         }
       },
       "repairs": {
@@ -322,15 +321,15 @@
       "choose_one": "Fornisci esattamente un solo metodo di autenticazione.",
       "required": "Questo campo è obbligatorio.",
       "invalid_token": "Credenziali non valide (token/e-mail). Verifica formato e contenuto.",
-      "duplicate_name": "Semantic name already exists. Choose a different name.",
-      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
+      "duplicate_name": "Il nome semantico esiste già. Scegli un nome diverso.",
+      "duplicate_semantic_location": "Il nome semantico esiste già. Scegli un nome diverso.",
       "unknown": "Errore imprevisto.",
       "invalid_subentry": "Scegli un gruppo di funzionalità valido."
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
       "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare.",
-      "no_semantic_locations": "No semantic locations are configured.",
+      "no_semantic_locations": "Non sono configurate posizioni semantiche.",
       "repairs_no_subentries": "Non ci sono gruppi di funzionalità da riparare.",
       "repair_no_devices": "Seleziona almeno un dispositivo da spostare.",
       "subentry_move_success": "Dispositivi assegnati a **{subentry}** ({count} aggiornati).",
@@ -464,8 +463,19 @@
           }
         }
       },
+      "uwt_mode": {
+        "name": "Modalità tracciamento indesiderato",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "Ultima osservazione BLE"
+          },
+          "google_device_id": {
+            "name": "ID dispositivo Google"
+          }
+        }
+      },
       "nova_auth_status": {
-        "name": "Stato dell’autenticazione API Nova",
+        "name": "Stato dell'autenticazione API Nova",
         "state_attributes": {
           "nova_api_status": {
             "name": "Stato dell’API Nova"
@@ -490,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Dispositivo",
         "state_attributes": {
           "device_name": {
             "name": "Nome del dispositivo"
@@ -547,9 +556,65 @@
             "name": "Ultima longitudine nota"
           }
         }
+      },
+      "last_location": {
+        "name": "Ultima posizione",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nome dispositivo"
+          },
+          "device_id": {
+            "name": "ID dispositivo"
+          },
+          "status": {
+            "name": "Stato"
+          },
+          "semantic_name": {
+            "name": "Etichetta semantica"
+          },
+          "battery_level": {
+            "name": "Livello batteria"
+          },
+          "last_seen": {
+            "name": "Ultima volta visto (riportato)"
+          },
+          "last_seen_utc": {
+            "name": "Ultima volta visto (UTC)"
+          },
+          "source_label": {
+            "name": "Etichetta sorgente"
+          },
+          "source_rank": {
+            "name": "Rango sorgente"
+          },
+          "is_own_report": {
+            "name": "Rapporto proprio dispositivo"
+          },
+          "latitude": {
+            "name": "Latitudine"
+          },
+          "longitude": {
+            "name": "Longitudine"
+          },
+          "accuracy_m": {
+            "name": "Precisione (m)"
+          },
+          "altitude_m": {
+            "name": "Altitudine (m)"
+          },
+          "location_age": {
+            "name": "Età della posizione (s)"
+          },
+          "location_status": {
+            "name": "Stato della posizione"
+          }
+        }
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "Batteria BLE"
+      },
       "last_seen": {
         "name": "Ultima volta visto",
         "state_attributes": {
@@ -618,15 +683,15 @@
       "stat_invalid_coords": {
         "name": "Coordinate non valide"
       },
-        "stat_fused_updates": {
-            "name": "Aggiornamenti di posizione fusi"
-        }
+      "stat_fused_updates": {
+        "name": "Aggiornamenti di posizione fusi"
+      }
     }
   },
   "issues": {
     "auth_expired": {
       "title": "È necessaria una nuova autenticazione",
-      "description": "L’autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell’integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento."
+      "description": "L'autenticazione di Google Find My Device non è più valida o è scaduta.\n\n**Voce:** {entry_title}\n**Account:** {email}\n\nNella scheda dell'integrazione, scegli **Riconfigura** per riautenticarti. Se di recente hai cambiato la password di Google o hai revocato dei token, dovrai accedere di nuovo qui per ripristinare il funzionamento.\n\n**Suggerimento:** Google potrebbe revocare i token quando le richieste provengono da un indirizzo IP o una regione diversi da quelli usati per creare il token (ad es. token generato su un laptop ma utilizzato da un server o VPS in un altro paese). Genera il file `secrets.json` sulla stessa rete in cui è in esecuzione Home Assistant oppure utilizza lo stesso indirizzo IP pubblico."
     },
     "fcm_connection_stuck": {
       "title": "Connessione push FCM non riuscita",
@@ -679,6 +744,14 @@
       "entries": "Voci di configurazione",
       "fcm": "Ricevitore FCM",
       "fcm_lock_contention_count": "Conteggio conflitti di lock FCM"
+    }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Solo aree ad alto traffico",
+        "in_all_areas": "Tutte le aree (crowdsourcing)"
+      }
     }
   }
 }

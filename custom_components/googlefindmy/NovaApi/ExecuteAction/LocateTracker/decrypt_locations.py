@@ -15,6 +15,8 @@ from importlib import import_module
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Any, cast
 
+from cryptography.exceptions import InvalidTag
+
 from custom_components.googlefindmy import get_proto_decoder
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
@@ -286,6 +288,24 @@ async def async_retrieve_identity_key(
 
     owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
     owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+
+    # --- Proactive Owner Key Version Mismatch Check ---
+    # If the tracker requires a newer owner key version than what we have cached,
+    # force-refresh the owner key BEFORE attempting decryption to avoid an
+    # unnecessary AES-GCM InvalidTag failure followed by a reactive retry.
+    if (
+        owner_key_version
+        and owner_key_info.version is not None
+        and owner_key_version > owner_key_info.version
+    ):
+        _LOGGER.info(
+            "Owner Key Version mismatch detected: Tracker requires V%s, "
+            "Cache has V%s. Refreshing...",
+            owner_key_version,
+            owner_key_info.version,
+        )
+        owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
+
     candidates: list[bytes] = []
     decrypt_errors: list[Exception] = []
 
@@ -1036,6 +1056,19 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             _LOGGER.warning(
                 "Failed to process one location report (malformed data): %s",
                 expected_exc,
+            )
+        except InvalidTag:
+            # InvalidTag means AES-GCM authentication failed during decryption.
+            # This is usually NOT a bug - common causes include:
+            # - Google authentication expired (user needs to re-auth in Google app)
+            # - Shared device where the sharing account's auth is stale
+            # - Tracker offline/dead battery causing stale encrypted data
+            # Log as warning (not error) since user action typically resolves this.
+            _LOGGER.warning(
+                "Decryption failed (InvalidTag): The location report could not be "
+                "authenticated. This often happens when Google authentication is "
+                "stale - try re-authenticating the account in the Google app. "
+                "For shared devices, the sharing account may need to re-authenticate."
             )
         except Exception as unexpected_exc:
             # Unexpected errors indicate bugs or API changes - log with stack trace

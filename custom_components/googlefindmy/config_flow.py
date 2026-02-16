@@ -922,6 +922,14 @@ _FIELD_VISIBILITY_HUB = "hub"
 # Field identifiers used in options/visibility flows
 _FIELD_REPAIR_DEVICES = "device_ids"
 
+_SUBENTRIES_DOCS_URL = (
+    "https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md"
+    "#subentries-and-feature-groups"
+)
+_SUBENTRY_PLACEHOLDERS: dict[str, str] = {
+    "subentries_docs_url": _SUBENTRIES_DOCS_URL,
+}
+
 # ---------------------------
 # Validators (format/plausibility)
 # ---------------------------
@@ -2321,13 +2329,18 @@ class ConfigFlow(
     def async_get_supported_subentry_types(
         cls,
         _config_entry: ConfigEntry,
-    ) -> dict[str, Callable[[], ConfigSubentryFlow]]:
-        """Disable manual subentry creation via the config entry UI."""
+    ) -> dict[str, type[ConfigSubentryFlow]]:
+        """Return an empty mapping to hide subentry UI elements.
 
-        # Subentries are provisioned programmatically by the integration
-        # coordinator. Returning an empty mapping prevents Home Assistant from
-        # displaying "Add subentry" menu items that would otherwise surface
-        # unsupported manual entry points in the UI.
+        Subentries (hub, service, tracker feature groups) are provisioned
+        programmatically by the integration coordinator, NOT manually by users.
+        Returning an empty dict prevents Home Assistant from displaying
+        "Add subentry" buttons (+ Add hub feature group, + Add service feature
+        group) in the config entry UI.
+
+        The async_step_hub entry point (for "Hub hinzufügen" / "Add Hub")
+        instantiates handlers directly without relying on this mapping.
+        """
         return {}
 
     async def async_step_discovery(
@@ -2687,21 +2700,19 @@ class ConfigFlow(
 
         config_entry = cast(ConfigEntry, config_entry_obj)
 
-        supported_types = type(self).async_get_supported_subentry_types(config_entry)
-        factory = supported_types.get(SUBENTRY_TYPE_HUB)
-        if factory is None:
-            _LOGGER.error(
-                "Add Hub flow unavailable: hub subentry type not supported (entry_id=%s)",
-                config_entry.entry_id,
-            )
-            return self.async_abort(reason="not_supported")
-
-        handler = factory()
+        # Instantiate HubSubentryFlowHandler directly - we don't use
+        # async_get_supported_subentry_types here because that method
+        # intentionally returns {} to hide subentry UI buttons.
+        # The "Add Hub" flow is a special entry point that bypasses the
+        # normal HA subentry flow manager.
+        handler = HubSubentryFlowHandler(config_entry)
         _LOGGER.info(
             "Add Hub flow requested; provisioning hub subentry (entry_id=%s)",
             config_entry.entry_id,
         )
+        # Provide runtime context expected by ConfigSubentryFlow methods
         setattr(handler, "hass", hass)
+        setattr(handler, "context", {"entry_id": config_entry.entry_id})
         result = handler.async_step_user(user_input)
         return await self._async_resolve_flow_result(result)
 
@@ -4327,13 +4338,25 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
     _group_key: str
     _subentry_type: str
     _features: tuple[str, ...]
+    _config_entry_cache: ConfigEntry | None
 
     def __init__(
         self,
         config_entry: ConfigEntry | None = None,
         subentry: ConfigSubentry | None = None,
     ) -> None:
+        """Initialize the subentry flow handler.
+
+        Home Assistant 2026.x may instantiate handlers without passing config_entry
+        in the constructor. The flow manager sets up context (including access to
+        the parent config entry via _get_entry()) after instantiation.
+
+        We support both patterns:
+        1. Direct instantiation with config_entry (legacy/manual usage)
+        2. HA flow manager instantiation (config_entry accessed via _get_entry())
+        """
         super_init = cast(Callable[..., None], super().__init__)
+        self._config_entry_cache = None
 
         if config_entry is not None and subentry is not None:
             try:
@@ -4364,18 +4387,52 @@ class _BaseSubentryFlow(ConfigSubentryFlow, _ConfigSubentryFlowMixin):  # type: 
         if subentry is not None and not hasattr(self, "subentry"):
             setattr(self, "subentry", subentry)
 
-        existing_entry = getattr(self, "config_entry", None)
-        if existing_entry is None and config_entry is not None:
-            setattr(self, "config_entry", config_entry)
-            existing_entry = config_entry
+        # Cache config_entry if provided directly; lazy resolution via
+        # the config_entry property handles HA flow manager instantiation
+        if config_entry is not None:
+            self._config_entry_cache = config_entry
 
-        if existing_entry is None:
-            raise RuntimeError(
-                f"{type(self).__name__} missing 'config_entry' after initialization; "
-                "factory/constructor signature mismatch"
-            )
+    @property
+    def config_entry(self) -> ConfigEntry:
+        """Return the parent config entry, resolving lazily if needed.
 
-        self.config_entry = cast(ConfigEntry, existing_entry)
+        Home Assistant 2026.x provides _get_entry() on ConfigSubentryFlow to
+        access the parent config entry. We try multiple resolution strategies
+        for compatibility across HA versions.
+        """
+        # Check cached value first
+        if self._config_entry_cache is not None:
+            return self._config_entry_cache
+
+        # Try the instance attribute (may be set by HA or super().__init__)
+        cached = getattr(self, "_config_entry", None)
+        if cached is not None:
+            self._config_entry_cache = cached
+            return cached
+
+        # Try HA 2026.x _get_entry() method
+        get_entry_method = getattr(self, "_get_entry", None)
+        if callable(get_entry_method):
+            try:
+                entry = get_entry_method()
+                if entry is not None:
+                    self._config_entry_cache = entry
+                    return entry
+            except Exception:  # noqa: BLE001 - defensive, HA internals may vary
+                pass
+
+        raise RuntimeError(
+            f"{type(self).__name__} cannot resolve config_entry; "
+            "ensure the handler is instantiated via Home Assistant's flow manager "
+            "or provide config_entry in the constructor"
+        )
+
+    @config_entry.setter
+    def config_entry(self, value: ConfigEntry) -> None:
+        """Set the parent config entry."""
+        self._config_entry_cache = value
+        # Also set on instance for compatibility
+        object.__setattr__(self, "_config_entry", value)
 
     @property
     def _entry_id(self) -> str:
@@ -5357,13 +5414,24 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             _register(vol.Optional(OPT_GOOGLE_HOME_FILTER_KEYWORDS), str)
         if OPT_ENABLE_STATS_ENTITIES is not None:
             _register(vol.Optional(OPT_ENABLE_STATS_ENTITIES), bool)
-        _register(
-            vol.Optional(OPT_CONTRIBUTOR_MODE),
-            vol.In([CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]),
-        )
+        if selector is not None:
+            _register(
+                vol.Optional(OPT_CONTRIBUTOR_MODE),
+                selector({
+                    "select": {
+                        "options": [CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS],
+                        "translation_key": "contributor_mode",
+                    }
+                }),
+            )
+        else:
+            _register(
+                vol.Optional(OPT_CONTRIBUTOR_MODE),
+                vol.In([CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS]),
+            )
         _register(
             vol.Optional(OPT_STALE_THRESHOLD),
-            vol.All(vol.Coerce(int), vol.Range(min=60, max=86400)),
+            vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),
         )
 
         base_schema = vol.Schema(fields)
@@ -5391,7 +5459,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 return self.async_create_entry(title="", data=new_options)
 
         return self.async_show_form(
-            step_id="settings", data_schema=schema_with_defaults, errors=errors
+            step_id="settings",
+            data_schema=schema_with_defaults,
+            errors=errors,
+            description_placeholders=_SUBENTRY_PLACEHOLDERS,
         )
 
     # ---------- Visibility (restore ignored devices) ----------
@@ -5441,6 +5512,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     step_id="visibility",
                     data_schema=schema,
                     errors={_FIELD_SUBENTRY: "invalid_subentry"},
+                    description_placeholders=_SUBENTRY_PLACEHOLDERS,
                 )
 
             raw_restore = user_input.get("unignore_devices") or []
@@ -5463,7 +5535,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
             return self.async_create_entry(title="", data=new_options)
 
-        return self.async_show_form(step_id="visibility", data_schema=schema)
+        return self.async_show_form(
+            step_id="visibility",
+            data_schema=schema,
+            description_placeholders=_SUBENTRY_PLACEHOLDERS,
+        )
 
     async def async_step_repairs(
         self, user_input: dict[str, Any] | None = None
@@ -5822,7 +5898,10 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                         errors["base"] = _map_api_exc_to_error_key(err2)
 
         return self.async_show_form(
-            step_id="credentials", data_schema=schema, errors=errors
+            step_id="credentials",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders=_SUBENTRY_PLACEHOLDERS,
         )
 
 

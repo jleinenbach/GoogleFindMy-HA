@@ -110,6 +110,8 @@ OPT_CONTRIBUTOR_MODE: str = "contributor_mode"
 OPT_IGNORED_DEVICES: str = "ignored_devices"
 OPT_DELETE_CACHES_ON_REMOVE: str = "delete_caches_on_remove"
 OPT_STALE_THRESHOLD: str = "stale_threshold"
+# Legacy option key - kept for reading old configurations, no longer used
+OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 
 # Canonical list of option keys supported by the integration (without tracked_devices)
 OPTION_KEYS: tuple[str, ...] = (
@@ -192,7 +194,21 @@ DEFAULT_MAP_VIEW_TOKEN_EXPIRATION: bool = False
 DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 
 # Stale threshold: After this many seconds without a location update,
-# the tracker state becomes "unknown" (default: 30 minutes = 1800 seconds)
+# the tracker state becomes "unknown". This is always enabled.
+# Users who need the last known location can use the "Last Location" entity.
+#
+# Based on real-world FMDN tracker update intervals:
+# - Typical update interval: 2-4 minutes (median ~3.4 min)
+# - 95th percentile: ~8 minutes
+# - 99th percentile: ~14 minutes
+#
+# Note: EID rotation (1024s) is NOT relevant here. When participating in the
+# FMDN network, we receive updates from smartphones that see the tracker.
+# The update frequency depends on smartphone density and tracker visibility,
+# not on EID rotation.
+#
+# Default: 1800 seconds (30 minutes) - conservative value for "really gone"
+# Minimum: 300 seconds (5 minutes) - allows ~2-3 typical update cycles
 DEFAULT_STALE_THRESHOLD: int = 1800
 
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
@@ -372,7 +388,7 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
     },
     OPT_STALE_THRESHOLD: {
         "type": "int",
-        "min": 60,
+        "min": 300,  # 5 minutes - allows ~2-3 typical FMDN update cycles
         "max": 86400,  # max 24 hours
         "step": 60,
     },
@@ -447,6 +463,12 @@ TRANSLATION_KEY_AUTH_STATUS: str = "nova_auth_status"
 
 # Issue key used for Repairs (translations use the same key).
 ISSUE_AUTH_EXPIRED_KEY: str = "auth_expired"
+
+# Issue/translation keys for common repair issues (keep aligned with translations/*.json).
+ISSUE_MULTIPLE_CONFIG_ENTRIES: str = "multiple_config_entries"
+TRANSLATION_KEY_CACHE_PURGED: str = "cache_purged"
+TRANSLATION_KEY_UNIQUE_ID_COLLISION: str = "unique_id_collision"
+TRANSLATION_KEY_DUPLICATE_ACCOUNT: str = "duplicate_account_entries"
 
 
 def issue_id_for(entry_id: str) -> str:
@@ -544,6 +566,7 @@ __all__ = [
     "OPTION_KEYS",
     "OPT_DELETE_CACHES_ON_REMOVE",
     "OPT_STALE_THRESHOLD",
+    "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
     "DEFAULT_LOCATION_POLL_INTERVAL",
@@ -585,6 +608,10 @@ __all__ = [
     "EVENT_AUTH_OK",
     "TRANSLATION_KEY_AUTH_STATUS",
     "ISSUE_AUTH_EXPIRED_KEY",
+    "ISSUE_MULTIPLE_CONFIG_ENTRIES",
+    "TRANSLATION_KEY_CACHE_PURGED",
+    "TRANSLATION_KEY_UNIQUE_ID_COLLISION",
+    "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
     "issue_id_for",
     "STORAGE_KEY",
     "STORAGE_VERSION",

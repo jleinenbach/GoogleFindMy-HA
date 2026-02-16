@@ -109,8 +109,13 @@ def test_duplicate_devices_seed_only_once(
     asyncio.run(_run_setup())
 
     assert len(tracker_added) == 1
-    assert len(tracker_added[0]) == 1
+    # Should have 2 entities: main tracker + last location (but only for one device due to deduplication)
+    assert len(tracker_added[0]) == 2
     assert tracker_added[0][0].device_id == "dup-device"
+    assert tracker_added[0][1].device_id == "dup-device"
+    # First is main tracker, second is last location
+    assert not tracker_added[0][0].unique_id.endswith(":last_location")
+    assert tracker_added[0][1].unique_id.endswith(":last_location")
 
     assert len(sensor_added) == 2
 

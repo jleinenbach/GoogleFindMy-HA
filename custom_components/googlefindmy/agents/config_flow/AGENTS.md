@@ -63,4 +63,79 @@ Add similar guards whenever a new optional attribute becomes relevant so future 
 
 ## Cross-reference checklist
 
-* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide’s subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.
+* [`docs/CONFIG_SUBENTRIES_HANDBOOK.md`](../../../docs/CONFIG_SUBENTRIES_HANDBOOK.md) — Mirrors this guide's subentry-flow reminders and now tracks every AGENT link. Update both documents together whenever setup/unload contracts, discovery affordances, or reconfigure hooks change.
+
+## Subentry handler registration (HA 2026.x compatibility)
+
+### `async_get_supported_subentry_types` MUST return empty dict
+
+**Critical:** This method MUST return `{}` to hide unwanted UI buttons in the config entry panel.
+
+**Why empty dict is required:**
+- Returning handler classes causes HA to display "+ Add hub feature group" and "+ Add service feature group" buttons
+- These manual subentry buttons should NOT be visible to users
+- Subentries are provisioned **programmatically** by the integration coordinator, not manually
+
+**Correct implementation:**
+```python
+@classmethod
+@callback
+def async_get_supported_subentry_types(
+    cls,
+    _config_entry: ConfigEntry,
+) -> dict[str, type[ConfigSubentryFlow]]:
+    """Return empty dict to hide subentry UI buttons."""
+    return {}  # MUST be empty to hide manual add buttons
+```
+
+**Wrong implementation (exposes unwanted UI):**
+```python
+# DON'T DO THIS - exposes "Add hub/service feature group" buttons!
+return {
+    SUBENTRY_TYPE_HUB: HubSubentryFlowHandler,
+    SUBENTRY_TYPE_SERVICE: ServiceSubentryFlowHandler,
+}
+```
+
+### `async_step_hub` must instantiate handlers directly
+
+Since `async_get_supported_subentry_types` returns empty, the "Add Hub" flow entry point (`async_step_hub`) must instantiate the handler class directly:
+
+```python
+async def async_step_hub(self, user_input=None):
+    # Don't use async_get_supported_subentry_types - it returns {}
+    # Instantiate the handler directly instead
+    handler = HubSubentryFlowHandler(config_entry)
+    setattr(handler, "hass", hass)
+    setattr(handler, "context", {"entry_id": config_entry.entry_id})
+    result = handler.async_step_user(user_input)
+    return await self._async_resolve_flow_result(result)
+```
+
+### Lazy `config_entry` resolution for handler compatibility
+
+Subentry handlers use a `config_entry` property with lazy resolution to support both direct instantiation and potential future HA flow manager usage:
+
+```python
+@property
+def config_entry(self) -> ConfigEntry:
+    if self._config_entry_cache is not None:
+        return self._config_entry_cache
+
+    # Fallback: try HA's _get_entry() method
+    get_entry_method = getattr(self, "_get_entry", None)
+    if callable(get_entry_method):
+        entry = get_entry_method()
+        if entry is not None:
+            self._config_entry_cache = entry
+            return entry
+
+    raise RuntimeError("Cannot resolve config_entry")
+```
+
+### Test expectations
+
+Tests must verify:
+1. `async_get_supported_subentry_types` returns empty dict `{}`
+2. `async_step_hub` creates entries successfully (via direct handler instantiation)
+

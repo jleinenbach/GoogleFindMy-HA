@@ -15,6 +15,13 @@
           "off": "mdi:wifi-off"
         }
       },
+      "uwt_mode": {
+        "default": "mdi:shield-check",
+        "state": {
+          "on": "mdi:shield-alert",
+          "off": "mdi:shield-check"
+        }
+      },
       "nova_auth_status": {
         "default": "mdi:account-alert",
         "state": {
@@ -44,6 +51,9 @@
       }
     },
     "sensor": {
+      "ble_battery": {
+        "default": "mdi:battery"
+      },
       "last_seen": {
         "default": "mdi:clock-outline"
       },
@@ -75,6 +85,9 @@
     "device_tracker": {
       "device": {
         "default": "mdi:cellphone"
+      },
+      "last_location": {
+        "default": "mdi:map-marker-path"
       }
     }
   }

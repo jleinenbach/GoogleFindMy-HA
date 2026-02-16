@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from types import ModuleType
 
+from . import any_pb2 as any_pb2
 from . import descriptor as descriptor
 from .internal import containers as containers
 from .message import DecodeError as DecodeError

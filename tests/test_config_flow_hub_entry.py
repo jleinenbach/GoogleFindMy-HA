@@ -5,12 +5,10 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Protocol
 
 import pytest
-from homeassistant.config_entries import ConfigEntry
 
 from custom_components.googlefindmy import config_flow
 from custom_components.googlefindmy.const import (
@@ -39,11 +37,11 @@ class _SubentrySupportToggle(Protocol):
     "simulate_legacy_core",
     [False, True],
 )
-def test_supported_subentry_types_disable_manual_hub_additions(
+def test_supported_subentry_types_returns_empty_to_hide_ui(
     subentry_support: _SubentrySupportToggle,
     simulate_legacy_core: bool,
 ) -> None:
-    """Manual hub creation should remain disabled on modern and legacy cores."""
+    """Subentry mapping must be empty to hide manual add buttons in HA UI."""
 
     if simulate_legacy_core:
         subentry_support.as_legacy()
@@ -54,6 +52,9 @@ def test_supported_subentry_types_disable_manual_hub_additions(
         SimpleNamespace()
     )
 
+    # Must return empty dict to hide "Add hub feature group" and
+    # "Add service feature group" buttons. Subentries are provisioned
+    # programmatically by the coordinator, not manually by users.
     assert mapping == {}
     assert SUBENTRY_TYPE_HUB not in mapping
     assert SUBENTRY_TYPE_SERVICE not in mapping
@@ -61,12 +62,12 @@ def test_supported_subentry_types_disable_manual_hub_additions(
 
 
 @pytest.mark.asyncio
-async def test_hub_flow_aborts_when_manual_addition_requested(
+async def test_hub_flow_creates_entry_when_requested(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Manual hub entry point should abort because the flow is disabled."""
+    """Hub entry point should create a subentry with proper handler registration."""
 
-    caplog.set_level(logging.ERROR)
+    caplog.set_level(logging.INFO)
 
     entry = SimpleNamespace(entry_id="entry-123", data={}, options={}, subentries={})
 
@@ -93,10 +94,10 @@ async def test_hub_flow_aborts_when_manual_addition_requested(
     if inspect.isawaitable(result):
         result = await result
 
-    assert result["type"] == "abort"
-    assert result["reason"] == "not_supported"
+    # Flow should create an entry (not abort)
+    assert result["type"] == "create_entry"
     assert any(
-        "hub subentry type not supported" in record.getMessage()
+        "Hub subentry flow requested" in record.getMessage()
         for record in caplog.records
     )
 
@@ -128,65 +129,6 @@ async def test_hub_flow_aborts_without_entry_context(
 
     assert result["type"] == "abort"
     assert result["reason"] == "unknown"
-
-
-@pytest.mark.asyncio
-async def test_hub_flow_aborts_when_hub_unsupported(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Cores without hub subentry support should abort with not_supported."""
-
-    caplog.set_level(logging.ERROR)
-
-    entry = SimpleNamespace(entry_id="entry-legacy", data={}, options={}, subentries={})
-
-    class _ConfigEntriesManager(ConfigEntriesDomainUniqueIdLookupMixin):
-        def __init__(self) -> None:
-            self.entry = entry
-            attach_config_entries_flow_manager(self)
-
-        def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
-            if entry_id == entry.entry_id:
-                return self.entry
-            return None
-
-    hass = SimpleNamespace(config_entries=_ConfigEntriesManager())
-
-    def _no_hub(
-        _: ConfigEntry,
-    ) -> dict[str, Callable[[], config_flow.ConfigSubentryFlow]]:
-        return {
-            config_flow.SUBENTRY_TYPE_SERVICE: lambda: config_flow.ServiceSubentryFlowHandler(
-                entry
-            ),
-            config_flow.SUBENTRY_TYPE_TRACKER: lambda: config_flow.TrackerSubentryFlowHandler(
-                entry
-            ),
-        }
-
-    monkeypatch.setattr(
-        config_flow.ConfigFlow,
-        "async_get_supported_subentry_types",
-        staticmethod(_no_hub),
-        raising=False,
-    )
-
-    flow = config_flow.ConfigFlow()
-    flow.hass = hass  # type: ignore[assignment]
-    flow.context = {"source": "hub", "entry_id": entry.entry_id}
-    flow.config_entry = entry  # type: ignore[assignment]
-
-    result = await flow.async_step_hub()
-    if inspect.isawaitable(result):
-        result = await result
-
-    assert result["type"] == "abort"
-    assert result["reason"] == "not_supported"
-    assert any(
-        "hub subentry type not supported" in record.getMessage()
-        for record in caplog.records
-    )
 
 
 @pytest.mark.asyncio

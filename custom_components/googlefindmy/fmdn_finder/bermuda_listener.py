@@ -119,7 +119,8 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
     """
     _LOGGER.info("Registering Bermuda FMDN beacon listener")
 
-    # Initialize caches
+    # Initialize caches.  hass.data[DOMAIN] is compatible with the
+    # HassKey-based DATA_DOMAIN defined in __init__.py.
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN].setdefault(DATA_LAST_AREA_CACHE, {})
     hass.data[DOMAIN].setdefault(DATA_AREA_DEBOUNCE, {})
@@ -131,6 +132,19 @@ async def async_setup_bermuda_listener(hass: HomeAssistant) -> None:
         Filters for Bermuda tracker entities and triggers FMDN uploads
         only after area has been stable for AREA_STABILIZATION_SECONDS.
         """
+        try:
+            _bermuda_state_changed_inner(event)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Bermuda state event handler failed for %s",
+                event.data.get("entity_id", "<unknown>"),
+                exc_info=True,
+            )
+
+    def _bermuda_state_changed_inner(
+        event: Event[EventStateChangedData],
+    ) -> None:
+        """Inner handler — separated so the outer guard stays minimal."""
         entity_id: str | None = event.data.get("entity_id")
         new_state: State | None = event.data.get("new_state")
         old_state: State | None = event.data.get("old_state")

@@ -117,7 +117,7 @@ def test_device_configuration_url_warns_when_external_url_missing(
     warnings = [
         record
         for record in caplog.records
-        if "Unable to resolve external URL" in record.getMessage()
+        if "Unable to resolve any Home Assistant URL for map view" in record.getMessage()
     ]
     assert len(warnings) == 1
     assert entity._base_url_warning_emitted is True

@@ -55,11 +55,16 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
 def _make_add_entities(hass: HomeAssistant, loop: asyncio.AbstractEventLoop):
     added: list[tuple[Any, str | None]] = []
     pending: list[asyncio.Task[Any]] = []
+    entity_counter = [0]  # Mutable counter to track entity IDs
 
     def _async_add_entities(entities: list[Any], **kwargs: Any) -> None:
         config_subentry_id = kwargs.get("config_subentry_id")
         for entity in entities:
             entity.hass = hass
+            # Simulate HA platform setting entity_id before async_added_to_hass
+            if not hasattr(entity, "entity_id") or entity.entity_id is None:
+                entity_counter[0] += 1
+                entity.entity_id = f"device_tracker.stub_{entity_counter[0]}"
             added.append((entity, config_subentry_id))
             if hasattr(entity, "async_added_to_hass"):
                 pending.append(loop.create_task(entity.async_added_to_hass()))
@@ -94,8 +99,12 @@ async def test_setup_iterates_tracker_subentries(stub_coordinator_factory: Any) 
     await asyncio.gather(*pending)
 
     assert {config for _, config in added} == {tracker_subentry.subentry_id}
-    assert {entity.unique_id for entity, _ in added} == {
-        f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1"
+    # Should have 2 entities per device: main tracker + last location
+    assert len(added) == 2
+    unique_ids = {entity.unique_id for entity, _ in added}
+    assert unique_ids == {
+        f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1",
+        f"{entry.entry_id}:{tracker_subentry.subentry_id}:device-1:last_location",
     }
 
 
@@ -141,11 +150,14 @@ async def test_placeholder_scopes_preserve_multiple_subentries(
     await asyncio.gather(*pending)
 
     unique_ids = {entity.unique_id for entity, _ in added}
-    assert len(unique_ids) >= 2
+    # Should have 4 entities: 2 main trackers + 2 last location trackers
+    assert len(unique_ids) >= 4
     assert unique_ids.issuperset(
         {
             f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}:device-alpha",
+            f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}:device-alpha:last_location",
             f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}:device-beta",
+            f"{entry.entry_id}:{TRACKER_SUBENTRY_KEY}:device-beta:last_location",
         }
     )
 
@@ -194,9 +206,11 @@ async def test_dispatcher_adds_new_tracker_subentries(
     await asyncio.gather(*pending)
 
     configs = [config for _, config in added]
-    assert configs.count(tracker_subentry.subentry_id) == 1
-    assert configs.count(new_subentry.subentry_id) == 1
-    assert len({entity.unique_id for entity, _ in added}) == 2
+    # Each subentry creates 2 entities (main tracker + last location)
+    assert configs.count(tracker_subentry.subentry_id) == 2
+    assert configs.count(new_subentry.subentry_id) == 2
+    # 2 devices x 2 entities each = 4 unique IDs
+    assert len({entity.unique_id for entity, _ in added}) == 4
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
 
 
@@ -228,7 +242,9 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
     await device_tracker.async_setup_entry(hass, entry, add_entities)
     await asyncio.gather(*pending)
 
+    # Initial count should be 2 (main tracker + last location)
     initial_count = len(added)
+    assert initial_count == 2
     signal = f"{DOMAIN}_subentry_setup_{entry.entry_id}"
 
     async_dispatcher_send(hass, signal, tracker_subentry.subentry_id)
@@ -237,7 +253,8 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
     async_dispatcher_send(hass, signal, tracker_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    assert len(added) == initial_count == 1
+    # Should still be 2 entities (no duplicates from repeated signals)
+    assert len(added) == initial_count == 2
     assert {config for _, config in added} == {tracker_subentry.subentry_id}
 
 

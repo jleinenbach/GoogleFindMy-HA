@@ -67,7 +67,6 @@ def fresh_loop() -> asyncio.AbstractEventLoop:
     """Yield a fresh event loop for isolation in scheduler tests."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         yield loop
     finally:

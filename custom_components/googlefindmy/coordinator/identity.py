@@ -29,6 +29,7 @@ from ..const import (
     issue_id_for,
 )
 from ..KeyBackup.cloud_key_decryptor import decrypt_eik
+from ._mixin_typing import _MixinBase
 from .helpers.identity import (
     extract_pair_date as _extract_pair_date_impl,
 )
@@ -56,19 +57,19 @@ from .helpers.identity import (
 from .helpers.subentry import normalize_epoch_seconds
 
 if TYPE_CHECKING:
-    from .main import DeviceIdentity, GoogleFindMyCoordinator
+    from .main import DeviceIdentity
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class IdentityOperations:
+class IdentityOperations(_MixinBase):
     """Identity operations mixin for GoogleFindMyCoordinator.
 
     This class contains methods that manage device identities,
     including identity key registration and account information.
     """
 
-    def _get_account_email(self: GoogleFindMyCoordinator) -> str:
+    def _get_account_email(self) -> str:
         """Return the configured Google account email for this entry (empty if unknown)."""
         entry = self.config_entry
         if entry is not None:
@@ -77,7 +78,7 @@ class IdentityOperations:
                 return email_value
         return ""
 
-    def _create_auth_issue(self: GoogleFindMyCoordinator) -> None:
+    def _create_auth_issue(self) -> None:
         """Create (idempotent) a Repairs issue for an authentication problem.
 
         Uses:
@@ -104,7 +105,7 @@ class IdentityOperations:
         except Exception as err:
             _LOGGER.debug("Failed to create Repairs issue: %s", err)
 
-    def _dismiss_auth_issue(self: GoogleFindMyCoordinator) -> bool:
+    def _dismiss_auth_issue(self) -> bool:
         """Dismiss (idempotently) the Repairs issue if present.
 
         Returns True when an issue existed and was removed, False otherwise.
@@ -135,7 +136,7 @@ class IdentityOperations:
 
         return issue_present
 
-    def _schedule_eid_resolver_refresh(self: GoogleFindMyCoordinator) -> None:
+    def _schedule_eid_resolver_refresh(self) -> None:
         """Refresh the global EID resolver when active device sets change."""
 
         hass = getattr(self, "hass", None)
@@ -155,7 +156,7 @@ class IdentityOperations:
                 create_task(refresh())
 
     def _register_identity_key(
-        self: GoogleFindMyCoordinator, device_id: str, identity_key: bytes
+        self, device_id: str, identity_key: bytes
     ) -> None:
         """Register a device's identity_key for shared tracker detection.
 
@@ -180,7 +181,7 @@ class IdentityOperations:
                     sorted(device_set),
                 )
 
-    def _reset_resolver_offset(self: GoogleFindMyCoordinator, device_id: str) -> None:
+    def _reset_resolver_offset(self, device_id: str) -> None:
         """Clear resolver offsets using registry IDs when identity keys rotate."""
 
         hass = getattr(self, "hass", None)
@@ -229,7 +230,7 @@ class IdentityOperations:
             reset(registry_id)
 
     def get_active_device_identities(
-        self: GoogleFindMyCoordinator,
+        self,
     ) -> list[DeviceIdentity]:
         """Return identity keys for enabled, non-ignored devices.
 

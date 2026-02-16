@@ -571,7 +571,6 @@ def test_service_stats_unique_id_migration_prefers_service_subentry(
     """Tracker-prefixed stats sensor IDs collapse to the service identifier."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -696,7 +695,6 @@ def test_unique_id_migration_rewrites_legacy_tracker_entities(
     """Legacy tracker IDs are namespaced and scoped to subentries without collisions."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -855,7 +853,6 @@ def test_hass_data_layout(
     """The integration stores runtime state only under hass.data[DOMAIN]["entries"]."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         if "homeassistant.components.button" not in sys.modules:
@@ -1194,7 +1191,6 @@ def test_setup_entry_reactivates_disabled_button_entities(
     """Disabled button entities are re-enabled during setup."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -1559,8 +1555,41 @@ async def test_programmatic_subentry_creation_triggers_setup_and_entities(
         def device_info(self) -> Any:
             return self._device_info
 
+    class _StubLastLocationTracker:
+        def __init__(
+            self,
+            coordinator: Any,
+            device: dict[str, Any],
+            *,
+            subentry_key: str,
+            subentry_identifier: str,
+        ) -> None:
+            del subentry_key
+            device_id = device.get("id", "device")
+            self.entity_id = f"device_tracker.{device_id}_last_location"
+            self._attr_unique_id = f"{coordinator.config_entry.entry_id}:{subentry_identifier}:{device_id}:last_location"
+            self._device_info = SimpleNamespace(
+                id=f"{coordinator.config_entry.entry_id}:{device_id}",
+                identifiers={
+                    (DOMAIN, f"{coordinator.config_entry.entry_id}:{device_id}")
+                },
+                config_entries={coordinator.config_entry.entry_id},
+                config_subentry_id=subentry_identifier,
+            )
+
+        @property
+        def unique_id(self) -> str:
+            return self._attr_unique_id
+
+        @property
+        def device_info(self) -> Any:
+            return self._device_info
+
     monkeypatch.setattr(device_tracker, "schedule_add_entities", _schedule_add_entities)
     monkeypatch.setattr(device_tracker, "GoogleFindMyDeviceTracker", _StubDeviceTracker)
+    monkeypatch.setattr(
+        device_tracker, "GoogleFindMyLastLocationTracker", _StubLastLocationTracker
+    )
 
     assert await integration.async_setup(hass, {}) is True
     assert await integration.async_setup_entry(hass, entry)
@@ -1650,7 +1679,6 @@ def test_setup_entry_failure_does_not_register_cache(
     """Setup failures must not leave a TokenCache registered in the facade."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -1719,7 +1747,6 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
     """A duplicate-account repair issue renders with translated placeholders."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -1804,7 +1831,6 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         assert "Primary Account" in rendered
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_issue_cleanup_on_success(
@@ -1813,7 +1839,6 @@ def test_duplicate_account_issue_cleanup_on_success(
     """Resolved duplicate-account issues are cleared during normal setup."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -1865,7 +1890,6 @@ def test_duplicate_account_issue_cleanup_on_success(
         assert create_calls == []
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_mixed_states_prefer_loaded(
@@ -1874,7 +1898,6 @@ def test_duplicate_account_mixed_states_prefer_loaded(
     """Loaded duplicates remain authoritative; others auto-disable and clean up."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -1975,7 +1998,6 @@ def test_duplicate_account_mixed_states_prefer_loaded(
         )
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_auto_disables_duplicates(
@@ -1984,7 +2006,6 @@ def test_duplicate_account_auto_disables_duplicates(
     """Non-authoritative entries are disabled, unloaded, and cleaned up."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2073,7 +2094,6 @@ def test_duplicate_account_auto_disables_duplicates(
         assert not create_calls
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_legacy_core_disable_fallback(
@@ -2083,7 +2103,6 @@ def test_duplicate_account_legacy_core_disable_fallback(
     """Legacy cores raise TypeError but still unload and raise repair issues."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2183,7 +2202,6 @@ def test_duplicate_account_legacy_core_disable_fallback(
         ), "Legacy duplicate issues should remain open for manual action"
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_all_not_loaded_prefers_newest_timestamp() -> None:
@@ -2238,7 +2256,6 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
     """When duplicates are gone, all related issues are purged."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2273,7 +2290,6 @@ def test_duplicate_account_clear_stale_issues_for_all() -> None:
         )
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
@@ -2282,7 +2298,6 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
     """Only stale duplicate-account issues are removed for tuple-key registries."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2352,7 +2367,6 @@ def test_duplicate_account_cleanup_keeps_active_tuple_key_issues(
         assert authoritative.entry_id in str(placeholders.get("entries", ""))
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_cleanup_respects_string_key_issue_registries(
@@ -2361,7 +2375,6 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
     """Stale cleanup handles registries that expose string-key issue mappings."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2479,14 +2492,12 @@ def test_duplicate_account_cleanup_respects_string_key_issue_registries(
         assert authoritative.entry_id in str(placeholders.get("entries", ""))
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_issue_exists_helper_is_synchronous() -> None:
     """_issue_exists interacts with the registry helpers without awaiting."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2519,7 +2530,6 @@ def test_issue_exists_helper_is_synchronous() -> None:
         )
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_duplicate_account_issue_log_level_downgrades_when_existing(
@@ -2528,7 +2538,6 @@ def test_duplicate_account_issue_log_level_downgrades_when_existing(
     """Existing repair issues cause duplicate detection logs to drop to DEBUG."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         integration = importlib.import_module("custom_components.googlefindmy")
@@ -2575,7 +2584,6 @@ def test_duplicate_account_issue_log_level_downgrades_when_existing(
         assert debug_records[-1].levelno == logging.DEBUG
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def test_service_no_active_entry_placeholders(
@@ -2584,7 +2592,6 @@ def test_service_no_active_entry_placeholders(
     """Service validation exposes counts/list placeholders for inactive setups."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
     try:
         services_module = importlib.import_module(
@@ -2680,7 +2687,6 @@ def test_service_no_active_entry_placeholders(
         assert "Account One" in rendered
     finally:
         loop.close()
-        asyncio.set_event_loop(None)
 
 
 def _platform_names(platforms: tuple[object, ...]) -> tuple[str, ...]:

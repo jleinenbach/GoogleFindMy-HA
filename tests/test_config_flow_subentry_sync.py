@@ -815,12 +815,15 @@ async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None
     assert hass.config_entries.removed == []
 
 
-def test_supported_subentry_types_disable_manual_additions() -> None:
-    """Config flow should not expose manual subentry factories to Home Assistant."""
+def test_supported_subentry_types_returns_empty_to_hide_ui() -> None:
+    """Config flow should return empty dict to hide manual subentry UI buttons."""
 
     entry = _EntryStub()
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
 
+    # Must return empty dict to hide "Add hub feature group" and
+    # "Add service feature group" buttons in the HA config entry UI.
+    # Subentries are provisioned programmatically by the coordinator.
     assert mapping == {}
 
 

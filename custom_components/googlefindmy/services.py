@@ -698,6 +698,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             except Exception:  # pragma: no cover - defensive guard
                 pass
 
+        # Fallback: scan domain-level entries bucket for runtimes not yet
+        # discovered via entry.runtime_data.  hass.data[DOMAIN] is compatible
+        # with the HassKey-based DATA_DOMAIN defined in __init__.py.
         entries: dict[str, Any] = hass.data.setdefault(DOMAIN, {}).setdefault(
             "entries", {}
         )
@@ -797,6 +800,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         if dev:
             for entry_id in dev.config_entries:
                 entry = _entry_for_id(hass, entry_id)
+                # Prefer entry.runtime_data (2026 standard), then entries bucket.
                 runtime = getattr(entry, "runtime_data", None)
                 if runtime:
                     return runtime, canonical_id
@@ -999,20 +1003,32 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
                 hass,
                 prefer_external=True,
                 allow_cloud=True,
-                allow_internal=False,
+                allow_internal=True,
             )
         except (HomeAssistantError, NoURLAvailableError) as err:
             _LOGGER.warning(
-                "Skipping configuration URL refresh; external URL unavailable: %s",
+                "Skipping configuration URL refresh; no reachable URL available: %s",
                 err,
             )
             return
 
         if not base_url:
             _LOGGER.warning(
-                "Skipping configuration URL refresh; external URL unavailable",
+                "Skipping configuration URL refresh; no reachable URL available",
             )
             return
+
+        try:
+            internal_url = get_url(
+                hass, allow_external=False, allow_cloud=False, allow_internal=True,
+            )
+        except (HomeAssistantError, NoURLAvailableError):
+            internal_url = None
+        if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+            _LOGGER.info(
+                "Using internal URL for map view links; "
+                "set an external URL in Home Assistant settings for remote access",
+            )
 
         entries = hass.config_entries.async_entries(DOMAIN)
         entries_by_id = {entry.entry_id: entry for entry in entries}

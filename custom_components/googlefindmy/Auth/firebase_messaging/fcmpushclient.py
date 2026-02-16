@@ -43,7 +43,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientSession
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.serialization import load_der_private_key
 
 import http_ece
@@ -435,8 +434,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
-        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii"))
-        salt = urlsafe_b64decode(salt_str.encode("ascii"))
+        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii") + b"=" * (-len(crypto_key_str) % 4))
+        salt = urlsafe_b64decode(salt_str.encode("ascii") + b"=" * (-len(salt_str) % 4))
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
@@ -447,11 +446,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
             raise ValueError("Invalid key values in credential payload")
 
-        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"========")
-        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"========")
-        privkey = load_der_private_key(
-            der_data, password=None, backend=default_backend()
-        )
+        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"=" * (-len(private_value) % 4))
+        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4))
+        privkey = load_der_private_key(der_data, password=None)
         decrypted = http_decrypt(
             raw_data,
             salt=salt,
@@ -473,6 +470,20 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             return ""
         raise RuntimeError(f"couldn't find in app_data {key}")
 
+    @staticmethod
+    def _extract_header_param(header: str, param: str) -> str:
+        """Extract a named parameter from a semicolon-separated header value.
+
+        FCM headers like crypto-key and encryption use the format
+        ``key=value;key2=value2``.  Blindly slicing off a fixed prefix
+        breaks when extra parameters (e.g. ``p256ecdsa=...``) are present.
+        """
+        for part in header.split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == param:
+                return value
+        raise ValueError(f"Parameter '{param}' not found in header: {header}")
+
     def _handle_data_message(
         self,
         msg: DataMessageStanza,
@@ -490,8 +501,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         ):
             # The deleted_messages message does not contain data.
             return
-        crypto_key = self._app_data_by_key(msg, "crypto-key")[3:]  # strip dh=
-        salt = self._app_data_by_key(msg, "encryption")[5:]  # strip salt=
+        crypto_key = self._extract_header_param(
+            self._app_data_by_key(msg, "crypto-key"), "dh"
+        )
+        salt = self._extract_header_param(
+            self._app_data_by_key(msg, "encryption"), "salt"
+        )
         subtype = self._app_data_by_key(msg, "subtype")
         if TYPE_CHECKING:
             assert self.credentials

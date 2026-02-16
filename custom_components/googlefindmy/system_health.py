@@ -14,6 +14,7 @@ from homeassistant.core import HomeAssistant, callback
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
 from .email import normalize_email
+from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
 
 class SystemHealthRegistration(Protocol):
@@ -119,11 +120,7 @@ def _get_fcm_info(receiver: Any) -> dict[str, Any]:
         ready_value = bool(ready_attr) if ready_attr is not None else None
     info["is_ready"] = ready_value
 
-    snapshots: dict[str, dict[str, Any]] = {}
-    try:
-        snapshots = receiver.get_health_snapshots()
-    except Exception:  # pragma: no cover - defensive guard
-        snapshots = {}
+    snapshots = safe_fcm_health_snapshots(receiver)
 
     info["healthy_entries"] = sorted(
         entry_id for entry_id, snap in snapshots.items() if snap.get("healthy")
@@ -137,13 +134,7 @@ def _get_fcm_info(receiver: Any) -> dict[str, Any]:
     if snapshots:
         info["entry_count"] = len(snapshots)
         info["entries"] = [
-            {
-                "entry_id": entry_id,
-                "healthy": bool(snap.get("healthy")),
-                "run_state": snap.get("run_state"),
-                "seconds_since_last_activity": snap.get("seconds_since_last_activity"),
-                "activity_stale": bool(snap.get("activity_stale")),
-            }
+            normalize_fcm_entry_snapshot(entry_id, snap)
             for entry_id, snap in snapshots.items()
         ]
 

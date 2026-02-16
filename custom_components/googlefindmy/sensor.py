@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -26,6 +26,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -33,6 +34,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import EntityRecoveryManager
 from .const import (
+    DATA_EID_RESOLVER,
     DEFAULT_ENABLE_STATS_ENTITIES,
     DOMAIN,
     OPT_ENABLE_STATS_ENTITIES,
@@ -51,10 +53,17 @@ from .entity import (
     GoogleFindMyEntity,
     ensure_config_subentry_id,
     ensure_dispatcher_dependencies,
+    known_ids_for_subentry_type,
     resolve_coordinator,
     schedule_add_entities,
 )
+from .entity import (
+    subentry_type as _subentry_type,
+)
 from .ha_typing import RestoreSensor, SensorEntity, callback
+
+if TYPE_CHECKING:
+    from .eid_resolver import GoogleFindMyEIDResolver
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,24 +74,6 @@ class _Scope(NamedTuple):
     subentry_key: str
     config_subentry_id: str | None
     identifier: str
-
-
-def _subentry_type(subentry: Any | None) -> str | None:
-    """Return the declared subentry type for dispatcher filtering."""
-
-    if subentry is None or isinstance(subentry, str):
-        return None
-
-    declared_type = getattr(subentry, "subentry_type", None)
-    if isinstance(declared_type, str):
-        return declared_type
-
-    data = getattr(subentry, "data", None)
-    if isinstance(data, Mapping):
-        fallback_type = data.get("subentry_type") or data.get("type")
-        if isinstance(fallback_type, str):
-            return fallback_type
-    return None
 
 
 # ----------------------------- Entity Descriptions -----------------------------
@@ -98,6 +89,18 @@ SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
     key="semantic_labels",
     translation_key="semantic_labels",
     icon="mdi:format-list-text",
+)
+
+BLE_BATTERY_DESCRIPTION = SensorEntityDescription(
+    key="ble_battery",
+    translation_key="ble_battery",
+    device_class=SensorDeviceClass.BATTERY,
+    native_unit_of_measurement=PERCENTAGE,
+    state_class=SensorStateClass.MEASUREMENT,
+    entity_category=EntityCategory.DIAGNOSTIC,
+    suggested_display_precision=0,
+    # No icon: SensorDeviceClass.BATTERY provides dynamic icons automatically
+    # based on percentage value (mdi:battery, mdi:battery-20, mdi:battery-alert).
 )
 
 # NOTE:
@@ -172,33 +175,6 @@ async def async_setup_entry(
     ensure_dispatcher_dependencies(hass)
     if getattr(coordinator, "config_entry", None) is None:
         coordinator.config_entry = entry
-
-    def _known_ids_for_type(expected_type: str) -> set[str]:
-        ids: set[str] = set()
-
-        subentries = getattr(entry, "subentries", None)
-        if isinstance(subentries, Mapping):
-            for subentry in subentries.values():
-                if _subentry_type(subentry) == expected_type:
-                    candidate = getattr(subentry, "subentry_id", None) or getattr(
-                        subentry, "entry_id", None
-                    )
-                    if isinstance(candidate, str) and candidate:
-                        ids.add(candidate)
-
-        runtime_data = getattr(entry, "runtime_data", None)
-        subentry_manager = getattr(runtime_data, "subentry_manager", None)
-        managed_subentries = getattr(subentry_manager, "managed_subentries", None)
-        if isinstance(managed_subentries, Mapping):
-            for subentry in managed_subentries.values():
-                if _subentry_type(subentry) == expected_type:
-                    candidate = getattr(subentry, "subentry_id", None) or getattr(
-                        subentry, "entry_id", None
-                    )
-                    if isinstance(candidate, str) and candidate:
-                        ids.add(candidate)
-
-        return ids
 
     def _collect_scopes(
         *,
@@ -310,7 +286,7 @@ async def async_setup_entry(
         )
 
     def _add_service_scope(scope: _Scope, forwarded_config_id: str | None) -> None:
-        service_ids = _known_ids_for_type(SUBENTRY_TYPE_SERVICE)
+        service_ids = known_ids_for_subentry_type(entry, SUBENTRY_TYPE_SERVICE)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_service",
@@ -416,7 +392,7 @@ async def async_setup_entry(
             candidate_subentry_id = forwarded_config_id
         candidate_subentry_id = candidate_subentry_id or scope.identifier
 
-        tracker_ids = _known_ids_for_type(SUBENTRY_TYPE_TRACKER)
+        tracker_ids = known_ids_for_subentry_type(entry, SUBENTRY_TYPE_TRACKER)
         sanitized_config_id = ensure_config_subentry_id(
             entry,
             "sensor_tracker",
@@ -452,6 +428,7 @@ async def async_setup_entry(
             primary_tracker_scope = tracker_scope
 
         known_ids: set[str] = set()
+        known_battery_ids: set[str] = set()
         entities_added = False
 
         def _schedule_tracker_entities(
@@ -475,15 +452,22 @@ async def async_setup_entry(
         if tracker_scheduler is None:
             tracker_scheduler = _schedule_tracker_entities
 
+        def _get_ble_resolver() -> GoogleFindMyEIDResolver | None:
+            """Return the EID resolver from hass.data, or None."""
+            domain_data = hass.data.get(DOMAIN)
+            if not isinstance(domain_data, dict):
+                return None
+            return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+
         def _build_entities() -> list[SensorEntity]:
+            """Build sensor entities for visible devices in the current subentry."""
             entities: list[SensorEntity] = []
+            resolver = _get_ble_resolver()
             for device in coordinator.get_subentry_snapshot(tracker_scope.subentry_key):
                 dev_id = device.get("id") if isinstance(device, Mapping) else None
                 dev_name = device.get("name") if isinstance(device, Mapping) else None
                 if not dev_id or not dev_name:
                     _LOGGER.debug("Skipping device without id/name: %s", device)
-                    continue
-                if dev_id in known_ids:
                     continue
 
                 visible = True
@@ -502,19 +486,47 @@ async def async_setup_entry(
                     )
                     continue
 
-                entity = GoogleFindMyLastSeenSensor(
-                    coordinator,
-                    device,
-                    subentry_key=tracker_scope.subentry_key,
-                    subentry_identifier=tracker_identifier,
-                )
-                unique_id = getattr(entity, "unique_id", None)
-                if isinstance(unique_id, str):
-                    if unique_id in added_unique_ids:
-                        continue
-                    added_unique_ids.add(unique_id)
-                known_ids.add(dev_id)
-                entities.append(entity)
+                # --- LastSeen sensor (always) ---
+                if dev_id not in known_ids:
+                    entity = GoogleFindMyLastSeenSensor(
+                        coordinator,
+                        device,
+                        subentry_key=tracker_scope.subentry_key,
+                        subentry_identifier=tracker_identifier,
+                    )
+                    unique_id = getattr(entity, "unique_id", None)
+                    if isinstance(unique_id, str):
+                        if unique_id in added_unique_ids:
+                            continue
+                        added_unique_ids.add(unique_id)
+                    known_ids.add(dev_id)
+                    entities.append(entity)
+
+                # --- BLE Battery sensor (when resolver has data) ---
+                if dev_id not in known_battery_ids and resolver is not None:
+                    battery_state = None
+                    try:
+                        battery_state = resolver.get_ble_battery_state(dev_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if battery_state is not None:
+                        battery_entity = GoogleFindMyBLEBatterySensor(
+                            coordinator,
+                            device,
+                            subentry_key=tracker_scope.subentry_key,
+                            subentry_identifier=tracker_identifier,
+                        )
+                        bat_uid = getattr(battery_entity, "unique_id", None)
+                        if isinstance(bat_uid, str) and bat_uid not in added_unique_ids:
+                            added_unique_ids.add(bat_uid)
+                            known_battery_ids.add(dev_id)
+                            entities.append(battery_entity)
+                            _LOGGER.info(
+                                "BLE battery sensor created for device=%s "
+                                "(battery=%s%%)",
+                                dev_id,
+                                battery_state.battery_pct,
+                            )
 
             return entities
 
@@ -1202,4 +1214,173 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
     def device_info(self) -> DeviceInfo:
         """Expose DeviceInfo using the shared entity helper."""
 
+        return super().device_info
+
+
+# ----------------------------- Per-Device BLE Battery ---------------------------
+
+
+class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
+    """Per-device battery sensor from FMDN hashed-flags BLE advertisement.
+
+    Reports a percentage (100/25/5) mapped from the FMDN 2-bit battery level
+    (GOOD/LOW/CRITICAL).  Uses ``SensorDeviceClass.BATTERY`` for automatic
+    dynamic icons and HA battery grouping.
+
+    Behavior:
+    - Created dynamically when the EID resolver first decodes battery data.
+    - Restores state across HA restarts via RestoreSensor.
+    - Available as long as the coordinator considers the device present.
+    - Reads battery state directly from the EID resolver (no coordinator proxy).
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = BLE_BATTERY_DESCRIPTION
+
+    _unrecorded_attributes = frozenset(
+        {
+            "last_ble_observation",
+            "google_device_id",
+            "battery_raw_level",
+        }
+    )
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the BLE battery sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_ble_battery",
+            separator="_",
+        )
+        self._attr_native_value: int | None = None
+
+    def _get_resolver(self) -> GoogleFindMyEIDResolver | None:
+        """Return the EID resolver from hass.data, or None."""
+        domain_data = self.hass.data.get(DOMAIN)
+        if not isinstance(domain_data, dict):
+            return None
+        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+
+    @property
+    def native_value(self) -> int | None:
+        """Return battery percentage from resolver, or restored value."""
+        resolver = self._get_resolver()
+        if resolver is None or self._device_id is None:
+            return self._attr_native_value
+        state = resolver.get_ble_battery_state(self._device_id)
+        if state is None:
+            return self._attr_native_value
+        return state.battery_pct
+
+    @property
+    def available(self) -> bool:
+        """Return True when the coordinator considers the device present.
+
+        No BLE staleness TTL — the last decoded battery level is shown as
+        long as the coordinator's TTL-smoothed presence holds.  This avoids
+        flapping for trackers that transmit the flags byte infrequently.
+        """
+        if not super().available:
+            return False
+        if not self.coordinator_has_device():
+            return False
+
+        try:
+            if self._device_id is not None and hasattr(self.coordinator, "is_device_present"):
+                raw = self.coordinator.is_device_present(self._device_id)
+                present = bool(raw) if not isinstance(raw, bool) else raw
+                if present:
+                    return True
+                # Presence expired → available only with a restored value
+                return self._attr_native_value is not None
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Unknown presence → available if we have any known value
+        return self._attr_native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return diagnostic attributes (excluded from recorder)."""
+        resolver = self._get_resolver()
+        if resolver is None or self._device_id is None:
+            return None
+        state = resolver.get_ble_battery_state(self._device_id)
+        if state is None:
+            return None
+        return {
+            "battery_raw_level": state.battery_level,
+            "last_ble_observation": datetime.fromtimestamp(
+                state.observed_at_wall, tz=UTC
+            ).isoformat(),
+            "google_device_id": self._device_id,
+        }
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Propagate coordinator updates and keep device label in sync."""
+        if not self.coordinator_has_device():
+            self.async_write_ha_state()
+            return
+
+        self.refresh_device_label_from_coordinator(log_prefix="BLEBattery")
+
+        # Update cached native_value from resolver for restore persistence
+        resolver = self._get_resolver()
+        if resolver is not None and self._device_id is not None:
+            state = resolver.get_ble_battery_state(self._device_id)
+            if state is not None:
+                self._attr_native_value = state.battery_pct
+
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Restore battery percentage from HA's persistent store."""
+        await super().async_added_to_hass()
+
+        try:
+            data = await self.async_get_last_sensor_data()
+            value = getattr(data, "native_value", None) if data else None
+        except (RuntimeError, AttributeError) as e:  # noqa: BLE001
+            _LOGGER.debug(
+                "Failed to restore BLE battery state for %s: %s",
+                self.entity_id,
+                e,
+            )
+            value = None
+
+        if value is None or value in ("unknown", "unavailable"):
+            return
+
+        try:
+            restored_pct = int(float(value))
+        except (ValueError, TypeError):
+            return
+
+        self._attr_native_value = restored_pct
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Expose DeviceInfo using the shared entity helper."""
         return super().device_info

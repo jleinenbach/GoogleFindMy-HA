@@ -41,7 +41,6 @@ def owner_index_coordinator(
         _factory,
     )
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     hass = _DummyHass(loop)
     hass.data.setdefault(DOMAIN, {})["device_owner_index"] = {}
 
@@ -101,7 +100,6 @@ def test_fcm_owner_index_fallback_routes_entry(
     """Owner-index mapping enables FCM routing when token context is missing."""
 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         receiver = FcmReceiverHA()
         hass = SimpleNamespace(

@@ -2,7 +2,8 @@
 
 """Google Find My Device integration for Home Assistant.
 
-Version: 2.6.6 — Multi-account enabled (E3) + owner-index routing attach
+Version: see INTEGRATION_VERSION in const.py / manifest.json (SSOT).
+Multi-account enabled (E3) + owner-index routing attach
 - Multi-account support: multiple config entries are allowed concurrently.
 - Duplicate-account protection: if two entries use the same Google email, we raise a
   Repair issue and abort the later entry to avoid mixing credentials/state.
@@ -66,6 +67,7 @@ from typing import (
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from weakref import WeakKeyDictionary
 
+import voluptuous as vol
 from homeassistant import data_entry_flow
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 
@@ -130,6 +132,17 @@ else:  # pragma: no cover - test environments without full Home Assistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.storage import Store
 
+try:  # pragma: no cover - HassKey introduced in HA 2024.6
+    from homeassistant.util.hass_dict import HassKey
+except ImportError:  # pragma: no cover - legacy Home Assistant builds
+
+    class HassKey(str):  # type: ignore[no-redef]
+        """Minimal shim for pre-2024.6 Home Assistant builds."""
+
+        def __class_getitem__(cls, item: Any) -> type:
+            return cls
+
+
 # Eagerly import diagnostics to prevent blocking calls on-demand
 from . import diagnostics  # noqa: F401
 
@@ -162,6 +175,7 @@ from .const import (
     DEFAULT_OPTIONS,
     DOMAIN,
     FEATURE_FMDN_FINDER_ENABLED,
+    ISSUE_MULTIPLE_CONFIG_ENTRIES,
     LEGACY_SERVICE_IDENTIFIER,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
@@ -184,6 +198,9 @@ from .const import (
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     TRACKER_SUBENTRY_TRANSLATION_KEY,
+    TRANSLATION_KEY_CACHE_PURGED,
+    TRANSLATION_KEY_DUPLICATE_ACCOUNT,
+    TRANSLATION_KEY_UNIQUE_ID_COLLISION,
     coerce_ignored_mapping,
     map_token_hex_digest,
     map_token_secret_seed,
@@ -569,18 +586,13 @@ else:
 _GOOGLE_HOME_FILTER_CLASS: type[Any] | None = None
 _GOOGLE_HOME_FILTER_IMPORT_ATTEMPTED = False
 
-try:
-    # Helper name has been `config_entry_only_config_schema` since Core 2023.7
-    # (renamed from `no_yaml_config_schema`). Retain fallbacks solely so legacy
-    # tests lacking the helper keep importing this module without exploding.
-    CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-except AttributeError:
-    try:
-        CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
-    except AttributeError:  # pragma: no cover - kept for legacy tests without helpers
-        import voluptuous as vol
-
-        CONFIG_SCHEMA = vol.Schema({DOMAIN: vol.Schema({})})
+# Declare that this integration is config-entry-only (no YAML configuration).
+# Use getattr fallback for older HA versions lacking config_entry_only_config_schema.
+CONFIG_SCHEMA: vol.Schema = getattr(
+    cv,
+    "config_entry_only_config_schema",
+    lambda domain: vol.Schema({domain: vol.Schema({})}),
+)(DOMAIN)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2379,10 +2391,15 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     recent_reconfigure_markers: dict[str, float]
 
 
+# Typed hass.data key for the global domain bucket (HA 2024.6+ HassKey).
+# Using HassKey enables static type analysis (MyPy) on hass.data[DATA_DOMAIN].
+DATA_DOMAIN: HassKey[GoogleFindMyDomainData] = HassKey(DOMAIN)
+
+
 def _domain_data(hass: HomeAssistant) -> GoogleFindMyDomainData:
     """Return the typed domain data bucket, creating it on first access."""
 
-    return cast(GoogleFindMyDomainData, hass.data.setdefault(DOMAIN, {}))
+    return cast(GoogleFindMyDomainData, hass.data.setdefault(DATA_DOMAIN, {}))
 
 
 _SUBENTRY_SETUP_RETRY_DELAY = 2.0
@@ -4773,7 +4790,7 @@ async def _async_create_uid_collision_issue(
             f"unique_id_collision_{entry.entry_id}",
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
-            translation_key="unique_id_collision",
+            translation_key=TRANSLATION_KEY_UNIQUE_ID_COLLISION,
             translation_placeholders={
                 "entry": entry.title or entry.entry_id,
                 "count": str(len(entity_ids)),
@@ -5698,7 +5715,7 @@ def _log_duplicate_and_raise_repair_issue(
             issue_id,
             is_fixable=False,
             severity=severity_value,
-            translation_key="duplicate_account_entries",
+            translation_key=TRANSLATION_KEY_DUPLICATE_ACCOUNT,
             translation_placeholders=placeholders,
         )
     except Exception as err:  # pragma: no cover - defensive log only
@@ -6473,13 +6490,21 @@ async def _async_setup_legacy_child_subentry(
         )
         return False
 
-    bucket = _domain_data(hass)
-    entries_bucket = _ensure_entries_bucket(bucket)
+    # Prefer entry.runtime_data on the parent ConfigEntry (2026 standard) before
+    # falling back to the domain-level entries bucket for legacy compatibility.
+    parent_payload: RuntimeData | GoogleFindMyCoordinator | None = None
+    parent_entry = hass.config_entries.async_get_entry(parent_entry_id)
+    if parent_entry is not None:
+        parent_payload = getattr(parent_entry, "runtime_data", None)
 
-    parent_payload = cast(
-        RuntimeData | GoogleFindMyCoordinator | None,
-        entries_bucket.get(parent_entry_id),
-    )
+    if parent_payload is None:
+        bucket = _domain_data(hass)
+        entries_bucket = _ensure_entries_bucket(bucket)
+        parent_payload = cast(
+            RuntimeData | GoogleFindMyCoordinator | None,
+            entries_bucket.get(parent_entry_id),
+        )
+
     if parent_payload is None:
         _LOGGER.debug(
             "[%s] Parent runtime data bucket missing for %s; deferring setup",  # noqa: G004
@@ -6583,10 +6608,14 @@ async def _async_setup_subentry(
             f"Config subentry {subentry_identifier} is not registered"
         )
 
-    bucket = _domain_data(hass)
-    entries_bucket = _ensure_entries_bucket(bucket)
+    # Prefer entry.runtime_data on the parent ConfigEntry (2026 standard) before
+    # falling back to the domain-level entries bucket for legacy compatibility.
+    parent_runtime_data = getattr(parent_entry, "runtime_data", None)
+    if parent_runtime_data is None:
+        bucket = _domain_data(hass)
+        entries_bucket = _ensure_entries_bucket(bucket)
+        parent_runtime_data = entries_bucket.get(parent_entry_id)
 
-    parent_runtime_data = entries_bucket.get(parent_entry_id)
     if parent_runtime_data is None:
         _LOGGER.warning(
             "[%s] Parent runtime data bucket missing for %s; deferring setup",
@@ -6813,7 +6842,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     # --- Multi-entry policy: allow MA; block duplicate-account (same email) ----
     # Legacy issue cleanup: we no longer block on multiple config entries
     try:
-        ir.async_delete_issue(hass, DOMAIN, "multiple_config_entries")
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_MULTIPLE_CONFIG_ENTRIES)
     except Exception:
         pass
 
@@ -7377,13 +7406,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         # devices across all loaded config entries via hass.data[DOMAIN][DATA_EID_RESOLVER].
         domain_bucket[DATA_EID_RESOLVER] = eid_resolver
 
-    # Setup FMDN Finder (Bermuda integration listener for location uploads)
-    # This allows Home Assistant to act as a "Finder" in Google's FMDN network,
-    # uploading encrypted location reports for detected FMDN beacons.
-    # Feature is disabled by default via FEATURE_FMDN_FINDER_ENABLED in const.py.
+    # ---- BLE Scanner: optional HA-Bluetooth FMDN advertisement listener ----
+    # Always attempted (independent of FEATURE_FMDN_FINDER_ENABLED).
+    # Collects MAC addresses and frame types for future BLE ringing (Phase 2).
+    # Silently skipped when the bluetooth integration is not loaded.
+    try:
+        from .fmdn_finder.ble_scanner import async_setup_ble_scanner  # noqa: PLC0415
+
+        await async_setup_ble_scanner(hass)
+    except ImportError:
+        _LOGGER.debug("BLE scanner module not available (optional)")
+    except Exception as err:  # noqa: BLE001
+        _LOGGER.debug("BLE scanner setup skipped: %s", err)
+
+    # ---- FMDN Finder: Bermuda listener for location uploads ----
+    # Disabled by default via FEATURE_FMDN_FINDER_ENABLED in const.py.
     if FEATURE_FMDN_FINDER_ENABLED:
         try:
-            from .fmdn_finder import async_setup_fmdn_finder
+            from .fmdn_finder import async_setup_fmdn_finder  # noqa: PLC0415
 
             fmdn_setup_success = await async_setup_fmdn_finder(hass)
             if fmdn_setup_success:
@@ -7519,21 +7559,33 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
                 hass,
                 prefer_external=True,
                 allow_cloud=True,
-                allow_internal=False,
+                allow_internal=True,
             ),
         )
     except (HomeAssistantError, NoURLAvailableError) as err:
         _LOGGER.warning(
-            "Skipping configuration URL refresh; external URL unavailable: %s",
+            "Skipping configuration URL refresh; no reachable URL available: %s",
             err,
         )
         return
 
     if not base_url or "://" not in base_url:
         _LOGGER.warning(
-            "Skipping configuration URL refresh; external URL unavailable",
+            "Skipping configuration URL refresh; no reachable URL available",
         )
         return
+
+    try:
+        internal_url = get_url(
+            hass, allow_external=False, allow_cloud=False, allow_internal=True,
+        )
+    except (HomeAssistantError, NoURLAvailableError):
+        internal_url = None
+    if base_url.rstrip("/") == (internal_url or "").rstrip("/"):
+        _LOGGER.info(
+            "Using internal URL for map view links; "
+            "set an external URL in Home Assistant settings for remote access",
+        )
 
     base_url = base_url.rstrip("/")
 
@@ -7673,13 +7725,14 @@ async def async_remove_config_entry_device(
         return False
 
     try:
-        bucket = _domain_data(hass)
-        entries_bucket = _ensure_entries_bucket(bucket)
-        runtime: RuntimeData | GoogleFindMyCoordinator | None = entries_bucket.get(
-            entry.entry_id
+        # Prefer entry.runtime_data (2026 standard), fall back to entries bucket.
+        runtime: RuntimeData | GoogleFindMyCoordinator | None = getattr(
+            entry, "runtime_data", None
         )
         if runtime is None:
-            runtime = getattr(entry, "runtime_data", None)
+            bucket = _domain_data(hass)
+            entries_bucket = _ensure_entries_bucket(bucket)
+            runtime = entries_bucket.get(entry.entry_id)
 
         coordinator: GoogleFindMyCoordinator | None = None
         purge_device: Callable[[str], Any] | None = None
@@ -8117,9 +8170,21 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
         except Exception as err:
             _LOGGER.debug("FCM release during parent unload raised: %s", err)
 
+        # Unload BLE scanner (if registered)
+        try:
+            from .fmdn_finder.ble_scanner import (
+                async_unload_ble_scanner,  # noqa: PLC0415
+            )
+
+            await async_unload_ble_scanner(hass)
+        except ImportError:
+            pass
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("BLE scanner unload raised: %s", err)
+
         # Unload FMDN Finder (if enabled)
         try:
-            from .fmdn_finder import async_unload_fmdn_finder
+            from .fmdn_finder import async_unload_fmdn_finder  # noqa: PLC0415
 
             await async_unload_fmdn_finder(hass)
             _LOGGER.debug("FMDN Finder unloaded successfully")
@@ -8190,12 +8255,17 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
 
     _ensure_runtime_imports()
 
+    # Prefer entry.runtime_data (2026 standard), then clean up entries bucket.
     bucket = _domain_data(hass)
     entries_bucket = bucket.get("entries")
 
-    runtime: RuntimeData | GoogleFindMyCoordinator | None = None
-    if isinstance(entries_bucket, dict):
+    runtime: RuntimeData | GoogleFindMyCoordinator | None = getattr(
+        entry, "runtime_data", None
+    )
+    if runtime is None and isinstance(entries_bucket, dict):
         runtime = entries_bucket.pop(entry.entry_id, None)
+    elif isinstance(entries_bucket, dict):
+        entries_bucket.pop(entry.entry_id, None)
 
     fallback_runtime = getattr(entry, "runtime_data", None)
     if runtime is None and isinstance(
@@ -8369,7 +8439,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
                     issue_id,
                     is_fixable=False,
                     severity=severity_value,
-                    translation_key="cache_purged",
+                    translation_key=TRANSLATION_KEY_CACHE_PURGED,
                     translation_placeholders={"entry_title": display_name},
                 )
             except Exception as err:
@@ -8398,10 +8468,25 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
 
 
 def _get_local_ip_sync() -> str:
-    """Best-effort local IP discovery via UDP connect (executor-only)."""
+    """Best-effort local IP discovery via UDP connect (executor-only).
+
+    WARNING: This function performs a blocking socket operation and MUST NOT be
+    called directly from the async event loop.  Always use the non-blocking
+    wrapper :func:`async_get_local_ip` instead.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
             return cast(str, s.getsockname()[0])
     except OSError:
         return ""
+
+
+async def async_get_local_ip(hass: HomeAssistant) -> str:
+    """Non-blocking wrapper for local IP discovery.
+
+    Delegates the blocking socket call to the HA executor so the event loop is
+    never stalled by DNS resolution or network timeouts.
+    """
+    result: str = await hass.async_add_executor_job(_get_local_ip_sync)
+    return result

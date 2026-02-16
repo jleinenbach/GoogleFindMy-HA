@@ -1,5 +1,4 @@
 {
-  "title": "Google Find My Device",
   "device": {
     "google_find_hub_service": {
       "name": "Google Find Hub Dienst"
@@ -251,16 +250,16 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "settings": {
         "title": "Optionen",
-        "description": "Einstellungen für die Ortung anpassen:\n• Positionsabfrage-Intervall: Wie häufig Positionen abgefragt werden (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte (1–60 Sekunden)\n• Veraltungsgrenze: Nach dieser Zeit ohne Update wird der Tracker-Status unbekannt\n\nGoogle-Home-Filter:\n• Aktivieren, um Ortungen durch Google-Home-Geräte der Zuhause-Zone zuzuordnen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: nest passt zu Küche Nest Mini",
+        "description": "Standorteinstellungen anpassen:\n• Standort-Abfrageintervall: Wie oft Standorte abgefragt werden (60–3600 Sekunden)\n• Geräte-Abfrageverzögerung: Verzögerung zwischen Geräteabfragen (1–60 Sekunden)\n• Standort-Timeout: Nach dieser Zeit ohne Update wird der Tracker-Status unbekannt\n\nGoogle Home-Filter:\n• Aktivieren, um Erkennungen von Google Home-Geräten mit der Heimzone zu verknüpfen\n• Schlüsselwörter unterstützen Teilübereinstimmungen (kommagetrennt)\n• Beispiel: 'nest' stimmt mit 'Küche Nest Mini' überein",
         "data": {
           "location_poll_interval": "Positionsabfrage-Intervall (s)",
           "device_poll_delay": "Verzögerung zwischen Geräteabfragen (s)",
-          "stale_threshold": "Veraltungsgrenze (s)",
+          "stale_threshold": "Standort-Timeout (s)",
           "google_home_filter_enabled": "Google-Home-Geräte filtern",
           "google_home_filter_keywords": "Filter-Schlüsselwörter (kommagetrennt)",
           "enable_stats_entities": "Statistik-Entitäten erstellen",
@@ -270,11 +269,11 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "stale_threshold": "Nach dieser Zeit (in Sekunden) ohne Standortaktualisierung wird der Tracker-Status unbekannt. Die letzten bekannten Koordinaten bleiben in den Attributen verfügbar. Standard: 1800 (30 Minuten).",
+          "stale_threshold": "Nach dieser Zeit (in Sekunden) ohne Standortaktualisierung wird der Tracker-Status unbekannt. Verwende die Entität 'Letzter Standort', um immer die letzte bekannte Position zu sehen. Standard: 1800 (30 Minuten).",
           "delete_caches_on_remove": "Löscht zwischengespeicherte Tokens und Gerätemetadaten, wenn dieser Eintrag entfernt wird.",
           "map_view_token_expiration": "Wenn aktiviert, laufen die Token für die Kartenansicht nach 1 Woche ab. Wenn deaktiviert (Standard), laufen die Token nicht ab.",
-          "contributor_mode": "Lege fest, wie dein Gerät zum Google-Netzwerk beiträgt (standardmäßig stark frequentierte Bereiche oder Alle Bereiche für Crowdsourcing).",
-          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subeinträge und Funktionsgruppen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "contributor_mode": "Lege fest, wie dein Gerät zum Google-Netzwerk beiträgt (standardmäßig Alle Bereiche für Crowdsourcing oder nur stark frequentierte Bereiche).",
+          "subentry": "Speichern Sie diese Optionen in der ausgewählten Funktionsgruppe. Beispiele finden Sie unter [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "visibility": {
@@ -285,7 +284,7 @@
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subeinträge und Funktionsgruppen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups)."
+          "subentry": "Wiederhergestellte Geräte werden der gewählten Funktionsgruppe zugeordnet. Hinweise finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "repairs": {
@@ -464,6 +463,17 @@
           }
         }
       },
+      "uwt_mode": {
+        "name": "Modus für unerwünschtes Tracking",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "Letzte BLE-Beobachtung"
+          },
+          "google_device_id": {
+            "name": "Google-Geräte-ID"
+          }
+        }
+      },
       "nova_auth_status": {
         "name": "Status der Nova-API-Authentifizierung",
         "state_attributes": {
@@ -490,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Gerät",
         "state_attributes": {
           "device_name": {
             "name": "Gerätename"
@@ -547,9 +556,65 @@
             "name": "Letzter bekannter Längengrad"
           }
         }
+      },
+      "last_location": {
+        "name": "Letzter Standort",
+        "state_attributes": {
+          "device_name": {
+            "name": "Gerätename"
+          },
+          "device_id": {
+            "name": "Geräte-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantische Bezeichnung"
+          },
+          "battery_level": {
+            "name": "Akkustand"
+          },
+          "last_seen": {
+            "name": "Zuletzt gesehen (gemeldet)"
+          },
+          "last_seen_utc": {
+            "name": "Zuletzt gesehen (UTC)"
+          },
+          "source_label": {
+            "name": "Quellenbezeichnung"
+          },
+          "source_rank": {
+            "name": "Quellenrang"
+          },
+          "is_own_report": {
+            "name": "Eigener Gerätebericht"
+          },
+          "latitude": {
+            "name": "Breitengrad"
+          },
+          "longitude": {
+            "name": "Längengrad"
+          },
+          "accuracy_m": {
+            "name": "Genauigkeit (m)"
+          },
+          "altitude_m": {
+            "name": "Höhe (m)"
+          },
+          "location_age": {
+            "name": "Standortalter (s)"
+          },
+          "location_status": {
+            "name": "Standortstatus"
+          }
+        }
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "BLE-Akku"
+      },
       "last_seen": {
         "name": "Zuletzt gesehen",
         "state_attributes": {
@@ -618,15 +683,15 @@
       "stat_invalid_coords": {
         "name": "Ungültige Koordinaten"
       },
-        "stat_fused_updates": {
-            "name": "Fusionierte Standort-Updates"
-        }
+      "stat_fused_updates": {
+        "name": "Fusionierte Standort-Updates"
+      }
     }
   },
   "issues": {
     "auth_expired": {
       "title": "Erneute Anmeldung erforderlich",
-      "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen."
+      "description": "Die Anmeldung für Google Find My Device ist ungültig oder abgelaufen.\n\n**Eintrag:** {entry_title}\n**Konto:** {email}\n\nWähle auf der Integrationskarte **Neu konfigurieren**, um dich erneut anzumelden. Wenn du kürzlich dein Google-Passwort geändert oder Tokens widerrufen hast, musst du dich hier neu authentifizieren, um die Funktionalität wiederherzustellen.\n\n**Tipp:** Google kann Tokens widerrufen, wenn Anfragen von einer anderen IP-Adresse oder Region kommen als bei der Token-Erstellung (z. B. Token auf einem Laptop erstellt, aber von einem Server oder VPS in einem anderen Land genutzt). Erstelle deine `secrets.json` im selben Netzwerk, in dem Home Assistant läuft, oder verwende dieselbe öffentliche IP-Adresse."
     },
     "fcm_connection_stuck": {
       "title": "FCM Push-Verbindung fehlgeschlagen",
@@ -679,6 +744,14 @@
       "entries": "Konfigurationseinträge",
       "fcm": "FCM-Empfänger",
       "fcm_lock_contention_count": "FCM-Sperrkonflikte"
+    }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Nur stark frequentierte Bereiche",
+        "in_all_areas": "Alle Bereiche (Crowdsourcing)"
+      }
     }
   }
 }

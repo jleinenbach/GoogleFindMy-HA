@@ -1,5 +1,4 @@
 {
-  "title": "Google Find My Device",
   "device": {
     "google_find_hub_service": {
       "name": "Google Find Hub-service"
@@ -98,9 +97,9 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
-      "entry_type": "Hub feature group",
+      "entry_type": "Hub-functiegroep",
       "initiate_flow": {
-        "user": "Add hub feature group"
+        "user": "Hub-functiegroep toevoegen"
       },
       "step": {
         "user": {
@@ -117,9 +116,9 @@
     },
     "service": {
       "title": "Google Find Hub-service",
-      "entry_type": "Service feature group",
+      "entry_type": "Service-functiegroep",
       "initiate_flow": {
-        "user": "Add service feature group"
+        "user": "Service-functiegroep toevoegen"
       },
       "step": {
         "user": {
@@ -136,9 +135,9 @@
     },
     "core_tracking": {
       "title": "Google Find My-apparaten",
-      "entry_type": "Device feature group",
+      "entry_type": "Apparaat-functiegroep",
       "initiate_flow": {
-        "user": "Add device feature group"
+        "user": "Apparaat-functiegroep toevoegen"
       },
       "step": {
         "user": {
@@ -251,30 +250,30 @@
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "subentry": "Pas inloggegevensupdates toe op de geselecteerde functiegroep. Bekijk de [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) handleiding voor workflow-details."
+          "subentry": "Pas inloggegevensupdates toe op de geselecteerde functiegroep. Bekijk de [Subentries en functiegroepen]({subentries_docs_url}) handleiding voor workflow-details."
         }
       },
       "settings": {
         "title": "Opties",
-        "description": "Locatie-instellingen aanpassen:\n• Locatie-pollinginterval: Hoe vaak locaties worden gepolld (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen apparaat-polls (1–60 seconden)\n\nGoogle Home-filter:\n• Schakel in om detecties van Google Home-apparaten te koppelen aan de Thuiszone\n• Trefwoorden ondersteunen gedeeltelijke overeenkomsten (kommagescheiden)\n• Voorbeeld: \"nest\" komt overeen met \"Keuken Nest Mini\"",
+        "description": "Locatie-instellingen aanpassen:\n• Locatie-pollinginterval: Hoe vaak locaties worden gepolld (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen apparaat-polls (1–60 seconden)\n• Verouderingsdrempel: Na deze tijd zonder updates wordt de trackerstatus onbekend\n\nGoogle Home-filter:\n• Schakel in om detecties van Google Home-apparaten te koppelen aan de Thuiszone\n• Trefwoorden ondersteunen gedeeltelijke overeenkomsten (kommagescheiden)\n• Voorbeeld: \"nest\" komt overeen met \"Keuken Nest Mini\"",
         "data": {
           "location_poll_interval": "Locatie-pollinginterval (s)",
           "device_poll_delay": "Apparaat-pollingvertraging (s)",
+          "stale_threshold": "Verouderingsdrempel (s)",
           "google_home_filter_enabled": "Google Home-apparaten filteren",
           "google_home_filter_keywords": "Filtertrefwoorden (kommagescheiden)",
           "enable_stats_entities": "Statistiekentiteiten aanmaken",
           "delete_caches_on_remove": "Caches verwijderen bij verwijderen item",
           "map_view_token_expiration": "Kaartweergave-tokenverloopdatum inschakelen",
           "contributor_mode": "Locatiebijdragermodus",
-          "stale_threshold": "Verouderingsdrempel (s)",
           "subentry": "Functiegroep"
         },
         "data_description": {
+          "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de trackerstatus 'onbekend'. Gebruik de entiteit 'Laatste locatie' om altijd de laatst bekende positie te zien. Standaard: 1800 (30 minuten).",
           "delete_caches_on_remove": "Verwijder gecachete tokens en apparaatmetadata wanneer dit item wordt verwijderd.",
           "map_view_token_expiration": "Indien ingeschakeld, verlopen kaartweergavetokens na 1 week. Indien uitgeschakeld (standaard), verlopen tokens niet.",
-          "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard drukbezochte gebieden, of Alle gebieden voor crowdsourced rapportage).",
-          "stale_threshold": "Wanneer een locatie ouder is dan deze drempel (in seconden), wordt de apparaatstatus 'onbekend'. Stel in op 0 om deze functie uit te schakelen.",
-          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor voorbeelden."
+          "contributor_mode": "Kies hoe je apparaat bijdraagt aan het Google-netwerk (standaard Alle gebieden voor crowdsourced rapportage, of alleen drukbezochte gebieden).",
+          "subentry": "Sla deze opties op in de geselecteerde functiegroep. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor voorbeelden."
         }
       },
       "visibility": {
@@ -285,7 +284,7 @@
           "subentry": "Functiegroep"
         },
         "data_description": {
-          "subentry": "Herstelde apparaten worden toegevoegd aan de functiegroep die je kiest. Zie [Subentries en functiegroepen](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) voor toewijzingsadvies."
+          "subentry": "Herstelde apparaten worden toegevoegd aan de functiegroep die je kiest. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor toewijzingsadvies."
         }
       },
       "repairs": {
@@ -464,6 +463,17 @@
           }
         }
       },
+      "uwt_mode": {
+        "name": "Ongewenste trackingmodus",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "Laatste BLE-observatie"
+          },
+          "google_device_id": {
+            "name": "Google-apparaat-ID"
+          }
+        }
+      },
       "nova_auth_status": {
         "name": "Nova API-authenticatiestatus",
         "state_attributes": {
@@ -490,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Apparaat",
         "state_attributes": {
           "device_name": {
             "name": "Apparaatnaam"
@@ -547,9 +556,65 @@
             "name": "Laatst bekende lengtegraad"
           }
         }
+      },
+      "last_location": {
+        "name": "Laatste locatie",
+        "state_attributes": {
+          "device_name": {
+            "name": "Apparaatnaam"
+          },
+          "device_id": {
+            "name": "Apparaat-ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantisch label"
+          },
+          "battery_level": {
+            "name": "Batterijniveau"
+          },
+          "last_seen": {
+            "name": "Laatst gezien (gerapporteerd)"
+          },
+          "last_seen_utc": {
+            "name": "Laatst gezien (UTC)"
+          },
+          "source_label": {
+            "name": "Bronlabel"
+          },
+          "source_rank": {
+            "name": "Bronrang"
+          },
+          "is_own_report": {
+            "name": "Eigen apparaatrapport"
+          },
+          "latitude": {
+            "name": "Breedtegraad"
+          },
+          "longitude": {
+            "name": "Lengtegraad"
+          },
+          "accuracy_m": {
+            "name": "Nauwkeurigheid (m)"
+          },
+          "altitude_m": {
+            "name": "Hoogte (m)"
+          },
+          "location_age": {
+            "name": "Leeftijd locatie (s)"
+          },
+          "location_status": {
+            "name": "Locatiestatus"
+          }
+        }
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "BLE-batterij"
+      },
       "last_seen": {
         "name": "Laatst gezien",
         "state_attributes": {
@@ -626,7 +691,7 @@
   "issues": {
     "auth_expired": {
       "title": "Herauthenticatie vereist",
-      "description": "Authenticatie voor Google Find My Device is ongeldig of verlopen voor dit item.\n\n**Item:** {entry_title}\n**Account:** {email}\n\nSelecteer **Opnieuw configureren** op de integratiekaart om opnieuw aan te melden. Als je onlangs je Google-wachtwoord hebt gewijzigd of tokens hebt ingetrokken, moet je hier opnieuw authenticeren om de functionaliteit te herstellen."
+      "description": "Authenticatie voor Google Find My Device is ongeldig of verlopen voor dit item.\n\n**Item:** {entry_title}\n**Account:** {email}\n\nSelecteer **Opnieuw configureren** op de integratiekaart om opnieuw aan te melden. Als je onlangs je Google-wachtwoord hebt gewijzigd of tokens hebt ingetrokken, moet je hier opnieuw authenticeren om de functionaliteit te herstellen.\n\n**Tip:** Google kan tokens intrekken wanneer verzoeken afkomstig zijn van een ander IP-adres of een andere regio dan waar het token is aangemaakt (bijv. token gegenereerd op een laptop maar gebruikt vanaf een server of VPS in een ander land). Genereer je `secrets.json` op hetzelfde netwerk waar Home Assistant draait, of gebruik hetzelfde openbare IP-adres."
     },
     "fcm_connection_stuck": {
       "title": "FCM push-verbinding mislukt",
@@ -679,6 +744,14 @@
       "entries": "Configuratie-items",
       "fcm": "FCM-ontvanger",
       "fcm_lock_contention_count": "FCM lock-contentieteller"
+    }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Alleen drukke gebieden",
+        "in_all_areas": "Alle gebieden (crowdsourcing)"
+      }
     }
   }
 }

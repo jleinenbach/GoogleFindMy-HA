@@ -25,7 +25,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -57,15 +57,10 @@ from .const import (
     OPT_MIN_POLL_INTERVAL,
 )
 from .ha_typing import callback
+from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
-# ---------------------------------------------------------------------------
-# Compatibility placeholders
-# ---------------------------------------------------------------------------
-
-
-class GoogleFindMyCoordinator:  # pragma: no cover - patched in tests
-    """Placeholder coordinator type for tests to monkeypatch."""
-
+if TYPE_CHECKING:
+    from .coordinator import GoogleFindMyCoordinator  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Redaction policy
@@ -334,11 +329,7 @@ def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
     if not rcvr:
         return None
 
-    snapshots: dict[str, dict[str, Any]] = {}
-    try:
-        snapshots = rcvr.get_health_snapshots()
-    except Exception:  # pragma: no cover - defensive guard
-        snapshots = {}
+    snapshots = safe_fcm_health_snapshots(rcvr)
 
     entries = []
     connected_entries: list[str] = []
@@ -346,19 +337,17 @@ def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
         if snap.get("healthy"):
             connected_entries.append(entry_id)
 
-        entries.append(
+        # Start with the shared base fields and extend with diagnostics-specific ones
+        entry_data = normalize_fcm_entry_snapshot(entry_id, snap)
+        entry_data.update(
             {
-                "entry_id": entry_id,
-                "healthy": bool(snap.get("healthy")),
                 "supervisor_running": bool(snap.get("supervisor_running")),
                 "client_ready": bool(snap.get("client_ready")),
-                "run_state": snap.get("run_state"),
                 "do_listen": bool(snap.get("do_listen")),
                 "last_activity_monotonic": snap.get("last_activity_monotonic"),
-                "seconds_since_last_activity": snap.get("seconds_since_last_activity"),
-                "activity_stale": bool(snap.get("activity_stale")),
             }
         )
+        entries.append(entry_data)
 
     def _get(attr: str, default: Any = None) -> Any:
         try:

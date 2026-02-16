@@ -11,7 +11,7 @@ from typing import (
 from custom_components.googlefindmy.protobuf_typing import (
     MessageProto as _MessageProto,
 )
-from custom_components.googlefindmy.ProtoDecoders import Any_pb2 as _Any_pb2
+from google.protobuf import any_pb2 as _any_pb2
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
 from google.protobuf.internal.containers import RepeatedCompositeFieldContainer
@@ -28,10 +28,10 @@ class Status(Message, _MessageProto):
     DETAILS_FIELD_NUMBER: _ClassVar[int]
     code: int
     message: str
-    details: RepeatedCompositeFieldContainer[_Any_pb2.Any]
+    details: RepeatedCompositeFieldContainer[_any_pb2.Any]
     def __init__(
         self,
         code: int | None = ...,
         message: str | None = ...,
-        details: _Iterable[_Any_pb2.Any | _Mapping[str, _Any]] | None = ...,
+        details: _Iterable[_any_pb2.Any | _Mapping[str, _Any]] | None = ...,
     ) -> None: ...

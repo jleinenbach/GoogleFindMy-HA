@@ -129,6 +129,68 @@ async def async_process_eid(hass, eid_bytes: bytes) -> dict[str, Any] | None:
 
 ---
 
+## BLE Battery State API
+
+When a BLE advertisement contains the optional **hashed-flags byte**
+(the byte immediately after the 20-byte EID), the resolver automatically
+decodes the battery level and stores it.  External integrations do not
+need to decode flags themselves.
+
+### Reading battery state
+
+```python
+from custom_components.googlefindmy.eid_resolver import BLEBatteryState
+
+if resolver:
+    # IMPORTANT: device_id must be the canonical_id (Google API device ID),
+    # i.e. device["id"] from the coordinator snapshot.
+    # This is NOT the HA device registry ID (match.device_id).
+    state: BLEBatteryState | None = resolver.get_ble_battery_state(canonical_id)
+    if state:
+        _LOGGER.info(
+            "Battery: %d%% (raw=%d, uwt=%s, observed=%.0f)",
+            state.battery_pct,
+            state.battery_level,
+            state.uwt_mode,
+            state.observed_at_wall,
+        )
+```
+
+### `BLEBatteryState` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `battery_level` | `int` | Raw FMDN 2-bit value: 0=GOOD, 1=LOW, 2=CRITICAL, 3=RESERVED |
+| `battery_pct` | `int` | Mapped percentage: 100, 25, 5, or 0 |
+| `uwt_mode` | `bool` | `True` if Unwanted Tracking protection is active (bit 7) |
+| `decoded_flags` | `int` | Fully decoded flags byte (after XOR) |
+| `observed_at_wall` | `float` | Wall-clock `time.time()` of the BLE observation |
+
+### Identity model — which ID to use
+
+The resolver stores battery state keyed by **`canonical_id`** (the Google
+API device identifier, e.g. `01KBBxxx:aaaaaaaa-…-bbbbbbbb`).  This is
+the same value as `device["id"]` in the coordinator snapshot.
+
+**Do not** use `EIDMatch.device_id` (the HA device registry ID) as the
+lookup key — it is a different identifier and the lookup will return
+`None`.
+
+See `docs/BLE_BATTERY_SENSOR.md` for a detailed architecture description
+and lessons learned.
+
+### Payload requirements for battery decoding
+
+For battery decoding to work, the BLE scanner must pass the **full raw
+payload** (including the hashed-flags byte) to `resolve_eid()`.  If only
+the bare 20-byte EID is passed, EID resolution will succeed but the
+battery state will not be decoded.
+
+Bermuda's `extract_raw_fmdn_payloads()` already preserves the full
+payload.  Other scanners should ensure they do not strip trailing bytes.
+
+---
+
 ## Technical Specification
 
 This section details the cryptographic construction and frame layout of the EIDs handled by the resolver. This information is critical for BLE scanner implementations to correctly extract the payload before calling the resolver.

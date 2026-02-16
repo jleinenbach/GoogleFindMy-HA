@@ -13,7 +13,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
@@ -35,6 +35,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD_3600,
     EidVariant,
     HeuristicBasis,
+    compute_flags_xor_mask,
     generate_eid_variant,
     generate_heuristic_eid,
 )
@@ -93,6 +94,11 @@ KNOWN_OFFSET_KEY_LENGTH = 2
 # of clock drift at 1024s rotation.
 LOCK_TRACKING_WINDOW_STEPS = 2
 
+# Maximum wall-clock time (seconds) the EID refresh loop may run before
+# yielding control back to the event loop via ``await asyncio.sleep(0)``.
+# Keeps the main thread responsive under HA's 10 ms watchdog budget.
+_YIELD_BUDGET_SECONDS: float = 0.008
+
 # =============================================================================
 # Heuristic Phone Discovery Configuration
 # =============================================================================
@@ -146,6 +152,52 @@ class DecryptionResult:
     metadata: dict[str, Any]
 
 
+@dataclass(slots=True)
+class BLEBatteryState:
+    """Decoded battery state from FMDN hashed-flags BLE advertisement.
+
+    Attributes:
+        battery_level: Raw FMDN value (0=GOOD, 1=LOW, 2=CRITICAL, 3=RESERVED).
+        battery_pct: Mapped percentage (100, 25, 5) or None for RESERVED (3).
+        uwt_mode: True if Unwanted Tracking mode is active (bit 7).
+        decoded_flags: Fully decoded flags byte (after XOR).
+        observed_at_wall: Wall-clock timestamp of the BLE observation (time.time()).
+    """
+
+    battery_level: int
+    battery_pct: int | None
+    uwt_mode: bool
+    decoded_flags: int
+    observed_at_wall: float
+
+
+@dataclass(slots=True)
+class BLEScanInfo:
+    """Last observed BLE scan metadata for a device.
+
+    Stored during EID resolution when a ``ble_address`` is provided by the
+    caller (typically Bermuda or another BLE scanner).  Used by the future
+    BLE ring fallback (Phase 2) to locate the device for a direct GATT
+    connection.
+
+    Attributes:
+        ble_address: Current BLE MAC address (rotates every ~15 min on FMDN).
+        observed_at: Monotonic timestamp (:func:`time.monotonic`) of the scan.
+        observed_at_wall: Wall-clock timestamp (:func:`time.time`) of the scan.
+    """
+
+    ble_address: str
+    observed_at: float
+    observed_at_wall: float
+
+
+# Mapping from FMDN 2-bit battery level to percentage.
+# Aligned with HA Core convention (cf. homeassistant/components/fitbit/const.py)
+# and HA icon thresholds in homeassistant/helpers/icon.py:
+#   100% → mdi:battery, 25% → mdi:battery-20, 5% → mdi:battery-alert
+FMDN_BATTERY_PCT: dict[int, int] = {0: 100, 1: 25, 2: 5}
+
+
 @runtime_checkable
 class _IdentityProvider(Protocol):
     """Protocol implemented by coordinators that can provide device identities."""
@@ -184,11 +236,15 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
         """
         ...
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:
+    def resolve_eid(
+        self, eid_bytes: bytes, *, ble_address: str | None = None
+    ) -> EIDMatch | None:
         """Resolve EID bytes to a matching device identity.
 
         Args:
             eid_bytes: Raw EID bytes from a BLE advertisement.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, stored for future direct GATT connections.
 
         Returns:
             EIDMatch with device identity info, or None if no match found.
@@ -198,7 +254,9 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
         """
         ...
 
-    def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
+    def resolve_eid_all(
+        self, eid_bytes: bytes, *, ble_address: str | None = None
+    ) -> list[EIDMatch]:
         """Resolve EID bytes to all matching device identities.
 
         This method supports shared devices: when the same physical tracker
@@ -206,10 +264,20 @@ class GoogleFindMyEIDResolverProtocol(Protocol):  # pylint: disable=unnecessary-
 
         Args:
             eid_bytes: Raw EID bytes from a BLE advertisement.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, stored for future direct GATT connections.
 
         Returns:
             List of EIDMatch entries for all accounts that share this device.
             Empty list if no match found.
+        """
+        ...
+
+    def get_ble_scan_info(self, device_id: str) -> BLEScanInfo | None:
+        """Return last observed BLE scan metadata for a device, or None.
+
+        Args:
+            device_id: The canonical_id (Google API device identifier).
         """
         ...
 
@@ -342,7 +410,7 @@ class CacheBuilder:
     lookup: dict[bytes, list[EIDMatch]] = field(default_factory=dict)
     metadata: dict[bytes, dict[str, Any]] = field(default_factory=dict)
 
-    def register_eid(
+    def register_eid(  # noqa: PLR0913
         self,
         eid_bytes: bytes,
         *,
@@ -350,6 +418,7 @@ class CacheBuilder:
         variant: EidVariant,
         window: WindowCandidate,
         advertisement_reversed: bool,
+        flags_xor_mask: int | None = None,
     ) -> None:
         """Register an EID and metadata, supporting multiple matches per EID.
 
@@ -401,7 +470,7 @@ class CacheBuilder:
 
         # Only update metadata if this match is the best (smallest offset)
         if best_match.device_id == match.device_id:
-            self.metadata[eid_bytes] = {
+            meta: dict[str, Any] = {
                 "variant": variant.value,
                 "rotation_timestamp": window.timestamp,
                 "time_offset": match.time_offset,
@@ -409,6 +478,9 @@ class CacheBuilder:
                 "timestamp_bases": timestamp_bases,
                 "advertisement_reversed": advertisement_reversed,
             }
+            if flags_xor_mask is not None:
+                meta["flags_xor_mask"] = flags_xor_mask
+            self.metadata[eid_bytes] = meta
         elif existing_metadata is not None and existing_bases is not None:
             existing_metadata["timestamp_bases"] = existing_bases
 
@@ -648,6 +720,11 @@ class GoogleFindMyEIDResolver:
         init=False, default_factory=dict
     )
     _heuristic_miss_log_at: dict[str, float] = field(init=False, default_factory=dict)
+    _flags_logged_devices: set[str] = field(init=False, default_factory=set)
+    _ble_battery_state: dict[str, BLEBatteryState] = field(
+        init=False, default_factory=dict
+    )
+    _ble_scan_info: dict[str, BLEScanInfo] = field(init=False, default_factory=dict)
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -655,7 +732,16 @@ class GoogleFindMyEIDResolver:
 
         self._ensure_cache_defaults()
         self._store = Store(self.hass, STORAGE_VERSION, STORAGE_KEY)
-        self._load_task = self.hass.async_create_task(self._async_load_locks())
+        load_coro = self._async_load_locks()
+        self._load_task = self.hass.async_create_task(load_coro)
+        if self._load_task is None or not isinstance(self._load_task, asyncio.Task):
+            # Task creation returned None or non-Task (e.g., in tests with mocks)
+            # Close the coroutine to prevent "coroutine never awaited" warnings
+            try:
+                load_coro.close()
+            except Exception:  # pragma: no cover - defensive close
+                pass
+            self._load_task = None
         self._start_alignment_timer()
 
     def _ensure_cache_defaults(self) -> None:  # noqa: PLR0912
@@ -684,6 +770,12 @@ class GoogleFindMyEIDResolver:
             self._learned_heuristic_params = {}
         if not hasattr(self, "_heuristic_miss_log_at"):
             self._heuristic_miss_log_at = {}
+        if not hasattr(self, "_flags_logged_devices"):
+            self._flags_logged_devices = set()
+        if not hasattr(self, "_ble_battery_state"):
+            self._ble_battery_state = {}
+        if not hasattr(self, "_ble_scan_info"):
+            self._ble_scan_info = {}
         if not hasattr(self, "_cached_identities"):
             self._cached_identities = []
 
@@ -786,6 +878,7 @@ class GoogleFindMyEIDResolver:
     def _schedule_lock_save(self) -> None:
         """Schedule persistence of EID locks."""
 
+        lock_save: Coroutine[Any, Any, None] | None = None
         try:
             task_name = "googlefindmy_eid_resolver_save"
             create_task = getattr(
@@ -800,22 +893,32 @@ class GoogleFindMyEIDResolver:
                 scheduled = create_task(lock_save)
             if scheduled is None:
                 asyncio.create_task(lock_save)
+                lock_save = None  # Ownership transferred to asyncio.create_task
                 _LOGGER.warning(
                     "EID lock save was not scheduled (task helper returned None)"
                 )
             elif asyncio.iscoroutine(scheduled):
                 asyncio.create_task(scheduled)
+                lock_save = None  # Ownership transferred
             elif not isinstance(scheduled, asyncio.Task):
                 try:
                     lock_save.close()
                 except Exception:  # pragma: no cover - defensive close
                     pass
+                lock_save = None
                 _LOGGER.warning(
                     "EID lock save task helper returned non-awaitable %s; coroutine closed",
                     type(scheduled).__name__,
                 )
+            else:
+                lock_save = None  # Ownership transferred to task
         except Exception as err:  # pragma: no cover - defensive log
             _LOGGER.error("Failed to schedule EID lock persistence: %s", err)
+            if lock_save is not None:
+                try:
+                    lock_save.close()
+                except Exception:  # pragma: no cover - defensive close
+                    pass
 
     def _purge_stale_locks(self, *, now: int) -> None:  # noqa: PLR0912
         """Drop expired generation locks to keep cache fresh."""
@@ -1412,6 +1515,7 @@ class GoogleFindMyEIDResolver:
         work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
         builder = CacheBuilder()
+        _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
@@ -1427,6 +1531,14 @@ class GoogleFindMyEIDResolver:
             for window in windows:
                 variants = self._compute_variants(work_item, window)
                 for variant_spec in variants:
+                    xor_mask: int | None = None
+                    try:
+                        xor_mask = compute_flags_xor_mask(
+                            variant_spec.key_bytes,
+                            variant_spec.window.timestamp,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                     for generated in self._generate_eids_from_spec(variant_spec):
                         match = EIDMatch(
                             device_id=work_item.registry_id,
@@ -1441,7 +1553,14 @@ class GoogleFindMyEIDResolver:
                             variant=generated.variant,
                             window=generated.window,
                             advertisement_reversed=generated.is_reversed,
+                            flags_xor_mask=xor_mask,
                         )
+
+            # Cooperative yield: give the event loop a chance to process
+            # pending callbacks when the CPU budget for this tick is spent.
+            if time.monotonic() >= _yield_deadline:
+                await asyncio.sleep(0)
+                _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         self._lookup, self._lookup_metadata = builder.finalize()
         _LOGGER.debug(
@@ -1767,6 +1886,12 @@ class GoogleFindMyEIDResolver:
             and owner_key_info.version is not None
             and owner_key_info.version < identity.owner_key_version
         ):
+            _LOGGER.info(
+                "Owner Key Version mismatch detected: Tracker requires V%s, "
+                "Cache has V%s. Refreshing...",
+                identity.owner_key_version,
+                owner_key_info.version,
+            )
             refreshed = await _fetch(force_refresh=True)
             if refreshed is not None:
                 return refreshed
@@ -2186,6 +2311,11 @@ class GoogleFindMyEIDResolver:
                     now=now,
                 )
 
+            # ---------------------------------------------------------
+            # FMDN BLE battery: decode flags + store per device
+            # ---------------------------------------------------------
+            self._update_ble_battery(raw, observed_frame, metadata, matches)
+
             return matches, candidate, observed_frame
 
         # =================================================================
@@ -2221,20 +2351,220 @@ class GoogleFindMyEIDResolver:
             )
         return [], None, None
 
-    def resolve_eid(self, eid_bytes: bytes) -> EIDMatch | None:  # noqa: PLR0911, PLR0912, PLR0915
+    # ------------------------------------------------------------------
+    # FMDN BLE battery decode + store
+    # ------------------------------------------------------------------
+    def _update_ble_battery(
+        self,
+        raw: bytes,
+        observed_frame: int | None,
+        metadata: dict[str, Any],
+        matches: list[EIDMatch],
+    ) -> None:
+        """Decode the FMDN hashed-flags byte and store battery state.
+
+        Extracts the optional flags byte from the BLE payload, XOR-decodes
+        it, and persists a :class:`BLEBatteryState` keyed by
+        ``canonical_id`` (the Google API device identifier) for **every**
+        matched device (shared-device propagation).
+
+        The canonical_id key must match the ``device["id"]`` used by the
+        coordinator snapshot and :class:`GoogleFindMyBLEBatterySensor` so
+        that :meth:`get_ble_battery_state` lookups succeed.
+
+        On first successful decode per device an INFO-level
+        ``FMDN_FLAGS_PROBE`` log is emitted; subsequent updates log at
+        DEBUG level only when the battery level changes.
+        """
+        if not matches:
+            return
+
+        length = len(raw)
+        xor_mask: int | None = metadata.get("flags_xor_mask")
+
+        # ---- Determine the hashed-flags byte position ----
+        flags_byte: int | None = None
+        if (
+            length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+            and raw[7] == FMDN_FRAME_TYPE
+        ):
+            # Service-data format: [header(7)][frame(1)][EID(20)][flags(1)]
+            flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+        elif (
+            length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+            and raw[0] == FMDN_FRAME_TYPE
+        ):
+            # Raw-header format: [frame(1)][EID(20)][flags(1)]
+            flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+
+        # ---- Decode and store ----
+        if flags_byte is not None and xor_mask is not None:
+            decoded = flags_byte ^ xor_mask
+            battery_raw = (decoded >> 5) & 0x03  # bits 5-6
+            uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
+            battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
+            now_wall = time.time()
+
+            state = BLEBatteryState(
+                battery_level=battery_raw,
+                battery_pct=battery_pct,
+                uwt_mode=uwt_mode,
+                decoded_flags=decoded,
+                observed_at_wall=now_wall,
+            )
+
+            battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
+            battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
+
+            # Store for ALL matches (shared-device propagation).
+            # Key by canonical_id (Google API device ID) — this is the same
+            # identifier used by the coordinator snapshot (device["id"]) and
+            # by GoogleFindMyBLEBatterySensor._device_id so that
+            # get_ble_battery_state() lookups succeed.
+            for match in matches:
+                storage_key = match.canonical_id or match.device_id
+                prev = self._ble_battery_state.get(storage_key)
+                self._ble_battery_state[storage_key] = state
+
+                # First decode per device → INFO probe log (once per device)
+                if storage_key not in self._flags_logged_devices:
+                    _LOGGER.info(
+                        "FMDN_FLAGS_PROBE device=%s canonical=%s "
+                        "flags_byte=0x%02x xor_mask=0x%02x decoded=0x%02x "
+                        "battery=%s(%d) battery_pct=%s uwt_mode=%s "
+                        "observed_frame=%s payload_len=%d",
+                        match.device_id,
+                        match.canonical_id,
+                        flags_byte,
+                        xor_mask,
+                        decoded,
+                        battery_label,
+                        battery_raw,
+                        battery_pct,
+                        uwt_mode,
+                        f"0x{observed_frame:02x}"
+                        if observed_frame is not None
+                        else None,
+                        length,
+                    )
+                    self._flags_logged_devices.add(storage_key)
+                elif prev is not None and prev.battery_level != battery_raw:
+                    # Battery level changed → DEBUG log
+                    _LOGGER.debug(
+                        "BLE battery changed device=%s %s(%d)→%s(%d)",
+                        storage_key,
+                        battery_labels.get(prev.battery_level, "?"),
+                        prev.battery_level,
+                        battery_label,
+                        battery_raw,
+                    )
+        else:
+            # Cannot decode — log once per device at DEBUG for diagnostics
+            for match in matches:
+                storage_key = match.canonical_id or match.device_id
+                if storage_key not in self._flags_logged_devices:
+                    _max_hex = 40  # noqa: PLR2004
+                    raw_hex = (
+                        raw.hex()
+                        if length <= _max_hex
+                        else raw[:_max_hex].hex() + "..."
+                    )
+                    _LOGGER.debug(
+                        "FMDN_FLAGS_PROBE device=%s canonical=%s "
+                        "CANNOT_DECODE observed_frame=%s payload_len=%d "
+                        "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",
+                        match.device_id,
+                        match.canonical_id,
+                        f"0x{observed_frame:02x}"
+                        if observed_frame is not None
+                        else None,
+                        length,
+                        xor_mask is not None,
+                        flags_byte is not None,
+                        raw_hex,
+                    )
+                    self._flags_logged_devices.add(storage_key)
+
+    # ------------------------------------------------------------------
+    # Public BLE battery API
+    # ------------------------------------------------------------------
+    def get_ble_battery_state(self, device_id: str) -> BLEBatteryState | None:
+        """Return the last observed BLE battery state for a device, or None.
+
+        The *device_id* parameter is the **canonical_id** (Google API device
+        identifier, i.e. ``device["id"]`` from the coordinator snapshot),
+        not the HA device-registry ID.
+        """
+        return self._ble_battery_state.get(device_id)
+
+    # ------------------------------------------------------------------
+    # Public BLE scan info API (Phase 2.2 preparation)
+    # ------------------------------------------------------------------
+    def get_ble_scan_info(self, device_id: str) -> BLEScanInfo | None:
+        """Return last observed BLE scan metadata for a device, or None.
+
+        The *device_id* parameter is the **canonical_id** (Google API device
+        identifier, i.e. ``device["id"]`` from the coordinator snapshot),
+        not the HA device-registry ID.
+
+        The returned :class:`BLEScanInfo` contains the current (rotated) BLE
+        MAC address and the timestamp of the last observation.  FMDN trackers
+        rotate their MAC every ~15 minutes, so callers should check
+        ``observed_at`` freshness before attempting GATT connections.
+        """
+        return self._ble_scan_info.get(device_id)
+
+    def _record_ble_scan_info(self, matches: list[EIDMatch], ble_address: str) -> None:
+        """Store the BLE address for all matched devices.
+
+        Called from :meth:`resolve_eid` when the caller provides a
+        ``ble_address``.  Uses the same canonical_id keying pattern
+        as :attr:`_ble_battery_state`.
+        """
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        for match in matches:
+            storage_key = match.canonical_id or match.device_id
+            self._ble_scan_info[storage_key] = BLEScanInfo(
+                ble_address=ble_address,
+                observed_at=now_mono,
+                observed_at_wall=now_wall,
+            )
+
+    def resolve_eid(  # noqa: PLR0911, PLR0912, PLR0915
+        self,
+        eid_bytes: bytes,
+        *,
+        ble_address: str | None = None,
+    ) -> EIDMatch | None:
         """Resolve a scanned payload to a Home Assistant device registry ID.
 
         For shared devices (same tracker across multiple accounts), this returns
         the match with the smallest time_offset (best match).
         Use resolve_eid_all() to get all matches.
+
+        Args:
+            eid_bytes: Raw EID bytes from a BLE advertisement.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, the address is stored for future direct GATT
+                connections (e.g. BLE ring fallback).  This parameter is
+                backward-compatible: existing callers that omit it are
+                unaffected.
         """
         matches, _, _ = self._resolve_eid_internal(eid_bytes)
         if not matches:
             return None
+        if ble_address is not None:
+            self._record_ble_scan_info(matches, ble_address)
         # Return the match with the smallest absolute time_offset (best match)
         return min(matches, key=lambda m: abs(m.time_offset))
 
-    def resolve_eid_all(self, eid_bytes: bytes) -> list[EIDMatch]:
+    def resolve_eid_all(
+        self,
+        eid_bytes: bytes,
+        *,
+        ble_address: str | None = None,
+    ) -> list[EIDMatch]:
         """Resolve a scanned payload to all matching Home Assistant device registry IDs.
 
         This method supports shared devices: when the same physical tracker
@@ -2244,12 +2574,13 @@ class GoogleFindMyEIDResolver:
 
         Args:
             eid_bytes: Raw EID bytes from a BLE advertisement.
-
-        Returns:
-            List of EIDMatch entries for all accounts that share this device.
-            Empty list if no match found.
+            ble_address: Optional BLE MAC address of the advertising device.
+                When provided, the address is stored for future direct GATT
+                connections (e.g. BLE ring fallback).
         """
         matches, _, _ = self._resolve_eid_internal(eid_bytes)
+        if matches and ble_address is not None:
+            self._record_ble_scan_info(matches, ble_address)
         return matches
 
     def _extract_candidates(  # noqa: PLR0912
@@ -2296,23 +2627,13 @@ class GoogleFindMyEIDResolver:
                 observed_frame = frame_type
                 modern_required_length = RAW_HEADER_LENGTH + MODERN_EID_LENGTH
 
-                def _legacy_payload_start() -> int:
-                    """Return the starting index for a legacy-length payload slice."""
-
-                    if (
-                        length == RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
-                        and payload[RAW_HEADER_LENGTH] == 0
-                        and payload[-1] != 0
-                    ):
-                        return RAW_HEADER_LENGTH + 1
-                    return RAW_HEADER_LENGTH
-
                 if frame_type == FMDN_FRAME_TYPE and length >= (
                     RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
                 ):
-                    payload_start = _legacy_payload_start()
                     candidates.append(
-                        payload[payload_start : payload_start + LEGACY_EID_LENGTH]
+                        payload[
+                            RAW_HEADER_LENGTH : RAW_HEADER_LENGTH + LEGACY_EID_LENGTH
+                        ]
                     )
                 elif frame_type == MODERN_FRAME_TYPE:
                     if length >= modern_required_length:
@@ -2328,9 +2649,11 @@ class GoogleFindMyEIDResolver:
                         <= length
                         <= (RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1)
                     ):
-                        payload_start = _legacy_payload_start()
                         candidates.append(
-                            payload[payload_start : payload_start + LEGACY_EID_LENGTH]
+                            payload[
+                                RAW_HEADER_LENGTH : RAW_HEADER_LENGTH
+                                + LEGACY_EID_LENGTH
+                            ]
                         )
                     else:
                         allow_sliding_window = length >= modern_required_length - 1

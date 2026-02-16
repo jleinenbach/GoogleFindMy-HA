@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import warnings
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol, cast, runtime_checkable
@@ -565,11 +566,8 @@ class GoogleFindMyAPI:
         """Return the event loop the sync helpers should execute on."""
 
         if self._session is not None:
-            session_loop = cast(
-                asyncio.AbstractEventLoop | None,
-                getattr(self._session, "_loop", None),
-            )
-            if session_loop is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
                 session_loop = cast(
                     asyncio.AbstractEventLoop | None,
                     getattr(self._session, "loop", None),
@@ -1537,8 +1535,15 @@ class GoogleFindMyAPI:
                 )
                 return (False, None)
 
-            _response_hex, request_uuid = result
+            response_hex, request_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
+            _LOGGER.debug(
+                "Play Sound Nova response for %s (uuid=%s): %d bytes: %s",
+                device_id,
+                request_uuid[:8] if request_uuid else "none",
+                len(response_hex) // 2 if response_hex else 0,
+                response_hex[:200] if response_hex else "(empty)",
+            )
             return (True, request_uuid)
 
         except NovaAuthError as err:
@@ -1631,6 +1636,12 @@ class GoogleFindMyAPI:
             if ok:
                 _LOGGER.info(
                     "Stop Sound (async) submitted successfully for %s", device_id
+                )
+                _LOGGER.debug(
+                    "Stop Sound Nova response for %s: %d bytes: %s",
+                    device_id,
+                    len(result_hex) // 2 if result_hex else 0,
+                    result_hex[:200] if result_hex else "(empty)",
                 )
             else:
                 _LOGGER.error(

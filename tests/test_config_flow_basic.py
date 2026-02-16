@@ -35,8 +35,8 @@ def test_flow_module_import_and_handler_registry() -> None:
     assert getattr(handler, "domain", None) == DOMAIN
 
 
-def test_supported_subentry_types_disable_manual_flows() -> None:
-    """Config flow should not expose manual subentry factories to the UI."""
+def test_supported_subentry_types_returns_empty_to_hide_ui() -> None:
+    """Config flow should return empty dict to hide subentry UI buttons."""
 
     from custom_components.googlefindmy import config_flow  # noqa: PLC0415
 
@@ -49,7 +49,10 @@ def test_supported_subentry_types_disable_manual_flows() -> None:
 
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)  # type: ignore[arg-type]
 
-    assert mapping == {}, "UI should not expose manual subentry types"
+    # Must return empty dict to hide "Add hub feature group" and
+    # "Add service feature group" buttons in the HA config entry UI.
+    # Subentries are provisioned programmatically, not manually by users.
+    assert mapping == {}, "UI should not expose manual subentry buttons"
 
 
 def test_subentry_update_constructor_allows_config_entry_and_subentry() -> None:

@@ -116,7 +116,6 @@ def _run(coro):
 
     loop = asyncio.new_event_loop()
     try:
-        asyncio.set_event_loop(loop)
         return loop.run_until_complete(coro)
     finally:
         drain_loop(loop)
@@ -142,7 +141,6 @@ def test_async_get_config_entry_diagnostics_includes_buffer(
         diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
     )
     monkeypatch.setattr(diagnostics, "async_redact_data", _redact)
-    monkeypatch.setattr(diagnostics, "GoogleFindMyCoordinator", _StubCoordinator)
 
     payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
 

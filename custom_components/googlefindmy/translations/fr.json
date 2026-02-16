@@ -1,5 +1,4 @@
 {
-  "title": "Google Find My Device",
   "device": {
     "google_find_hub_service": {
       "name": "Service du hub Google Find"
@@ -98,9 +97,9 @@
   "config_subentries": {
     "hub": {
       "title": "Google Find My Device Hub",
-      "entry_type": "Hub feature group",
+      "entry_type": "Groupe de fonctionnalités du hub",
       "initiate_flow": {
-        "user": "Add hub feature group"
+        "user": "Ajouter un groupe de fonctionnalités du hub"
       },
       "step": {
         "user": {
@@ -117,9 +116,9 @@
     },
     "service": {
       "title": "Service Google Find Hub",
-      "entry_type": "Service feature group",
+      "entry_type": "Groupe de fonctionnalités du service",
       "initiate_flow": {
-        "user": "Add service feature group"
+        "user": "Ajouter un groupe de fonctionnalités du service"
       },
       "step": {
         "user": {
@@ -136,9 +135,9 @@
     },
     "core_tracking": {
       "title": "Appareils Google Find My",
-      "entry_type": "Device feature group",
+      "entry_type": "Groupe de fonctionnalités des appareils",
       "initiate_flow": {
-        "user": "Add device feature group"
+        "user": "Ajouter un groupe de fonctionnalités des appareils"
       },
       "step": {
         "user": {
@@ -163,26 +162,26 @@
           "credentials": "Mettre à jour les identifiants",
           "settings": "Modifier les paramètres",
           "visibility": "Visibilité des appareils",
-          "semantic_locations": "Semantic locations",
+          "semantic_locations": "Emplacements sémantiques",
           "repairs": "Réparations des groupes de fonctionnalités"
         }
       },
       "semantic_locations_menu": {
-        "title": "Semantic locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Emplacements sémantiques",
+        "description": "Gérez les remplacements d’emplacements sémantiques. Correspondances existantes :\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_location_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Ajouter un emplacement sémantique",
+          "semantic_location_edit": "Modifier un emplacement sémantique",
+          "semantic_locations_delete": "Supprimer un emplacement sémantique"
         }
       },
       "semantic_locations": {
-        "title": "Semantic Locations",
-        "description": "Manage semantic location overrides. Existing mappings:\n{semantic_locations}",
+        "title": "Emplacements sémantiques",
+        "description": "Gérez les remplacements d’emplacements sémantiques. Correspondances existantes :\n{semantic_locations}",
         "menu_options": {
-          "semantic_locations_add": "Add semantic location",
-          "semantic_locations_edit": "Edit semantic location",
-          "semantic_locations_delete": "Delete semantic location"
+          "semantic_locations_add": "Ajouter un emplacement sémantique",
+          "semantic_locations_edit": "Modifier un emplacement sémantique",
+          "semantic_locations_delete": "Supprimer un emplacement sémantique"
         }
       },
       "semantic_locations_add": {
@@ -199,10 +198,10 @@
         }
       },
       "semantic_locations_edit": {
-        "title": "Choose semantic location",
-        "description": "Select a semantic location to edit.",
+        "title": "Choisir un emplacement sémantique",
+        "description": "Sélectionnez un emplacement sémantique à modifier.",
         "data": {
-          "semantic_location": "Semantic location"
+          "semantic_location": "Emplacement sémantique"
         }
       },
       "semantic_location_edit": {
@@ -232,10 +231,10 @@
         }
       },
       "semantic_locations_delete": {
-        "title": "Delete semantic locations",
-        "description": "Select semantic locations to delete.",
+        "title": "Supprimer des emplacements sémantiques",
+        "description": "Sélectionnez les emplacements sémantiques à supprimer.",
         "data": {
-          "semantic_locations": "Semantic locations"
+          "semantic_locations": "Emplacements sémantiques"
         }
       },
       "credentials": {
@@ -251,12 +250,12 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour les différents parcours."
+          "subentry": "Appliquez les mises à jour d’identifiants au groupe de fonctionnalités sélectionné. Consultez la section [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour les différents parcours."
         }
       },
       "settings": {
         "title": "Options",
-        "description": "Ajuster les paramètres de localisation :\n• Intervalle d'interrogation de localisation : fréquence des interrogations (60–3600 secondes)\n• Délai entre interrogations d'appareils : intervalle entre les requêtes par appareil (1–60 secondes)\n• Seuil d'obsolescence : au-delà de ce délai sans mise à jour, l'état du traceur passe à inconnu\n\nFiltre Google Home :\n• Activer pour associer les détections des appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge les correspondances partielles (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
+        "description": "Ajuster les paramètres de localisation :\n• Intervalle de sondage de localisation : Fréquence de sondage des localisations (60–3600 secondes)\n• Délai entre les sondages d’appareils : Délai entre les sondages d’appareils (1–60 secondes)\n• Seuil d’obsolescence : Au-delà de ce délai sans mise à jour, l’état du traceur passe à inconnu\n\nFiltre Google Home :\n• Activer pour associer les détections d’appareils Google Home à la zone Domicile\n• Les mots-clés prennent en charge la correspondance partielle (séparés par des virgules)\n• Exemple : « nest » correspond à « Kitchen Nest Mini »",
         "data": {
           "location_poll_interval": "Intervalle d'interrogation de position (s)",
           "device_poll_delay": "Délai entre les interrogations d'appareil (s)",
@@ -270,11 +269,11 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "stale_threshold": "Après ce délai en secondes sans mise à jour de position, l'état du traceur passe à inconnu. Les dernières coordonnées connues restent disponibles dans les attributs. Par défaut : 1800 (30 minutes).",
+          "stale_threshold": "Après ce délai en secondes sans mise à jour de position, l'état du traceur passe à inconnu. Utilisez l'entité 'Dernière position' pour toujours voir la dernière position connue. Par défaut : 1800 (30 minutes).",
           "delete_caches_on_remove": "Supprime les jetons mis en cache et les métadonnées des appareils lors de la suppression de cette entrée.",
           "map_view_token_expiration": "Lorsqu'elle est activée, les jetons de la vue carte expirent après 1 semaine. Lorsqu'elle est désactivée (par défaut), ils n'expirent pas.",
-          "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut les zones à forte affluence ou Toutes les zones pour une contribution participative).",
-          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour des exemples."
+          "contributor_mode": "Choisissez comment votre appareil contribue au réseau Google (par défaut Toutes les zones pour une contribution participative ou uniquement les zones à forte affluence).",
+          "subentry": "Enregistrez ces options pour le groupe de fonctionnalités sélectionné. Consultez [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour des exemples."
         }
       },
       "visibility": {
@@ -285,7 +284,7 @@
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
-          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Sous-entrées et groupes de fonctionnalités](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) pour obtenir des conseils."
+          "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour obtenir des conseils."
         }
       },
       "repairs": {
@@ -322,15 +321,15 @@
       "choose_one": "Veuillez fournir exactement une méthode d’authentification.",
       "required": "Ce champ est obligatoire.",
       "invalid_token": "Identifiants invalides (jeton/e-mail). Veuillez vérifier le format et le contenu.",
-      "duplicate_name": "Semantic name already exists. Choose a different name.",
-      "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
+      "duplicate_name": "Le nom sémantique existe déjà. Choisissez un autre nom.",
+      "duplicate_semantic_location": "Le nom sémantique existe déjà. Choisissez un autre nom.",
       "unknown": "Erreur inattendue.",
       "invalid_subentry": "Choisissez un groupe de fonctionnalités valide."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
       "no_ignored_devices": "Aucun appareil ignoré à restaurer.",
-      "no_semantic_locations": "No semantic locations are configured.",
+      "no_semantic_locations": "Aucun emplacement sémantique n’est configuré.",
       "repairs_no_subentries": "Aucun groupe de fonctionnalités à réparer.",
       "repair_no_devices": "Sélectionnez au moins un appareil à déplacer.",
       "subentry_move_success": "Appareils attribués à **{subentry}** ({count} mis à jour).",
@@ -464,8 +463,19 @@
           }
         }
       },
+      "uwt_mode": {
+        "name": "Mode de suivi indésirable",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "Dernière observation BLE"
+          },
+          "google_device_id": {
+            "name": "ID d'appareil Google"
+          }
+        }
+      },
       "nova_auth_status": {
-        "name": "Statut d’authentification de l’API Nova",
+        "name": "Statut d'authentification de l'API Nova",
         "state_attributes": {
           "nova_api_status": {
             "name": "Statut de l’API Nova"
@@ -490,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Appareil",
         "state_attributes": {
           "device_name": {
             "name": "Nom de l’appareil"
@@ -547,9 +556,65 @@
             "name": "Dernière longitude connue"
           }
         }
+      },
+      "last_location": {
+        "name": "Dernière position",
+        "state_attributes": {
+          "device_name": {
+            "name": "Nom de l'appareil"
+          },
+          "device_id": {
+            "name": "ID de l'appareil"
+          },
+          "status": {
+            "name": "Statut"
+          },
+          "semantic_name": {
+            "name": "Étiquette sémantique"
+          },
+          "battery_level": {
+            "name": "Niveau de batterie"
+          },
+          "last_seen": {
+            "name": "Vu pour la dernière fois (rapporté)"
+          },
+          "last_seen_utc": {
+            "name": "Vu pour la dernière fois (UTC)"
+          },
+          "source_label": {
+            "name": "Étiquette de source"
+          },
+          "source_rank": {
+            "name": "Rang de source"
+          },
+          "is_own_report": {
+            "name": "Rapport de l'appareil propre"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Précision (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Âge de la position (s)"
+          },
+          "location_status": {
+            "name": "État de la position"
+          }
+        }
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "Batterie BLE"
+      },
       "last_seen": {
         "name": "Vu pour la dernière fois",
         "state_attributes": {
@@ -618,15 +683,15 @@
       "stat_invalid_coords": {
         "name": "Coordonnées invalides"
       },
-        "stat_fused_updates": {
-            "name": "Mises à jour de position fusionnées"
-        }
+      "stat_fused_updates": {
+        "name": "Mises à jour de position fusionnées"
+      }
     }
   },
   "issues": {
     "auth_expired": {
       "title": "Une réauthentification est requise",
-      "description": "L’authentification de Google Find My Device n’est plus valide ou a expiré.\n\n**Entrée :** {entry_title}\n**Compte :** {email}\n\nDans la carte de l’intégration, choisissez **Reconfigurer** pour vous réauthentifier. Si vous avez récemment changé votre mot de passe Google ou révoqué des jetons, vous devrez vous reconnecter ici pour rétablir le fonctionnement."
+      "description": "L'authentification de Google Find My Device n'est plus valide ou a expiré.\n\n**Entrée :** {entry_title}\n**Compte :** {email}\n\nDans la carte de l'intégration, choisissez **Reconfigurer** pour vous réauthentifier. Si vous avez récemment changé votre mot de passe Google ou révoqué des jetons, vous devrez vous reconnecter ici pour rétablir le fonctionnement.\n\n**Conseil :** Google peut révoquer les jetons lorsque les requêtes proviennent d'une adresse IP ou d'une région différente de celle où le jeton a été créé (par ex. jeton généré sur un ordinateur portable mais utilisé depuis un serveur ou un VPS dans un autre pays). Générez votre `secrets.json` sur le même réseau que Home Assistant, ou utilisez la même adresse IP publique."
     },
     "fcm_connection_stuck": {
       "title": "Échec de la connexion push FCM",
@@ -679,6 +744,14 @@
       "entries": "Entrées de configuration",
       "fcm": "Récepteur FCM",
       "fcm_lock_contention_count": "Nombre de contentions du verrou FCM"
+    }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "Zones à fort trafic uniquement",
+        "in_all_areas": "Toutes les zones (crowdsourcing)"
+      }
     }
   }
 }

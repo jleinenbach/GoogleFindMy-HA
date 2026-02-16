@@ -585,19 +585,17 @@ class TestMergeCacheRow:
         existing: dict[str, Any] = {
             "latitude": 52.0,
             "longitude": 13.0,
+            "accuracy": 20.0,
             "last_seen": 1000.0,
         }
         incoming: dict[str, Any] = {
             "latitude": 53.0,  # ~111km north
             "longitude": 13.0,
+            "accuracy": 20.0,
             "last_seen": None,
         }
-        result = merge_cache_row(
-            existing=existing,
-            incoming=incoming,
-            significant_change_meters=50.0,  # Default threshold
-        )
-        # Should allow update due to significant distance
+        result = merge_cache_row(existing=existing, incoming=incoming)
+        # 111km >> adaptive threshold (~14m for 20m+20m accuracy)
         assert result["latitude"] == 53.0
 
     def test_insignificant_distance_blocks_update_without_timestamp(self) -> None:
@@ -605,21 +603,73 @@ class TestMergeCacheRow:
         existing: dict[str, Any] = {
             "latitude": 52.0,
             "longitude": 13.0,
+            "accuracy": 20.0,
             "last_seen": 1000.0,
         }
         incoming: dict[str, Any] = {
-            "latitude": 52.0001,  # Very close
+            "latitude": 52.0001,  # ~11m - below adaptive threshold
             "longitude": 13.0001,
+            "accuracy": 20.0,
             "last_seen": None,
         }
-        result = merge_cache_row(
-            existing=existing,
-            incoming=incoming,
-            significant_change_meters=50.0,
-        )
-        # Should block update due to insignificant distance
+        result = merge_cache_row(existing=existing, incoming=incoming)
+        # 11m < adaptive threshold (~14m for 20m+20m accuracy)
         assert result["latitude"] == 52.0
         assert result["longitude"] == 13.0
+
+    def test_adaptive_threshold_gps_allows_small_movement(self) -> None:
+        """Good GPS accuracy (10m) allows small but real movements (>7m)."""
+        existing: dict[str, Any] = {
+            "latitude": 52.0,
+            "longitude": 13.0,
+            "accuracy": 10.0,
+            "last_seen": 1000.0,
+        }
+        incoming: dict[str, Any] = {
+            # ~15m north-east - above adaptive threshold (~7m for 10m+10m)
+            "latitude": 52.0001,
+            "longitude": 13.00015,
+            "accuracy": 10.0,
+            "last_seen": None,
+        }
+        result = merge_cache_row(existing=existing, incoming=incoming)
+        assert result["latitude"] == 52.0001
+
+    def test_adaptive_threshold_ble_blocks_noise(self) -> None:
+        """Poor BLE accuracy (200m) blocks small positional noise."""
+        existing: dict[str, Any] = {
+            "latitude": 52.0,
+            "longitude": 13.0,
+            "accuracy": 200.0,
+            "last_seen": 1000.0,
+        }
+        incoming: dict[str, Any] = {
+            # ~50m north - below adaptive threshold (~141m for 200m+200m)
+            "latitude": 52.00045,
+            "longitude": 13.0,
+            "accuracy": 200.0,
+            "last_seen": None,
+        }
+        result = merge_cache_row(existing=existing, incoming=incoming)
+        # 50m < 141m threshold → blocked
+        assert result["latitude"] == 52.0
+
+    def test_adaptive_threshold_no_accuracy_uses_fallback(self) -> None:
+        """Missing accuracy falls back to 200m, creating a high threshold."""
+        existing: dict[str, Any] = {
+            "latitude": 52.0,
+            "longitude": 13.0,
+            "last_seen": 1000.0,
+        }
+        incoming: dict[str, Any] = {
+            # ~50m north - below fallback threshold (~141m for 200m+200m)
+            "latitude": 52.00045,
+            "longitude": 13.0,
+            "last_seen": None,
+        }
+        result = merge_cache_row(existing=existing, incoming=incoming)
+        # No accuracy → 200m fallback → threshold ~141m → blocked
+        assert result["latitude"] == 52.0
 
     def test_does_not_mutate_inputs(self) -> None:
         """Input dictionaries are not mutated."""

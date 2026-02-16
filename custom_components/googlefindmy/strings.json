@@ -1,5 +1,4 @@
 {
-  "title": "Google Find My Device",
   "device": {
     "google_find_hub_service": {
       "name": "Google Find Hub Service"
@@ -251,15 +250,16 @@
           "subentry": "Feature group"
         },
         "data_description": {
-          "subentry": "Apply credential updates to the selected feature group. Review the [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) guide for workflow details."
+          "subentry": "Apply credential updates to the selected feature group. Review the [Subentries and feature groups]({subentries_docs_url}) guide for workflow details."
         }
       },
       "settings": {
         "title": "Options",
-        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: “nest” matches “Kitchen Nest Mini”",
+        "description": "Adjust location settings:\n• Location poll interval: How often to poll for locations (60–3600 seconds)\n• Device poll delay: Delay between device polls (1–60 seconds)\n• Stale threshold: After this time without updates, tracker state becomes unknown\n\nGoogle Home Filter:\n• Enable to associate detections from Google Home devices with the Home zone\n• Keywords support partial matching (comma-separated)\n• Example: nest matches Kitchen Nest Mini",
         "data": {
           "location_poll_interval": "Location poll interval (s)",
           "device_poll_delay": "Device poll delay (s)",
+          "stale_threshold": "Stale threshold (s)",
           "google_home_filter_enabled": "Filter Google Home devices",
           "google_home_filter_keywords": "Filter keywords (comma-separated)",
           "enable_stats_entities": "Create statistics entities",
@@ -269,10 +269,11 @@
           "subentry": "Feature group"
         },
         "data_description": {
+          "stale_threshold": "After this many seconds without a location update, the tracker state becomes unknown. Use the 'Last Location' entity to always see the last known position. Default: 1800 (30 minutes).",
           "delete_caches_on_remove": "Remove cached tokens and device metadata when this entry is deleted.",
           "map_view_token_expiration": "When enabled, map view tokens expire after 1 week. When disabled (default), tokens do not expire.",
           "contributor_mode": "Choose how your device contributes to Google's network (High-traffic areas by default, or All areas for crowdsourced reporting).",
-          "subentry": "Store these options on the selected feature group. See [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) for examples."
+          "subentry": "Store these options on the selected feature group. See [Subentries and feature groups]({subentries_docs_url}) for examples."
         }
       },
       "visibility": {
@@ -283,7 +284,7 @@
           "subentry": "Feature group"
         },
         "data_description": {
-          "subentry": "Restored devices join the feature group you choose. See [Subentries and feature groups](https://github.com/BSkando/GoogleFindMy-HA/blob/main/README.md#subentries-and-feature-groups) for assignment guidance."
+          "subentry": "Restored devices join the feature group you choose. See [Subentries and feature groups]({subentries_docs_url}) for assignment guidance."
         }
       },
       "repairs": {
@@ -308,15 +309,6 @@
         "data": {
           "delete_subentry": "Subentry to delete",
           "fallback_subentry": "Fallback feature group"
-        }
-      },
-      "credentials": {
-        "title": "Update Credentials for {account_email}",
-        "description": "⚠️ This will update credentials for the current account only.\n\nTo add a different account, cancel this and use '+ Add Integration' from the Integrations page instead.",
-        "data": {
-          "new_secrets_json": "New secrets.json content (optional)",
-          "new_oauth_token": "New OAuth Token (optional)",
-          "new_google_email": "New Google Email (optional)"
         }
       }
     },
@@ -429,6 +421,28 @@
       },
       "reset_statistics": {
         "name": "Reset Statistics"
+      },
+      "regenerate_aas_token": {
+        "name": "Regenerate AAS Token",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Cooldown period (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Cooldown remaining (s)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "Regenerate ADM Token",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "Cooldown period (s)"
+          },
+          "cooldown_remaining": {
+            "name": "Cooldown remaining (s)"
+          }
+        }
       }
     },
     "binary_sensor": {
@@ -446,6 +460,17 @@
           },
           "fcm_connected_at": {
             "name": "FCM connected at"
+          }
+        }
+      },
+      "uwt_mode": {
+        "name": "Unwanted Tracking Mode",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "Last BLE observation"
+          },
+          "google_device_id": {
+            "name": "Google device ID"
           }
         }
       },
@@ -475,7 +500,6 @@
     },
     "device_tracker": {
       "device": {
-        "name": "Device",
         "state_attributes": {
           "device_name": {
             "name": "Device name"
@@ -486,11 +510,11 @@
           "status": {
             "name": "Status"
           },
-        "semantic_name": {
-          "name": "Semantic label"
-        },
-        "battery_level": {
-          "name": "Battery level"
+          "semantic_name": {
+            "name": "Semantic label"
+          },
+          "battery_level": {
+            "name": "Battery level"
           },
           "last_seen": {
             "name": "Last seen (reported)"
@@ -518,11 +542,79 @@
           },
           "altitude_m": {
             "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Location age (s)"
+          },
+          "location_status": {
+            "name": "Location status"
+          },
+          "last_latitude": {
+            "name": "Last known latitude"
+          },
+          "last_longitude": {
+            "name": "Last known longitude"
+          }
+        }
+      },
+      "last_location": {
+        "name": "Last Location",
+        "state_attributes": {
+          "device_name": {
+            "name": "Device name"
+          },
+          "device_id": {
+            "name": "Device ID"
+          },
+          "status": {
+            "name": "Status"
+          },
+          "semantic_name": {
+            "name": "Semantic label"
+          },
+          "battery_level": {
+            "name": "Battery level"
+          },
+          "last_seen": {
+            "name": "Last seen (reported)"
+          },
+          "last_seen_utc": {
+            "name": "Last seen (UTC)"
+          },
+          "source_label": {
+            "name": "Source label"
+          },
+          "source_rank": {
+            "name": "Source rank"
+          },
+          "is_own_report": {
+            "name": "Own-device report"
+          },
+          "latitude": {
+            "name": "Latitude"
+          },
+          "longitude": {
+            "name": "Longitude"
+          },
+          "accuracy_m": {
+            "name": "Accuracy (m)"
+          },
+          "altitude_m": {
+            "name": "Altitude (m)"
+          },
+          "location_age": {
+            "name": "Location age (s)"
+          },
+          "location_status": {
+            "name": "Location status"
           }
         }
       }
     },
     "sensor": {
+      "ble_battery": {
+        "name": "BLE Battery"
+      },
       "last_seen": {
         "name": "Last Seen",
         "state_attributes": {
@@ -599,7 +691,7 @@
   "issues": {
     "auth_expired": {
       "title": "Reauthentication required",
-      "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality."
+      "description": "Authentication for Google Find My Device is invalid or has expired for this entry.\n\n**Entry:** {entry_title}\n**Account:** {email}\n\nSelect **Reconfigure** on the integration card to sign in again. If you recently changed your Google password or revoked tokens, you must re-authenticate here to restore functionality.\n\n**Tip:** Google may revoke tokens when requests come from a different IP address or region than where the token was created (e.g. token generated on a laptop but used from a server or VPS in another country). Generate your `secrets.json` on the same network where Home Assistant runs, or use the same public IP address."
     },
     "fcm_connection_stuck": {
       "title": "FCM Push Connection Failed",
@@ -652,6 +744,14 @@
       "entries": "Config entries",
       "fcm": "FCM receiver",
       "fcm_lock_contention_count": "FCM lock contention count"
+    }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "High-traffic areas only",
+        "in_all_areas": "All areas (crowdsourcing)"
+      }
     }
   }
 }

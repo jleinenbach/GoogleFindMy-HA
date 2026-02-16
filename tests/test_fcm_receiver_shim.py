@@ -11,11 +11,20 @@ from custom_components.googlefindmy.Auth import fcm_receiver, token_cache
 
 
 class _StubCache:
-    """Minimal TokenCache stand-in exposing the `_data` attribute."""
+    """Minimal TokenCache stand-in exposing sync accessors."""
 
     def __init__(self, entry_id: str, initial: dict | None = None) -> None:
         self.entry_id = entry_id
         self._data = copy.deepcopy(initial) if initial is not None else {}
+
+    def sync_get(self, name: str) -> object:
+        return self._data.get(name)
+
+    def sync_pop(self, name: str, default: object = None) -> object:
+        return self._data.pop(name, default)
+
+    def sync_set(self, name: str, value: object) -> None:
+        self._data[name] = value
 
 
 @pytest.fixture
