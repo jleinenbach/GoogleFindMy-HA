@@ -639,8 +639,18 @@ class PollingOperations(_MixinBase):
                         _LOGGER.debug("FCM wait error: %s", fcm_wait_err)
                 self._startup_complete = True
 
-            if self._is_fcm_ready_soft():
+            fcm_now_ready = self._is_fcm_ready_soft()
+            if fcm_now_ready:
                 self._set_fcm_status(FcmStatus.CONNECTED)
+                # FIX: Clear deferral state as soon as FCM comes back, regardless
+                # of whether a poll is due.  Without this, a forced poll during
+                # an outage would update _last_poll_mono and the deferral would
+                # linger until the next due window (up to effective_interval).
+                if self._fcm_defer_started_mono:
+                    self._clear_fcm_deferral()
+                    # Trigger an immediate poll so we don't wait the full
+                    # interval after a prolonged outage.
+                    self.force_poll_due()
             elif self._fcm_last_stage < 2:
                 self._set_fcm_status(
                     FcmStatus.DEGRADED,
@@ -1037,6 +1047,7 @@ class PollingOperations(_MixinBase):
             google_home_filter = self._get_google_home_filter()
 
             last_exception: Exception | None = None
+            _any_device_got_data = False
             try:
                 cycle_failed = False
                 for idx, dev in enumerate(devices):
@@ -1269,6 +1280,7 @@ class PollingOperations(_MixinBase):
 
                         self.increment_stat("polled_updates")
                         self._consecutive_timeouts = 0
+                        _any_device_got_data = True
 
                         # Immediate per-device update for more responsive UI during long poll cycles.
                         self.push_updated([dev_id])
@@ -1419,8 +1431,19 @@ class PollingOperations(_MixinBase):
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
             finally:
-                # Update scheduling baseline and clear flag, then push end snapshot
-                self._last_poll_mono = time.monotonic()
+                # Update scheduling baseline and clear flag, then push end snapshot.
+                # FIX: When a forced poll (no push transport) yields NO data for
+                # any device, do NOT advance the poll baseline.  This avoids a
+                # 5-minute dead zone where no retries happen even though the push
+                # transport may reconnect at any moment.  Instead we schedule a
+                # short retry so the next attempt happens within seconds.
+                if force and not _any_device_got_data:
+                    _LOGGER.debug(
+                        "Forced poll returned no data; keeping poll baseline to retry sooner."
+                    )
+                    self._schedule_short_retry(30.0)
+                else:
+                    self._last_poll_mono = time.monotonic()
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 if cycle_failed:

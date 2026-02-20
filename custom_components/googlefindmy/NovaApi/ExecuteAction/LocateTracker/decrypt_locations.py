@@ -140,6 +140,35 @@ def clear_eik_cache() -> None:
     _LOGGER.debug("EIK cache cleared (all entries)")
 
 
+def invalidate_eik_cache_for_key(
+    encrypted_identity_key: bytes, owner_key_version: int
+) -> int:
+    """Invalidate all cached EIK entries for a specific encrypted identity key.
+
+    Called when persistent MAC/InvalidTag failures indicate the cached decrypted
+    EIK is stale (e.g., after key rotation, re-pairing, or E2EE reset).
+
+    Returns:
+        The number of entries removed.
+    """
+    removed = 0
+    for do_flip in (False, True):
+        from custom_components.googlefindmy.FMDNCrypto.mcu_utils import flip_bits
+
+        flipped_blob = flip_bits(encrypted_identity_key, do_flip)
+        cache_key = _get_eik_cache_key(flipped_blob, owner_key_version, do_flip)
+        if cache_key in _eik_cache:
+            del _eik_cache[cache_key]
+            removed += 1
+    if removed:
+        _LOGGER.info(
+            "Invalidated %d EIK cache entries (version=%s) due to persistent auth failures",
+            removed,
+            owner_key_version,
+        )
+    return removed
+
+
 def get_eik_cache_stats() -> dict[str, int]:
     """Return current cache statistics (for diagnostics)."""
     return {
@@ -983,6 +1012,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         network_locations_time = network_locations_time[:_MAX_REPORTS]
 
     wrapped: list[WrappedLocation] = []
+    _auth_failures = 0  # Track MAC / InvalidTag failures across all reports
+    _encrypted_report_count = 0  # Count non-SEMANTIC reports attempted
+
     if len(network_locations) != len(network_locations_time):
         _LOGGER.debug(
             "Mismatched report arrays: locations=%s timestamps=%s (dropping unmatched entries)",
@@ -1016,6 +1048,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 )
                 continue
 
+            _encrypted_report_count += 1
             enc = loc.geoLocation.encryptedReport
             encrypted_location: bytes = enc.encryptedLocation
             public_key_random: bytes = enc.publicKeyRandom
@@ -1051,24 +1084,36 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     name="",
                 )
             )
-        except (AttributeError, KeyError, TypeError, ValueError) as expected_exc:
+        except InvalidTag:
+            # InvalidTag means AES-GCM authentication failed during decryption.
+            _auth_failures += 1
+            _LOGGER.warning(
+                "Decryption auth failed (InvalidTag): report could not be "
+                "authenticated. This often happens when Google authentication is "
+                "stale - try re-authenticating the account in the Google app."
+            )
+        except ValueError as ve:
+            # FIX: PyCryptodome's AES-EAX decrypt_and_verify() raises
+            # ValueError("MAC check failed") on tag mismatch.  This is NOT
+            # malformed data — it is an authentication failure identical in
+            # meaning to InvalidTag from the cryptography library.
+            if "mac" in str(ve).lower():
+                _auth_failures += 1
+                _LOGGER.warning(
+                    "Decryption auth failed (MAC check): report could not be "
+                    "authenticated. This often happens when the identity key is "
+                    "stale or Google authentication has expired."
+                )
+            else:
+                _LOGGER.warning(
+                    "Failed to process one location report (malformed data): %s",
+                    ve,
+                )
+        except (AttributeError, KeyError, TypeError) as expected_exc:
             # Expected errors from malformed protobuf data - log at warning level
             _LOGGER.warning(
                 "Failed to process one location report (malformed data): %s",
                 expected_exc,
-            )
-        except InvalidTag:
-            # InvalidTag means AES-GCM authentication failed during decryption.
-            # This is usually NOT a bug - common causes include:
-            # - Google authentication expired (user needs to re-auth in Google app)
-            # - Shared device where the sharing account's auth is stale
-            # - Tracker offline/dead battery causing stale encrypted data
-            # Log as warning (not error) since user action typically resolves this.
-            _LOGGER.warning(
-                "Decryption failed (InvalidTag): The location report could not be "
-                "authenticated. This often happens when Google authentication is "
-                "stale - try re-authenticating the account in the Google app. "
-                "For shared devices, the sharing account may need to re-authenticate."
             )
         except Exception as unexpected_exc:
             # Unexpected errors indicate bugs or API changes - log with stack trace
@@ -1076,6 +1121,34 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 "Unexpected error processing location report: %s",
                 unexpected_exc,
                 exc_info=True,
+            )
+
+    # FIX: When ALL encrypted reports fail authentication, the cached EIK is
+    # likely stale (e.g., after key rotation, re-pairing, or E2EE reset).
+    # Invalidate the cache so the next attempt forces a fresh key derivation.
+    if (
+        _auth_failures > 0
+        and _encrypted_report_count > 0
+        and _auth_failures >= _encrypted_report_count
+        and raw_encrypted_identity_key
+    ):
+        owner_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
+        removed = invalidate_eik_cache_for_key(raw_encrypted_identity_key, owner_ver)
+        if removed:
+            _LOGGER.warning(
+                "All %d encrypted location reports failed authentication. "
+                "Invalidated %d cached identity key(s) to force re-derivation "
+                "on next poll. If this persists, re-authenticate the account "
+                "or check if E2EE keys have been reset.",
+                _auth_failures,
+                removed,
+            )
+        else:
+            _LOGGER.warning(
+                "All %d encrypted location reports failed authentication "
+                "but no cached keys found to invalidate. The identity key "
+                "derivation may be failing. Re-authenticate the account.",
+                _auth_failures,
             )
 
     if not wrapped:

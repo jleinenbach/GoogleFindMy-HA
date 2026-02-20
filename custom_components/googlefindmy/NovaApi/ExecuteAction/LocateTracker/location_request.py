@@ -375,7 +375,10 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     return
                 except Exception as err:
                     _LOGGER.error(
-                        "Unexpected error during async decryption for %s: %s", name, err
+                        "Unexpected error during async decryption for %s (%s): %s",
+                        name,
+                        type(err).__name__,
+                        err,
                     )
                     _LOGGER.debug("Traceback: %s", traceback.format_exc())
                     ctx.data = cast(list[dict[str, Any]], [])
