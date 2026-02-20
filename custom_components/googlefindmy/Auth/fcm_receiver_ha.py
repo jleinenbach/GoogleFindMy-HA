@@ -82,6 +82,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
     StaleOwnerKeyError,
     async_decrypt_location_response_locations,
 )
@@ -1640,6 +1641,14 @@ class FcmReceiverHA:
                         entry_id,
                     )
                     return {}
+                except DecryptionError as dec_err:
+                    _LOGGER.warning(
+                        "Background location decryption failed for entry %s: %s. "
+                        "This may resolve after re-authentication or key refresh.",
+                        entry_id,
+                        dec_err,
+                    )
+                    return {}
 
             locations: list[JSONDict] = (
                 raw_locations if raw_locations is not None else []
@@ -1672,12 +1681,13 @@ class FcmReceiverHA:
                     best_record = record
                     best_key = key
 
-            if best_record is not None:
-                return dict(best_record)
-
-            return dict(locations[0])
+            return dict(best_record) if best_record is not None else dict(locations[0])
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Failed to decode background location data: %s", err)
+            _LOGGER.error(
+                "Failed to decode background location data (%s): %s",
+                type(err).__name__,
+                err,
+            )
             return {}
 
     # -------------------- Credentials & stop --------------------
