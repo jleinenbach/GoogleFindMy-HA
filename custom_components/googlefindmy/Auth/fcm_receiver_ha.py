@@ -1681,10 +1681,7 @@ class FcmReceiverHA:
                     best_record = record
                     best_key = key
 
-            if best_record is not None:
-                return dict(best_record)
-
-            return dict(locations[0])
+            return dict(best_record) if best_record is not None else dict(locations[0])
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
                 "Failed to decode background location data (%s): %s",

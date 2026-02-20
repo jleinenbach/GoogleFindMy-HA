@@ -1432,18 +1432,18 @@ class PollingOperations(_MixinBase):
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
             finally:
                 # Update scheduling baseline and clear flag, then push end snapshot.
-                # FIX: When a forced poll (no push transport) yields NO data for
-                # any device, do NOT advance the poll baseline.  This avoids a
-                # 5-minute dead zone where no retries happen even though the push
-                # transport may reconnect at any moment.  Instead we schedule a
-                # short retry so the next attempt happens within seconds.
+                # Always advance the poll baseline to prevent high-frequency
+                # forced-poll loops that bypass min_poll_interval.  When push
+                # transport reconnects, push_updated() resets the baseline so
+                # there is no "dead zone" risk.
                 if force and not _any_device_got_data:
                     _LOGGER.debug(
-                        "Forced poll returned no data; keeping poll baseline to retry sooner."
+                        "Forced poll returned no data; scheduling retry "
+                        "after min_poll_interval (%ds).",
+                        self.min_poll_interval,
                     )
-                    self._schedule_short_retry(30.0)
-                else:
-                    self._last_poll_mono = time.monotonic()
+                    self._schedule_short_retry(self.min_poll_interval)
+                self._last_poll_mono = time.monotonic()
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 if cycle_failed:

@@ -153,8 +153,6 @@ def invalidate_eik_cache_for_key(
     """
     removed = 0
     for do_flip in (False, True):
-        from custom_components.googlefindmy.FMDNCrypto.mcu_utils import flip_bits
-
         flipped_blob = flip_bits(encrypted_identity_key, do_flip)
         cache_key = _get_eik_cache_key(flipped_blob, owner_key_version, do_flip)
         if cache_key in _eik_cache:
