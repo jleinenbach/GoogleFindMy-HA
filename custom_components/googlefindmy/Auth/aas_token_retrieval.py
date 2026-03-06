@@ -500,17 +500,20 @@ async def async_get_aas_token(
     return token
 
 
-# ----------------------- Legacy sync wrapper (unsupported) -----------------------
+# ----------------------- Legacy sync wrapper (CLI/offline only) -----------------------
 
 
-def get_aas_token() -> (
-    str
-):  # pragma: no cover - legacy path kept for compatibility messaging
-    """Legacy sync API is intentionally unsupported to prevent event loop deadlocks.
+def get_aas_token(*, cache: TokenCache) -> str:
+    """Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
 
     Raises:
-        NotImplementedError: Always. Use `await async_get_aas_token()` instead.
+        RuntimeError: If called from within a running event loop.
     """
-    raise NotImplementedError(
-        "Use `await async_get_aas_token(cache=...)` instead of the synchronous get_aas_token()."
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_get_aas_token(cache=cache))
+    raise RuntimeError(
+        "Sync get_aas_token() called from the event loop. "
+        "Use `await async_get_aas_token()` instead."
     )

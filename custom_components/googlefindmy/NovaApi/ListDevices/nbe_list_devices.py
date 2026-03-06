@@ -282,7 +282,7 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
                 "custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device"
             ).register_esp32
 
-            register_esp32()
+            register_esp32(cache=cache)
 
         # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
         await asyncio.to_thread(_register_esp32_cli)

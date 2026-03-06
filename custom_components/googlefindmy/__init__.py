@@ -7006,27 +7006,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     await _async_relink_button_devices(hass, entry)
     await _async_relink_subentry_entities(hass, entry)
 
-    # Acquire shared FCM and create a startup barrier for the first poll cycle.
-    fcm_ready_event = asyncio.Event()
-    fcm = await _async_acquire_shared_fcm(
-        hass,
-        entry=entry,
-        cache=cache,
-        entry_resolver=lambda: getattr(entry, "entry_id", None),
-    )
-    pm_fcm_acquired = time.monotonic()
-    fcm_ready_event.set()
-
-    # Signal-only stop on unload (bounded; actual await in async_unload_entry)
-    def _on_unload_signal_fcm() -> None:
-        try:
-            fcm.request_stop()
-        except Exception as err:
-            _LOGGER.debug("FCM stop signal during unload raised: %s", err)
-
-    entry.async_on_unload(_on_unload_signal_fcm)
-
-    # Credentials seed: legacy bundle OR individual oauth_token+email must be present
+    # Credentials seed: legacy bundle OR individual oauth_token+email must be present.
+    # IMPORTANT: This MUST run BEFORE _async_acquire_shared_fcm() because the FCM
+    # receiver reads fcm_credentials from the cache during async_initialize() →
+    # _prime_cache_state().  Without this, cold starts leave fcm_credentials empty
+    # and device locations stay "Unknown" (Issue #152).
     secrets_data = entry.data.get(DATA_SECRET_BUNDLE)
     oauth_token = entry.data.get(CONF_OAUTH_TOKEN)
     aas_token_entry = entry.data.get(DATA_AAS_TOKEN)
@@ -7063,6 +7047,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
             "No credentials found in config entry (neither secrets_data nor oauth_token+google_email)"
         )
         raise ConfigEntryNotReady("Credentials missing")
+
+    # Acquire shared FCM and create a startup barrier for the first poll cycle.
+    fcm_ready_event = asyncio.Event()
+    fcm = await _async_acquire_shared_fcm(
+        hass,
+        entry=entry,
+        cache=cache,
+        entry_resolver=lambda: getattr(entry, "entry_id", None),
+    )
+    pm_fcm_acquired = time.monotonic()
+    fcm_ready_event.set()
+
+    # Signal-only stop on unload (bounded; actual await in async_unload_entry)
+    def _on_unload_signal_fcm() -> None:
+        try:
+            fcm.request_stop()
+        except Exception as err:
+            _LOGGER.debug("FCM stop signal during unload raised: %s", err)
+
+    entry.async_on_unload(_on_unload_signal_fcm)
 
     # Remove legacy parent links from tracker devices before building runtime state.
     _self_heal_device_registry(hass, entry)

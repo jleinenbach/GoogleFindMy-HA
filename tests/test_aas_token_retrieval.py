@@ -750,10 +750,11 @@ async def test_async_get_aas_token_ttl_write_failure(
     assert result == "aas_token"
 
 
-def test_get_aas_token_sync_raises() -> None:
-    """Legacy sync API should raise NotImplementedError."""
-    with pytest.raises(NotImplementedError, match="async_get_aas_token"):
-        aas_token_retrieval.get_aas_token()
+async def test_get_aas_token_sync_raises() -> None:
+    """Sync API should raise RuntimeError when called from a running event loop."""
+    cache = _DummyCache()
+    with pytest.raises(RuntimeError, match="async_get_aas_token"):
+        aas_token_retrieval.get_aas_token(cache=cache)
 
 
 async def test_get_or_generate_android_id_fcm_without_gcm_block() -> None:
