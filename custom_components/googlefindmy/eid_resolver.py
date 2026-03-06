@@ -157,9 +157,9 @@ class BLEBatteryState:
     """Decoded battery state from FMDN hashed-flags BLE advertisement.
 
     Attributes:
-        battery_level: Raw FMDN value (0=GOOD, 1=LOW, 2=CRITICAL, 3=RESERVED).
-        battery_pct: Mapped percentage (100, 25, 5) or None for RESERVED (3).
-        uwt_mode: True if Unwanted Tracking mode is active (bit 7).
+        battery_level: Raw FMDN value (0=UNSUPPORTED, 1=NORMAL, 2=LOW, 3=CRITICALLY_LOW).
+        battery_pct: Mapped percentage (100, 25, 5) or None for UNSUPPORTED (0).
+        uwt_mode: True if Unwanted Tracking mode is active.
         decoded_flags: Fully decoded flags byte (after XOR).
         observed_at_wall: Wall-clock timestamp of the BLE observation (time.time()).
     """
@@ -192,10 +192,10 @@ class BLEScanInfo:
 
 
 # Mapping from FMDN 2-bit battery level to percentage.
-# Aligned with HA Core convention (cf. homeassistant/components/fitbit/const.py)
-# and HA icon thresholds in homeassistant/helpers/icon.py:
+# Per Google FMDN spec: 0=Unsupported, 1=Normal, 2=Low, 3=Critically Low.
+# HA icon thresholds in homeassistant/helpers/icon.py:
 #   100% → mdi:battery, 25% → mdi:battery-20, 5% → mdi:battery-alert
-FMDN_BATTERY_PCT: dict[int, int] = {0: 100, 1: 25, 2: 5}
+FMDN_BATTERY_PCT: dict[int, int | None] = {0: None, 1: 100, 2: 25, 3: 5}
 
 
 @runtime_checkable
@@ -2400,8 +2400,8 @@ class GoogleFindMyEIDResolver:
         # ---- Decode and store ----
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
-            battery_raw = (decoded >> 5) & 0x03  # bits 5-6
-            uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
+            battery_raw = (decoded >> 1) & 0x03  # FMDN spec bits [6:5] (MSB-first = standard bits 2:1)
+            uwt_mode = bool(decoded & 0x01)  # FMDN spec bit [7] (MSB-first = standard bit 0)
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 
@@ -2413,7 +2413,7 @@ class GoogleFindMyEIDResolver:
                 observed_at_wall=now_wall,
             )
 
-            battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
+            battery_labels = {0: "UNSUPPORTED", 1: "NORMAL", 2: "LOW", 3: "CRITICALLY_LOW"}
             battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
 
             # Store for ALL matches (shared-device propagation).
@@ -2459,7 +2459,7 @@ class GoogleFindMyEIDResolver:
                         battery_raw,
                     )
         else:
-            # Cannot decode — log once per device at DEBUG for diagnostics
+            # Cannot decode — log once per device at INFO for diagnostics
             for match in matches:
                 storage_key = match.canonical_id or match.device_id
                 if storage_key not in self._flags_logged_devices:
@@ -2469,7 +2469,7 @@ class GoogleFindMyEIDResolver:
                         if length <= _max_hex
                         else raw[:_max_hex].hex() + "..."
                     )
-                    _LOGGER.debug(
+                    _LOGGER.info(
                         "FMDN_FLAGS_PROBE device=%s canonical=%s "
                         "CANNOT_DECODE observed_frame=%s payload_len=%d "
                         "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",

@@ -183,30 +183,29 @@ class TestBLEBatteryStateDataclass:
 
     def test_dataclass_fields(self) -> None:
         state = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
-        assert state.battery_level == 0
+        assert state.battery_level == 1
         assert state.battery_pct == 100
         assert state.uwt_mode is False
-        assert state.decoded_flags == 0x00
+        assert state.decoded_flags == 0x02
         assert state.observed_at_wall == 1000.0
 
     def test_battery_pct_mapping(self) -> None:
-        """FMDN_BATTERY_PCT should map 0->100, 1->25, 2->5."""
-        assert FMDN_BATTERY_PCT == {0: 100, 1: 25, 2: 5}
+        """FMDN_BATTERY_PCT: 0->None (unsupported), 1->100, 2->25, 3->5."""
+        assert FMDN_BATTERY_PCT == {0: None, 1: 100, 2: 25, 3: 5}
 
-    def test_battery_pct_reserved_raw_returns_none(self) -> None:
-        """An unrecognized raw value (3=RESERVED) should map to None, not 0.
+    def test_battery_pct_unsupported_raw_returns_none(self) -> None:
+        """Raw value 0 (UNSUPPORTED) should map to None.
 
-        A tracker sending battery_raw=3 can still transmit (battery is not
-        physically dead).  Mapping to 0% would be a false positive — the
-        correct representation is None (HA shows 'unknown').
+        A tracker sending battery_raw=0 does not support battery indication.
+        The correct representation is None (HA shows 'unknown').
         """
-        assert FMDN_BATTERY_PCT.get(3) is None
+        assert FMDN_BATTERY_PCT.get(0) is None
 
     def test_slots_optimization(self) -> None:
         """BLEBatteryState uses __slots__ for memory efficiency."""
@@ -220,10 +219,10 @@ class TestBLEBatteryStateDataclass:
         ensures the correct attribute name is used and no alias exists.
         """
         state = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         # Correct attribute exists and is accessible
@@ -238,10 +237,10 @@ class TestBLEBatteryStateDataclass:
         _build_entities() when logging BLE battery sensor creation.
         """
         state = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=1000.0,
         )
         # Reproduce the log format string from sensor.py _build_entities()
@@ -269,32 +268,51 @@ class TestUpdateBLEBattery:
         resolver._update_ble_battery(raw, None, metadata, [])
         assert len(resolver._ble_battery_state) == 0
 
-    def test_decode_good_service_data(self) -> None:
-        """Battery level 0 (GOOD) -> 100% via service-data format."""
+    def test_decode_unsupported_service_data(self) -> None:
+        """Battery level 0 (UNSUPPORTED) -> None via service-data format."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x55
 
-        desired_decoded = 0b00_000000  # battery=0, uwt=0
+        desired_decoded = 0b00000_00_0  # battery=0, uwt=0
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
-        match = _match("dev-good")
+        match = _match("dev-unsup")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
-        state = resolver._ble_battery_state.get("dev-good")
+        state = resolver._ble_battery_state.get("dev-unsup")
         assert state is not None
         assert state.battery_level == 0
-        assert state.battery_pct == 100
+        assert state.battery_pct is None
         assert state.uwt_mode is False
 
-    def test_decode_low_service_data(self) -> None:
-        """Battery level 1 (LOW) -> 25% via service-data format."""
+    def test_decode_normal_service_data(self) -> None:
+        """Battery level 1 (NORMAL) -> 100% via service-data format."""
         resolver = _make_resolver()
         eid = b"\xbb" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        desired_decoded = 0b00_100000
+        desired_decoded = 0b00000_01_0  # battery=1 at bits 2:1
+        flags_byte = desired_decoded ^ xor_mask
+
+        raw = _service_data_payload(eid, flags_byte)
+        match = _match("dev-normal")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get("dev-normal")
+        assert state is not None
+        assert state.battery_level == 1
+        assert state.battery_pct == 100
+        assert state.uwt_mode is False
+
+    def test_decode_low_service_data(self) -> None:
+        """Battery level 2 (LOW) -> 25% via service-data format."""
+        resolver = _make_resolver()
+        eid = b"\xcc" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+
+        desired_decoded = 0b00000_10_0  # battery=2 at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -303,36 +321,17 @@ class TestUpdateBLEBattery:
 
         state = resolver._ble_battery_state.get("dev-low")
         assert state is not None
-        assert state.battery_level == 1
+        assert state.battery_level == 2
         assert state.battery_pct == 25
         assert state.uwt_mode is False
 
-    def test_decode_critical_service_data(self) -> None:
-        """Battery level 2 (CRITICAL) -> 5% via service-data format."""
-        resolver = _make_resolver()
-        eid = b"\xcc" * LEGACY_EID_LENGTH
-        xor_mask = 0x00
-
-        desired_decoded = 0b01_000000
-        flags_byte = desired_decoded ^ xor_mask
-
-        raw = _service_data_payload(eid, flags_byte)
-        match = _match("dev-crit")
-        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
-
-        state = resolver._ble_battery_state.get("dev-crit")
-        assert state is not None
-        assert state.battery_level == 2
-        assert state.battery_pct == 5
-        assert state.uwt_mode is False
-
     def test_decode_uwt_mode_active(self) -> None:
-        """UWT mode bit 7 set -> uwt_mode=True."""
+        """UWT mode (bit 0 in standard notation) set -> uwt_mode=True."""
         resolver = _make_resolver()
         eid = b"\xdd" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        desired_decoded = 0b10_000000
+        desired_decoded = 0b00000_00_1  # battery=0, uwt=1 (bit 0)
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -342,7 +341,7 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-uwt")
         assert state is not None
         assert state.battery_level == 0
-        assert state.battery_pct == 100
+        assert state.battery_pct is None
         assert state.uwt_mode is True
 
     def test_decode_raw_header_format(self) -> None:
@@ -351,7 +350,7 @@ class TestUpdateBLEBattery:
         eid = b"\xee" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        desired_decoded = 0b00_100000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL) at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _raw_header_payload(eid, flags_byte)
@@ -361,14 +360,14 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-raw")
         assert state is not None
         assert state.battery_level == 1
-        assert state.battery_pct == 25
+        assert state.battery_pct == 100
 
     def test_shared_device_propagation(self) -> None:
         """When one BLE packet matches 2 accounts, battery stores for BOTH device_ids."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -410,7 +409,7 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        flags_byte = 0b00_000000 ^ xor_mask
+        flags_byte = 0b00000_01_0 ^ xor_mask  # battery=1 (NORMAL)
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-time")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
@@ -423,7 +422,7 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        flags_byte = 0b00_000000 ^ xor_mask
+        flags_byte = 0b00000_01_0 ^ xor_mask  # battery=1 (NORMAL)
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-log")
 
@@ -449,46 +448,41 @@ class TestUpdateBLEBattery:
         xor_mask = 0x00
         match = _match("dev-change")
 
-        # First: GOOD (0)
-        decoded_good = 0b00_000000
-        raw = _service_data_payload(eid, decoded_good ^ xor_mask)
+        # First: NORMAL (1) → 100%
+        decoded_normal = 0b00000_01_0  # battery=1 at bits 2:1
+        raw = _service_data_payload(eid, decoded_normal ^ xor_mask)
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-change"].battery_pct == 100
 
-        # Second: LOW (1) — triggers battery-changed DEBUG log
-        decoded_low = 0b00_100000
+        # Second: LOW (2) → 25% — triggers battery-changed DEBUG log
+        decoded_low = 0b00000_10_0  # battery=2 at bits 2:1
         raw = _service_data_payload(eid, decoded_low ^ xor_mask)
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-change"].battery_pct == 25
-        assert resolver._ble_battery_state["dev-change"].battery_level == 1
+        assert resolver._ble_battery_state["dev-change"].battery_level == 2
 
-    def test_reserved_battery_raw_3_maps_to_none_pct(self) -> None:
-        """Raw battery value 3 (RESERVED) maps to None via FMDN_BATTERY_PCT.get.
-
-        A device transmitting battery_raw=3 is still operational (it can send
-        RF packets), so 0% would be a false-positive empty-battery alarm.
-        None causes HA to display the sensor as 'unknown'.
-        """
+    def test_critically_low_battery_raw_3(self) -> None:
+        """Raw battery value 3 (CRITICALLY_LOW) maps to 5%."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b01_100000
+        desired_decoded = 0b00000_11_0  # battery=3 at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
-        match = _match("dev-reserved")
+        match = _match("dev-crit")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
-        state = resolver._ble_battery_state.get("dev-reserved")
+        state = resolver._ble_battery_state.get("dev-crit")
         assert state is not None
         assert state.battery_level == 3
-        assert state.battery_pct is None
+        assert state.battery_pct == 5
 
     def test_combined_battery_and_uwt(self) -> None:
-        """Battery CRITICAL + UWT -> battery_pct=5, uwt_mode=True."""
+        """Battery LOW + UWT -> battery_pct=25, uwt_mode=True."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b11_000000
+        desired_decoded = 0b00000_10_1  # battery=2 (LOW) + uwt=1 (bit 0)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-combo")
@@ -497,16 +491,16 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-combo")
         assert state is not None
         assert state.battery_level == 2
-        assert state.battery_pct == 5
+        assert state.battery_pct == 25
         assert state.uwt_mode is True
-        assert state.decoded_flags == 0xC0
+        assert state.decoded_flags == 0x05
 
     def test_observed_frame_format_in_log(self) -> None:
         """When observed_frame is an int, the info log should format it as hex."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-frame")
@@ -566,16 +560,16 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        decoded_good = 0b00_000000
-        raw = _service_data_payload(eid, decoded_good ^ xor_mask)
+        decoded_normal = 0b00000_01_0  # battery=1 (NORMAL)
+        raw = _service_data_payload(eid, decoded_normal ^ xor_mask)
         match = _match("dev-same")
 
-        # First decode — GOOD, INFO log
+        # First decode — NORMAL, INFO log
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-same"].battery_pct == 100
         assert "dev-same" in resolver._flags_logged_devices
 
-        # Second decode — same level (GOOD), no change log emitted
+        # Second decode — same level (NORMAL), no change log emitted
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-same"].battery_pct == 100
 
@@ -604,10 +598,10 @@ class TestGetBLEBatteryState:
     def test_returns_stored_state(self) -> None:
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=5000.0,
         )
         resolver._ble_battery_state["test-dev"] = state
@@ -619,7 +613,7 @@ class TestGetBLEBatteryState:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_100000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("api-dev")
@@ -627,7 +621,7 @@ class TestGetBLEBatteryState:
 
         result = resolver.get_ble_battery_state("api-dev")
         assert result is not None
-        assert result.battery_pct == 25
+        assert result.battery_pct == 100
 
 
 # ===========================================================================
@@ -681,10 +675,10 @@ class TestBLEBatterySensorNativeValue:
         """When resolver has battery data, native_value returns battery_pct."""
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         resolver._ble_battery_state["dev-1"] = state
@@ -719,19 +713,19 @@ class TestBLEBatterySensorNativeValue:
         assert sensor.native_value is None
 
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         assert sensor.native_value == 100
 
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=2000.0,
         )
         assert sensor.native_value == 25
@@ -763,10 +757,10 @@ class TestBLEBatterySensorAvailability:
         """Sensor available when coordinator reports device as present."""
         resolver = _make_resolver()
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         coordinator = _fake_coordinator(device_id="dev-1", present=True)
@@ -885,10 +879,10 @@ class TestBLEBatterySensorExtraAttributes:
     def test_attributes_with_resolver_data(self) -> None:
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=True,
-            decoded_flags=0xA0,
+            decoded_flags=0x05,
             observed_at_wall=1700000000.0,
         )
         resolver._ble_battery_state["dev-1"] = state
@@ -897,7 +891,7 @@ class TestBLEBatterySensorExtraAttributes:
         attrs = sensor.extra_state_attributes
 
         assert attrs is not None
-        assert attrs["battery_raw_level"] == 1
+        assert attrs["battery_raw_level"] == 2
         assert "uwt_mode" not in attrs  # UWT is its own binary sensor now
         assert attrs["google_device_id"] == "dev-1"
         assert "last_ble_observation" in attrs
@@ -925,10 +919,10 @@ class TestBLEBatterySensorCoordinatorUpdate:
         """When resolver has battery data, update caches native_value."""
         resolver = _make_resolver()
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=1000.0,
         )
         coordinator = _fake_coordinator(
@@ -1327,7 +1321,7 @@ class TestIntegrationDecodeToEntity:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x33
-        desired_decoded = 0b01_000000
+        desired_decoded = 0b00000_10_0  # battery=2 (LOW) at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-pipe")
@@ -1335,7 +1329,7 @@ class TestIntegrationDecodeToEntity:
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
         sensor = _build_battery_sensor(device_id="dev-pipe", resolver=resolver)
-        assert sensor.native_value == 5
+        assert sensor.native_value == 25
 
         attrs = sensor.extra_state_attributes
         assert attrs is not None
@@ -1347,7 +1341,7 @@ class TestIntegrationDecodeToEntity:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
 

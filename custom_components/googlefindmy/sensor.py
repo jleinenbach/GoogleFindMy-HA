@@ -1224,7 +1224,7 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
     """Per-device battery sensor from FMDN hashed-flags BLE advertisement.
 
     Reports a percentage (100/25/5) mapped from the FMDN 2-bit battery level
-    (GOOD/LOW/CRITICAL).  Uses ``SensorDeviceClass.BATTERY`` for automatic
+    (NORMAL/LOW/CRITICALLY_LOW).  Uses ``SensorDeviceClass.BATTERY`` for automatic
     dynamic icons and HA battery grouping.
 
     Behavior:

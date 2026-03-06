@@ -160,9 +160,9 @@ if resolver:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `battery_level` | `int` | Raw FMDN 2-bit value: 0=GOOD, 1=LOW, 2=CRITICAL, 3=RESERVED |
-| `battery_pct` | `int` | Mapped percentage: 100, 25, 5, or 0 |
-| `uwt_mode` | `bool` | `True` if Unwanted Tracking protection is active (bit 7) |
+| `battery_level` | `int` | Raw FMDN 2-bit value: 0=UNSUPPORTED, 1=NORMAL, 2=LOW, 3=CRITICALLY_LOW |
+| `battery_pct` | `int \| None` | Mapped percentage: 100, 25, 5, or None (unsupported) |
+| `uwt_mode` | `bool` | `True` if Unwanted Tracking protection is active |
 | `decoded_flags` | `int` | Fully decoded flags byte (after XOR) |
 | `observed_at_wall` | `float` | Wall-clock `time.time()` of the BLE observation |
 
