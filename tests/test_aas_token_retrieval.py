@@ -750,7 +750,7 @@ async def test_async_get_aas_token_ttl_write_failure(
     assert result == "aas_token"
 
 
-def test_get_aas_token_sync_raises() -> None:
+async def test_get_aas_token_sync_raises() -> None:
     """Sync API should raise RuntimeError when called from a running event loop."""
     cache = _DummyCache()
     with pytest.raises(RuntimeError, match="async_get_aas_token"):
