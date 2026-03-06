@@ -7,6 +7,7 @@
 import secrets
 import time
 
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.const import MICRO
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
@@ -32,8 +33,8 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
 from custom_components.googlefindmy.SpotApi.spot_request import spot_request
 
 
-def register_esp32() -> None:
-    owner_key: bytes = get_owner_key()
+def register_esp32(*, cache: TokenCache) -> None:
+    owner_key: bytes = get_owner_key(cache=cache).key
 
     eik: bytes = secrets.token_bytes(32)
     eid: bytes = generate_eid_variant(eik, 0, EidVariant.LEGACY_SECP160R1_X20_BE)
