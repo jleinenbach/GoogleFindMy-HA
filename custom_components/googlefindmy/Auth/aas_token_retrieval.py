@@ -503,7 +503,7 @@ async def async_get_aas_token(
 # ----------------------- Legacy sync wrapper (CLI/offline only) -----------------------
 
 
-def get_aas_token() -> str:
+def get_aas_token(*, cache: TokenCache) -> str:
     """Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
 
     Raises:
@@ -512,11 +512,10 @@ def get_aas_token() -> str:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop -> allowed (CLI/offline usage)
-        return asyncio.run(async_get_aas_token())
+        return asyncio.run(async_get_aas_token(cache=cache))
     if loop.is_running():
         raise RuntimeError(
             "Sync get_aas_token() called from the event loop. "
             "Use `await async_get_aas_token()` instead."
         )
-    return asyncio.run(async_get_aas_token())
+    return asyncio.run(async_get_aas_token(cache=cache))

@@ -425,7 +425,7 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
 # ---------------------------------------------------------------------------
 
 
-def get_owner_key() -> bytes:
+def get_owner_key(*, cache: TokenCache) -> OwnerKeyInfo:
     """Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
 
     Raises:
@@ -434,11 +434,10 @@ def get_owner_key() -> bytes:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No running loop -> allowed (CLI/offline usage)
-        return asyncio.run(async_get_owner_key())
+        return asyncio.run(async_get_owner_key(cache=cache))
     if loop.is_running():
         raise RuntimeError(
             "Sync get_owner_key() called from the event loop. "
             "Use `await async_get_owner_key()` instead."
         )
-    return asyncio.run(async_get_owner_key())
+    return asyncio.run(async_get_owner_key(cache=cache))
