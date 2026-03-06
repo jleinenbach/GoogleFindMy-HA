@@ -76,10 +76,13 @@ from .proto.checkin_pb2 import (
 _logger = logging.getLogger(__name__)
 
 
+_SHA1_HEX_LENGTH = 40
+
+
 def _normalize_sha1_fingerprint(v: str) -> str:
     """Strip colons/spaces and validate a SHA-1 hex fingerprint."""
     v = v.replace(":", "").replace(" ", "").strip().lower()
-    if len(v) != 40 or not all(c in "0123456789abcdef" for c in v):
+    if len(v) != _SHA1_HEX_LENGTH or not all(c in "0123456789abcdef" for c in v):
         raise ValueError(f"Invalid SHA-1 fingerprint: {v!r}")
     return v
 
