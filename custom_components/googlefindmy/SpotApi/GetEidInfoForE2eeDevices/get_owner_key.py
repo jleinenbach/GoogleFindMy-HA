@@ -432,12 +432,10 @@ def get_owner_key(*, cache: TokenCache) -> OwnerKeyInfo:
         RuntimeError: If called from within a running event loop.
     """
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(async_get_owner_key(cache=cache))
-    if loop.is_running():
-        raise RuntimeError(
-            "Sync get_owner_key() called from the event loop. "
-            "Use `await async_get_owner_key()` instead."
-        )
-    return asyncio.run(async_get_owner_key(cache=cache))
+    raise RuntimeError(
+        "Sync get_owner_key() called from the event loop. "
+        "Use `await async_get_owner_key()` instead."
+    )

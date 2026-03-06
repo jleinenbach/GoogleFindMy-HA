@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.SpotApi.CreateBleDevice import create_ble_device
 
 
@@ -141,7 +143,7 @@ def test_register_esp32(monkeypatch) -> None:
     monkeypatch.setattr(module, "max_truncated_eid_seconds_server", 30, False)
     monkeypatch.setattr(module, "ROTATION_PERIOD", 10, False)
 
-    create_ble_device.register_esp32(cache=None)
+    create_ble_device.register_esp32(cache=MagicMock(spec=TokenCache))
 
     assert spot_calls == [("CreateBleDevice", b"stub-serialized")]
 
