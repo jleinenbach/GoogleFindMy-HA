@@ -27,6 +27,7 @@ Injection points (optional):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -420,19 +421,24 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
 
 
 # ---------------------------------------------------------------------------
-# Legacy sync facade (disabled by design)
+# Legacy sync facade (CLI/offline only)
 # ---------------------------------------------------------------------------
 
 
-def get_owner_key() -> bytes:  # pragma: no cover - kept for import compatibility
-    """Legacy sync facade - intentionally unsupported inside Home Assistant.
-
-    This function exists only to preserve import compatibility for external/CLI scripts.
-    It **must not** be used from within the HA event loop and intentionally raises to
-    enforce the async-first contract. CLI users should run `async_get_owner_key()` via
-    `asyncio.run(...)`.
+def get_owner_key() -> bytes:
+    """Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
 
     Raises:
-        NotImplementedError: Always. Use `async_get_owner_key()` instead.
+        RuntimeError: If called from within a running event loop.
     """
-    raise NotImplementedError("Use async_get_owner_key() instead.")
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop -> allowed (CLI/offline usage)
+        return asyncio.run(async_get_owner_key())
+    if loop.is_running():
+        raise RuntimeError(
+            "Sync get_owner_key() called from the event loop. "
+            "Use `await async_get_owner_key()` instead."
+        )
+    return asyncio.run(async_get_owner_key())
