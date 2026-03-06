@@ -662,6 +662,7 @@ class FcmReceiverHA:
                 api_key=self.api_key,
                 messaging_sender_id=self.message_sender_id,
                 bundle_id="com.google.android.apps.adm",
+                android_cert_sha1="38918a453d07199354f8b19af05ec6562ced5788",
             )
 
             # Per-entry credentials update callback
