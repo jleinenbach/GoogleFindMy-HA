@@ -258,6 +258,7 @@ def compute_flags_xor_mask(
     time_counter_u32: int,
     *,
     curve_byte_len: int = LEGACY_EID_LENGTH,
+    curve_order: int | None = None,
 ) -> int:
     """Return the single-byte XOR mask for decoding FMDN Hashed Flags.
 
@@ -265,10 +266,14 @@ def compute_flags_xor_mask(
     significant byte of ``SHA256(r)`` where *r* is the scalar derived from
     ``AES-ECB-256(EIK, Table10_PRF_Input)`` reduced modulo the curve order
     and encoded big-endian, zero-padded to *curve_byte_len* bytes.
+
+    For P-256 variants pass ``curve_byte_len=32`` and
+    ``curve_order=P256_ORDER``; the default uses the legacy secp160r1 curve.
     """
     r_dash: bytes = _prf_table10(eik, time_counter_u32, strict=False)
     r_dash_int: int = int.from_bytes(r_dash, byteorder="big", signed=False)
-    curve_order: int = int(_get_curve().order)
+    if curve_order is None:
+        curve_order = int(_get_curve().order)
     r_scalar: int = r_dash_int % curve_order
     r_bytes: bytes = r_scalar.to_bytes(curve_byte_len, byteorder="big")
     sha256_r: bytes = hashlib.sha256(r_bytes).digest()
