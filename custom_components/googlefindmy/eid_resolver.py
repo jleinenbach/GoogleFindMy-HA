@@ -30,6 +30,7 @@ from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
+    P256_ORDER,
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
@@ -65,6 +66,16 @@ MODERN_FRAME_TYPE = 0x41
 RAW_HEADER_LENGTH = 1
 SERVICE_DATA_OFFSET = 8
 AESGCM_NONCE_LENGTH = 12
+
+# Curve parameters for compute_flags_xor_mask(), keyed by EidVariant.
+# (curve_byte_len, curve_order): Legacy uses secp160r1 (None=default), P256 uses P256_ORDER.
+_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
+    EidVariant.LEGACY_SECP160R1_X20_BE: (LEGACY_EID_LENGTH, None),
+    EidVariant.MODERN_P256_X32_BE: (MODERN_EID_LENGTH, P256_ORDER),
+    EidVariant.MODERN_P256_X20_TRUNC_BE: (MODERN_EID_LENGTH, P256_ORDER),
+    EidVariant.MODERN_P256_X32_LE_SCALAR: (MODERN_EID_LENGTH, P256_ORDER),
+    EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
+}
 
 # Strategy Configuration
 # ENABLE_ABSOLUTE_UNIX_BASIS: If True, scans for EIDs based on absolute Unix time (Deep Scan).
@@ -1532,10 +1543,15 @@ class GoogleFindMyEIDResolver:
                 variants = self._compute_variants(work_item, window)
                 for variant_spec in variants:
                     xor_mask: int | None = None
+                    curve_len, curve_ord = _VARIANT_CURVE_PARAMS.get(
+                        variant_spec.variant, (LEGACY_EID_LENGTH, None)
+                    )
                     try:
                         xor_mask = compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
+                            curve_byte_len=curve_len,
+                            curve_order=curve_ord,
                         )
                     except Exception:  # noqa: BLE001
                         pass
@@ -2384,18 +2400,28 @@ class GoogleFindMyEIDResolver:
 
         # ---- Determine the hashed-flags byte position ----
         flags_byte: int | None = None
+        # Service-data format: [header(7)][frame(1)][EID(N)][flags(1)]
         if (
             length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
             and raw[7] == FMDN_FRAME_TYPE
         ):
-            # Service-data format: [header(7)][frame(1)][EID(20)][flags(1)]
             flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+        elif (
+            length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH + 1
+            and raw[7] == MODERN_FRAME_TYPE
+        ):
+            flags_byte = raw[SERVICE_DATA_OFFSET + MODERN_EID_LENGTH]
+        # Raw-header format: [frame(1)][EID(N)][flags(1)]
         elif (
             length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
             and raw[0] == FMDN_FRAME_TYPE
         ):
-            # Raw-header format: [frame(1)][EID(20)][flags(1)]
             flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+        elif (
+            length >= RAW_HEADER_LENGTH + MODERN_EID_LENGTH + 1
+            and raw[0] == MODERN_FRAME_TYPE
+        ):
+            flags_byte = raw[RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
 
         # ---- Decode and store ----
         if flags_byte is not None and xor_mask is not None:

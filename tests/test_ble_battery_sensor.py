@@ -22,6 +22,9 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     LEGACY_EID_LENGTH,
+    MODERN_EID_LENGTH,
+    P256_ORDER,
+    compute_flags_xor_mask,
 )
 from custom_components.googlefindmy.sensor import (
     BLE_BATTERY_DESCRIPTION,
@@ -32,6 +35,7 @@ from custom_components.googlefindmy.sensor import (
 # Constants used to build test payloads
 # ---------------------------------------------------------------------------
 _FMDN_FRAME_TYPE = resolver_module.FMDN_FRAME_TYPE  # 0x40
+_MODERN_FRAME_TYPE = resolver_module.MODERN_FRAME_TYPE  # 0x41
 _SERVICE_DATA_OFFSET = resolver_module.SERVICE_DATA_OFFSET  # 8
 _RAW_HEADER_LENGTH = resolver_module.RAW_HEADER_LENGTH  # 1
 
@@ -107,6 +111,19 @@ def _service_data_payload(eid: bytes, flags_byte: int) -> bytes:
 def _raw_header_payload(eid: bytes, flags_byte: int) -> bytes:
     """Build a raw-header format payload: [frame(1)][EID(20)][flags(1)]."""
     frame = bytes([_FMDN_FRAME_TYPE])
+    return frame + eid + bytes([flags_byte])
+
+
+def _modern_service_data_payload(eid: bytes, flags_byte: int) -> bytes:
+    """Build a modern service-data payload: [header(7)][frame(1)][EID(32)][flags(1)]."""
+    header = b"\x00" * 7
+    frame = bytes([_MODERN_FRAME_TYPE])
+    return header + frame + eid + bytes([flags_byte])
+
+
+def _modern_raw_header_payload(eid: bytes, flags_byte: int) -> bytes:
+    """Build a modern raw-header payload: [frame(1)][EID(32)][flags(1)]."""
+    frame = bytes([_MODERN_FRAME_TYPE])
     return frame + eid + bytes([flags_byte])
 
 
@@ -581,6 +598,101 @@ class TestUpdateBLEBattery:
         match = _match("dev-flags-no-mask")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": None}, [match])
         assert resolver._ble_battery_state.get("dev-flags-no-mask") is None
+
+    def test_decode_modern_service_data(self) -> None:
+        """Modern frame 0x41 with 32-byte EID via service-data format."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * MODERN_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
+        flags_byte = desired_decoded ^ xor_mask
+
+        raw = _modern_service_data_payload(eid, flags_byte)
+        match = _match("dev-modern-sd")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get("dev-modern-sd")
+        assert state is not None
+        assert state.battery_level == 1
+        assert state.battery_pct == 100
+        assert state.uwt_mode is False
+
+    def test_decode_modern_raw_header(self) -> None:
+        """Modern frame 0x41 with 32-byte EID via raw-header format."""
+        resolver = _make_resolver()
+        eid = b"\xbb" * MODERN_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_10_0  # battery=2 (LOW)
+        flags_byte = desired_decoded ^ xor_mask
+
+        raw = _modern_raw_header_payload(eid, flags_byte)
+        match = _match("dev-modern-raw")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get("dev-modern-raw")
+        assert state is not None
+        assert state.battery_level == 2
+        assert state.battery_pct == 25
+
+    def test_modern_frame_too_short_cannot_decode(self) -> None:
+        """Modern frame type at position 7 but payload too short for 32-byte EID."""
+        resolver = _make_resolver()
+        # 7 header + 1 frame + 20 bytes (too short for 32-byte EID + 1 flags)
+        raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20
+        match = _match("dev-modern-short")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
+        assert resolver._ble_battery_state.get("dev-modern-short") is None
+
+
+# ===========================================================================
+# 2b. compute_flags_xor_mask() with P256 curve
+# ===========================================================================
+
+
+class TestComputeFlagsXorMaskP256:
+    """Tests for compute_flags_xor_mask with P256 curve parameters."""
+
+    def test_p256_xor_mask_differs_from_legacy(self) -> None:
+        """Same EIK+timestamp should produce different masks for P256 vs legacy."""
+        eik = b"\x42" * 32
+        timestamp = 1000000
+
+        legacy_mask = compute_flags_xor_mask(eik, timestamp)
+        p256_mask = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=MODERN_EID_LENGTH, curve_order=P256_ORDER
+        )
+
+        # They *can* coincidentally be equal, but with overwhelming probability
+        # they differ due to different curve order and byte length.
+        # We just verify both calls succeed without error.
+        assert isinstance(legacy_mask, int)
+        assert isinstance(p256_mask, int)
+        assert 0 <= legacy_mask <= 255
+        assert 0 <= p256_mask <= 255
+
+    def test_p256_xor_mask_deterministic(self) -> None:
+        """Same inputs should always produce the same P256 mask."""
+        eik = b"\xab" * 32
+        timestamp = 2000000
+
+        mask1 = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=MODERN_EID_LENGTH, curve_order=P256_ORDER
+        )
+        mask2 = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=MODERN_EID_LENGTH, curve_order=P256_ORDER
+        )
+        assert mask1 == mask2
+
+    def test_legacy_default_backward_compatible(self) -> None:
+        """Calling without curve_order should use legacy secp160r1 (backward compatible)."""
+        eik = b"\xcd" * 32
+        timestamp = 3000000
+
+        mask_default = compute_flags_xor_mask(eik, timestamp)
+        mask_explicit = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=LEGACY_EID_LENGTH, curve_order=None
+        )
+        assert mask_default == mask_explicit
 
 
 # ===========================================================================
