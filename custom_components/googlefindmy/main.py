@@ -363,6 +363,23 @@ def _ensure_authenticated() -> None:
 
     data["oauth_token"] = oauth_token
 
+    # Clear stale derived tokens — they were generated from the old OAuth
+    # token and will be regenerated from the new one. The _FileCache
+    # auto-saves on every set() call, so fresh AAS/ADM tokens produced
+    # during the first successful Nova API request are persisted back
+    # to secrets.json automatically.
+    for key in list(data.keys()):
+        if key.startswith(
+            (
+                "adm_token_",
+                "adm_token_issued_at_",
+                "aas_token_issued_at_",
+                "adm_probe_",
+            )
+        ):
+            del data[key]
+    data.pop("aas_token", None)
+
     # 3) Persist to secrets.json
     secrets_path.parent.mkdir(parents=True, exist_ok=True)
     with open(secrets_path, "w", encoding="utf-8") as fh:
@@ -418,14 +435,72 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     return fcm
 
 
+def _clear_stale_tokens_for_reauth() -> None:
+    """Clear cached tokens from secrets.json to force re-authentication.
+
+    Called when ``--reauth`` is passed on the CLI. Removes ``oauth_token``,
+    ``aas_token``, and all derived ``adm_token_*`` / timestamp keys so that
+    ``_ensure_authenticated()`` triggers the Chrome login flow.
+    """
+    import json  # noqa: PLC0415
+
+    secrets_path = _this_dir / "Auth" / "secrets.json"
+    if not secrets_path.is_file():
+        return
+
+    try:
+        with open(secrets_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return
+    except Exception:  # noqa: BLE001
+        return
+
+    keys_to_remove = [
+        k
+        for k in data
+        if k.startswith(
+            (
+                "oauth_token",
+                "aas_token",
+                "adm_token_",
+                "adm_token_issued_at_",
+                "aas_token_issued_at_",
+                "adm_probe_",
+            )
+        )
+    ]
+    if not keys_to_remove:
+        return
+
+    for k in keys_to_remove:
+        del data[k]
+
+    with open(secrets_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+
+    print(f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n")
+
+
 if __name__ == "__main__":
+    import argparse  # noqa: PLC0415
     import asyncio  # noqa: PLC0415
 
     from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: E402, PLC0415
         _async_cli_main,
     )
 
+    _cli_parser = argparse.ArgumentParser(description="Google Find My Device CLI")
+    _cli_parser.add_argument(
+        "--reauth",
+        action="store_true",
+        help="Force re-authentication by clearing cached tokens and running Chrome login",
+    )
+    _cli_args = _cli_parser.parse_args()
+
     if _standalone:
+        if _cli_args.reauth:
+            _clear_stale_tokens_for_reauth()
         _ensure_authenticated()
         _file_cache = _register_file_cache()
 

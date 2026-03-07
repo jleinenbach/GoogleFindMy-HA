@@ -13,7 +13,6 @@ import pytest
 
 from custom_components.googlefindmy.Auth.firebase_messaging.const import (
     GCM_REGISTER3_URL,
-    GCM_REGISTER_URL,
     GCM_SERVER_KEY_B64,
 )
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
@@ -87,7 +86,7 @@ def test_gcm_register_prefers_legacy_sender_first(
 def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """HTML/404 responses rotate the endpoint but never switch sender (upstream alignment)."""
+    """HTML/404 responses retry on the same endpoint without switching sender (upstream alignment)."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
@@ -115,10 +114,10 @@ def test_gcm_register_html_response_rotates_endpoint_not_sender(
 
     assert result["token"] == "abc123"
     assert result["android_id"] == 42
-    # Endpoint rotates, but sender stays as legacy key
+    # Both attempts use the same endpoint — no rotation (upstream alignment)
     assert [call["url"] for call in session.calls] == [
         GCM_REGISTER3_URL,
-        GCM_REGISTER_URL,
+        GCM_REGISTER3_URL,
     ]
     assert [call["data"]["sender"] for call in session.calls] == [
         GCM_SERVER_KEY_B64,
@@ -126,48 +125,10 @@ def test_gcm_register_html_response_rotates_endpoint_not_sender(
     ]
 
 
-def test_gcm_register_rotation_logs_reason_and_sender(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Endpoint rotation still logs details when no fallback sender is available."""
-
-    responses = [
-        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
-        _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
-    ]
-    session = _FakeSession(responses)
-    config = FcmRegisterConfig(
-        project_id="proj",
-        app_id="app",
-        api_key="key",
-        messaging_sender_id=GCM_SERVER_KEY_B64,
-        bundle_id="bundle",
-    )
-    register = FcmRegister(config, http_client_session=session)
-
-    async def fast_sleep(_: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
-
-    with caplog.at_level(logging.WARNING):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 11, "securityToken": 22})
-        )
-
-    assert result["token"] == "abc123"
-    assert any(
-        "GCM register switching endpoint /c2dm/register3 -> /c2dm/register due to HTTP 404"
-        in record.getMessage()
-        and f"sender={GCM_SERVER_KEY_B64} (legacy server key)" in record.getMessage()
-        for record in caplog.records
-    )
-
-
 def test_gcm_register_404_retries_with_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A 404 rotates endpoint but keeps the same legacy sender."""
+    """A 404 retries on the same endpoint with the same legacy sender."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
@@ -191,10 +152,10 @@ def test_gcm_register_404_retries_with_same_sender(
     result = asyncio.run(register.gcm_register({"androidId": 11, "securityToken": 22}))
 
     assert result["token"] == "abc123"
-    # Endpoint rotates: register3 → register
+    # No endpoint rotation — always /c2dm/register3 (upstream alignment)
     assert [call["url"] for call in session.calls] == [
         GCM_REGISTER3_URL,
-        GCM_REGISTER_URL,
+        GCM_REGISTER3_URL,
     ]
     # Sender stays legacy — no switch to numeric
     assert [call["data"]["sender"] for call in session.calls] == [
