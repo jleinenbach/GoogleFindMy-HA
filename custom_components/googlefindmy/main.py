@@ -25,7 +25,53 @@ else:
         _cc.__path__ = []
         sys.modules["custom_components"] = _cc
     if "custom_components.googlefindmy" not in sys.modules:
-        _ccg = types.ModuleType("custom_components.googlefindmy")
+
+        class _LazyGoogleFindMyModule(types.ModuleType):
+            """Virtual package that lazily resolves proto-decoder helpers."""
+
+            _PROTO_PATHS: dict[str, str] = {
+                "Common_pb2": "custom_components.googlefindmy.ProtoDecoders.Common_pb2",
+                "DeviceUpdate_pb2": "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2",
+                "LocationReportsUpload_pb2": (
+                    "custom_components.googlefindmy.ProtoDecoders.LocationReportsUpload_pb2"
+                ),
+            }
+            _proto_cache: dict[str, object] = {}
+
+            @classmethod
+            def _import_proto(cls, pname: str) -> object:
+                mod = cls._proto_cache.get(pname)
+                if mod is not None:
+                    return mod
+                from importlib import import_module as _imp  # noqa: PLC0415
+
+                mod = _imp(cls._PROTO_PATHS[pname])
+                cls._proto_cache[pname] = mod
+                return mod
+
+            def __getattr__(self, name: str) -> object:
+                from types import MappingProxyType  # noqa: PLC0415
+
+                if name == "get_proto_decoder":
+                    func = self._import_proto
+                    setattr(self, name, func)
+                    return func
+                if name == "get_proto_decoders":
+
+                    def _get_all() -> object:
+                        for pn in self._PROTO_PATHS:
+                            self._import_proto(pn)
+                        return MappingProxyType(self._proto_cache)
+
+                    setattr(self, name, _get_all)
+                    return _get_all
+                if name in self._PROTO_PATHS:
+                    return self._import_proto(name)
+                raise AttributeError(
+                    f"module 'custom_components.googlefindmy' has no attribute {name!r}"
+                )
+
+        _ccg = _LazyGoogleFindMyModule("custom_components.googlefindmy")
         _ccg.__path__ = [str(_this_dir)]
         sys.modules["custom_components.googlefindmy"] = _ccg
 
