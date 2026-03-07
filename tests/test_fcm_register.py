@@ -274,10 +274,10 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(session.calls) == 2
 
 
-def test_gcm_register_falls_back_to_numeric_sender(
+def test_gcm_register_phone_registration_error_retries_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PHONE_REGISTRATION_ERROR triggers a second attempt using the numeric sender."""
+    """PHONE_REGISTRATION_ERROR is transient — retries with the same sender (no switch)."""
 
     responses = [
         _FakeResponse(
@@ -306,14 +306,15 @@ def test_gcm_register_falls_back_to_numeric_sender(
 
     assert result["token"] == "xyz"
     assert len(session.calls) == 2
+    # Both attempts use the same legacy sender — no switch to numeric
     assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
-    assert session.calls[1]["data"]["sender"] == "1234567890123"
+    assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_phone_registration_error_logs_sender(
+def test_gcm_register_phone_registration_error_logs_transient(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """PHONE_REGISTRATION_ERROR debug log reports which sender was active."""
+    """PHONE_REGISTRATION_ERROR log reports the error as transient."""
 
     responses = [
         _FakeResponse(
@@ -336,7 +337,7 @@ def test_gcm_register_phone_registration_error_logs_sender(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.INFO):
         result = asyncio.run(
             register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
         )
@@ -344,12 +345,7 @@ def test_gcm_register_phone_registration_error_logs_sender(
     assert result["token"] == "xyz"
     assert any(
         "PHONE_REGISTRATION_ERROR" in record.getMessage()
-        and f"sender={GCM_SERVER_KEY_B64} (legacy server key)" in record.getMessage()
-        for record in caplog.records
-    )
-    assert any(
-        "switching sender fallback" in record.getMessage()
-        and "sender=1234567890123" in record.getMessage()
+        and "transient" in record.getMessage()
         for record in caplog.records
     )
 
