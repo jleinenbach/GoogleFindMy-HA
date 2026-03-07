@@ -8,8 +8,11 @@ import types
 from pathlib import Path
 
 _this_dir = Path(__file__).resolve().parent
+_standalone = not (
+    _this_dir.name == "googlefindmy" and _this_dir.parent.name == "custom_components"
+)
 
-if _this_dir.name == "googlefindmy" and _this_dir.parent.name == "custom_components":
+if not _standalone:
     # Running inside the HA repo structure – add repo root to sys.path
     _repo_root = str(_this_dir.parents[2])
     if _repo_root not in sys.path:
@@ -57,5 +60,107 @@ else:
 
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
 
+
+def _register_file_cache() -> None:
+    """Create a file-backed TokenCache and register it for standalone CLI use.
+
+    Reads/writes ``Auth/secrets.json`` (the upstream GoogleFindMyTools layout)
+    so that ``_resolve_cli_cache`` in ``nbe_list_devices`` finds a registered
+    cache and the CLI flow works without Home Assistant.
+    """
+    import json  # noqa: PLC0415
+
+    from custom_components.googlefindmy.Auth.token_cache import (  # noqa: PLC0415
+        _register_instance,
+        _set_default_entry_id,
+    )
+
+    secrets_path = _this_dir / "Auth" / "secrets.json"
+
+    # Build a minimal TokenCache-compatible object backed by a JSON file.
+    # We cannot call TokenCache() because it requires a real HomeAssistant
+    # instance, so we create a duck-typed replacement instead.
+
+    class _FileCache:
+        """Minimal file-backed cache compatible with the TokenCache interface."""
+
+        entry_id: str = "standalone"
+
+        def __init__(self, path: Path) -> None:
+            self._path = path
+            self._data: dict[str, object] = {}
+            if path.is_file():
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        raw = json.load(fh)
+                    if isinstance(raw, dict):
+                        self._data = raw
+                except Exception:  # noqa: BLE001
+                    pass
+
+        def _save(self) -> None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._path, "w", encoding="utf-8") as fh:
+                json.dump(self._data, fh, indent=2)
+
+        # --- async interface expected by nbe_list_devices / nova_request ---
+
+        async def get(self, name: str) -> object:
+            return self._data.get(name)
+
+        async def set(self, name: str, value: object) -> None:
+            if value is None:
+                self._data.pop(name, None)
+            else:
+                self._data[name] = value
+            self._save()
+
+        async def async_get_cached_value(self, name: str) -> object:
+            return self._data.get(name)
+
+        async def async_set_cached_value(self, name: str, value: object) -> None:
+            await self.set(name, value)
+
+        async def async_get_cached_value_or_set(self, name: str, generator):  # type: ignore[no-untyped-def]
+            existing = self._data.get(name)
+            if existing is not None:
+                return existing
+            import asyncio  # noqa: PLC0415
+
+            candidate = generator()
+            if asyncio.iscoroutine(candidate):
+                candidate = await candidate
+            await self.set(name, candidate)
+            return candidate
+
+        async def get_or_set(self, name: str, generator):  # type: ignore[no-untyped-def]
+            return await self.async_get_cached_value_or_set(name, generator)
+
+        def sync_get(self, name: str) -> object:
+            return self._data.get(name)
+
+        def sync_set(self, name: str, value: object) -> None:
+            if value is None:
+                self._data.pop(name, None)
+            else:
+                self._data[name] = value
+            self._save()
+
+        async def flush(self) -> None:
+            self._save()
+
+        async def close(self) -> None:
+            self._save()
+
+    file_cache = _FileCache(secrets_path)
+
+    # Register as a TokenCache instance so _resolve_cli_cache finds it.
+    # mypy: _FileCache is duck-typed, not a real TokenCache subclass.
+    _register_instance("standalone", file_cache)  # type: ignore[arg-type]
+    _set_default_entry_id("standalone", force=True)
+
+
 if __name__ == "__main__":
+    if _standalone:
+        _register_file_cache()
     list_devices()
