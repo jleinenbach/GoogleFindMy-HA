@@ -84,58 +84,92 @@ else:
 
         _ha_available = find_spec("homeassistant") is not None
     if not _ha_available:
+        import importlib.abc  # noqa: PLC0415
+        import importlib.machinery  # noqa: PLC0415
 
-        class _StubHAPackage(types.ModuleType):
-            """Auto-generate HA submodule stubs on demand.
+        class _DummyMeta(type):
+            """Metaclass so dummy classes double as pass-through decorators."""
 
-            Any ``from homeassistant.X.Y import Z`` that reaches an
-            unregistered submodule will get an empty stub module created
-            automatically, so transitive imports never fail.
-            """
+            def __call__(cls, *args, **kwargs):  # type: ignore[override]
+                # @some_ha_decorator usage: return the function unchanged
+                if len(args) == 1 and callable(args[0]) and not kwargs:
+                    return args[0]
+                obj = cls.__new__(cls)
+                obj.__init__(*args, **kwargs)
+                return obj
+
+        class _Dummy(metaclass=_DummyMeta):
+            """Versatile stand-in for any HA symbol (class, decorator, constant)."""
+
+            def __init__(self, *args, **kwargs):  # noqa: ARG002
+                pass
+
+            def __init_subclass__(cls, **kwargs):
+                super().__init_subclass__(**kwargs)
+
+        class _StubHAModule(types.ModuleType):
+            """Stub module – missing attributes become ``_Dummy`` subclasses."""
 
             def __getattr__(self, name: str) -> object:
                 if name.startswith("_"):
                     raise AttributeError(name)
-                fullname = f"{self.__name__}.{name}"
-                if fullname in sys.modules:
-                    return sys.modules[fullname]
-                sub = _StubHAPackage(fullname)
-                sub.__path__ = []
-                sys.modules[fullname] = sub
-                setattr(self, name, sub)
-                return sub
-
-        _ha = _StubHAPackage("homeassistant")
-        _ha.__path__ = []
-        sys.modules["homeassistant"] = _ha
-
-        # Override specific submodules with concrete stubs where needed.
-        _ha_core = _StubHAPackage("homeassistant.core")
-        _ha_core.__path__ = []
-        _ha_core.HomeAssistant = type("HomeAssistant", (), {})  # type: ignore[attr-defined]
-        sys.modules["homeassistant.core"] = _ha_core
-
-        _ha_helpers = _StubHAPackage("homeassistant.helpers")
-        _ha_helpers.__path__ = []
-        sys.modules["homeassistant.helpers"] = _ha_helpers
-
-        _ha_storage = _StubHAPackage("homeassistant.helpers.storage")
-        _ha_storage.__path__ = []
-        _ha_storage.Store = type("Store", (), {})  # type: ignore[attr-defined]
-        sys.modules["homeassistant.helpers.storage"] = _ha_storage
+                cls = type(name, (_Dummy,), {})
+                setattr(self, name, cls)
+                return cls
 
         class _StubHAExceptions(types.ModuleType):
-            """Auto-generate HA exception stubs on demand."""
+            """Stub for ``homeassistant.exceptions`` – generates Exception subclasses."""
 
             _HomeAssistantError: type = type("HomeAssistantError", (Exception,), {})
 
             def __getattr__(self, name: str) -> object:
                 if name.startswith("_"):
                     raise AttributeError(name)
-                # All HA exceptions inherit from HomeAssistantError
                 cls = type(name, (self._HomeAssistantError,), {})
                 setattr(self, name, cls)
                 return cls
+
+        class _HAStubFinder(importlib.abc.MetaPathFinder):
+            """Import hook: auto-create stub modules for any ``homeassistant.*``."""
+
+            def find_spec(  # type: ignore[override]
+                self,
+                fullname: str,
+                path: object,
+                target: object = None,
+            ) -> "importlib.machinery.ModuleSpec | None":
+                if (
+                    fullname == "homeassistant"
+                    or fullname.startswith("homeassistant.")
+                ) and fullname not in sys.modules:
+                    return importlib.machinery.ModuleSpec(
+                        fullname, self, is_package=True,  # type: ignore[arg-type]
+                    )
+                return None
+
+            # Loader protocol -------------------------------------------------
+            def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType:
+                mod = _StubHAModule(spec.name)
+                mod.__path__ = []  # type: ignore[attr-defined]
+                return mod
+
+            def exec_module(self, module: types.ModuleType) -> None:  # noqa: ARG002
+                pass
+
+        sys.meta_path.insert(0, _HAStubFinder())
+
+        # Pre-populate specific submodules with concrete stubs so the
+        # critical import chain (token_cache, exceptions, get_owner_key)
+        # gets the exact types it needs.
+        _ha_core = _StubHAModule("homeassistant.core")
+        _ha_core.__path__ = []  # type: ignore[attr-defined]
+        _ha_core.HomeAssistant = type("HomeAssistant", (), {})  # type: ignore[attr-defined]
+        sys.modules["homeassistant.core"] = _ha_core
+
+        _ha_storage = _StubHAModule("homeassistant.helpers.storage")
+        _ha_storage.__path__ = []  # type: ignore[attr-defined]
+        _ha_storage.Store = type("Store", (), {})  # type: ignore[attr-defined]
+        sys.modules["homeassistant.helpers.storage"] = _ha_storage
 
         _ha_exceptions = _StubHAExceptions("homeassistant.exceptions")
         _ha_exceptions.HomeAssistantError = _ha_exceptions._HomeAssistantError  # type: ignore[attr-defined]
