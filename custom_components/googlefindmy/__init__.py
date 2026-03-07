@@ -209,7 +209,7 @@ from .const import (
 from .const import (
     CONFIG_ENTRY_VERSION as CONFIG_ENTRY_VERSION,
 )
-from .email import normalize_email, unique_account_id
+from .email_utils import normalize_email, unique_account_id
 from .ha_typing import CloudDiscoveryRuntime, callback
 from .SpotApi.spot_grpc_transport import SPOT_GRPC_TRANSPORT
 

@@ -21,7 +21,7 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DATA_SUBENTRY_KEY,
 )
-from custom_components.googlefindmy.email import unique_account_id
+from custom_components.googlefindmy.email_utils import unique_account_id
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
