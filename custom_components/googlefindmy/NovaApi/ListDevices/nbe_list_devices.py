@@ -216,7 +216,9 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
                 "Multiple token caches registered. Provide the ConfigEntry ID via "
                 f"the CLI argument or set GOOGLEFINDMY_ENTRY_ID. Available IDs: {available}."
             )
-        raise MissingTokenCacheError()
+        # Exactly one entry registered — use it directly (no ambiguity).
+        sole_id = entry_ids[0]
+        return get_cache_for_entry(sole_id), sole_id
 
     normalized = entry_id_hint.strip()
 

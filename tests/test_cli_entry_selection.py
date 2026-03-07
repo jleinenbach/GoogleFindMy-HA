@@ -31,7 +31,7 @@ class _DummyCache:
 
 
 def test_resolve_cli_cache_requires_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_resolve_cli_cache should enforce entry selection and return the cache."""
+    """_resolve_cli_cache should auto-select a single entry and return the cache."""
 
     cache = _DummyCache("entry-one")
     monkeypatch.setattr(
@@ -39,13 +39,17 @@ def test_resolve_cli_cache_requires_entry(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setattr(nbe_list_devices, "get_cache_for_entry", lambda entry: cache)
 
+    # Explicit hint works as before
     resolved_cache, namespace = nbe_list_devices._resolve_cli_cache("entry-one")
     assert resolved_cache is cache
     assert namespace == "entry-one"
 
-    with pytest.raises(MissingTokenCacheError):
-        nbe_list_devices._resolve_cli_cache(None)
+    # With exactly one entry registered, None hint auto-selects it
+    resolved_cache, namespace = nbe_list_devices._resolve_cli_cache(None)
+    assert resolved_cache is cache
+    assert namespace == "entry-one"
 
+    # With no entries registered, any hint raises
     monkeypatch.setattr(nbe_list_devices, "get_registered_entry_ids", lambda: [])
     with pytest.raises(MissingTokenCacheError):
         nbe_list_devices._resolve_cli_cache("entry-one")

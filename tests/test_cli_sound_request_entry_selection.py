@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.PlaySound import (
     start_sound_request,
     stop_sound_request,
@@ -36,8 +35,8 @@ def _clear_entry_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GOOGLEFINDMY_ENTRY_ID", raising=False)
 
 
-def test_start_cli_requires_explicit_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The start-sound CLI helper should refuse to auto-select an entry."""
+def test_start_cli_auto_selects_single_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The start-sound CLI helper should auto-select a single registered entry."""
 
     cache = _DummyCache("entry-one")
     monkeypatch.setattr(
@@ -45,7 +44,8 @@ def test_start_cli_requires_explicit_entry(monkeypatch: pytest.MonkeyPatch) -> N
     )
     monkeypatch.setattr(nbe_list_devices, "get_cache_for_entry", lambda entry: cache)
 
-    with pytest.raises(MissingTokenCacheError):
+    # Auto-selection succeeds; the next error is about missing FCM credentials.
+    with pytest.raises(RuntimeError, match="FCM token"):
         asyncio.run(start_sound_request._async_cli_main(None))
 
 
@@ -107,8 +107,8 @@ def test_start_cli_uses_selected_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     assert recorded["token"] == "token-123"
 
 
-def test_stop_cli_requires_explicit_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The stop-sound CLI helper should refuse to auto-select an entry."""
+def test_stop_cli_auto_selects_single_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stop-sound CLI helper should auto-select a single registered entry."""
 
     cache = _DummyCache("entry-one")
     monkeypatch.setattr(
@@ -116,7 +116,8 @@ def test_stop_cli_requires_explicit_entry(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setattr(nbe_list_devices, "get_cache_for_entry", lambda entry: cache)
 
-    with pytest.raises(MissingTokenCacheError):
+    # Auto-selection succeeds; the next error is about missing FCM credentials.
+    with pytest.raises(RuntimeError, match="FCM token"):
         asyncio.run(stop_sound_request._async_cli_main(None))
 
 
