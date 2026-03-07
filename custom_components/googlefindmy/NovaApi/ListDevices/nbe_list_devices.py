@@ -306,6 +306,19 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
         )
 
 
+def list_devices() -> None:
+    """Interactive CLI entry point (sync wrapper around _async_cli_main).
+
+    This matches the upstream GoogleFindMyTools API: ``main.py`` simply calls
+    ``list_devices()`` and everything runs synchronously from the caller's
+    perspective.
+    """
+    try:
+        asyncio.run(_async_cli_main())
+    except KeyboardInterrupt:
+        print("\nExiting.")
+
+
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI arguments for entry selection.
 
