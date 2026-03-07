@@ -89,6 +89,7 @@ def _register_file_cache() -> None:
         def __init__(self, path: Path) -> None:
             self._path = path
             self._data: dict[str, object] = {}
+            self._load_failed = False
             if path.is_file():
                 try:
                     with open(path, encoding="utf-8") as fh:
@@ -96,9 +97,19 @@ def _register_file_cache() -> None:
                     if isinstance(raw, dict):
                         self._data = raw
                 except Exception:  # noqa: BLE001
-                    pass
+                    import logging  # noqa: PLC0415
+
+                    logging.getLogger(__name__).warning(
+                        "Failed to load %s; credentials will not be persisted "
+                        "until a successful write occurs.",
+                        path,
+                    )
+                    self._load_failed = True
 
         def _save(self) -> None:
+            if self._load_failed and not self._data:
+                return  # Don't overwrite valid file with empty data
+            self._load_failed = False
             self._path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._path, "w", encoding="utf-8") as fh:
                 json.dump(self._data, fh, indent=2)
