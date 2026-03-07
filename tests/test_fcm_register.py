@@ -84,16 +84,13 @@ def test_gcm_register_prefers_legacy_sender_first(
     assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_html_response_triggers_sender_fallback(
+def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """HTML/404 responses trigger a sender fallback before the next attempt."""
+    """HTML/404 responses rotate the endpoint but never switch sender (upstream alignment)."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
-        _FakeResponse(
-            404, "<!doctype html>legacy not found", {"Content-Type": "text/html"}
-        ),
         _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
     ]
     session = _FakeSession(responses)
@@ -118,23 +115,15 @@ def test_gcm_register_html_response_triggers_sender_fallback(
 
     assert result["token"] == "abc123"
     assert result["android_id"] == 42
+    # Endpoint rotates, but sender stays as legacy key
     assert [call["url"] for call in session.calls] == [
-        GCM_REGISTER3_URL,
         GCM_REGISTER3_URL,
         GCM_REGISTER_URL,
     ]
     assert [call["data"]["sender"] for call in session.calls] == [
         GCM_SERVER_KEY_B64,
-        "1234567890123",
-        "1234567890123",
+        GCM_SERVER_KEY_B64,
     ]
-    assert any(
-        "switching sender from" in record.getMessage()
-        and "HTML/404" in record.getMessage()
-        and "1234567890123" in record.getMessage()
-        and GCM_SERVER_KEY_B64 in record.getMessage()
-        for record in caplog.records
-    )
 
 
 def test_gcm_register_rotation_logs_reason_and_sender(
@@ -175,10 +164,10 @@ def test_gcm_register_rotation_logs_reason_and_sender(
     )
 
 
-def test_gcm_register_fallback_succeeds_on_second_attempt(
+def test_gcm_register_404_retries_with_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failing attempt triggers a sender fallback and succeeds immediately."""
+    """A 404 rotates endpoint but keeps the same legacy sender."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
@@ -202,13 +191,15 @@ def test_gcm_register_fallback_succeeds_on_second_attempt(
     result = asyncio.run(register.gcm_register({"androidId": 11, "securityToken": 22}))
 
     assert result["token"] == "abc123"
+    # Endpoint rotates: register3 → register
     assert [call["url"] for call in session.calls] == [
         GCM_REGISTER3_URL,
-        GCM_REGISTER3_URL,
+        GCM_REGISTER_URL,
     ]
+    # Sender stays legacy — no switch to numeric
     assert [call["data"]["sender"] for call in session.calls] == [
         GCM_SERVER_KEY_B64,
-        "1234567890123",
+        GCM_SERVER_KEY_B64,
     ]
 
 
