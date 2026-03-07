@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import os
@@ -337,6 +338,7 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         LOGGER.debug("webdriver-manager not available, skipping fallback")
         return None
 
+    driver: WebDriver | None = None
     try:
         LOGGER.info("Attempting webdriver-manager fallback...")
         service = _chrome_service_cls(_chrome_driver_manager_cls().install())
@@ -345,13 +347,14 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
 
-        driver: WebDriver = _selenium_webdriver.Chrome(service=service, options=options)
+        driver = _selenium_webdriver.Chrome(service=service, options=options)
         LOGGER.warning(
             "Started using webdriver-manager (standard Selenium). "
             "This uses standard Selenium without bot detection bypass!"
         )
         return driver
     except Exception as err:  # noqa: BLE001 - fallback should not raise
+        _quit_driver(driver)
         LOGGER.debug("webdriver-manager fallback failed: %s", err)
         return None
 
@@ -394,6 +397,13 @@ def safe_quit_driver(driver: WebDriver | None) -> None:
             pass
 
 
+def _quit_driver(driver: WebDriver | None) -> None:
+    """Silently quit a partially-initialized driver to avoid leftover Chrome windows."""
+    if driver is not None:
+        with contextlib.suppress(Exception):
+            driver.quit()
+
+
 def create_driver(
     chrome_path: str | None = None, *, headless: bool = False
 ) -> WebDriver:
@@ -418,6 +428,7 @@ def create_driver(
             LOGGER.debug("Detected Chrome version: %d", version_main)
 
     # Strategy 1: Default with version_main if detected
+    driver: WebDriver | None = None
     try:
         options = get_options(headless=headless)
         if resolved_path:
@@ -429,6 +440,7 @@ def create_driver(
         LOGGER.debug("ChromeDriver started successfully.")
         return driver
     except Exception as err:  # noqa: BLE001
+        _quit_driver(driver)
         LOGGER.warning("Strategy 1 (default) failed: %s", err)
 
     # Strategy 2: Use browser_executable_path parameter (if supported)
@@ -446,6 +458,7 @@ def create_driver(
             LOGGER.debug("ChromeDriver started with browser_executable_path.")
             return driver
         except Exception as err:  # noqa: BLE001
+            _quit_driver(driver)
             LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
 
     # Strategy 3: Try without specifying version
@@ -459,6 +472,7 @@ def create_driver(
         LOGGER.debug("ChromeDriver started without explicit version.")
         return driver
     except Exception as err:  # noqa: BLE001
+        _quit_driver(driver)
         LOGGER.warning("Strategy 3 (no version) failed: %s", err)
 
     # Strategy 4: Try headless mode
@@ -477,6 +491,7 @@ def create_driver(
             LOGGER.debug("ChromeDriver started in headless mode.")
             return driver
         except Exception as err:  # noqa: BLE001
+            _quit_driver(driver)
             LOGGER.warning("Strategy 4 (headless) failed: %s", err)
 
     # Strategy 5: webdriver-manager fallback
