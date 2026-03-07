@@ -13,7 +13,7 @@ _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-from NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
+from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
 
 if __name__ == "__main__":
     list_devices()
