@@ -772,9 +772,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and raw_encrypted_identity_key
             and len(raw_encrypted_identity_key) != _EIK_LEN
         ):
-            _LOGGER.warning(
-                "[DIAG-ALERT] Key length is %d (expected %d for raw EIK)."
-                " This suggests wrapping/encryption!",
+            _LOGGER.debug(
+                "[DIAG] Key length is %d (expected %d for raw EIK);"
+                " likely GCM-wrapped (normal for Moto Tag / Chipolo).",
                 len(raw_encrypted_identity_key),
                 _EIK_LEN,
             )
@@ -784,9 +784,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and raw_encrypted_identity_key
             and len(raw_encrypted_identity_key) > _EIK_LEN
         ):
-            _LOGGER.warning(
-                "[DIAG-ALERT] Key length %d bytes exceeds expected raw EIK length (%d)."
-                " Probable wrapped key container or HKDF-required envelope.",
+            _LOGGER.debug(
+                "[DIAG] Key length %d bytes exceeds expected raw EIK length (%d);"
+                " probable GCM-wrapped key (will attempt unwrap).",
                 len(raw_encrypted_identity_key),
                 _EIK_LEN,
             )
