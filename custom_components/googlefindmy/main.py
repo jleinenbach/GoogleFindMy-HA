@@ -27,8 +27,16 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 
-from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
+# Ensure the repository root (two levels above this file) is on sys.path so
+# that ``custom_components`` can be resolved when running this script directly
+# from the CLI (i.e. ``python main.py``).
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: E402
     _async_cli_main,
 )
 
