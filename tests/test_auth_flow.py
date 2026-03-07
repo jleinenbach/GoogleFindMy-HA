@@ -61,6 +61,12 @@ class FakeDriver:
     def quit(self) -> None:
         self.quit_calls += 1
 
+    def execute_script(self, script: str) -> Any:  # noqa: ARG002
+        return None
+
+    def get_cookies(self) -> list[dict[str, str]]:
+        return []
+
 
 class ImmediateWaitFactory:
     """Replacement for WebDriverWait that immediately evaluates predicates."""
@@ -101,9 +107,10 @@ def test_request_oauth_account_token_flow_returns_cookie(
     driver = FakeDriver(cookie_after_wait={"value": "token123"})
     wait_factory = _apply_flow_patches(monkeypatch, driver)
 
-    token = request_oauth_account_token_flow(headless=True)
+    token, email = request_oauth_account_token_flow(headless=True)
 
     assert token == "token123"
+    assert email is None  # FakeDriver has no real session
     assert driver.visited_urls == ["https://accounts.google.com/EmbeddedSetup"]
     assert driver.quit_calls == 1
     assert wait_factory.instances and wait_factory.instances[0].until_calls == 1
