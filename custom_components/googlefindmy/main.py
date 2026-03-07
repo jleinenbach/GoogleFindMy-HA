@@ -26,6 +26,35 @@ else:
         _ccg.__path__ = [str(_this_dir)]
         sys.modules["custom_components.googlefindmy"] = _ccg
 
+    # Provide lightweight stubs for homeassistant so HA-specific imports
+    # in token_cache.py and exceptions.py don't fail at import time.
+    # Only inject stubs when HA is genuinely unavailable (not just not-yet-imported).
+    _ha_available = "homeassistant" in sys.modules
+    if not _ha_available:
+        from importlib.util import find_spec
+
+        _ha_available = find_spec("homeassistant") is not None
+    if not _ha_available:
+        _ha = types.ModuleType("homeassistant")
+        _ha.__path__ = []
+        sys.modules["homeassistant"] = _ha
+
+        _ha_core = types.ModuleType("homeassistant.core")
+        _ha_core.HomeAssistant = type("HomeAssistant", (), {})  # type: ignore[attr-defined]
+        sys.modules["homeassistant.core"] = _ha_core
+
+        _ha_helpers = types.ModuleType("homeassistant.helpers")
+        _ha_helpers.__path__ = []
+        sys.modules["homeassistant.helpers"] = _ha_helpers
+
+        _ha_storage = types.ModuleType("homeassistant.helpers.storage")
+        _ha_storage.Store = type("Store", (), {})  # type: ignore[attr-defined]
+        sys.modules["homeassistant.helpers.storage"] = _ha_storage
+
+        _ha_exceptions = types.ModuleType("homeassistant.exceptions")
+        _ha_exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})  # type: ignore[attr-defined]
+        sys.modules["homeassistant.exceptions"] = _ha_exceptions
+
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
 
 if __name__ == "__main__":
