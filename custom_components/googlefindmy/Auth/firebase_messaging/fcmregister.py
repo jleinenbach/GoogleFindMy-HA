@@ -559,39 +559,27 @@ class FcmRegister:
 
             if error_code:
                 last_error = f"Error={error_code}"
-                if error_code == "PHONE_REGISTRATION_ERROR" and sender_index + 1 < len(
-                    sender_candidates
-                ):
-                    _logger.debug(
-                        "GCM register encountered PHONE_REGISTRATION_ERROR with sender=%s (%s)",
+                if error_code == "PHONE_REGISTRATION_ERROR":
+                    # Transient error — just retry with the same sender.
+                    # Upstream GoogleFindMyTools treats this as transient and
+                    # retries without switching sender, which eventually succeeds.
+                    _logger.info(
+                        "GCM register %s (transient, attempt %d/%d); "
+                        "retrying with same sender=%s (%s)",
+                        error_code,
+                        attempt,
+                        retries,
                         body["sender"],
                         sender_mode(body["sender"]),
                     )
-                    sender_index += 1
-                    body["sender"] = sender_candidates[sender_index]
-                    label = (
-                        "legacy server key"
-                        if sender_candidates[sender_index] == GCM_SERVER_KEY_B64
-                        else "configured numeric sender"
-                    )
+                else:
                     _logger.warning(
-                        "GCM register error %s encountered; switching sender fallback to %s (sender=%s)",
-                        error_code,
-                        label,
-                        body["sender"],
+                        "GCM register error via %s (attempt %d/%d): %s",
+                        indicator,
+                        attempt,
+                        retries,
+                        last_error,
                     )
-                    if attempt < retries:
-                        await asyncio.sleep(1)
-                    attempt += 1
-                    continue
-
-                _logger.warning(
-                    "GCM register error via %s (attempt %d/%d): %s",
-                    indicator,
-                    attempt,
-                    retries,
-                    last_error,
-                )
             else:
                 snippet = response_text[:200]
                 if html_like:
