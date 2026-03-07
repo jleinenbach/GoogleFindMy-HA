@@ -27,6 +27,50 @@ else:
     if "custom_components.googlefindmy" not in sys.modules:
         _ccg = types.ModuleType("custom_components.googlefindmy")
         _ccg.__path__ = [str(_this_dir)]
+
+        # Provide a __getattr__ so that `from custom_components.googlefindmy import X`
+        # can lazily resolve names defined in __init__.py (e.g. get_proto_decoder)
+        # without executing the full __init__.py (which has heavy HA imports).
+        def _ccg_getattr(name: str) -> object:
+            from importlib import import_module as _imp  # noqa: PLC0415
+            from types import MappingProxyType  # noqa: PLC0415
+
+            _PROTO_PATHS: dict[str, str] = {
+                "Common_pb2": "custom_components.googlefindmy.ProtoDecoders.Common_pb2",
+                "DeviceUpdate_pb2": "custom_components.googlefindmy.ProtoDecoders.DeviceUpdate_pb2",
+                "LocationReportsUpload_pb2": (
+                    "custom_components.googlefindmy.ProtoDecoders.LocationReportsUpload_pb2"
+                ),
+            }
+            _proto_cache: dict[str, object] = {}
+
+            def _import_proto(pname: str) -> object:
+                mod = _proto_cache.get(pname)
+                if mod is not None:
+                    return mod
+                mod = _imp(_PROTO_PATHS[pname])
+                _proto_cache[pname] = mod
+                return mod
+
+            def get_proto_decoder(pname: str) -> object:
+                return _import_proto(pname)
+
+            def get_proto_decoders() -> object:
+                for pn in _PROTO_PATHS:
+                    _import_proto(pn)
+                return MappingProxyType(_proto_cache)
+
+            if name == "get_proto_decoder":
+                _ccg.get_proto_decoder = get_proto_decoder  # type: ignore[attr-defined]
+                return get_proto_decoder
+            if name == "get_proto_decoders":
+                _ccg.get_proto_decoders = get_proto_decoders  # type: ignore[attr-defined]
+                return get_proto_decoders
+            if name in _PROTO_PATHS:
+                return _import_proto(name)
+            raise AttributeError(f"module 'custom_components.googlefindmy' has no attribute {name!r}")
+
+        _ccg.__getattr__ = _ccg_getattr  # type: ignore[attr-defined]
         sys.modules["custom_components.googlefindmy"] = _ccg
 
     # Provide lightweight stubs for homeassistant so HA-specific imports
