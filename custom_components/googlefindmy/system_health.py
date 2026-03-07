@@ -13,7 +13,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 
 from .const import CONF_GOOGLE_EMAIL, DATA_SECRET_BUNDLE, DOMAIN, INTEGRATION_VERSION
-from .email import normalize_email
+from .email_utils import normalize_email
 from .shared_helpers import normalize_fcm_entry_snapshot, safe_fcm_health_snapshots
 
 

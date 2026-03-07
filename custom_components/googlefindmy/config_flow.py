@@ -122,7 +122,7 @@ from .const import (
     coerce_ignored_mapping,
     service_device_identifier,
 )
-from .email import normalize_email, normalize_email_or_default, unique_account_id
+from .email_utils import normalize_email, normalize_email_or_default, unique_account_id
 from .integration_modules import (
     import_integration_api_module,
     import_integration_package,

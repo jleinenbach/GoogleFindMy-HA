@@ -47,7 +47,7 @@ except ImportError:  # pragma: no cover - provide a minimal fallback for tests
 
 from . import config_flow as config_flow_module
 from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMAIN
-from .email import normalize_email
+from .email_utils import normalize_email
 from .ha_typing import CloudDiscoveryRuntime, callback
 
 cf = cast(Any, config_flow_module)
