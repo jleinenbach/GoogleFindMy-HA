@@ -90,29 +90,37 @@ else:
         class _DummyMeta(type):
             """Metaclass so dummy classes double as pass-through decorators."""
 
-            def __call__(cls, *args, **kwargs):  # type: ignore[override]
+            def __call__(cls, *args: object, **kwargs: object) -> object:
                 # @some_ha_decorator usage: return the function unchanged
                 if len(args) == 1 and callable(args[0]) and not kwargs:
                     return args[0]
-                obj = cls.__new__(cls)
-                obj.__init__(*args, **kwargs)
-                return obj
+                return super().__call__(*args, **kwargs)
 
         class _Dummy(metaclass=_DummyMeta):
             """Versatile stand-in for any HA symbol (class, decorator, constant)."""
 
-            def __init__(self, *args, **kwargs):  # noqa: ARG002
+            def __init__(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
                 pass
 
-            def __init_subclass__(cls, **kwargs):
+            def __init_subclass__(cls, **kwargs: object) -> None:
                 super().__init_subclass__(**kwargs)
 
         class _StubHAModule(types.ModuleType):
-            """Stub module – missing attributes become ``_Dummy`` subclasses."""
+            """Stub module – missing attributes become ``_Dummy`` subclasses.
+
+            Attribute lookup first checks ``sys.modules`` for a registered
+            submodule so that ``from homeassistant import core`` (attribute-
+            style access after the finder has already loaded the submodule)
+            returns the real stub module rather than fabricating a dummy.
+            """
 
             def __getattr__(self, name: str) -> object:
                 if name.startswith("_"):
                     raise AttributeError(name)
+                # If a submodule with this name exists, return it.
+                fullname = f"{self.__name__}.{name}"
+                if fullname in sys.modules:
+                    return sys.modules[fullname]
                 cls = type(name, (_Dummy,), {})
                 setattr(self, name, cls)
                 return cls
@@ -132,7 +140,7 @@ else:
         class _HAStubFinder(importlib.abc.MetaPathFinder):
             """Import hook: auto-create stub modules for any ``homeassistant.*``."""
 
-            def find_spec(  # type: ignore[override]
+            def find_spec(
                 self,
                 fullname: str,
                 path: object,
@@ -143,14 +151,16 @@ else:
                     or fullname.startswith("homeassistant.")
                 ) and fullname not in sys.modules:
                     return importlib.machinery.ModuleSpec(
-                        fullname, self, is_package=True,  # type: ignore[arg-type]
+                        fullname,
+                        self,  # type: ignore[arg-type]
+                        is_package=True,
                     )
                 return None
 
             # Loader protocol -------------------------------------------------
             def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType:
                 mod = _StubHAModule(spec.name)
-                mod.__path__ = []  # type: ignore[attr-defined]
+                mod.__path__ = []
                 return mod
 
             def exec_module(self, module: types.ModuleType) -> None:  # noqa: ARG002
@@ -162,17 +172,17 @@ else:
         # critical import chain (token_cache, exceptions, get_owner_key)
         # gets the exact types it needs.
         _ha_core = _StubHAModule("homeassistant.core")
-        _ha_core.__path__ = []  # type: ignore[attr-defined]
-        _ha_core.HomeAssistant = type("HomeAssistant", (), {})  # type: ignore[attr-defined]
+        _ha_core.__path__ = []
+        setattr(_ha_core, "HomeAssistant", type("HomeAssistant", (), {}))
         sys.modules["homeassistant.core"] = _ha_core
 
         _ha_storage = _StubHAModule("homeassistant.helpers.storage")
-        _ha_storage.__path__ = []  # type: ignore[attr-defined]
-        _ha_storage.Store = type("Store", (), {})  # type: ignore[attr-defined]
+        _ha_storage.__path__ = []
+        setattr(_ha_storage, "Store", type("Store", (), {}))
         sys.modules["homeassistant.helpers.storage"] = _ha_storage
 
         _ha_exceptions = _StubHAExceptions("homeassistant.exceptions")
-        _ha_exceptions.HomeAssistantError = _ha_exceptions._HomeAssistantError  # type: ignore[attr-defined]
+        setattr(_ha_exceptions, "HomeAssistantError", _ha_exceptions._HomeAssistantError)
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
 
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
