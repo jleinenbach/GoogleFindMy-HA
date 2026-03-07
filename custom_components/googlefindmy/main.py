@@ -307,7 +307,63 @@ def _register_file_cache() -> None:
     _set_default_entry_id("standalone", force=True)
 
 
+def _ensure_authenticated() -> None:
+    """Run the Chrome-based OAuth login when no credentials exist yet.
+
+    This replicates the original GoogleFindMyTools first-run experience:
+    Chrome opens for Google login, the user enters their e-mail, and both
+    the OAuth token and username are persisted to ``Auth/secrets.json``.
+    """
+    import json  # noqa: PLC0415
+
+    secrets_path = _this_dir / "Auth" / "secrets.json"
+    data: dict[str, object] = {}
+    if secrets_path.is_file():
+        try:
+            with open(secrets_path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if isinstance(raw, dict):
+                data = raw
+        except Exception:  # noqa: BLE001
+            pass
+
+    has_user = isinstance(data.get("username"), str) and data["username"]
+    has_token = (
+        (isinstance(data.get("oauth_token"), str) and data["oauth_token"])
+        or (isinstance(data.get("aas_token"), str) and data["aas_token"])
+    )
+    if has_user and has_token:
+        return  # Already authenticated
+
+    print("No credentials found. Starting authentication flow...\n")
+
+    # 1) Get the OAuth token via Chrome login
+    from custom_components.googlefindmy.Auth.auth_flow import (  # noqa: PLC0415
+        request_oauth_account_token_flow,
+    )
+
+    oauth_token = request_oauth_account_token_flow()
+
+    # 2) Ask for the Google account e-mail (needed for gpsoauth exchange)
+    if not has_user:
+        email = input("\nEnter your Google account email: ").strip()
+        if not email:
+            print("Error: email is required.", file=sys.stderr)
+            sys.exit(1)
+        data["username"] = email
+
+    data["oauth_token"] = oauth_token
+
+    # 3) Persist to secrets.json
+    secrets_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(secrets_path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+
+    print("\nCredentials saved. Continuing...\n")
+
+
 if __name__ == "__main__":
     if _standalone:
+        _ensure_authenticated()
         _register_file_cache()
     list_devices()
