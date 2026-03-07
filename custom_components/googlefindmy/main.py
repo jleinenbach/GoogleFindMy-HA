@@ -418,32 +418,6 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     return fcm
 
 
-def _try_seed_fcm_credentials(cache: object) -> None:
-    """Import FCM credentials from a user-provided file if the cache is empty.
-
-    If ``Auth/fcm_credentials.json`` exists and the cache does not yet contain
-    ``fcm_credentials``, the file is read and injected into the cache.  This
-    provides a workaround for environments where fresh GCM registration is
-    unreliable: the user can export credentials from a working HA installation
-    and place them in the ``Auth/`` directory.
-    """
-    import json  # noqa: PLC0415
-
-    if hasattr(cache, "sync_get") and cache.sync_get("fcm_credentials"):  # type: ignore[union-attr]
-        return  # already seeded
-    creds_file = _this_dir / "Auth" / "fcm_credentials.json"
-    if not creds_file.is_file():
-        return
-    try:
-        with open(creds_file, encoding="utf-8") as fh:
-            fcm_creds = json.load(fh)
-        if isinstance(fcm_creds, dict) and hasattr(cache, "sync_set"):
-            cache.sync_set("fcm_credentials", fcm_creds)  # type: ignore[union-attr]
-            print("FCM credentials imported from fcm_credentials.json")
-    except Exception:  # noqa: BLE001
-        pass
-
-
 if __name__ == "__main__":
     import asyncio  # noqa: PLC0415
 
@@ -454,7 +428,6 @@ if __name__ == "__main__":
     if _standalone:
         _ensure_authenticated()
         _file_cache = _register_file_cache()
-        _try_seed_fcm_credentials(_file_cache)
 
         async def _cli_main() -> None:
             fcm = await _setup_fcm_receiver(_file_cache)
