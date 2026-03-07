@@ -150,6 +150,9 @@ def _register_file_cache() -> None:
         def sync_get(self, name: str) -> object:
             return self._data.get(name)
 
+        async def all(self) -> dict[str, object]:
+            return dict(self._data)
+
         def sync_set(self, name: str, value: object) -> None:
             if value is None:
                 self._data.pop(name, None)
