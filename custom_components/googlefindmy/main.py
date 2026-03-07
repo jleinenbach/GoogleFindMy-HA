@@ -84,19 +84,43 @@ else:
 
         _ha_available = find_spec("homeassistant") is not None
     if not _ha_available:
-        _ha = types.ModuleType("homeassistant")
+
+        class _StubHAPackage(types.ModuleType):
+            """Auto-generate HA submodule stubs on demand.
+
+            Any ``from homeassistant.X.Y import Z`` that reaches an
+            unregistered submodule will get an empty stub module created
+            automatically, so transitive imports never fail.
+            """
+
+            def __getattr__(self, name: str) -> object:
+                if name.startswith("_"):
+                    raise AttributeError(name)
+                fullname = f"{self.__name__}.{name}"
+                if fullname in sys.modules:
+                    return sys.modules[fullname]
+                sub = _StubHAPackage(fullname)
+                sub.__path__ = []
+                sys.modules[fullname] = sub
+                setattr(self, name, sub)
+                return sub
+
+        _ha = _StubHAPackage("homeassistant")
         _ha.__path__ = []
         sys.modules["homeassistant"] = _ha
 
-        _ha_core = types.ModuleType("homeassistant.core")
+        # Override specific submodules with concrete stubs where needed.
+        _ha_core = _StubHAPackage("homeassistant.core")
+        _ha_core.__path__ = []
         _ha_core.HomeAssistant = type("HomeAssistant", (), {})  # type: ignore[attr-defined]
         sys.modules["homeassistant.core"] = _ha_core
 
-        _ha_helpers = types.ModuleType("homeassistant.helpers")
+        _ha_helpers = _StubHAPackage("homeassistant.helpers")
         _ha_helpers.__path__ = []
         sys.modules["homeassistant.helpers"] = _ha_helpers
 
-        _ha_storage = types.ModuleType("homeassistant.helpers.storage")
+        _ha_storage = _StubHAPackage("homeassistant.helpers.storage")
+        _ha_storage.__path__ = []
         _ha_storage.Store = type("Store", (), {})  # type: ignore[attr-defined]
         sys.modules["homeassistant.helpers.storage"] = _ha_storage
 
@@ -208,6 +232,12 @@ def _register_file_cache() -> None:
 
         def sync_get(self, name: str) -> object:
             return self._data.get(name)
+
+        def sync_pop(self, name: str, default: object = None) -> object:
+            val = self._data.pop(name, default)
+            if val is not default:
+                self._save()
+            return val
 
         async def all(self) -> dict[str, object]:
             return dict(self._data)
