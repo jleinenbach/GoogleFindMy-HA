@@ -17,7 +17,15 @@ if TYPE_CHECKING:
     from selenium.webdriver.remote.webdriver import WebDriver
 
 
-def request_oauth_account_token_flow(headless: bool = False) -> str:
+def request_oauth_account_token_flow(
+    headless: bool = False,
+) -> tuple[str, str | None]:
+    """Open Chrome for Google login and return ``(oauth_token, email)``.
+
+    The *email* is extracted from the Chrome session after login if possible.
+    It may be ``None`` when the DOM selectors fail (e.g. Google changes their
+    page layout) — callers should fall back to prompting the user.
+    """
     # In Home Assistant context, skip the interactive prompts
     is_home_assistant = "homeassistant" in sys.modules
 
@@ -59,15 +67,55 @@ def request_oauth_account_token_flow(headless: bool = False) -> str:
             msg = "OAuth token cookie value is missing or not a string"
             raise RuntimeError(msg)
 
+        # Try to extract the logged-in email from the page before closing.
+        email: str | None = _extract_email_from_session(driver)
+
         # Print the value of the "oauth_token" cookie
         if not is_home_assistant:
             print("[AuthFlow] Retrieved Account Token successfully.")
+            if email:
+                print(f"[AuthFlow] Detected account: {email}")
 
-        return oauth_token_value
+        return oauth_token_value, email
 
     finally:
         # Close the browser
         driver.quit()
+
+
+def _extract_email_from_session(driver: WebDriver) -> str | None:
+    """Best-effort extraction of the Google account email from the Chrome session.
+
+    Google's EmbeddedSetup page stores the email in various places after login.
+    We try several strategies; if none works we return ``None`` and the caller
+    can fall back to a manual prompt.
+    """
+    # Strategy 1: data-email attribute (common in Google account pages)
+    for selector in (
+        "[data-email]",
+        "#profileIdentifier",
+    ):
+        try:
+            result = driver.execute_script(
+                f"var el = document.querySelector('{selector}');"
+                "if (!el) return null;"
+                "return el.dataset.email || el.textContent || null;"
+            )
+            if isinstance(result, str) and "@" in result:
+                return result.strip()
+        except Exception:  # noqa: BLE001
+            continue
+
+    # Strategy 2: scan all cookies for one that looks like an email
+    try:
+        for c in driver.get_cookies():
+            val = c.get("value", "")
+            if isinstance(val, str) and "@" in val and "." in val.split("@")[-1]:
+                return val.strip()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return None
 
 
 if __name__ == "__main__":

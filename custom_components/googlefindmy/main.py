@@ -6,6 +6,7 @@
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 _this_dir = Path(__file__).resolve().parent
 _standalone = not (
@@ -188,12 +189,14 @@ else:
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
 
 
-def _register_file_cache() -> None:
+def _register_file_cache() -> object:
     """Create a file-backed TokenCache and register it for standalone CLI use.
 
     Reads/writes ``Auth/secrets.json`` (the upstream GoogleFindMyTools layout)
     so that ``_resolve_cli_cache`` in ``nbe_list_devices`` finds a registered
     cache and the CLI flow works without Home Assistant.
+
+    Returns the cache instance so callers can pass it to the FCM setup.
     """
     import json  # noqa: PLC0415
 
@@ -305,6 +308,7 @@ def _register_file_cache() -> None:
     # mypy: _FileCache is duck-typed, not a real TokenCache subclass.
     _register_instance("standalone", file_cache)  # type: ignore[arg-type]
     _set_default_entry_id("standalone", force=True)
+    return file_cache
 
 
 def _ensure_authenticated() -> None:
@@ -342,15 +346,20 @@ def _ensure_authenticated() -> None:
         request_oauth_account_token_flow,
     )
 
-    oauth_token = request_oauth_account_token_flow()
+    oauth_token, detected_email = request_oauth_account_token_flow()
 
-    # 2) Ask for the Google account e-mail (needed for gpsoauth exchange)
+    # 2) Set the Google account e-mail (needed for gpsoauth exchange).
+    #    Prefer the email extracted from the Chrome session; fall back to
+    #    a CLI prompt only when extraction failed.
     if not has_user:
-        email = input("\nEnter your Google account email: ").strip()
-        if not email:
-            print("Error: email is required.", file=sys.stderr)
-            sys.exit(1)
-        data["username"] = email
+        if detected_email:
+            data["username"] = detected_email
+        else:
+            email = input("\nEnter your Google account email: ").strip()
+            if not email:
+                print("Error: email is required.", file=sys.stderr)
+                sys.exit(1)
+            data["username"] = email
 
     data["oauth_token"] = oauth_token
 
@@ -362,8 +371,75 @@ def _ensure_authenticated() -> None:
     print("\nCredentials saved. Continuing...\n")
 
 
+async def _setup_fcm_receiver(cache: object) -> Any:
+    """Initialize the FCM push-notification receiver for standalone CLI use.
+
+    This is required because Google delivers location data exclusively via
+    FCM push notifications, not HTTP responses.  Without a registered FCM
+    receiver, location queries would fail with
+    ``RuntimeError: FCM receiver provider has not been registered.``
+    """
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from custom_components.googlefindmy.Auth.fcm_receiver_ha import (  # noqa: PLC0415
+        FcmReceiverHA,
+    )
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request import (  # noqa: PLC0415
+        register_fcm_receiver_provider as loc_register,
+    )
+
+    fcm = FcmReceiverHA()
+    await fcm.async_initialize(entry_id="standalone", cache=cache)  # type: ignore[arg-type]
+
+    # Minimal coordinator stub so _select_manual_locate_entry finds an entry.
+    coordinator_stub = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id="standalone"),
+        cache=cache,
+        is_device_present=lambda _cid: True,
+        get_device_display_name=lambda _cid: None,
+    )
+    fcm.register_coordinator(coordinator_stub)
+
+    def _get_fcm(entry_id: str | None = None) -> FcmReceiverHA:  # noqa: ARG001
+        return fcm
+
+    loc_register(_get_fcm)
+
+    # Also register in api.py if available (used by some code paths).
+    try:
+        from custom_components.googlefindmy.api import (  # noqa: PLC0415
+            register_fcm_receiver_provider as api_register,
+        )
+
+        api_register(_get_fcm)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return fcm
+
+
 if __name__ == "__main__":
+    import asyncio  # noqa: PLC0415
+
+    from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: E402, PLC0415
+        _async_cli_main,
+    )
+
     if _standalone:
         _ensure_authenticated()
-        _register_file_cache()
-    list_devices()
+        _file_cache = _register_file_cache()
+
+        async def _cli_main() -> None:
+            fcm = await _setup_fcm_receiver(_file_cache)
+            try:
+                await _async_cli_main()
+            finally:
+                with __import__("contextlib").suppress(Exception):
+                    await fcm.async_stop()
+
+        try:
+            asyncio.run(_cli_main())
+        except KeyboardInterrupt:
+            print("\nExiting.")
+    else:
+        list_devices()
