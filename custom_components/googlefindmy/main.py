@@ -100,8 +100,21 @@ else:
         _ha_storage.Store = type("Store", (), {})  # type: ignore[attr-defined]
         sys.modules["homeassistant.helpers.storage"] = _ha_storage
 
-        _ha_exceptions = types.ModuleType("homeassistant.exceptions")
-        _ha_exceptions.HomeAssistantError = type("HomeAssistantError", (Exception,), {})  # type: ignore[attr-defined]
+        class _StubHAExceptions(types.ModuleType):
+            """Auto-generate HA exception stubs on demand."""
+
+            _HomeAssistantError: type = type("HomeAssistantError", (Exception,), {})
+
+            def __getattr__(self, name: str) -> object:
+                if name.startswith("_"):
+                    raise AttributeError(name)
+                # All HA exceptions inherit from HomeAssistantError
+                cls = type(name, (self._HomeAssistantError,), {})
+                setattr(self, name, cls)
+                return cls
+
+        _ha_exceptions = _StubHAExceptions("homeassistant.exceptions")
+        _ha_exceptions.HomeAssistantError = _ha_exceptions._HomeAssistantError  # type: ignore[attr-defined]
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
 
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
