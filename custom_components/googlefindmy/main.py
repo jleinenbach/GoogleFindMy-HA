@@ -28,7 +28,13 @@ else:
 
     # Provide lightweight stubs for homeassistant so HA-specific imports
     # in token_cache.py and exceptions.py don't fail at import time.
-    if "homeassistant" not in sys.modules:
+    # Only inject stubs when HA is genuinely unavailable (not just not-yet-imported).
+    _ha_available = "homeassistant" in sys.modules
+    if not _ha_available:
+        from importlib.util import find_spec
+
+        _ha_available = find_spec("homeassistant") is not None
+    if not _ha_available:
         _ha = types.ModuleType("homeassistant")
         _ha.__path__ = []
         sys.modules["homeassistant"] = _ha
