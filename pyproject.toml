@@ -104,6 +104,7 @@ ignore = ["E501"]
     "E402",
     "UP022",
 ]
+"custom_components/googlefindmy/main.py" = ["E402", "I001"]
 "custom_components/googlefindmy/config_flow.py" = [
     "PLR0912",
     "PLR0915",
