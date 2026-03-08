@@ -416,6 +416,11 @@ async def _ensure_aas_token(cache: object) -> None:
 
     This function must be called **immediately** after ``_ensure_authenticated()``
     and **before** any subsequent Chrome sessions.
+
+    If no AAS token is available and the exchange fails (e.g. because the
+    OAuth cookie is stale from a previous session), the process exits with
+    a clear re-authentication prompt instead of continuing only to fail
+    later during the first API call.
     """
     # If an AAS token is already cached, nothing to do.
     existing = await cache.get("aas_token")  # type: ignore[attr-defined]
@@ -431,14 +436,20 @@ async def _ensure_aas_token(cache: object) -> None:
         )
 
         await async_get_aas_token(cache=cache)  # type: ignore[arg-type]
-    except Exception as exc:  # noqa: BLE001
-        import logging  # noqa: PLC0415
-
-        logging.getLogger(__name__).warning(
-            "Eager AAS token exchange failed: %s. "
-            "Will retry during API call.",
-            exc,
+    except Exception:  # noqa: BLE001
+        # The OAuth cookie is single-use and already consumed/expired.
+        # Without an AAS token the CLI cannot make any API calls, so
+        # continuing would just produce the same error later.  Exit
+        # immediately with a clear message.
+        print(
+            "\nError: Could not obtain an AAS authentication token.\n"
+            "The OAuth cookie in secrets.json is stale (single-use, already consumed).\n"
+            "\n"
+            "Please re-authenticate:\n"
+            "  python main.py --reauth\n",
+            file=sys.stderr,
         )
+        sys.exit(1)
 
 
 async def _ensure_shared_key(cache: object) -> None:
