@@ -269,20 +269,24 @@ async def _exchange_oauth_for_aas(
             f"Invalid response from gpsoauth: {_summarize_response(resp)}"
         )
     if "Token" not in resp:
-        resp_keys: list[str] | str = "N/A"
-        error_details_present = False
-        if isinstance(resp, dict):
-            resp_keys = list(resp.keys())
-            error_details_present = bool(resp.get("ErrorDetails") or resp.get("Error"))
+        error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
+        error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
+        resp_keys = list(resp.keys()) if isinstance(resp, dict) else "N/A"
         _LOGGER.warning(
-            "gpsoauth response missing token; response details recorded in extras.",
+            "gpsoauth response missing token. Error=%s, ErrorDetails=%s, keys=%s, user=%s",
+            error_value or "(none)",
+            error_details or "(none)",
+            resp_keys,
+            _mask_email_for_logs(username),
             extra={
-                "error_field_present": error_details_present,
+                "error_field_present": bool(error_value),
                 "response_keys": resp_keys,
                 "user": _mask_email_for_logs(username),
             },
         )
-        raise RuntimeError("Missing 'Token' in gpsoauth response")
+        raise RuntimeError(
+            f"Missing 'Token' in gpsoauth response (Error={error_value or '(none)'})"
+        )
     return resp
 
 
@@ -379,7 +383,17 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
     android_id = await _get_or_generate_android_id(username, cache=cache)
 
     # 3) Exchange OAuth → AAS (blocking call executed in executor).
-    resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+    try:
+        resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+    except RuntimeError:
+        if not oauth_token.startswith("aas_et/"):
+            _LOGGER.error(
+                "AAS token exchange failed with a likely-expired OAuth cookie. "
+                "The Chrome OAuth cookie is single-use and cannot be reused. "
+                "Please re-authenticate: "
+                "python -m custom_components.googlefindmy --reauth",
+            )
+        raise
 
     # 4) Persist normalized email if gpsoauth returns it (keeps cache consistent).
     if isinstance(resp.get("Email"), str) and resp["Email"]:

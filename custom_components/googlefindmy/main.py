@@ -216,9 +216,17 @@ def _register_file_cache() -> object:
 
         entry_id: str = "standalone"
 
+        # Keys that are hidden in memory but preserved in the backing file.
+        # This mirrors HA's two-layer persistence (volatile TokenCache +
+        # persistent entry.data) for standalone mode where secrets.json is
+        # the only store.  The AAS master token must survive runtime
+        # invalidation so it can be recovered on the next process start.
+        _SOFT_INVALIDATE_KEYS: frozenset[str] = frozenset({"aas_token"})
+
         def __init__(self, path: Path) -> None:
             self._path = path
             self._data: dict[str, object] = {}
+            self._soft_invalidated: set[str] = set()
             self._load_failed = False
             if path.is_file():
                 try:
@@ -247,23 +255,33 @@ def _register_file_cache() -> object:
         # --- async interface expected by nbe_list_devices / nova_request ---
 
         async def get(self, name: str) -> object:
+            if name in self._soft_invalidated:
+                return None
             return self._data.get(name)
 
         async def set(self, name: str, value: object) -> None:
             if value is None:
+                if name in self._SOFT_INVALIDATE_KEYS and name in self._data:
+                    # Soft-invalidate: hide from in-memory reads but keep in
+                    # the backing file so the value survives process restarts.
+                    self._soft_invalidated.add(name)
+                    return  # intentionally skip _save()
                 self._data.pop(name, None)
             else:
                 self._data[name] = value
+                self._soft_invalidated.discard(name)
             self._save()
 
         async def async_get_cached_value(self, name: str) -> object:
+            if name in self._soft_invalidated:
+                return None
             return self._data.get(name)
 
         async def async_set_cached_value(self, name: str, value: object) -> None:
             await self.set(name, value)
 
         async def async_get_cached_value_or_set(self, name: str, generator):  # type: ignore[no-untyped-def]
-            existing = self._data.get(name)
+            existing = await self.get(name)
             if existing is not None:
                 return existing
             import asyncio  # noqa: PLC0415
