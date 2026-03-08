@@ -215,34 +215,56 @@ async def _interactive_flow_hex() -> str:
 async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
     """Strategy chain to obtain a hex-encoded shared key (32 bytes).
 
-    Order:
-        1) Try deriving from FCM credentials (non-interactive, HA-friendly).
-        2) If allowed (CLI/TTY), run the interactive flow in an executor.
+    Order (CLI/TTY mode):
+        1) Interactive browser flow — authoritative source from Google's Key Backup vault.
+        2) FCM credentials derivation — fallback if Chrome is unavailable.
+
+    Order (non-interactive / HA mode):
+        1) FCM credentials derivation — only non-interactive option available.
+
+    The interactive flow is preferred in CLI mode because
+    ``_derive_from_fcm_credentials`` extracts bytes from the FCM private key which
+    are **not** the real vault-backed shared key.  In HA mode the correct shared key
+    is typically pre-populated from the secrets bundle during ``async_setup_entry``,
+    so this function is rarely reached.
 
     Returns:
         str: lowercase hex string of the 32-byte key.
 
     Raises:
-        RuntimeError: if neither strategy can provide a valid key.
+        RuntimeError: if no strategy can provide a valid key.
     """
-    # 1) Non-interactive derivation (preferred for HA)
+    is_tty = sys.stdin and sys.stdin.isatty()
+
+    # 1) In interactive CLI mode, prefer the browser-based vault flow (authoritative)
+    if is_tty:
+        try:
+            _LOGGER.info(
+                "Retrieving shared key via interactive browser flow (CLI mode)"
+            )
+            return await _interactive_flow_hex()
+        except Exception as err:
+            _LOGGER.warning(
+                "Interactive shared key flow failed, trying FCM derivation: %s",
+                err,
+            )
+
+    # 2) Non-interactive derivation from FCM credentials (HA/headless fallback)
     try:
         return await _derive_from_fcm_credentials(cache=cache)
     except Exception as err:
         _LOGGER.debug("FCM-derivation for shared key not available: %s", err)
 
-    # 2) Interactive flow (only if we seem to be in a CLI/TTY)
-    try:
-        if sys.stdin and sys.stdin.isatty():
-            _LOGGER.info(
-                "Falling back to interactive shared key flow (CLI mode detected)"
-            )
-            return await _interactive_flow_hex()
+    # 3) All strategies exhausted
+    if is_tty:
         raise RuntimeError(
-            "Interactive flow not available in non-interactive environment"
+            "All shared key retrieval strategies failed. "
+            "Ensure Chrome/Chromium is installed for the browser-based flow."
         )
-    except Exception as err:
-        raise RuntimeError(f"Failed to retrieve shared key: {err}") from err
+    raise RuntimeError(
+        "Shared key retrieval failed in non-interactive environment. "
+        "The FCM-derived key may be incorrect; consider providing the key manually."
+    )
 
 
 # -----------------------------------------------------------------------------
