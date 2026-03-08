@@ -47,6 +47,8 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
+from cryptography.exceptions import InvalidTag
+
 from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
@@ -366,6 +368,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     DecryptionError,
                     SpotApiEmptyResponseError,
                     SpotAuthPermanentError,
+                    InvalidTag,
                 ) as err:
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
