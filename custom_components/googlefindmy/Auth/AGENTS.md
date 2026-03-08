@@ -43,6 +43,12 @@ Chrome Cookie (oauth2_4/***, single-use, consumed after first exchange)
 * **AAS master token:** Long-lived. Only invalidated by password change, manual revocation in Google account settings, or Google security heuristics. Can generate unlimited scoped ADM tokens via `perform_oauth()`.
 * **ADM scoped token:** Short-lived (~1 hour, measured adaptively by `TTLPolicy` in `nova_request.py`). Regenerated automatically from the AAS token on expiry.
 
+### Architecture note: OAuth fallback lives in the ADM layer
+
+When `gpsoauth.perform_oauth()` rejects the AAS token (`InvalidAasTokenError`), the retry logic in `adm_token_retrieval.py:449-482` attempts an **OAuth fallback**: it reads `CONF_OAUTH_TOKEN`, switches `DATA_AUTH_METHOD` to `"individual_tokens"`, and retries — which causes the next iteration to call `async_get_aas_token()` → `_generate_aas_token()` → `gpsoauth.exchange_token(oauth_cookie)` to produce a fresh AAS token from the Chrome cookie.
+
+This is architecturally an **AAS regeneration** triggered from the ADM layer. It works for HA where the Chrome cookie may still be fresh (e.g., during initial config validation), but is ineffective in standalone mode where the cookie is already consumed. A future refactor could move this fallback into `aas_token_retrieval.py` where it logically belongs; for now it is documented here so contributors understand the cross-layer dependency.
+
 ### HA vs standalone persistence
 
 | Layer | HA mode | Standalone CLI (`main.py`) |
