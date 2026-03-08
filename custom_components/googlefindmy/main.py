@@ -406,6 +406,41 @@ def _ensure_authenticated() -> None:
     print("\nCredentials saved. Continuing...\n")
 
 
+async def _ensure_aas_token(cache: object) -> None:
+    """Eagerly exchange the OAuth cookie for an AAS master token.
+
+    The OAuth cookie obtained by ``_ensure_authenticated()`` is **single-use**
+    and has a very short TTL.  If we open Chrome again (e.g. for the shared
+    key vault flow) before exchanging it, the cookie is invalidated and the
+    AAS exchange fails with ``BadAuthentication``.
+
+    This function must be called **immediately** after ``_ensure_authenticated()``
+    and **before** any subsequent Chrome sessions.
+    """
+    # If an AAS token is already cached, nothing to do.
+    existing = await cache.get("aas_token")  # type: ignore[attr-defined]
+    if isinstance(existing, str) and existing.strip():
+        return
+    # If there's no OAuth token either, skip (auth wasn't needed).
+    oauth = await cache.get("oauth_token")  # type: ignore[attr-defined]
+    if not isinstance(oauth, str) or not oauth.strip():
+        return
+    try:
+        from custom_components.googlefindmy.Auth.aas_token_retrieval import (  # noqa: PLC0415
+            async_get_aas_token,
+        )
+
+        await async_get_aas_token(cache=cache)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001
+        import logging  # noqa: PLC0415
+
+        logging.getLogger(__name__).warning(
+            "Eager AAS token exchange failed: %s. "
+            "Will retry during API call.",
+            exc,
+        )
+
+
 async def _ensure_shared_key(cache: object) -> None:
     """Obtain the shared key from Google's vault if not already cached.
 
@@ -558,6 +593,11 @@ if __name__ == "__main__":
             session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
             )
+            # Exchange the single-use OAuth cookie for an AAS master token
+            # BEFORE opening Chrome again for the shared key flow.  The OAuth
+            # cookie has a very short TTL and is invalidated once a new Chrome
+            # session is opened, so the exchange must happen immediately.
+            await _ensure_aas_token(_file_cache)
             await _ensure_shared_key(_file_cache)
             fcm = await _setup_fcm_receiver(_file_cache)
             try:
