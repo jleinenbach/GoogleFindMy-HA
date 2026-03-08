@@ -254,7 +254,7 @@ def _print_locations(locations: list[dict[str, object]]) -> None:
                 print(f"Accuracy: {acc}m")
             last_seen = loc.get("last_seen")
             if last_seen is not None:
-                dt = _dt.datetime.fromtimestamp(float(last_seen), tz=_dt.UTC)
+                dt = _dt.datetime.fromtimestamp(float(str(last_seen)), tz=_dt.UTC)
                 print(f"Last seen: {dt:%Y-%m-%d %H:%M:%S UTC}")
             print(
                 f"Google Maps: https://www.google.com/maps/search/"

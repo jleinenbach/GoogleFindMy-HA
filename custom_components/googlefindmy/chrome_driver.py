@@ -14,6 +14,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
 
 # Platform-specific import for Windows registry access
 _winreg: ModuleType | None = None
@@ -359,12 +360,12 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         return None
 
 
-def safe_quit_driver(driver: WebDriver | None) -> None:
+def safe_quit_driver(driver: RemoteWebDriver | None) -> None:
     """Safely quit the Chrome driver, handling WinError 6 and other errors.
 
     Parameters
     ----------
-    driver: WebDriver | None
+    driver: RemoteWebDriver | None
         The WebDriver instance to quit, or None.
     """
     if driver is None:
