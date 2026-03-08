@@ -2011,6 +2011,32 @@ class FcmReceiverHA:
 
             self._update_token_routing(token, {entry_id})
             await self._persist_routing_token(entry_id, token)
+
+            # Wait for the FCM client to be actively listening before sending
+            # the location request.  Without this, the push notification from
+            # Google may arrive before the MCS connection is established.
+            pc = self.pcs.get(entry_id)
+            if pc is not None:
+                _MAX_READY_WAIT_S = 15.0
+                _POLL_INTERVAL_S = 0.3
+                waited = 0.0
+                while waited < _MAX_READY_WAIT_S:
+                    run_state = getattr(pc, "run_state", None)
+                    if (
+                        FcmPushClientRunState is not None
+                        and run_state == FcmPushClientRunState.STARTED
+                    ):
+                        break
+                    await asyncio.sleep(_POLL_INTERVAL_S)
+                    waited += _POLL_INTERVAL_S
+                else:
+                    _LOGGER.warning(
+                        "[entry=%s] FCM client not in STARTED state after %.1fs; "
+                        "location request may time out",
+                        entry_id,
+                        _MAX_READY_WAIT_S,
+                    )
+
             _LOGGER.info(
                 "[entry=%s] Manual locate registration ready for %s",
                 entry_id,
