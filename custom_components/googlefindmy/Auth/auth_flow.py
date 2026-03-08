@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from selenium.webdriver.support.ui import WebDriverWait
 
-from custom_components.googlefindmy.chrome_driver import create_driver
+from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 
 if TYPE_CHECKING:
     from selenium.webdriver.remote.webdriver import WebDriver
@@ -79,8 +79,8 @@ def request_oauth_account_token_flow(
         return oauth_token_value, email
 
     finally:
-        # Close the browser
-        driver.quit()
+        # Close the browser (safe_quit handles WinError 6 on Windows)
+        safe_quit_driver(driver)
 
 
 def _extract_email_from_session(driver: WebDriver) -> str | None:

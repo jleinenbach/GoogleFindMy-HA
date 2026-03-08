@@ -233,6 +233,37 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     return cache, normalized
 
 
+def _print_locations(locations: list[dict[str, object]]) -> None:
+    """Pretty-print location results to the console."""
+    if not locations:
+        print(
+            "\nNo location data received. "
+            "The tracker may be out of range or the request timed out."
+        )
+        return
+
+    import datetime as _dt  # noqa: PLC0415
+
+    for loc in locations:
+        lat = loc.get("latitude")
+        lon = loc.get("longitude")
+        if lat is not None and lon is not None:
+            print(f"\nLocation: {lat}, {lon}")
+            acc = loc.get("accuracy")
+            if acc is not None:
+                print(f"Accuracy: {acc}m")
+            last_seen = loc.get("last_seen")
+            if last_seen is not None:
+                dt = _dt.datetime.fromtimestamp(float(str(last_seen)), tz=_dt.UTC)
+                print(f"Last seen: {dt:%Y-%m-%d %H:%M:%S UTC}")
+            print(
+                f"Google Maps: https://www.google.com/maps/search/"
+                f"?api=1&query={lat},{lon}"
+            )
+        elif loc.get("semantic_name"):
+            print(f"\nSemantic location: {loc['semantic_name']}")
+
+
 async def _async_cli_main(
     entry_id: str | None = None,
     *,
@@ -279,44 +310,54 @@ async def _async_cli_main(
     for idx, (device_name, canonic_id) in enumerate(canonic_ids, start=1):
         print(f"{idx}. {device_name}: {canonic_id}")
 
-    selected_value = input(
-        "\nIf you want to see locations of a tracker, type the number of the tracker and press 'Enter'.\n"
-        "If you want to register a new ESP32- or Zephyr-based tracker, type 'r' and press 'Enter': "
-    )
-
-    if selected_value == "r":
-        print("Loading...")
-
-        def _register_esp32_cli() -> None:
-            """Synchronous helper to register a new ESP32 device."""
-            # Lazy import to avoid touching spot token logic at HA startup
-            register_esp32 = import_module(
-                "custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device"
-            ).register_esp32
-
-            register_esp32(cache=cache)
-
-        # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
-        await asyncio.to_thread(_register_esp32_cli)
-    else:
-        selected_idx = int(selected_value) - 1
-        selected_device_name = canonic_ids[selected_idx][0]
-        selected_canonic_id = canonic_ids[selected_idx][1]
-
-        print("Fetching location...")
-
-        # Lazy import: only needed for the CLI branch
-        get_location_data_for_device = import_module(
-            "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
-        ).get_location_data_for_device
-
-        await get_location_data_for_device(
-            selected_canonic_id,
-            selected_device_name,
-            session=session,
-            cache=cache,
-            namespace=namespace,
+    while True:
+        selected_value = input(
+            "\nType the number of a tracker to locate it, 'r' to register a new tracker, or 'q' to quit: "
         )
+
+        if selected_value.strip().lower() == "q":
+            print("Goodbye!")
+            break
+
+        if selected_value == "r":
+            print("Loading...")
+
+            def _register_esp32_cli() -> None:
+                """Synchronous helper to register a new ESP32 device."""
+                # Lazy import to avoid touching spot token logic at HA startup
+                register_esp32 = import_module(
+                    "custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device"
+                ).register_esp32
+
+                register_esp32(cache=cache)
+
+            # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
+            await asyncio.to_thread(_register_esp32_cli)
+        else:
+            try:
+                selected_idx = int(selected_value) - 1
+                selected_device_name = canonic_ids[selected_idx][0]
+                selected_canonic_id = canonic_ids[selected_idx][1]
+            except (ValueError, IndexError):
+                print("Invalid selection. Please try again.")
+                continue
+
+            print("Fetching location...")
+
+            # Lazy import: only needed for the CLI branch
+            get_location_data_for_device = import_module(
+                "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
+            ).get_location_data_for_device
+
+            locations = await get_location_data_for_device(
+                selected_canonic_id,
+                selected_device_name,
+                session=session,
+                cache=cache,
+                namespace=namespace,
+            )
+
+            _print_locations(locations)
 
 
 def list_devices() -> None:

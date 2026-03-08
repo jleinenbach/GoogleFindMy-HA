@@ -6,7 +6,11 @@ omits that attribute, causing class creation to fail before tests import the
 integration. Provide a lightweight placeholder so the annotations resolve.
 """
 
-import pycares
+try:
+    import pycares
+except ModuleNotFoundError:
+    # pycares is not installed (e.g. mypy-only CI run); nothing to patch.
+    pycares = None  # type: ignore[assignment]
 
 _ARES_RESULT_TYPES = {
     "ares_query_a_result",
@@ -25,7 +29,8 @@ _ARES_RESULT_TYPES = {
     "ares_nameinfo_result",
 }
 
-for _result_name in _ARES_RESULT_TYPES:
-    if not hasattr(pycares, _result_name):
-        placeholder = type(_result_name, (), {})
-        setattr(pycares, _result_name, placeholder)
+if pycares is not None:
+    for _result_name in _ARES_RESULT_TYPES:
+        if not hasattr(pycares, _result_name):
+            placeholder = type(_result_name, (), {})
+            setattr(pycares, _result_name, placeholder)
