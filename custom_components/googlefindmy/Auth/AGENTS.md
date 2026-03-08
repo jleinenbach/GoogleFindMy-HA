@@ -87,6 +87,8 @@ Android IDs and related identifiers stored in `TokenCache` must follow predictab
 * **FCM credential bundle:** `fcm_credentials` — contains the `gcm.android_id` value that downstream helpers normalize and cache under the key above.
 * **AAS token:** `aas_token` (`DATA_AAS_TOKEN`) — the master token. In standalone mode this key is **soft-invalidated** (hidden in memory but preserved in `secrets.json`). Do not add it to hard-delete flows.
 * **OAuth token:** `oauth_token` (`CONF_OAUTH_TOKEN`) — the original Chrome cookie. Must remain as-is after initial storage; never overwrite with an AAS token value.
+* **Shared key:** `shared_key` — the 32-byte vault-backed key used to decrypt the owner key. In HA mode, pre-populated from the secrets bundle as `shared_key_<email>` and migrated to `shared_key` on first access. In standalone CLI mode, obtained via the interactive browser flow on first run.
+* **Owner key:** `owner_key_<username>` — the decrypted owner key (hex string). Cleared during `--reauth` and during blind-refresh retries when EIK decryption fails.
 
 When adding new cache-backed helpers under this directory, reuse these patterns (prefix + username suffix) so multi-account setups remain isolated and future helpers can retrieve existing values without guessing.
 

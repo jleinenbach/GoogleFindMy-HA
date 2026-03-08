@@ -119,14 +119,26 @@ def _decode_base64_like_32(s: str) -> bytes:
 
 
 async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
-    """Try deriving the shared key from FCM credentials (non-interactive path).
+    """Last-resort derivation of a 32-byte key from FCM credentials.
 
-    The FCM credential layout typically contains a private key in base64/base64url form.
-    We derive deterministic 32-byte material by using the **last 32 bytes** of the DER
-    payload, preserving prior behavior while avoiding interactive flows.
+    .. warning::
+        This function extracts the last 32 bytes of the PKCS8-DER-encoded FCM
+        private key.  These bytes are **NOT** the real shared key from Google's
+        Key Backup vault — they are part of the EC public key suffix embedded in
+        the DER structure.  The FCM private key (used for Firebase push auth) has
+        no cryptographic relationship to the vault-backed shared key.
+
+        This function exists solely as a last-resort fallback for headless / HA
+        environments where the interactive browser flow is unavailable.  In those
+        environments the correct shared key is normally pre-populated from the
+        secrets bundle and this code path is never reached.
+
+        In CLI/TTY mode, ``_retrieve_shared_key_hex`` calls the interactive
+        browser flow **first** to obtain the real vault key.  See
+        ``docs/CRYPTOGRAPHY.md`` § "Shared Key Retrieval" for the full analysis.
 
     Returns:
-        str: lowercase hex string of 32 bytes.
+        str: lowercase hex string of 32 bytes (unlikely to be the correct key).
 
     Raises:
         RuntimeError: if credentials are not present/invalid or too short.
