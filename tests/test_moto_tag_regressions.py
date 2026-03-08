@@ -43,7 +43,9 @@ async def test_moto_tag_decryption_unwraps_and_injects_metadata(
 
     decrypt_mock = MagicMock(return_value=decrypted_identity_key)
 
-    async def fake_unwrap(identity_key: bytes, *, cache: object) -> bytes:
+    async def fake_unwrap(
+        identity_key: bytes, *, cache: object, device_id: str | None = None
+    ) -> bytes:
         decrypt_mock(identity_key)
         return decrypted_identity_key
 
