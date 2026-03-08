@@ -269,20 +269,19 @@ async def _exchange_oauth_for_aas(
             f"Invalid response from gpsoauth: {_summarize_response(resp)}"
         )
     if "Token" not in resp:
-        resp_keys: list[str] | str = "N/A"
-        error_details_present = False
-        if isinstance(resp, dict):
-            resp_keys = list(resp.keys())
-            error_details_present = bool(resp.get("ErrorDetails") or resp.get("Error"))
+        error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
+        error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
+        resp_keys = list(resp.keys()) if isinstance(resp, dict) else "N/A"
         _LOGGER.warning(
-            "gpsoauth response missing token; response details recorded in extras.",
-            extra={
-                "error_field_present": error_details_present,
-                "response_keys": resp_keys,
-                "user": _mask_email_for_logs(username),
-            },
+            "gpsoauth response missing token. Error=%s, ErrorDetails=%s, keys=%s, user=%s",
+            error_value or "(none)",
+            error_details or "(none)",
+            resp_keys,
+            _mask_email_for_logs(username),
         )
-        raise RuntimeError("Missing 'Token' in gpsoauth response")
+        raise RuntimeError(
+            f"Missing 'Token' in gpsoauth response (Error={error_value or '(none)'})"
+        )
     return resp
 
 
