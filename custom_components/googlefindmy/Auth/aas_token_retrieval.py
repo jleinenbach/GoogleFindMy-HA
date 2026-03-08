@@ -389,7 +389,22 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                 "Failed to persist normalized username from gpsoauth: %s", _clip(err)
             )
 
-    return str(resp["Token"])
+    aas_token = str(resp["Token"])
+
+    # 5) Persist the AAS token back as the OAuth slot so that future calls
+    #    hit the ``startswith("aas_et/")`` shortcut (line 333) instead of
+    #    re-attempting gpsoauth.exchange_token with a stale one-time-use
+    #    cookie.  This mirrors HA's config_flow behaviour where entry.data
+    #    stores the AAS token under CONF_OAUTH_TOKEN.
+    if aas_token.startswith("aas_et/"):
+        try:
+            await cache.set(CONF_OAUTH_TOKEN, aas_token)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug(
+                "Failed to persist AAS token into oauth_token slot: %s", _clip(err)
+            )
+
+    return aas_token
 
 
 # ---------------------------------------------------------------------------
