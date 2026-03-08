@@ -413,13 +413,13 @@ async def _ensure_shared_key(cache: object) -> None:
     triggering the browser flow lazily during decryption, which can conflict
     with ChromeDriver file locks on Windows.
     """
-    existing = await cache.get("shared_key")  # type: ignore[union-attr]
+    existing = await cache.get("shared_key")  # type: ignore[attr-defined]
     if existing:
         return
     # Check user-scoped legacy key too
-    username = await cache.get("username")  # type: ignore[union-attr]
+    username = await cache.get("username")  # type: ignore[attr-defined]
     if isinstance(username, str) and username:
-        legacy = await cache.get(f"shared_key_{username}")  # type: ignore[union-attr]
+        legacy = await cache.get(f"shared_key_{username}")  # type: ignore[attr-defined]
         if legacy:
             return
     print("Retrieving encryption key from Google Key Backup vault...\n")

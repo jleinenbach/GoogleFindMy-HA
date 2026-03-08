@@ -421,14 +421,15 @@ def create_driver(
     its lock on ``chromedriver.exe``.  This function retries up to 3 times
     with a short delay to handle transient file locks.
     """
-    for attempt in range(3):
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
             return _create_driver_inner(chrome_path=chrome_path, headless=headless)
         except (PermissionError, OSError) as err:
             # WinError 32 (file in use) or WinError 183 (file already exists)
             err_str = str(err)
             is_file_lock = "WinError 32" in err_str or "WinError 183" in err_str
-            if not is_file_lock or attempt >= 2:
+            if not is_file_lock or attempt >= max_retries - 1:
                 raise
             LOGGER.info(
                 "ChromeDriver file lock detected (attempt %d/3), "
@@ -437,7 +438,7 @@ def create_driver(
             )
             time.sleep(3)
         except RuntimeError:
-            if attempt >= 2 or platform.system() != "Windows":
+            if attempt >= max_retries - 1 or platform.system() != "Windows":
                 raise
             # All strategies failed — on Windows this may be due to file locks;
             # retry after a delay.
@@ -458,7 +459,7 @@ def _is_file_lock_error(err: BaseException) -> bool:
     return "WinError 32" in msg or "WinError 183" in msg
 
 
-def _create_driver_inner(
+def _create_driver_inner(  # noqa: PLR0912, PLR0915
     chrome_path: str | None = None, *, headless: bool = False
 ) -> WebDriver:
     """Internal driver creation with multiple strategy fallbacks."""
