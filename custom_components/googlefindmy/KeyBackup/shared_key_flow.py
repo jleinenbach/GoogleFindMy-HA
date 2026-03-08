@@ -14,7 +14,7 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as ec
 from selenium.webdriver.support.ui import WebDriverWait
 
-from custom_components.googlefindmy.chrome_driver import create_driver
+from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 from custom_components.googlefindmy.KeyBackup.response_parser import (
     get_fmdn_shared_key,
 )
@@ -102,8 +102,7 @@ def request_shared_key_flow() -> str | None:
         LOGGER.exception("Shared key flow terminated unexpectedly")
         return None
     finally:
-        if driver is not None:
-            driver.quit()
+        safe_quit_driver(driver)
 
 
 if __name__ == "__main__":

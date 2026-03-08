@@ -310,13 +310,42 @@ async def _async_cli_main(
             "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
         ).get_location_data_for_device
 
-        await get_location_data_for_device(
+        locations = await get_location_data_for_device(
             selected_canonic_id,
             selected_device_name,
             session=session,
             cache=cache,
             namespace=namespace,
         )
+
+        if locations:
+            import datetime as _dt  # noqa: PLC0415
+
+            for loc in locations:
+                lat = loc.get("latitude")
+                lon = loc.get("longitude")
+                if lat is not None and lon is not None:
+                    print(f"\nLocation: {lat}, {lon}")
+                    acc = loc.get("accuracy")
+                    if acc is not None:
+                        print(f"Accuracy: {acc}m")
+                    last_seen = loc.get("last_seen")
+                    if last_seen is not None:
+                        dt = _dt.datetime.fromtimestamp(
+                            float(last_seen), tz=_dt.UTC
+                        )
+                        print(f"Last seen: {dt:%Y-%m-%d %H:%M:%S UTC}")
+                    print(
+                        f"Google Maps: https://www.google.com/maps/search/"
+                        f"?api=1&query={lat},{lon}"
+                    )
+                elif loc.get("semantic_name"):
+                    print(f"\nSemantic location: {loc['semantic_name']}")
+        else:
+            print(
+                "\nNo location data received. "
+                "The tracker may be out of range or the request timed out."
+            )
 
 
 def list_devices() -> None:
