@@ -23,22 +23,23 @@ Normalization & validation:
 - Decoded key must be exactly 32 bytes (256 bit).
 
 Retrieval strategy (when not cached):
-1) Derive from FCM credentials (non-interactive, HA-friendly).
-2) As a last resort (CLI only), run the interactive shared-key flow.
+- In CLI/TTY mode: interactive browser flow via ``shared_key_flow.py`` (the only
+  authoritative source — retrieves the real vault key from Google's Key Backup service).
+- In non-interactive / HA mode: the key must be pre-populated from the secrets
+  bundle during ``async_setup_entry()``.  If missing, a descriptive error is raised.
 """
 
 from __future__ import annotations
 
 import base64
 import importlib
-import json
 import logging
 import re
 import sys
 from binascii import Error as BinasciiError
 from binascii import unhexlify
 from collections.abc import Awaitable, Callable
-from typing import Any, cast
+from typing import cast
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.typing_utils import (
@@ -114,80 +115,8 @@ def _decode_base64_like_32(s: str) -> bytes:
 
 
 # -----------------------------------------------------------------------------
-# Retrieval strategies (cache-aware)
+# Retrieval (cache-aware)
 # -----------------------------------------------------------------------------
-
-
-async def _derive_from_fcm_credentials(*, cache: TokenCache) -> str:
-    """Last-resort derivation of a 32-byte key from FCM credentials.
-
-    .. warning::
-        This function extracts the last 32 bytes of the PKCS8-DER-encoded FCM
-        private key.  These bytes are **NOT** the real shared key from Google's
-        Key Backup vault — they are part of the EC public key suffix embedded in
-        the DER structure.  The FCM private key (used for Firebase push auth) has
-        no cryptographic relationship to the vault-backed shared key.
-
-        This function exists solely as a last-resort fallback for headless / HA
-        environments where the interactive browser flow is unavailable.  In those
-        environments the correct shared key is normally pre-populated from the
-        secrets bundle and this code path is never reached.
-
-        In CLI/TTY mode, ``_retrieve_shared_key_hex`` calls the interactive
-        browser flow **first** to obtain the real vault key.  See
-        ``docs/CRYPTOGRAPHY.md`` § "Shared Key Retrieval" for the full analysis.
-
-    Returns:
-        str: lowercase hex string of 32 bytes (unlikely to be the correct key).
-
-    Raises:
-        RuntimeError: if credentials are not present/invalid or too short.
-    """
-    if cache is None:
-        raise ValueError("TokenCache instance is required for multi-account safety.")
-
-    creds: Any = await cache.get("fcm_credentials")
-
-    if isinstance(creds, str):
-        try:
-            creds = json.loads(creds)
-        except (json.JSONDecodeError, TypeError):
-            creds = {}
-    if not isinstance(creds, dict):
-        raise RuntimeError("No FCM credentials available in cache")
-
-    private_b64: str | None = None
-    keys_obj = creds.get("keys")
-    if isinstance(keys_obj, dict):
-        priv = keys_obj.get("private")
-        if isinstance(priv, str) and priv.strip():
-            private_b64 = priv.strip()
-
-    if not private_b64:
-        raise RuntimeError("FCM credentials have no private key to derive from")
-
-    # Normalize PEM-ish inputs and whitespace; add padding
-    v = re.sub(r"-{5}BEGIN[^-]+-{5}|-{5}END[^-]+-{5}", "", private_b64)
-    v = re.sub(r"\s+", "", v)
-    v_padded = v + ("=" * ((-len(v)) % 4))
-
-    try:
-        der = base64.urlsafe_b64decode(v_padded)
-    except (ValueError, TypeError):
-        try:
-            der = base64.b64decode(v_padded)
-        except (ValueError, TypeError) as exc:
-            raise RuntimeError(
-                f"FCM private key is not valid base64/base64url: {exc}"
-            ) from exc
-
-    if len(der) < SHARED_KEY_LEN:
-        raise RuntimeError(
-            f"FCM private key too short ({len(der)} bytes); cannot derive shared key"
-        )
-
-    shared = der[-SHARED_KEY_LEN:]
-    return shared.hex()
 
 
 async def _interactive_flow_hex() -> str:
@@ -224,31 +153,25 @@ async def _interactive_flow_hex() -> str:
         return _decode_base64_like_32(s).hex()
 
 
-async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
-    """Strategy chain to obtain a hex-encoded shared key (32 bytes).
+async def _retrieve_shared_key_hex() -> str:
+    """Obtain a hex-encoded shared key (32 bytes) via the interactive browser flow.
 
-    Order (CLI/TTY mode):
-        1) Interactive browser flow — authoritative source from Google's Key Backup vault.
-        2) FCM credentials derivation — fallback if Chrome is unavailable.
+    The interactive flow opens Chrome, navigates to Google's Key Backup vault,
+    and extracts the authoritative shared key via JavaScript interception.
+    This is the **only** way to obtain the correct shared key.
 
-    Order (non-interactive / HA mode):
-        1) FCM credentials derivation — only non-interactive option available.
-
-    The interactive flow is preferred in CLI mode because
-    ``_derive_from_fcm_credentials`` extracts bytes from the FCM private key which
-    are **not** the real vault-backed shared key.  In HA mode the correct shared key
-    is typically pre-populated from the secrets bundle during ``async_setup_entry``,
-    so this function is rarely reached.
+    In non-interactive (HA) mode, the shared key must be pre-populated from
+    the secrets bundle during ``async_setup_entry()``.  This function is only
+    reached when the cache has no shared key.
 
     Returns:
         str: lowercase hex string of the 32-byte key.
 
     Raises:
-        RuntimeError: if no strategy can provide a valid key.
+        RuntimeError: if the key cannot be obtained.
     """
     is_tty = sys.stdin and sys.stdin.isatty()
 
-    # 1) In interactive CLI mode, prefer the browser-based vault flow (authoritative)
     if is_tty:
         try:
             _LOGGER.info(
@@ -256,26 +179,15 @@ async def _retrieve_shared_key_hex(*, cache: TokenCache) -> str:
             )
             return await _interactive_flow_hex()
         except Exception as err:
-            _LOGGER.warning(
-                "Interactive shared key flow failed, trying FCM derivation: %s",
-                err,
-            )
+            _LOGGER.warning("Interactive shared key flow failed: %s", err)
+            raise RuntimeError(
+                "Shared key retrieval failed. "
+                "Ensure Chrome/Chromium is installed for the browser-based flow."
+            ) from err
 
-    # 2) Non-interactive derivation from FCM credentials (HA/headless fallback)
-    try:
-        return await _derive_from_fcm_credentials(cache=cache)
-    except Exception as err:
-        _LOGGER.debug("FCM-derivation for shared key not available: %s", err)
-
-    # 3) All strategies exhausted
-    if is_tty:
-        raise RuntimeError(
-            "All shared key retrieval strategies failed. "
-            "Ensure Chrome/Chromium is installed for the browser-based flow."
-        )
     raise RuntimeError(
-        "Shared key retrieval failed in non-interactive environment. "
-        "The FCM-derived key may be incorrect; consider providing the key manually."
+        "Shared key not available in non-interactive environment. "
+        "Provide the key via secrets bundle or run the CLI with --reauth."
     )
 
 
@@ -312,7 +224,7 @@ async def _get_or_generate_shared_key_hex(
 
     # Generate fresh and persist
     async def _generate() -> str:
-        return await _retrieve_shared_key_hex(cache=cache)
+        return await _retrieve_shared_key_hex()
 
     generator = cast(
         Callable[[], Awaitable[str] | str],

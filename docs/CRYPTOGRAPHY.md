@@ -374,13 +374,15 @@ retrieval path is the **interactive browser flow** implemented in
 |--------|---------|----------------|
 | **Source** | Secrets bundle (`entry.data[DATA_SECRET_BUNDLE]`) provided during setup. The bundle originates from a prior CLI run that executed the interactive browser flow. | Interactive browser flow on first run (when `shared_key` is not yet cached in `secrets.json`). |
 | **Cache** | `TokenCache` (entry-scoped). Loaded from bundle in `__init__.py:_async_save_secrets_data()` as `shared_key_{email}`. | `_FileCache` backed by `secrets.json`. Stored as `shared_key`. |
-| **Retrieval** | `async_get_shared_key()` finds the key in cache immediately. `_derive_from_fcm_credentials()` is **never called**. | `_retrieve_shared_key_hex()` tries the interactive browser flow first (CLI/TTY mode), then falls back to FCM derivation. |
+| **Retrieval** | `async_get_shared_key()` finds the key in cache immediately. | `_retrieve_shared_key_hex()` runs the interactive browser flow to obtain the vault key. |
 
-### Why FCM credential derivation cannot produce the correct shared key
+### Why the shared key cannot be derived from FCM credentials
 
-The function `_derive_from_fcm_credentials()` in `shared_key_retrieval.py`
-extracts the last 32 bytes of the PKCS8-DER-encoded FCM private key. This
-approach is fundamentally flawed for two independent reasons:
+An earlier version of this codebase included a function
+(`_derive_from_fcm_credentials()`) that attempted to derive the shared key by
+extracting the last 32 bytes of the PKCS8-DER-encoded FCM private key. This
+function was **removed** because it is fundamentally broken for two independent
+reasons:
 
 **1. No cryptographic relationship between FCM keys and the Key Backup vault.**
 The FCM private key is a P-256 key generated locally by `fcmregister.py` for
@@ -394,7 +396,7 @@ LSKF → Scrypt → Recovery Key → HKDF+AES-GCM → Application Key
 
 The FCM key does not appear anywhere in this chain.
 
-**2. The DER byte extraction is incorrect.** The PKCS8-DER structure for a
+**2. The DER byte extraction was incorrect.** The PKCS8-DER structure for a
 P-256 key contains the 32-byte private scalar in an inner `OCTET STRING`,
 followed by an optional 65-byte uncompressed public key in a `BIT STRING`.
 The last 32 bytes of the DER blob are the **suffix of the public key**, not
@@ -417,22 +419,20 @@ SEQUENCE {
 `der[-32:]` captures the last 32 bytes of the public key suffix, which has no
 cryptographic utility for AES-GCM decryption.
 
-**Conclusion:** `_derive_from_fcm_credentials()` is retained solely as a
-last-resort fallback for headless/HA environments where the interactive browser
-flow is unavailable. In CLI/TTY mode, the interactive flow is always preferred.
-In HA mode, the shared key is pre-populated from the secrets bundle and the
-derivation function is never reached.
+This function was not part of the upstream GoogleFindMyTools project. It was
+introduced during the HA adaptation and has been removed. The interactive
+browser flow is the only way to obtain the correct shared key.
 
-### Retrieval strategy order
+### Retrieval strategy
 
-`_retrieve_shared_key_hex()` uses the following priority:
+`_retrieve_shared_key_hex()` behavior:
 
 **CLI/TTY mode** (standalone `main.py`):
-1. Interactive browser flow (authoritative vault key)
-2. FCM derivation (fallback, unlikely to produce correct key)
+- Interactive browser flow (authoritative vault key from Google Key Backup).
 
 **Non-interactive mode** (HA, headless):
-1. FCM derivation (only available option; key is normally pre-cached)
+- Key must be pre-populated from the secrets bundle. If missing, a descriptive
+  error is raised.
 
 ### Cache keys
 
