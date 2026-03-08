@@ -36,6 +36,7 @@ from binascii import unhexlify
 from collections.abc import Awaitable, Callable
 from typing import Any, NamedTuple
 
+from cryptography.exceptions import InvalidTag
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -190,9 +191,15 @@ async def _retrieve_owner_key(
             "Missing or empty 'encryptedOwnerKey' in eid_info.encryptedOwnerKeyAndMetadata"
         )
 
-    owner_key: Any = await _run_in_executor(
-        decrypt_owner_key, shared_key, encrypted_owner_key
-    )
+    try:
+        owner_key: Any = await _run_in_executor(
+            decrypt_owner_key, shared_key, encrypted_owner_key
+        )
+    except InvalidTag as exc:
+        raise RuntimeError(
+            "Owner key decryption failed (InvalidTag): the shared key may be "
+            "stale or incompatible. Try re-authenticating with --reauth."
+        ) from exc
     owner_key_version = getattr(metadata, "ownerKeyVersion", None)
 
     if not isinstance(owner_key, (bytes, bytearray)) or len(owner_key) == 0:
