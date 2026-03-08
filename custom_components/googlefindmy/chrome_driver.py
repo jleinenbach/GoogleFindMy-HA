@@ -415,7 +415,53 @@ def create_driver(
     3. Fallback without specifying version
     4. Headless mode
     5. webdriver-manager fallback (standard Selenium)
+
+    On Windows, ``undetected_chromedriver`` may fail with ``WinError 32``
+    (file in use) if a previous ChromeDriver process hasn't fully released
+    its lock on ``chromedriver.exe``.  This function retries up to 3 times
+    with a short delay to handle transient file locks.
     """
+    for attempt in range(3):
+        try:
+            return _create_driver_inner(chrome_path=chrome_path, headless=headless)
+        except (PermissionError, OSError) as err:
+            # WinError 32 (file in use) or WinError 183 (file already exists)
+            err_str = str(err)
+            is_file_lock = "WinError 32" in err_str or "WinError 183" in err_str
+            if not is_file_lock or attempt >= 2:
+                raise
+            LOGGER.info(
+                "ChromeDriver file lock detected (attempt %d/3), "
+                "waiting for lock release...",
+                attempt + 1,
+            )
+            time.sleep(3)
+        except RuntimeError:
+            if attempt >= 2 or platform.system() != "Windows":
+                raise
+            # All strategies failed — on Windows this may be due to file locks;
+            # retry after a delay.
+            LOGGER.info(
+                "All ChromeDriver strategies failed (attempt %d/3), "
+                "retrying after delay...",
+                attempt + 1,
+            )
+            time.sleep(3)
+
+    # Should not reach here, but satisfy type checker
+    return _create_driver_inner(chrome_path=chrome_path, headless=headless)
+
+
+def _is_file_lock_error(err: BaseException) -> bool:
+    """Check if an exception is a Windows file lock error (WinError 32/183)."""
+    msg = str(err)
+    return "WinError 32" in msg or "WinError 183" in msg
+
+
+def _create_driver_inner(
+    chrome_path: str | None = None, *, headless: bool = False
+) -> WebDriver:
+    """Internal driver creation with multiple strategy fallbacks."""
     # Kill any existing Chrome processes to avoid conflicts
     _kill_existing_chrome_processes()
 
@@ -426,6 +472,9 @@ def create_driver(
         version_main = get_chrome_version(resolved_path)
         if version_main:
             LOGGER.debug("Detected Chrome version: %d", version_main)
+
+    # Track whether all failures are file-lock related (Windows)
+    _all_file_lock = True
 
     # Strategy 1: Default with version_main if detected
     driver: WebDriver | None = None
@@ -441,6 +490,8 @@ def create_driver(
         return driver
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
+        if not _is_file_lock_error(err):
+            _all_file_lock = False
         LOGGER.warning("Strategy 1 (default) failed: %s", err)
 
     # Strategy 2: Use browser_executable_path parameter (if supported)
@@ -459,6 +510,8 @@ def create_driver(
             return driver
         except Exception as err:  # noqa: BLE001
             _quit_driver(driver)
+            if not _is_file_lock_error(err):
+                _all_file_lock = False
             LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
 
     # Strategy 3: Try without specifying version
@@ -473,6 +526,8 @@ def create_driver(
         return driver
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
+        if not _is_file_lock_error(err):
+            _all_file_lock = False
         LOGGER.warning("Strategy 3 (no version) failed: %s", err)
 
     # Strategy 4: Try headless mode
@@ -492,12 +547,22 @@ def create_driver(
             return driver
         except Exception as err:  # noqa: BLE001
             _quit_driver(driver)
+            if not _is_file_lock_error(err):
+                _all_file_lock = False
             LOGGER.warning("Strategy 4 (headless) failed: %s", err)
 
     # Strategy 5: webdriver-manager fallback
     fallback_driver = _try_webdriver_manager_fallback()
     if fallback_driver is not None:
         return fallback_driver
+
+    # If all failures were file-lock related, raise PermissionError so the
+    # outer retry loop in create_driver() can wait and retry.
+    if _all_file_lock and platform.system() == "Windows":
+        raise PermissionError(
+            "All ChromeDriver strategies failed due to file lock (WinError 32/183). "
+            "A previous ChromeDriver process may still be running."
+        )
 
     # All strategies failed
     raise RuntimeError(

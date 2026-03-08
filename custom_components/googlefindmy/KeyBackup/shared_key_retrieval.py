@@ -153,6 +153,12 @@ async def _interactive_flow_hex() -> str:
         return _decode_base64_like_32(s).hex()
 
 
+# Guard: only attempt the browser flow once per process to avoid opening
+# multiple Chrome windows on retry paths (e.g. blind refresh in
+# async_retrieve_identity_key).
+_browser_flow_attempted = False
+
+
 async def _retrieve_shared_key_hex() -> str:
     """Obtain a hex-encoded shared key (32 bytes) via the interactive browser flow.
 
@@ -164,15 +170,27 @@ async def _retrieve_shared_key_hex() -> str:
     the secrets bundle during ``async_setup_entry()``.  This function is only
     reached when the cache has no shared key.
 
+    A module-level guard prevents the browser from being opened more than once
+    per process lifetime, avoiding the "5 browser windows" problem when multiple
+    retry paths each trigger shared key retrieval.
+
     Returns:
         str: lowercase hex string of the 32-byte key.
 
     Raises:
         RuntimeError: if the key cannot be obtained.
     """
+    global _browser_flow_attempted  # noqa: PLW0603
+
     is_tty = sys.stdin and sys.stdin.isatty()
 
     if is_tty:
+        if _browser_flow_attempted:
+            raise RuntimeError(
+                "Shared key browser flow already attempted in this session. "
+                "Restart with --reauth to try again."
+            )
+        _browser_flow_attempted = True
         try:
             _LOGGER.info(
                 "Retrieving shared key via interactive browser flow (CLI mode)"
