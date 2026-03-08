@@ -411,7 +411,11 @@ async def async_retrieve_identity_key(
     # Build key sources list (matches eid_resolver pattern: try owner + shared)
     key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
     try:
-        shared_key = await async_get_shared_key(cache=cache)
+        _cached_user = await cache.get(username_string)
+        shared_key = await async_get_shared_key(
+            cache=cache,
+            username=_cached_user if isinstance(_cached_user, str) else None,
+        )
         if shared_key is not None:
             key_sources.append(("shared", shared_key))
     except Exception:  # noqa: BLE001 - best-effort
