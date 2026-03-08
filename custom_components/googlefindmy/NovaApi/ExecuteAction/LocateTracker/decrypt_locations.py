@@ -247,7 +247,7 @@ class StaleOwnerKeyError(DecryptionError):
 
 
 async def _unwrap_encrypted_identity_key(
-    identity_key: bytes, *, cache: TokenCache
+    identity_key: bytes, *, cache: TokenCache, device_id: str | None = None
 ) -> bytes | None:
     """Unwrap a 60-byte encrypted identity key into a 32-byte EIK if possible."""
 
@@ -266,6 +266,15 @@ async def _unwrap_encrypted_identity_key(
         )
     except Exception as exc:  # pragma: no cover - defensive diagnostic path
         _LOGGER.debug("[DECRYPT] EIK unwrap failed in thread: %s", exc)
+        # Try AAD envelope fallback before giving up
+        aad_result = _try_unwrap_aesgcm_envelope(
+            identity_key, owner_key_info.key, device_id
+        )
+        if aad_result is not None and len(aad_result) == _EIK_LEN:
+            _LOGGER.debug(
+                "[DECRYPT] Successfully unwrapped 60-byte EIK via AAD envelope (early path)."
+            )
+            return bytes(aad_result)
         return None
 
     if len(decrypted_eik) != _EIK_LEN:
@@ -854,7 +863,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and len(raw_encrypted_identity_key) == EIK_GCM_TOTAL_LEN
         ):
             early_unwrapped_identity_key = await _unwrap_encrypted_identity_key(
-                raw_encrypted_identity_key, cache=cache
+                raw_encrypted_identity_key, cache=cache, device_id=canonic_id
             )
 
         _LOGGER.debug(
