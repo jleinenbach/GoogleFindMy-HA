@@ -378,7 +378,17 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
     android_id = await _get_or_generate_android_id(username, cache=cache)
 
     # 3) Exchange OAuth → AAS (blocking call executed in executor).
-    resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+    try:
+        resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+    except RuntimeError:
+        if not oauth_token.startswith("aas_et/"):
+            _LOGGER.error(
+                "AAS token exchange failed with a likely-expired OAuth cookie. "
+                "The Chrome OAuth cookie is single-use and cannot be reused. "
+                "Please re-authenticate: "
+                "python -m custom_components.googlefindmy --reauth",
+            )
+        raise
 
     # 4) Persist normalized email if gpsoauth returns it (keeps cache consistent).
     if isinstance(resp.get("Email"), str) and resp["Email"]:
@@ -389,22 +399,7 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
                 "Failed to persist normalized username from gpsoauth: %s", _clip(err)
             )
 
-    aas_token = str(resp["Token"])
-
-    # 5) Persist the AAS token back as the OAuth slot so that future calls
-    #    hit the ``startswith("aas_et/")`` shortcut (line 333) instead of
-    #    re-attempting gpsoauth.exchange_token with a stale one-time-use
-    #    cookie.  This mirrors HA's config_flow behaviour where entry.data
-    #    stores the AAS token under CONF_OAUTH_TOKEN.
-    if aas_token.startswith("aas_et/"):
-        try:
-            await cache.set(CONF_OAUTH_TOKEN, aas_token)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug(
-                "Failed to persist AAS token into oauth_token slot: %s", _clip(err)
-            )
-
-    return aas_token
+    return str(resp["Token"])
 
 
 # ---------------------------------------------------------------------------
