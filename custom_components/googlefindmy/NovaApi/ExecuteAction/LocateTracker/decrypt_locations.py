@@ -589,9 +589,10 @@ async def async_retrieve_identity_key(
             username = await cache.get(username_string)
             if isinstance(username, str) and username:
                 await cache.set(f"owner_key_{username}", None)
-            # Also clear shared key — if the owner key decryption fails
-            # because the shared key is stale, both must be refreshed.
-            await cache.set("shared_key", None)
+            # Note: shared_key is NOT cleared here. The shared key is stable
+            # and does not rotate with owner key versions. Clearing it would
+            # trigger the browser flow on retry, which fails on Windows due
+            # to ChromeDriver file locks and opens multiple browser windows.
         except Exception as cache_exc:  # noqa: BLE001
             _LOGGER.debug("Failed to clear cached keys: %s", cache_exc)
         try:

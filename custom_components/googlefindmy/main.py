@@ -406,6 +406,34 @@ def _ensure_authenticated() -> None:
     print("\nCredentials saved. Continuing...\n")
 
 
+async def _ensure_shared_key(cache: object) -> None:
+    """Obtain the shared key from Google's vault if not already cached.
+
+    Called eagerly during CLI startup (before any location requests) to avoid
+    triggering the browser flow lazily during decryption, which can conflict
+    with ChromeDriver file locks on Windows.
+    """
+    existing = await cache.get("shared_key")  # type: ignore[attr-defined]
+    if existing:
+        return
+    # Check user-scoped legacy key too
+    username = await cache.get("username")  # type: ignore[attr-defined]
+    if isinstance(username, str) and username:
+        legacy = await cache.get(f"shared_key_{username}")  # type: ignore[attr-defined]
+        if legacy:
+            return
+    print("Retrieving encryption key from Google Key Backup vault...\n")
+    from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (  # noqa: PLC0415
+        async_get_shared_key,
+    )
+
+    await async_get_shared_key(
+        cache=cache,  # type: ignore[arg-type]
+        username=username if isinstance(username, str) else None,
+    )
+    print("Encryption key saved.\n")
+
+
 async def _setup_fcm_receiver(cache: object) -> Any:
     """Initialize the FCM push-notification receiver for standalone CLI use.
 
@@ -530,6 +558,7 @@ if __name__ == "__main__":
             session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
             )
+            await _ensure_shared_key(_file_cache)
             fcm = await _setup_fcm_receiver(_file_cache)
             try:
                 await _async_cli_main(session=session)
