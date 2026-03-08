@@ -485,6 +485,8 @@ def _clear_stale_tokens_for_reauth() -> None:
                 "adm_token_issued_at_",
                 "aas_token_issued_at_",
                 "adm_probe_",
+                "owner_key",
+                "shared_key",
             )
         )
     ]

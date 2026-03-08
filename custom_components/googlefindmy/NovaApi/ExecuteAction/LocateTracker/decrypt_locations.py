@@ -375,7 +375,13 @@ async def async_retrieve_identity_key(
         )
 
     owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
-    owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+    try:
+        owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+    except (InvalidTag, RuntimeError) as exc:
+        raise DecryptionError(
+            "Owner key decryption failed (shared key may be stale). "
+            "Re-authenticate with --reauth to refresh crypto keys."
+        ) from exc
 
     # --- Proactive Owner Key Version Mismatch Check ---
     # If the tracker requires a newer owner key version than what we have cached,
@@ -392,7 +398,15 @@ async def async_retrieve_identity_key(
             owner_key_version,
             owner_key_info.version,
         )
-        owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
+        try:
+            owner_key_info = await async_get_owner_key(
+                cache=cache, force_refresh=True
+            )
+        except (InvalidTag, RuntimeError) as exc:
+            raise DecryptionError(
+                "Owner key refresh failed (InvalidTag). "
+                "Re-authenticate with --reauth to refresh crypto keys."
+            ) from exc
 
     # Build key sources list (matches eid_resolver pattern: try owner + shared)
     key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
@@ -575,8 +589,11 @@ async def async_retrieve_identity_key(
             username = await cache.get(username_string)
             if isinstance(username, str) and username:
                 await cache.set(f"owner_key_{username}", None)
+            # Also clear shared key — if the owner key decryption fails
+            # because the shared key is stale, both must be refreshed.
+            await cache.set("shared_key", None)
         except Exception as cache_exc:  # noqa: BLE001
-            _LOGGER.debug("Failed to clear cached owner key: %s", cache_exc)
+            _LOGGER.debug("Failed to clear cached keys: %s", cache_exc)
         try:
             return await async_retrieve_identity_key(
                 device_registration,
