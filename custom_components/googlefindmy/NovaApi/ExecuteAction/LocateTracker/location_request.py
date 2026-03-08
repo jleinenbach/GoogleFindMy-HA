@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Any, Protocol, cast, runtime_checkable
 
 import aiohttp
+from cryptography.exceptions import InvalidTag
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -47,8 +48,6 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
 )
-from cryptography.exceptions import InvalidTag
-
 from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
