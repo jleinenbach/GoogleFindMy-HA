@@ -77,6 +77,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
 
 from aiohttp import ClientError
+from cryptography.exceptions import InvalidTag
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -1608,7 +1609,7 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    async def _decode_background_location_async(
+    async def _decode_background_location_async(  # noqa: PLR0911
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
         """Decode background location using protobuf decoders.
@@ -1648,6 +1649,14 @@ class FcmReceiverHA:
                         "This may resolve after re-authentication or key refresh.",
                         entry_id,
                         dec_err,
+                    )
+                    return {}
+                except InvalidTag:
+                    _LOGGER.warning(
+                        "Background location decryption auth failed (InvalidTag) "
+                        "for entry %s. Cached identity key may be stale; "
+                        "will retry on next update.",
+                        entry_id,
                     )
                     return {}
 
