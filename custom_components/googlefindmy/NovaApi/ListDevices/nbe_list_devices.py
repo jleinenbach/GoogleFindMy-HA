@@ -233,19 +233,29 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     return cache, normalized
 
 
-async def _async_cli_main(entry_id: str | None = None) -> None:
+async def _async_cli_main(
+    entry_id: str | None = None,
+    *,
+    session: ClientSession | None = None,
+) -> None:
     """Asynchronous main function for the CLI experience (single event loop).
 
     This function provides an interactive command-line interface for fetching
     device locations or registering new microcontroller-based trackers.
     It is intended for development and testing purposes.
+
+    Args:
+        entry_id: Optional config entry ID to scope the CLI session.
+        session: Optional shared aiohttp session to avoid ephemeral per-request sessions.
     """
     cache, namespace = _resolve_cli_cache(
         entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
     )
 
     print("Loading...")
-    result_hex = await async_request_device_list(cache=cache, namespace=namespace)
+    result_hex = await async_request_device_list(
+        cache=cache, namespace=namespace, session=session
+    )
 
     device_list = parse_device_list_protobuf(result_hex)
 
@@ -303,6 +313,7 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
         await get_location_data_for_device(
             selected_canonic_id,
             selected_device_name,
+            session=session,
             cache=cache,
             namespace=namespace,
         )

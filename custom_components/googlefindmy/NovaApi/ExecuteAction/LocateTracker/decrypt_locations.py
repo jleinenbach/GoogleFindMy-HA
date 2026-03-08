@@ -464,6 +464,27 @@ async def async_retrieve_identity_key(
             "Tracker was encrypted with a stale owner key version."
         ) from last_exc
 
+    # Blind refresh: version check unavailable but key is clearly wrong.
+    # This mirrors the version-mismatch retry above but works when SPOT gRPC
+    # fails to provide current_owner_key_version (common in standalone CLI).
+    if not candidates and current_owner_key_version is None and _retry:
+        _LOGGER.info(
+            "EIK decryption failed and SPOT version check unavailable; "
+            "attempting blind owner key refresh."
+        )
+        try:
+            username = await cache.get(username_string)
+            if isinstance(username, str) and username:
+                await cache.set(f"owner_key_{username}", None)
+        except Exception as cache_exc:  # noqa: BLE001
+            _LOGGER.debug("Failed to clear cached owner key: %s", cache_exc)
+        try:
+            return await async_retrieve_identity_key(
+                device_registration, cache=cache, _retry=False
+            )
+        except Exception as refresh_exc:  # noqa: BLE001
+            _LOGGER.warning("Blind owner key refresh also failed: %s", refresh_exc)
+
     if candidates:
         return candidates
 
@@ -772,9 +793,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and raw_encrypted_identity_key
             and len(raw_encrypted_identity_key) != _EIK_LEN
         ):
-            _LOGGER.warning(
-                "[DIAG-ALERT] Key length is %d (expected %d for raw EIK)."
-                " This suggests wrapping/encryption!",
+            _LOGGER.debug(
+                "[DIAG] Key length is %d (expected %d for raw EIK);"
+                " likely GCM-wrapped (normal for Moto Tag / Chipolo).",
                 len(raw_encrypted_identity_key),
                 _EIK_LEN,
             )
@@ -784,9 +805,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and raw_encrypted_identity_key
             and len(raw_encrypted_identity_key) > _EIK_LEN
         ):
-            _LOGGER.warning(
-                "[DIAG-ALERT] Key length %d bytes exceeds expected raw EIK length (%d)."
-                " Probable wrapped key container or HKDF-required envelope.",
+            _LOGGER.debug(
+                "[DIAG] Key length %d bytes exceeds expected raw EIK length (%d);"
+                " probable GCM-wrapped key (will attempt unwrap).",
                 len(raw_encrypted_identity_key),
                 _EIK_LEN,
             )
@@ -843,7 +864,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 identity_key_candidate_bytes = [identity_key_bytes]
                 identity_key = identity_key_bytes
         except Exception as exc:  # pragma: no cover - diagnostics only
-            _LOGGER.debug("[DECRYPT] Failed to unwrap: %s", exc)
+            _LOGGER.warning(
+                "[DECRYPT] Failed to unwrap 60-byte EIK: %s. "
+                "The owner key in secrets.json may be outdated.",
+                type(exc).__name__,
+            )
 
     if identity_key is None:
         raise DecryptionError("Identity key derivation returned no candidates.")

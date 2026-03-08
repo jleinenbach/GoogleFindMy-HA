@@ -505,12 +505,18 @@ if __name__ == "__main__":
         _file_cache = _register_file_cache()
 
         async def _cli_main() -> None:
+            import aiohttp  # noqa: PLC0415
+
+            session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
+            )
             fcm = await _setup_fcm_receiver(_file_cache)
             try:
-                await _async_cli_main()
+                await _async_cli_main(session=session)
             finally:
                 with __import__("contextlib").suppress(Exception):
                     await fcm.async_stop()
+                await session.close()
 
         try:
             asyncio.run(_cli_main())

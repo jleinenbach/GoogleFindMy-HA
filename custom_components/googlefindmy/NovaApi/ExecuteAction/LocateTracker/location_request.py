@@ -15,6 +15,7 @@ from types import ModuleType
 from typing import Any, Protocol, cast, runtime_checkable
 
 import aiohttp
+from cryptography.exceptions import InvalidTag
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -366,6 +367,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     DecryptionError,
                     SpotApiEmptyResponseError,
                     SpotAuthPermanentError,
+                    InvalidTag,
                 ) as err:
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
