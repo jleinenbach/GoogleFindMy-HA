@@ -214,7 +214,7 @@ def _register_file_cache() -> object:
     class _FileCache:
         """Minimal file-backed cache compatible with the TokenCache interface."""
 
-        entry_id: str = "standalone"
+        entry_id: str = ""
 
         # Keys that are hidden in memory but preserved in the backing file.
         # This mirrors HA's two-layer persistence (volatile TokenCache +
@@ -324,8 +324,8 @@ def _register_file_cache() -> object:
 
     # Register as a TokenCache instance so _resolve_cli_cache finds it.
     # mypy: _FileCache is duck-typed, not a real TokenCache subclass.
-    _register_instance("standalone", file_cache)  # type: ignore[arg-type]
-    _set_default_entry_id("standalone", force=True)
+    _register_instance("", file_cache)  # type: ignore[arg-type]
+    _set_default_entry_id("", force=True)
     return file_cache
 
 
@@ -480,6 +480,23 @@ async def _ensure_shared_key(cache: object) -> None:
     print("Encryption key saved.\n")
 
 
+async def _clear_stale_adm_token(cache: object) -> None:
+    """Clear cached ADM token so the first API request generates a fresh one.
+
+    Unlike Home Assistant (which has a coordinator polling regularly to keep
+    tokens fresh), the CLI process exits between uses.  The ADM token stored
+    in secrets.json from the previous session has most likely expired (~1 h
+    lifetime).  Clearing it here avoids a guaranteed 401 + lengthy retry
+    cascade on the very first request.
+    """
+    username_raw = await cache.get("username")  # type: ignore[attr-defined]
+    if not isinstance(username_raw, str) or not username_raw.strip():
+        return
+    user = username_raw.strip().lower()
+    for key in (f"adm_token_{user}", f"adm_token_issued_at_{user}"):
+        await cache.set(key, None)  # type: ignore[attr-defined]
+
+
 async def _setup_fcm_receiver(cache: object) -> Any:
     """Initialize the FCM push-notification receiver for standalone CLI use.
 
@@ -498,13 +515,13 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     )
 
     fcm = FcmReceiverHA()
-    await fcm.async_initialize(entry_id="standalone", cache=cache)  # type: ignore[arg-type]
+    await fcm.async_initialize(entry_id="", cache=cache)  # type: ignore[arg-type]
 
     # Minimal coordinator stub so _select_manual_locate_entry finds an entry.
     # Must provide attributes that fcm_receiver_ha._write_coordinator_payload expects.
     _standalone_loc_data: dict[str, dict[str, object]] = {}
     coordinator_stub = SimpleNamespace(
-        config_entry=SimpleNamespace(entry_id="standalone"),
+        config_entry=SimpleNamespace(entry_id=""),
         cache=cache,
         is_device_present=lambda _cid: True,
         get_device_display_name=lambda _cid: None,
@@ -618,6 +635,7 @@ if __name__ == "__main__":
             # session is opened, so the exchange must happen immediately.
             await _ensure_aas_token(_file_cache)
             await _ensure_shared_key(_file_cache)
+            await _clear_stale_adm_token(_file_cache)
             fcm = await _setup_fcm_receiver(_file_cache)
             try:
                 await _async_cli_main(session=session)
