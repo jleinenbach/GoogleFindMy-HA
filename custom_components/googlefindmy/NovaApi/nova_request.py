@@ -1515,9 +1515,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             continue
 
                         if auth_retries_used == _AUTH_STEP_AAS_ADM_REFRESH:
-                            # Step 2: Second 401 - ADM refresh didn't help
-                            # Wait cooldown, then invalidate AAS and refresh entire chain
-                            # Set deadline for entire cooldown + refresh period
+                            # Step 2: Second 401 - ADM token may not have propagated yet.
+                            # Do NOT invalidate the AAS token here: gpsoauth already
+                            # validated it during Step 1's _do_refresh_async(). A second
+                            # 401 means propagation delay, not AAS invalidity.
+                            # If the AAS were truly rejected, Step 1 would have raised
+                            # NovaAuthPermanentError via InvalidAasTokenError.
                             await _cache_set(
                                 ns_deadline_key,
                                 time.time()
@@ -1527,13 +1530,11 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                             )
                             _LOGGER.info(
                                 "Nova API: 401 Unauthorized - ADM refresh unsuccessful. "
-                                "AAS token likely invalid. Waiting %.0fs before refreshing entire token chain.",
+                                "Waiting %.0fs before refreshing ADM token again.",
                                 _SHORT_COOLDOWN_S,
                             )
                             await asyncio.sleep(_SHORT_COOLDOWN_S)
-                            _LOGGER.info("Nova API: invalidating AAS token.")
-                            await policy.async_invalidate_aas_token()
-                            _LOGGER.info("Nova API: refreshing AAS+ADM token chain.")
+                            _LOGGER.info("Nova API: refreshing ADM token (AAS retained).")
                             try:
                                 await policy.async_on_401()
                             except NovaAuthPermanentError:
