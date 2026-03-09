@@ -501,11 +501,19 @@ async def _setup_fcm_receiver(cache: object) -> Any:
     await fcm.async_initialize(entry_id="standalone", cache=cache)  # type: ignore[arg-type]
 
     # Minimal coordinator stub so _select_manual_locate_entry finds an entry.
+    # Must provide attributes that fcm_receiver_ha._write_coordinator_payload expects.
+    _standalone_loc_data: dict[str, dict[str, object]] = {}
     coordinator_stub = SimpleNamespace(
         config_entry=SimpleNamespace(entry_id="standalone"),
         cache=cache,
         is_device_present=lambda _cid: True,
         get_device_display_name=lambda _cid: None,
+        _device_location_data=_standalone_loc_data,
+        update_device_cache=lambda device_id, payload, **_kw: _standalone_loc_data.__setitem__(
+            device_id, payload
+        ),
+        increment_stat=lambda _name: None,
+        push_updated=lambda _ids: None,
     )
     fcm.register_coordinator(coordinator_stub)
 
