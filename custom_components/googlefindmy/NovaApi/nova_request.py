@@ -986,15 +986,19 @@ class AsyncTTLPolicy(TTLPolicy):
             threshold = self._jitter_sec(threshold, self.JITTER_SEC)
 
             if age >= threshold:
+                # Don't proactively invalidate the AAS token.  In CLI mode the
+                # OAuth cookie is single-use and consumed — destroying the AAS
+                # here would be fatal because no replacement can be obtained.
+                # Even in HA mode, premature invalidation is wasteful.  Instead,
+                # let gpsoauth validate the AAS on the next ADM refresh: if it's
+                # truly expired, InvalidAasTokenError propagates correctly.
                 self.log.info(
-                    "AAS token for %s reached measured threshold (%.1f hours) – "
-                    "proactively refreshing token chain.",
+                    "AAS token for %s past learned threshold (%.1f hours); "
+                    "will validate on next ADM refresh.",
                     self.username,
                     best_ttl / 3600,
                 )
-                await self.async_invalidate_aas_token()
-                # The next ADM refresh will trigger a fresh AAS token generation
-                return True
+                return False
         except (TypeError, ValueError) as e:
             self.log.debug("AAS proactive refresh check failed: %s", e)
 
