@@ -548,7 +548,7 @@ class FcmReceiverHA:
     def get_last_connected_wall_time(self, entry_id: str | None) -> float | None:
         """Return the last wall-clock timestamp when the entry marked healthy."""
 
-        entry_key = entry_id or self._default_entry_id
+        entry_key = entry_id if entry_id is not None else self._default_entry_id
         if entry_key is None:
             return None
 
@@ -616,7 +616,7 @@ class FcmReceiverHA:
             self._entry_caches[entry_id] = cache
             await self._prime_cache_state(entry_id, cache)
 
-        if entry_id and self._default_entry_id is None:
+        if entry_id is not None and self._default_entry_id is None:
             self._default_entry_id = entry_id
 
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
@@ -1079,7 +1079,7 @@ class FcmReceiverHA:
         except ValueError:
             pass  # already removed
 
-        if entry_id:
+        if entry_id is not None:
             replacement = None
             for other in self.coordinators:
                 other_entry = getattr(other, "config_entry", None)
@@ -1218,7 +1218,7 @@ class FcmReceiverHA:
         if token and token in self._token_to_entries:
             return set(self._token_to_entries[token]), "token"
 
-        if entry_id:
+        if entry_id is not None:
             return {entry_id}, "client"
 
         owner_entry = self._lookup_owner_entry(canonic_id)
@@ -1851,7 +1851,7 @@ class FcmReceiverHA:
         Otherwise returns the token for the receiver's default entry when set,
         falling back to the first available token across clients.
         """
-        target_entry = entry_id or self._default_entry_id
+        target_entry = entry_id if entry_id is not None else self._default_entry_id
 
         if target_entry:
             creds = self.creds.get(target_entry)
@@ -1881,7 +1881,7 @@ class FcmReceiverHA:
     def set_default_entry_id(self, entry_id: str | None) -> None:
         """Record the preferred entry_id for legacy token lookups."""
 
-        if entry_id and isinstance(entry_id, str):
+        if isinstance(entry_id, str):
             self._default_entry_id = entry_id
             return
         self._default_entry_id = None
@@ -1902,7 +1902,7 @@ class FcmReceiverHA:
             candidate_entry = (
                 getattr(entry, "entry_id", None) if entry is not None else None
             )
-            if not candidate_entry:
+            if candidate_entry is None:
                 continue
 
             candidate_cache = self._entry_caches.get(candidate_entry)
