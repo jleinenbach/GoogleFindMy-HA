@@ -28,10 +28,7 @@ from custom_components.googlefindmy.const import (
     LOCATION_REQUEST_TIMEOUT_S,
 )
 from custom_components.googlefindmy.example_data_provider import get_example_data
-from custom_components.googlefindmy.exceptions import (
-    MissingNamespaceError,
-    MissingTokenCacheError,
-)
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
@@ -513,9 +510,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
         cache_provider = _cache_provider
 
-    resolved_namespace = namespace or entry_id
-    if not resolved_namespace:
-        raise MissingNamespaceError()
+    resolved_namespace = namespace if namespace is not None else (entry_id or "")
 
     async def _cache_get_raw(key: str) -> Any:
         getter = getattr(cache_ref, "async_get_cached_value", None)
