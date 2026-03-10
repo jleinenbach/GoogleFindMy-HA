@@ -74,7 +74,7 @@ def _patch_perform_auth(mod: Any) -> None:
     if orig is None:
         return  # function not found — nothing to patch
 
-    def _patched_perform_auth(data: dict, proxies: Any = None) -> Any:
+    def _patched_perform_auth(data: dict[str, Any], proxies: Any = None) -> Any:
         data["droidguard_results"] = "null"
         return orig(data, proxies)
 
