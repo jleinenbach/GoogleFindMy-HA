@@ -43,8 +43,8 @@
       "reset_statistics": {
         "default": "mdi:restart"
       },
-      "regenerate_aas_token": {
-        "default": "mdi:key-chain"
+      "regenerate_fcm_token": {
+        "default": "mdi:cellphone-wireless"
       },
       "regenerate_adm_token": {
         "default": "mdi:key-change"

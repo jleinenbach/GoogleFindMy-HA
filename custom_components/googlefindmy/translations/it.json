@@ -422,8 +422,8 @@
       "reset_statistics": {
         "name": "Reimposta statistiche"
       },
-      "regenerate_aas_token": {
-        "name": "Rigenera token AAS",
+      "regenerate_fcm_token": {
+        "name": "Rigenera token FCM",
         "state_attributes": {
           "cooldown_seconds": {
             "name": "Periodo di attesa (s)"

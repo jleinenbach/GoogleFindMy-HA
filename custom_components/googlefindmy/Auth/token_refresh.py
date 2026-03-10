@@ -1,5 +1,5 @@
 # custom_components/googlefindmy/Auth/token_refresh.py
-"""Token refresh utilities for manual regeneration of AAS and ADM tokens.
+"""Token refresh utilities for manual regeneration of ADM and FCM tokens.
 
 This module provides entry-scoped token regeneration with:
 - Shared cooldown (3 minutes) across all token refresh operations
@@ -9,11 +9,13 @@ This module provides entry-scoped token regeneration with:
 Token dependency chain:
     OAuth Token -> AAS Token -> ADM Token
 
+FCM/GCM tokens are independent and can be regenerated at any time.
+
 When regenerating:
-- AAS Token: Invalidates both AAS and ADM, regenerates AAS (ADM will be
-  regenerated on next API call)
 - ADM Token: Invalidates only ADM, regenerates ADM (uses existing AAS if valid,
   otherwise triggers AAS regeneration)
+- FCM Token: Invalidates FCM tokens while preserving GCM device identity
+  (android_id/security_token), then re-registers to obtain fresh tokens
 """
 
 from __future__ import annotations
@@ -23,9 +25,11 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
-from ..const import DATA_AAS_TOKEN, TOKEN_REFRESH_COOLDOWN_S
+from ..const import DOMAIN, TOKEN_REFRESH_COOLDOWN_S
 
 if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
+
     from .token_cache import TokenCache
 
 _LOGGER = logging.getLogger(__name__)
@@ -81,90 +85,78 @@ def _record_refresh(entry_id: str) -> None:
     _last_refresh_timestamps[entry_id] = time.time()
 
 
-async def async_regenerate_aas_token(
+async def async_regenerate_fcm_token(
     *,
-    cache: TokenCache,
-    username: str | None = None,
+    hass: HomeAssistant,
+    entry_id: str,
 ) -> bool:
-    """Regenerate the AAS token, invalidating both AAS and ADM tokens.
+    """Regenerate FCM/GCM tokens while preserving device identity.
 
-    Since ADM depends on AAS, invalidating AAS requires ADM to be regenerated
-    as well. This function:
+    This function:
     1. Checks and enforces the shared cooldown
-    2. Invalidates both AAS and ADM tokens in the cache
-    3. Triggers a fresh AAS token generation
+    2. Invalidates FCM tokens (keeps GCM android_id/security_token)
+    3. Triggers re-registration via the FCM receiver
 
     Args:
-        cache: Entry-scoped TokenCache instance
-        username: Optional username; resolved from cache if not provided
+        hass: Home Assistant instance
+        entry_id: Config entry ID
 
     Returns:
-        True if regeneration succeeded, False otherwise
-
-    Logs:
-        INFO level for button press and success/failure
+        True if regeneration succeeded or was started, False otherwise
     """
-    from .aas_token_retrieval import async_get_aas_token
-    from .username_provider import async_get_username
-
-    entry_id = await _get_entry_id(cache)
-
     async with _refresh_lock:
         on_cooldown, remaining = is_refresh_on_cooldown(entry_id)
         if on_cooldown:
             _LOGGER.info(
-                "AAS token regeneration blocked: cooldown active (%.1fs remaining)",
+                "FCM token regeneration blocked: cooldown active (%.1fs remaining)",
                 remaining,
             )
             return False
 
-        # Resolve username for logging
-        user = username
-        if not user:
-            user = await async_get_username(cache=cache)
-        masked_user = _mask_email(user)
-
         _LOGGER.info(
-            "AAS token regeneration requested for %s (entry: %s)",
-            masked_user,
+            "FCM token regeneration requested (entry: %s)",
             entry_id,
         )
 
         try:
-            # Invalidate AAS token
-            await cache.set(DATA_AAS_TOKEN, None)
-            _LOGGER.info("Invalidated AAS token for %s", masked_user)
-
-            # Invalidate ADM token (depends on AAS)
-            if user:
-                adm_key = f"adm_token_{user.strip().lower()}"
-                await cache.set(adm_key, None)
-                _LOGGER.info(
-                    "Invalidated ADM token for %s (AAS dependency)", masked_user
+            bucket = hass.data.get(DOMAIN)
+            if not bucket or not isinstance(bucket, dict):
+                _LOGGER.error(
+                    "FCM token regeneration failed: integration data not available"
                 )
+                return False
 
-            # Trigger AAS token regeneration
-            # The existing function handles retries and backoff internally
-            new_token = await async_get_aas_token(cache=cache)
+            receivers = bucket.get("fcm_receivers", {})
+            receiver = receivers.get(entry_id)
+            if receiver is None:
+                receiver = bucket.get("fcm_receiver")
+            if receiver is None:
+                _LOGGER.error(
+                    "FCM token regeneration failed: no FCM receiver found (entry: %s)",
+                    entry_id,
+                )
+                return False
 
-            if new_token:
+            success = await receiver.async_reregister_fcm(entry_id)
+
+            if success:
                 _record_refresh(entry_id)
                 _LOGGER.info(
-                    "AAS token regeneration successful for %s",
-                    masked_user,
+                    "FCM token regeneration successful (entry: %s)",
+                    entry_id,
                 )
                 return True
 
             _LOGGER.warning(
-                "AAS token regeneration returned empty token for %s",
-                masked_user,
+                "FCM token regeneration failed (entry: %s)",
+                entry_id,
             )
             return False
 
         except Exception as err:
             _LOGGER.error(
-                "AAS token regeneration failed for %s: %s",
-                masked_user,
+                "FCM token regeneration failed (entry: %s): %s",
+                entry_id,
                 err,
             )
             return False

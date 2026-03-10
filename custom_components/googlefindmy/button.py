@@ -156,11 +156,11 @@ RESET_STATISTICS_DESCRIPTION = ButtonEntityDescription(
     icon="mdi:restart",
 )
 
-# Entity description for regenerating AAS token
-REGENERATE_AAS_TOKEN_DESCRIPTION = ButtonEntityDescription(
-    key="regenerate_aas_token",
-    translation_key="regenerate_aas_token",
-    icon="mdi:key-chain",
+# Entity description for regenerating FCM token
+REGENERATE_FCM_TOKEN_DESCRIPTION = ButtonEntityDescription(
+    key="regenerate_fcm_token",
+    translation_key="regenerate_fcm_token",
+    icon="mdi:cellphone-wireless",
     entity_category=EntityCategory.CONFIG,
 )
 
@@ -436,7 +436,7 @@ async def async_setup_entry(
 
         # Token regeneration buttons (disabled by default)
         for button_cls in (
-            GoogleFindMyRegenerateAasTokenButton,
+            GoogleFindMyRegenerateFcmTokenButton,
             GoogleFindMyRegenerateAdmTokenButton,
         ):
             token_button = button_cls(
@@ -1405,17 +1405,17 @@ class GoogleFindMyTokenRefreshButtonBase(
         return attrs
 
 
-class GoogleFindMyRegenerateAasTokenButton(GoogleFindMyTokenRefreshButtonBase):
-    """Button to regenerate the AAS (Android AuthSub) token.
+class GoogleFindMyRegenerateFcmTokenButton(GoogleFindMyTokenRefreshButtonBase):
+    """Button to regenerate FCM/GCM tokens.
 
-    Regenerating the AAS token will also invalidate the ADM token since
-    ADM depends on AAS. The ADM token will be regenerated on the next API call.
+    Preserves the GCM device identity (android_id/security_token) and
+    obtains fresh GCM + FCM registration tokens via re-registration.
     """
 
-    _attr_entity_description = REGENERATE_AAS_TOKEN_DESCRIPTION
-    _attr_icon = REGENERATE_AAS_TOKEN_DESCRIPTION.icon
-    _attr_translation_key = REGENERATE_AAS_TOKEN_DESCRIPTION.translation_key
-    _token_type = "AAS"
+    _attr_entity_description = REGENERATE_FCM_TOKEN_DESCRIPTION
+    _attr_icon = REGENERATE_FCM_TOKEN_DESCRIPTION.icon
+    _attr_translation_key = REGENERATE_FCM_TOKEN_DESCRIPTION.translation_key
+    _token_type = "FCM"
 
     def __init__(
         self,
@@ -1434,53 +1434,47 @@ class GoogleFindMyRegenerateAasTokenButton(GoogleFindMyTokenRefreshButtonBase):
             DOMAIN,
             entry_id,
             subentry_identifier,
-            "regenerate_aas_token",
+            "regenerate_fcm_token",
             separator="_",
         )
 
     async def async_press(self) -> None:
-        """Handle the button press to regenerate AAS token."""
-        from .Auth.token_refresh import async_regenerate_aas_token
+        """Handle the button press to regenerate FCM token."""
+        from .Auth.token_refresh import async_regenerate_fcm_token
 
         entry_id = self.entry_id or "unknown"
 
         if not self.available:
             _LOGGER.info(
-                "AAS token regeneration button pressed but cooldown active (entry: %s)",
+                "FCM token regeneration button pressed but cooldown active (entry: %s)",
                 entry_id,
             )
             return
 
         _LOGGER.info(
-            "AAS token regeneration button pressed (entry: %s)",
+            "FCM token regeneration button pressed (entry: %s)",
             entry_id,
         )
 
-        # Get the token cache from runtime data
-        config_entry = getattr(self.coordinator, "config_entry", None)
-        runtime_data = getattr(config_entry, "runtime_data", None)
-        cache = getattr(runtime_data, "token_cache", None)
-        if cache is None:
-            cache = getattr(self.coordinator, "cache", None)
-
-        if cache is None:
+        hass = self.hass
+        if hass is None:
             _LOGGER.error(
-                "AAS token regeneration failed: no token cache available (entry: %s)",
+                "FCM token regeneration failed: no hass instance available (entry: %s)",
                 entry_id,
             )
             return
 
-        success = await async_regenerate_aas_token(cache=cache)
+        success = await async_regenerate_fcm_token(hass=hass, entry_id=entry_id)
 
         if success:
             self._update_last_pressed()
             _LOGGER.info(
-                "AAS token regeneration completed successfully (entry: %s)",
+                "FCM token regeneration completed successfully (entry: %s)",
                 entry_id,
             )
         else:
             _LOGGER.warning(
-                "AAS token regeneration failed (entry: %s)",
+                "FCM token regeneration failed (entry: %s)",
                 entry_id,
             )
 

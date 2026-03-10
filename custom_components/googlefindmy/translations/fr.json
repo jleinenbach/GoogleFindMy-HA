@@ -422,8 +422,8 @@
       "reset_statistics": {
         "name": "Réinitialiser les statistiques"
       },
-      "regenerate_aas_token": {
-        "name": "Régénérer le jeton AAS",
+      "regenerate_fcm_token": {
+        "name": "Régénérer le jeton FCM",
         "state_attributes": {
           "cooldown_seconds": {
             "name": "Période de refroidissement (s)"

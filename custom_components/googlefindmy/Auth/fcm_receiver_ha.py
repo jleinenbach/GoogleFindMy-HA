@@ -1916,6 +1916,68 @@ class FcmReceiverHA:
             if task:
                 task.cancel()
 
+    async def async_reregister_fcm(self, entry_id: str) -> bool:
+        """Public API: invalidate FCM tokens and re-register for a specific entry.
+
+        Preserves the GCM device identity (android_id/security_token) and
+        obtains fresh GCM + FCM tokens via ``reregister_keeping_identity()``.
+
+        Returns True if re-registration succeeded.
+        """
+        if entry_id not in self.pcs and entry_id not in self.creds:
+            _LOGGER.warning(
+                "[entry=%s] Cannot re-register FCM: entry not known to receiver",
+                entry_id,
+            )
+            return False
+
+        # 1. Invalidate FCM tokens (keeps GCM identity)
+        await self._invalidate_fcm_tokens(entry_id)
+
+        # 2. Stop the supervisor for this entry
+        stop_evt = self._stop_evts.get(entry_id)
+        if stop_evt is not None:
+            stop_evt.set()
+        task = self.supervisors.pop(entry_id, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+        # 3. Stop the client so it can be re-created
+        pc = self.pcs.pop(entry_id, None)
+        if pc is not None:
+            try:
+                await asyncio.wait_for(pc.stop(), timeout=5.0)
+            except (TimeoutError, ConnectionError, asyncio.CancelledError):
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 4. Reset the stop event and restart the supervisor
+        self._stop_evts[entry_id] = asyncio.Event()
+        cache = self._entry_caches.get(entry_id)
+        await self._start_supervisor_for_entry(entry_id, cache)
+
+        # 5. Wait briefly for the registration to complete
+        await asyncio.sleep(2.0)
+
+        # Check if we got a valid FCM token
+        token = self.get_fcm_token(entry_id)
+        if token:
+            _LOGGER.info(
+                "[entry=%s] FCM re-registration completed successfully", entry_id
+            )
+            return True
+
+        _LOGGER.warning(
+            "[entry=%s] FCM re-registration started but token not yet available",
+            entry_id,
+        )
+        return True  # Supervisor is running; registration may still be in progress
+
     async def async_stop(self, timeout: float = 5.0) -> None:
         """Stop all supervisors and clients (graceful, bounded)."""
         for eid, evt in self._stop_evts.items():
