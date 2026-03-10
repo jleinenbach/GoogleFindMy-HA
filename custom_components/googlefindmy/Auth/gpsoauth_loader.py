@@ -44,7 +44,37 @@ def require_gpsoauth() -> GpsoauthModule:
     invoke this helper immediately before using gpsoauth APIs.
     """
 
-    return cast(GpsoauthModule, import_module("gpsoauth"))
+    mod = cast(GpsoauthModule, import_module("gpsoauth"))
+    _patch_perform_auth(mod)
+    return mod
+
+
+def _patch_perform_auth(mod: Any) -> None:
+    """Monkey-patch gpsoauth._perform_auth_request to inject missing params.
+
+    Since ~March 2026 Google requires ``droidguard_results`` in master-login
+    requests.  gpsoauth 2.0.0 does not send it, causing "MissingDroidguard"
+    errors.  Passing the string ``"null"`` satisfies the server-side check.
+
+    The ``not in data`` guards make this idempotent: if a future gpsoauth
+    release adds these fields natively the patch becomes a no-op.
+
+    References:
+        https://github.com/simon-weber/gpsoauth/issues/81
+        AuroraStore commit 50e3034b (GitLab whyorean/AuroraStore)
+        https://github.com/BSkando/GoogleFindMy-HA/issues/114
+    """
+
+    orig = getattr(mod, "_perform_auth_request", None)
+    if orig is None:
+        return  # function not found — nothing to patch
+
+    def _patched_perform_auth(data: dict, proxies: Any = None) -> Any:
+        if "droidguard_results" not in data:
+            data["droidguard_results"] = "null"  # String "null", NOT Python None
+        return orig(data, proxies)
+
+    mod._perform_auth_request = _patched_perform_auth
 
 
 @lru_cache(maxsize=1)
