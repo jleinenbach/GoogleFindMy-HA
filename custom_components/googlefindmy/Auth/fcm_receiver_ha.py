@@ -166,6 +166,8 @@ _T = TypeVar("_T")
 _BACKOFF_WARNING_THRESHOLD_S = 1024.0
 _MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
 _MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
+_HTTP_UNAUTHORIZED = 401
+_HTTP_NOT_FOUND = 404
 
 
 async def _call_in_executor(
@@ -989,6 +991,40 @@ class FcmReceiverHA:
                 entry_id,
             )
 
+    @staticmethod
+    def _raise_if_fatal_client_error(
+        entry_id: str, err: ClientError
+    ) -> None:
+        """Raise ``FatalRegistrationError`` for 401/404 client errors."""
+        status_raw = getattr(err, "status", None)
+        if status_raw is None:
+            status_raw = getattr(err, "status_code", None)
+        try:
+            status_int = int(cast(int | str, status_raw))
+        except (TypeError, ValueError):
+            status_int = None
+
+        if status_int == _HTTP_UNAUTHORIZED:
+            raise FatalRegistrationError(
+                f"FCM registration auth failed ({status_int}): "
+                "token renewal needed",
+                is_auth_error=True,
+            ) from err
+
+        if status_int == _HTTP_NOT_FOUND:
+            raise FatalRegistrationError(
+                f"FCM registration endpoint not found ({status_int}): "
+                "may be transient",
+                is_auth_error=False,
+            ) from err
+
+        _LOGGER.error(
+            "[entry=%s] FCM registration client error (status=%s): %s",
+            entry_id,
+            status_raw,
+            err,
+        )
+
     async def _register_for_fcm_entry(self, entry_id: str) -> bool:
         """Single registration attempt for a specific entry."""
         pc = self.pcs.get(entry_id)
@@ -1031,40 +1067,7 @@ class FcmReceiverHA:
         except FatalRegistrationError:
             raise
         except ClientError as err:
-            status_raw = getattr(err, "status", None)
-            if status_raw is None:
-                status_raw = getattr(err, "status_code", None)
-            try:
-                status_int = int(cast(int | str, status_raw))
-            except (TypeError, ValueError):
-                status_int = None
-
-            if status_int == 401:
-                message = (
-                    f"FCM registration auth failed ({status_int}): "
-                    "token renewal needed"
-                )
-                self._fatal_errors[entry_id] = message
-                raise FatalRegistrationError(
-                    message, is_auth_error=True
-                ) from err
-
-            if status_int == 404:
-                message = (
-                    f"FCM registration endpoint not found ({status_int}): "
-                    "may be transient"
-                )
-                self._fatal_errors[entry_id] = message
-                raise FatalRegistrationError(
-                    message, is_auth_error=False
-                ) from err
-
-            _LOGGER.error(
-                "[entry=%s] FCM registration client error (status=%s): %s",
-                entry_id,
-                status_raw,
-                err,
-            )
+            self._raise_if_fatal_client_error(entry_id, err)
             return False
         except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
             # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
