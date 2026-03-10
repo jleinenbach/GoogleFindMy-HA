@@ -163,7 +163,8 @@ type MutableJSONMapping = MutableMapping[str, Any]
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
-_BACKOFF_WARNING_THRESHOLD_S = 1024.0
+_MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
+_BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
 _MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
 _MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
 _HTTP_UNAUTHORIZED = 401
@@ -287,6 +288,9 @@ class FcmReceiverHA:
 
         # Active background tasks for exception tracking (P0 fix)
         self._active_tasks: set[asyncio.Task[Any]] = set()
+
+        # Per-entry nudge events: allows coordinator to wake up a sleeping supervisor
+        self._retry_nudge_evts: dict[str, asyncio.Event] = {}
 
     def _clear_fatal_error_for_entry(
         self, entry_id: str, *, reason: str | None = None
@@ -550,6 +554,27 @@ class FcmReceiverHA:
 
     ready = is_ready  # alias used by callers
 
+    def nudge_retry(self, entry_id: str | None = None) -> bool:
+        """Wake a sleeping supervisor so it retries FCM connection immediately.
+
+        Called by the polling coordinator when it enters degraded mode and wants
+        the supervisor to attempt reconnection sooner than the backoff timer.
+        Returns True if a nudge event was set.
+        """
+        key = entry_id or self._default_entry_id
+        if not key:
+            # Nudge all entries
+            nudged = False
+            for evt in self._retry_nudge_evts.values():
+                evt.set()
+                nudged = True
+            return nudged
+        evt = self._retry_nudge_evts.get(key)
+        if evt is not None:
+            evt.set()
+            return True
+        return False
+
     def get_last_connected_wall_time(self, entry_id: str | None) -> float | None:
         """Return the last wall-clock timestamp when the entry marked healthy."""
 
@@ -717,13 +742,29 @@ class FcmReceiverHA:
         stop_evt = self._stop_evts.setdefault(entry_id, asyncio.Event())
 
         async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
+            nudge_evt = self._retry_nudge_evts.setdefault(
+                entry_id, asyncio.Event()
+            )
+
+            async def _nudge_sleep(seconds: float) -> bool:
+                """Sleep up to *seconds*, returning True if nudged early."""
+                nudge_evt.clear()
+                try:
+                    await asyncio.wait_for(nudge_evt.wait(), timeout=seconds)
+                    return True  # nudged
+                except TimeoutError:
+                    return False
+
             backoff = 1.0
             try:
                 while not stop_evt.is_set():
                     pc = await self._ensure_client_for_entry(entry_id, cache)
                     if not pc:
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 4096.0)
+                        nudged = await _nudge_sleep(backoff)
+                        if nudged:
+                            backoff = 1.0
+                        else:
+                            backoff = min(backoff * 2, _MAX_SUPERVISOR_BACKOFF_S)
                         continue
 
                     try:
@@ -841,8 +882,11 @@ class FcmReceiverHA:
                                 entry_id,
                                 delay,
                             )
-                        await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 4096.0)
+                        nudged = await _nudge_sleep(delay)
+                        if nudged:
+                            backoff = 1.0
+                        else:
+                            backoff = min(backoff * 2, _MAX_SUPERVISOR_BACKOFF_S)
                         continue
 
                     # Telemetry (aggregate counters)
@@ -943,8 +987,11 @@ class FcmReceiverHA:
                         _LOGGER.info(
                             "[entry=%s] Restarting FCM client in %.1fs", entry_id, delay
                         )
-                        await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 4096.0)
+                        nudged = await _nudge_sleep(delay)
+                        if nudged:
+                            backoff = 1.0
+                        else:
+                            backoff = min(backoff * 2, _MAX_SUPERVISOR_BACKOFF_S)
             except asyncio.CancelledError:
                 _LOGGER.debug("[entry=%s] FCM supervisor cancelled", entry_id)
                 raise
@@ -953,6 +1000,7 @@ class FcmReceiverHA:
             finally:
                 _LOGGER.info("[entry=%s] FCM supervisor stopped", entry_id)
                 self._update_entry_health(entry_id, False)
+                self._retry_nudge_evts.pop(entry_id, None)
 
         task = asyncio.create_task(
             _supervisor(), name=f"{DOMAIN}.fcm_supervisor[{entry_id}]"
