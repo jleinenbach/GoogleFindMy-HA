@@ -793,6 +793,93 @@ class FcmRegister:
             raise RuntimeError("Registration did not yield credentials")
         return credentials
 
+    async def _fallback_full_register(
+        self, reason: str
+    ) -> MutableJSONMapping:
+        """Run a full ``register()`` as fallback and notify the callback."""
+        _logger.warning("%s; falling back to full register()", reason)
+        self.credentials = await self.register()
+        if self.credentials_updated_callback and self.credentials:
+            try:
+                self.credentials_updated_callback(self.credentials)
+            except Exception as e:
+                _logger.debug(
+                    "credentials_updated_callback raised", exc_info=e
+                )
+        if self.credentials is None:
+            raise RuntimeError("Fallback registration did not yield credentials")
+        return self.credentials
+
+    async def reregister_keeping_identity(self) -> MutableJSONMapping:
+        """Re-register FCM tokens while preserving GCM device identity.
+
+        Performs a check-in with the existing android_id/security_token,
+        then obtains fresh GCM and FCM tokens.  Falls back to full
+        ``register()`` if the identity is no longer valid.
+
+        :return: The full credentials dict with same android_id but fresh tokens.
+        """
+        if not self.credentials or "gcm" not in self.credentials:
+            return await self._fallback_full_register(
+                "No existing GCM identity"
+            )
+
+        android_id = self.credentials["gcm"]["android_id"]
+        security_token = self.credentials["gcm"]["security_token"]
+
+        # Step 1: Check-in with existing device identity
+        try:
+            gcm_response = await self.gcm_check_in(android_id, security_token)
+        except Exception as e:
+            _logger.debug("Check-in exception detail", exc_info=e)
+            return await self._fallback_full_register(
+                "Check-in with existing identity failed"
+            )
+
+        if not gcm_response:
+            return await self._fallback_full_register(
+                "Check-in returned empty response"
+            )
+
+        # Step 2: Re-register GCM token (uses same android_id/security_token)
+        gcm_data = await self.gcm_register(gcm_response)
+        if not gcm_data:
+            raise RuntimeError(
+                "GCM re-registration failed with existing identity"
+            )
+
+        # Step 3: Generate fresh keys and re-register FCM
+        keys = self.generate_keys()
+        fcm_data = await self.fcm_install_and_register(gcm_data, keys)
+        if not fcm_data:
+            raise RuntimeError("FCM re-registration failed")
+
+        res: dict[str, Any] = {
+            "keys": keys,
+            "gcm": gcm_data,
+            "fcm": fcm_data,
+            "config": {
+                "bundle_id": self.config.bundle_id,
+                "project_id": self.config.project_id,
+                "vapid_key": self.config.vapid_key,
+            },
+        }
+
+        self.credentials = res
+        if self.credentials_updated_callback:
+            try:
+                self.credentials_updated_callback(res)
+            except Exception as e:
+                _logger.debug(
+                    "credentials_updated_callback raised", exc_info=e
+                )
+
+        _logger.info(
+            "Re-registered FCM with existing device identity "
+            "(android_id preserved)"
+        )
+        return res
+
     async def register(self) -> JSONDict:
         """Register GCM and FCM tokens for configured sender_id/app.
 

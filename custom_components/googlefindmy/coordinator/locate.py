@@ -422,9 +422,9 @@ class LocateOperations(_MixinBase):
                 slot = dict(location_data)
                 slot.setdefault("last_updated", time.time())
 
-                # Apply type-aware cooldowns based on internal hint (if any), then strip it.
+                # Report-type cooldown removed: location_poll_interval already
+                # regulates polling frequency; the 600s cooldown caused stale updates.
                 report_hint = slot.get("_report_hint")
-                self._apply_report_type_cooldown(device_id, report_hint)
 
                 # Track crowd-sourced updates when hint is present
                 if report_hint:
