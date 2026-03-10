@@ -1922,7 +1922,8 @@ class FcmReceiverHA:
         Preserves the GCM device identity (android_id/security_token) and
         obtains fresh GCM + FCM tokens via ``reregister_keeping_identity()``.
 
-        Returns True if re-registration succeeded.
+        Returns True if re-registration was initiated (supervisor restarted),
+        False if the entry is not known to this receiver.
         """
         if entry_id not in self.pcs and entry_id not in self.creds:
             _LOGGER.warning(
@@ -1946,7 +1947,11 @@ class FcmReceiverHA:
             except (TimeoutError, asyncio.CancelledError):
                 pass
 
-        # 3. Stop the client so it can be re-created
+        # 3. Reset the stop event BEFORE stopping the client to prevent
+        #    a race where concurrent code sees the old (set) event.
+        self._stop_evts[entry_id] = asyncio.Event()
+
+        # 4. Stop the client so it can be re-created
         pc = self.pcs.pop(entry_id, None)
         if pc is not None:
             try:
@@ -1956,27 +1961,16 @@ class FcmReceiverHA:
             except Exception:  # noqa: BLE001
                 pass
 
-        # 4. Reset the stop event and restart the supervisor
-        self._stop_evts[entry_id] = asyncio.Event()
+        # 5. Restart the supervisor (will re-register with fresh tokens)
         cache = self._entry_caches.get(entry_id)
         await self._start_supervisor_for_entry(entry_id, cache)
 
-        # 5. Wait briefly for the registration to complete
-        await asyncio.sleep(2.0)
-
-        # Check if we got a valid FCM token
-        token = self.get_fcm_token(entry_id)
-        if token:
-            _LOGGER.info(
-                "[entry=%s] FCM re-registration completed successfully", entry_id
-            )
-            return True
-
-        _LOGGER.warning(
-            "[entry=%s] FCM re-registration started but token not yet available",
+        _LOGGER.info(
+            "[entry=%s] FCM re-registration initiated; "
+            "supervisor restarted with invalidated tokens",
             entry_id,
         )
-        return True  # Supervisor is running; registration may still be in progress
+        return True
 
     async def async_stop(self, timeout: float = 5.0) -> None:
         """Stop all supervisors and clients (graceful, bounded)."""
