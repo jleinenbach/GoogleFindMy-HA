@@ -471,7 +471,21 @@ class PollingOperations(_MixinBase):
             _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
         self._fcm_defer_started_mono = 0.0
         self._fcm_last_stage = 0
+        self._degraded_mode_warned = False
         self._set_fcm_status(FcmStatus.CONNECTED)
+
+    def _nudge_fcm_supervisor(self) -> None:
+        """Ask the FCM supervisor to wake up and retry connection immediately."""
+        try:
+            fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
+            if fcm is None:
+                return
+            nudge_fn = getattr(fcm, "nudge_retry", None)
+            if callable(nudge_fn):
+                entry_id = self._entry_id()
+                nudge_fn(entry_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -------------------- Poll timing prediction --------------------
     def _get_predicted_poll_time(self) -> float | None:
@@ -913,10 +927,17 @@ class PollingOperations(_MixinBase):
 
                 if fcm_ready or force_poll:
                     if force_poll:
-                        _LOGGER.warning(
-                            "Push transport unavailable for %ds; forcing poll cycle.",
-                            _PUSH_NOT_READY_TIMEOUT_S,
-                        )
+                        if not self._degraded_mode_warned:
+                            _LOGGER.warning(
+                                "Push transport unavailable for %ds; forcing poll cycle.",
+                                _PUSH_NOT_READY_TIMEOUT_S,
+                            )
+                        else:
+                            _LOGGER.debug(
+                                "Push transport still unavailable; forcing poll cycle.",
+                            )
+                        # Nudge FCM supervisor to retry connection sooner
+                        self._nudge_fcm_supervisor()
                     _LOGGER.debug(
                         "Scheduling background polling cycle (devices=%d, interval=%ds)",
                         len(devices_to_poll),
@@ -1033,9 +1054,15 @@ class PollingOperations(_MixinBase):
                     self._note_fcm_deferral(time.monotonic())
                     self._schedule_short_retry(5.0)
                     return
-                _LOGGER.warning(
-                    "Starting poll cycle without push transport; continuing in degraded mode."
-                )
+                if not self._degraded_mode_warned:
+                    _LOGGER.warning(
+                        "Starting poll cycle without push transport; continuing in degraded mode."
+                    )
+                    self._degraded_mode_warned = True
+                else:
+                    _LOGGER.debug(
+                        "Poll cycle still without push transport (degraded mode)."
+                    )
             elif self._fcm_defer_started_mono:
                 # If we were deferring previously, clear the escalation timeline.
                 self._clear_fcm_deferral()

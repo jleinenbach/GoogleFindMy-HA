@@ -696,6 +696,7 @@ class GoogleFindMyCoordinator(
         # Push readiness deferral/escalation bookkeeping
         self._fcm_defer_started_mono: float = 0.0
         self._fcm_last_stage: int = 0  # 0=none, 1=warned, 2=errored
+        self._degraded_mode_warned: bool = False
 
         # Push readiness memoization and cooldown after transport errors
         self._push_ready_memo: bool | None = None
