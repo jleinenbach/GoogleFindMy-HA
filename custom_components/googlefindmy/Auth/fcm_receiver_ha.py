@@ -164,6 +164,8 @@ _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
 _BACKOFF_WARNING_THRESHOLD_S = 1024.0
+_MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
+_MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
 
 
 async def _call_in_executor(
@@ -256,6 +258,7 @@ class FcmReceiverHA:
 
         self._fatal_error: str | None = None
         self._fatal_errors: dict[str, str] = {}
+        self._fatal_retry_counts: dict[str, int] = {}  # "entry:auth"|"entry:endpoint" -> count
 
         # Aggregate telemetry
         self.last_start_monotonic: float = 0.0
@@ -725,10 +728,9 @@ class FcmReceiverHA:
                         ok_reg = await self._register_for_fcm_entry(entry_id)
                     except FatalRegistrationError as err:
                         message = str(err) or "FCM registration failed"
-                        self._fatal_error = message
                         self._fatal_errors[entry_id] = message
                         _LOGGER.error(
-                            "[entry=%s] FCM registration failed permanently; credentials may be invalid: %s",
+                            "[entry=%s] FCM registration failed: %s",
                             entry_id,
                             message,
                         )
@@ -739,7 +741,72 @@ class FcmReceiverHA:
                         finally:
                             async with self._lock:
                                 self.pcs.pop(entry_id, None)
-                        break
+
+                        is_auth = getattr(err, "is_auth_error", False)
+                        counter_key = (
+                            f"{entry_id}:auth"
+                            if is_auth
+                            else f"{entry_id}:endpoint"
+                        )
+                        fatal_count = (
+                            self._fatal_retry_counts.get(counter_key, 0) + 1
+                        )
+                        self._fatal_retry_counts[counter_key] = fatal_count
+
+                        if is_auth:
+                            # 401: Token renewal while preserving android_id
+                            max_retries = _MAX_FATAL_AUTH_RETRIES
+                            if fatal_count >= max_retries:
+                                self._fatal_error = message
+                                _LOGGER.error(
+                                    "[entry=%s] FCM auth failed %d "
+                                    "consecutive times; giving up. "
+                                    "Re-authentication may be required.",
+                                    entry_id,
+                                    fatal_count,
+                                )
+                                break
+
+                            await self._invalidate_fcm_tokens(entry_id)
+
+                            delay = 60.0 * fatal_count
+                            _LOGGER.warning(
+                                "[entry=%s] FCM auth error 401 (%d/%d); "
+                                "renewing tokens (android_id preserved), "
+                                "retry in %.0fs",
+                                entry_id,
+                                fatal_count,
+                                max_retries,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            # 404: Endpoint rotation — just retry
+                            max_retries = _MAX_FATAL_ENDPOINT_RETRIES
+                            if fatal_count >= max_retries:
+                                self._fatal_error = message
+                                _LOGGER.error(
+                                    "[entry=%s] FCM endpoint 404 "
+                                    "persisted for %d attempts; "
+                                    "giving up.",
+                                    entry_id,
+                                    fatal_count,
+                                )
+                                break
+
+                            delay = min(300.0, 30.0 * fatal_count)
+                            _LOGGER.warning(
+                                "[entry=%s] FCM endpoint 404 (%d/%d); "
+                                "retrying in %.0fs (likely Google "
+                                "endpoint rotation)",
+                                entry_id,
+                                fatal_count,
+                                max_retries,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
 
                     if not ok_reg:
                         try:
@@ -793,12 +860,11 @@ class FcmReceiverHA:
                         self._update_last_activity_for_entry(
                             entry_id, pc, time.monotonic()
                         )
+                        backoff = 1.0  # reset only after a successful start
                     except Exception as err:
                         _LOGGER.info(
                             "[entry=%s] FCM client failed to start: %s", entry_id, err
                         )
-
-                    backoff = 1.0  # reset after a successful start
 
                     while not stop_evt.is_set():
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
@@ -892,13 +958,61 @@ class FcmReceiverHA:
         self.supervisors[entry_id] = task
         _LOGGER.info("Started FCM supervisor for entry %s", entry_id)
 
+    async def _invalidate_fcm_tokens(self, entry_id: str) -> None:
+        """Clear renewable FCM tokens while preserving GCM device identity.
+
+        After this, the next registration attempt will use
+        ``reregister_keeping_identity()`` to get fresh FCM tokens with
+        the same android_id/security_token.
+        """
+        creds = self.creds.get(entry_id)
+        if creds and isinstance(creds, dict):
+            # Remove FCM-related parts, keep GCM device identity
+            creds.pop("fcm", None)
+            creds.pop("keys", None)
+            gcm = creds.get("gcm")
+            if isinstance(gcm, dict):
+                gcm.pop("token", None)
+                gcm.pop("app_id", None)
+
+            # Persist partial credentials so restarts also trigger re-register
+            entry_cache = self._entry_caches.get(entry_id)
+            if entry_cache is not None:
+                try:
+                    await entry_cache.set("fcm_credentials", creds)
+                except Exception:
+                    pass
+
+            _LOGGER.info(
+                "[entry=%s] Invalidated FCM tokens; "
+                "android_id/security_token preserved for re-registration",
+                entry_id,
+            )
+
     async def _register_for_fcm_entry(self, entry_id: str) -> bool:
         """Single registration attempt for a specific entry."""
         pc = self.pcs.get(entry_id)
         if not pc:
             return False
         try:
-            token_or_creds = await pc.checkin_or_register()
+            creds = getattr(pc, "credentials", None)
+            # If FCM tokens were invalidated (partial creds with only GCM
+            # identity), re-register while preserving android_id.
+            needs_reregister = (
+                isinstance(creds, dict)
+                and "gcm" in creds
+                and "fcm" not in creds
+            )
+            if needs_reregister:
+                _LOGGER.info(
+                    "[entry=%s] Partial credentials detected; "
+                    "re-registering with existing device identity",
+                    entry_id,
+                )
+                token_or_creds = await pc.reregister_keeping_identity()
+            else:
+                token_or_creds = await pc.checkin_or_register()
+
             if token_or_creds:
                 _LOGGER.info("[entry=%s] FCM registered successfully", entry_id)
                 token = self.get_fcm_token(entry_id)
@@ -908,6 +1022,9 @@ class FcmReceiverHA:
                 self._clear_fatal_error_for_entry(
                     entry_id, reason="Registration succeeded"
                 )
+                # Reset fatal retry counters on success
+                self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
+                self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
             return False
@@ -922,11 +1039,25 @@ class FcmReceiverHA:
             except (TypeError, ValueError):
                 status_int = None
 
-            if status_int in {401, 404}:
-                message = f"GCM Registration failed ({status_int}): Credentials invalid"
-                self._fatal_error = message
+            if status_int == 401:
+                message = (
+                    f"FCM registration auth failed ({status_int}): "
+                    "token renewal needed"
+                )
                 self._fatal_errors[entry_id] = message
-                raise FatalRegistrationError(message) from err
+                raise FatalRegistrationError(
+                    message, is_auth_error=True
+                ) from err
+
+            if status_int == 404:
+                message = (
+                    f"FCM registration endpoint not found ({status_int}): "
+                    "may be transient"
+                )
+                self._fatal_errors[entry_id] = message
+                raise FatalRegistrationError(
+                    message, is_auth_error=False
+                ) from err
 
             _LOGGER.error(
                 "[entry=%s] FCM registration client error (status=%s): %s",

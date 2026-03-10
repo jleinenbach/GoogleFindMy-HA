@@ -832,6 +832,41 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             if self.register is register:
                 self.register = None
 
+    async def reregister_keeping_identity(self) -> str:
+        """Re-register FCM tokens while preserving GCM device identity.
+
+        :return: The FCM token.
+        """
+        register = FcmRegister(
+            self.fcm_config,
+            self.credentials,
+            self.credentials_updated_callback,
+            http_client_session=self._http_client_session,
+        )
+        self.register = register
+
+        try:
+            credentials = await register.reregister_keeping_identity()
+            self.credentials = credentials
+
+            fcm_section = credentials.get("fcm")
+            registration_token: str | None = None
+            if isinstance(fcm_section, Mapping):
+                registration_section = fcm_section.get("registration")
+                if isinstance(registration_section, Mapping):
+                    token_candidate = registration_section.get("token")
+                    if isinstance(token_candidate, str):
+                        registration_token = token_candidate
+
+            if registration_token is None:
+                raise RuntimeError("FCM registration token missing from credentials.")
+
+            return registration_token
+        finally:
+            await register.close()
+            if self.register is register:
+                self.register = None
+
     async def _start_heartbeat_sender(self) -> None:
         """Send client heartbeats at a fixed interval while started."""
         interval = self.config.client_heartbeat_interval or 0

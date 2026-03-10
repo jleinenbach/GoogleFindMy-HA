@@ -374,25 +374,15 @@ class CacheOperations(_MixinBase):
         fused_applied = slot.pop("_fused_applied", False)
 
         status = slot.get("status")
-        is_stationary_logic = (
-            status in ("Fused (Weighted)", "Stationary (at Anchor)") or is_replay
-        )
 
         # Track fused update statistics
         if fused_applied and status == "Fused (Weighted)":
             self.increment_stat("fused_updates")
 
-        # Apply report type cooldown for stationary updates
-        if is_stationary_logic:
-            apply_cooldown = getattr(self, "_apply_report_type_cooldown", None)
-            if callable(apply_cooldown):
-                apply_cooldown(device_id, report_hint)
-        else:
-            _LOGGER.debug(
-                "Skipping throttle cooldown for %s despite '%s' hint (movement detected)",
-                device_id,
-                report_hint,
-            )
+        # Report-type cooldown removed: location_poll_interval (default 300s)
+        # already provides sufficient protection against excessive polling.
+        # The previous 600s cooldown for crowdsourced reports caused a feedback
+        # loop where replays kept extending the cooldown indefinitely.
 
         # Track crowd-sourced updates when hint is present
         if report_hint:
