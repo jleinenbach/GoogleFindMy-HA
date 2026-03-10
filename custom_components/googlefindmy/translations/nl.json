@@ -422,8 +422,8 @@
       "reset_statistics": {
         "name": "Statistieken resetten"
       },
-      "regenerate_aas_token": {
-        "name": "AAS-token opnieuw genereren",
+      "regenerate_fcm_token": {
+        "name": "FCM-token opnieuw genereren",
         "state_attributes": {
           "cooldown_seconds": {
             "name": "Afkoelperiode (s)"
