@@ -42,33 +42,9 @@ def require_gpsoauth() -> GpsoauthModule:
     The import is deferred until runtime so the integration can be imported
     in environments where the optional dependency is absent. Callers should
     invoke this helper immediately before using gpsoauth APIs.
-
-    A monkey-patch is applied on first import to inject the
-    ``google_play_services_version`` parameter into every auth request.
-    Without this parameter Google returns ``ServiceDisabled`` since ~May 2025.
-    The patch is safe for gpsoauth >=2.0.0 (which already sets the value)
-    because it only adds the key when missing.
-    See: https://github.com/simon-weber/gpsoauth/pull/74
     """
 
-    mod = import_module("gpsoauth")
-
-    # --- Backport: inject google_play_services_version for gpsoauth <2.0.0 ---
-    _orig = getattr(mod, "_perform_auth_request", None)
-    if _orig is not None and not getattr(_orig, "_gps_version_patched", False):
-
-        def _patched_perform_auth(
-            data: dict[str, Any], proxies: Any = None
-        ) -> Any:
-            if "google_play_services_version" not in data:
-                data["google_play_services_version"] = 240913000
-            return _orig(data, proxies)
-
-        _patched_perform_auth._gps_version_patched = True  # type: ignore[attr-defined]
-        mod._perform_auth_request = _patched_perform_auth  # type: ignore[attr-defined]
-    # --- End backport ---
-
-    return cast(GpsoauthModule, mod)
+    return cast(GpsoauthModule, import_module("gpsoauth"))
 
 
 @lru_cache(maxsize=1)
