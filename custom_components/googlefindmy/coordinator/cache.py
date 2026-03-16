@@ -398,10 +398,6 @@ class CacheOperations(_MixinBase):
         raw_last_seen = _normalize_epoch_seconds(slot.get("last_seen"))
         self._track_device_interval(device_id, raw_last_seen)
 
-        # Increment crowdsourced stats for push/manual commits
-        if slot.get("source_label") == "crowdsourced":
-            self.increment_stat("crowd_sourced_updates")
-
         # Significance check
         if not self._is_significant_update(device_id, slot):
             _LOGGER.debug(
