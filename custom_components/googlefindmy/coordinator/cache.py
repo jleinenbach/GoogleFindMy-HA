@@ -793,12 +793,6 @@ class CacheOperations(_MixinBase):
         existing_acc = _safe_accuracy(existing_acc_raw)
         new_acc = _safe_accuracy(new_acc_raw)
 
-        # FIX #155: When BOTH sides carry the fallback accuracy, fusion
-        # degenerates to a meaningless 50/50 average that injects jitter.
-        # Accept the newer data as-is instead of blending.
-        if existing_acc == DEFAULT_ACCURACY_FALLBACK_M and new_acc == DEFAULT_ACCURACY_FALLBACK_M:
-            return True
-
         try:
             dist = _haversine_distance_impl(
                 existing_lat, existing_lon, new_lat, new_lon
@@ -823,6 +817,13 @@ class CacheOperations(_MixinBase):
                     new_data["altitude"] = existing["altitude"]
                 new_data["location_type"] = "trusted"
                 new_data["status"] = "Stationary (at Anchor)"
+            return True
+
+        # FIX #155: When BOTH sides carry the fallback accuracy, fusion
+        # degenerates to a meaningless 50/50 average that injects jitter.
+        # Accept the newer data as-is instead of blending.
+        # Placed after trusted-anchor checks so anchored devices stay pinned.
+        if existing_acc == DEFAULT_ACCURACY_FALLBACK_M and new_acc == DEFAULT_ACCURACY_FALLBACK_M:
             return True
 
         # Clear jump - no overlap, accept as-is

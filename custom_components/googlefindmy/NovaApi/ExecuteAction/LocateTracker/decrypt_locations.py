@@ -1274,11 +1274,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                         if candidate_key != active_identity_key:
                             active_identity_key = candidate_key
                             identity_key_bytes = bytes(candidate_key)
-                            # Sync metadata_update so the promoted key
-                            # persists to cache/payload instead of the
-                            # original stale value (codex review fix).
+                            # Sync metadata_update and metadata so the
+                            # promoted key persists to cache/payload
+                            # instead of the original stale value.
                             metadata_update["identity_key"] = identity_key_bytes
                             metadata_update["identityKey"] = identity_key_bytes
+                            metadata["identity_key"] = identity_key_bytes
+                            metadata["identityKey"] = identity_key_bytes
                             # Reorder candidates so the promoted key is
                             # tried first for remaining reports.
                             all_identity_keys.remove(candidate_key)
