@@ -976,8 +976,6 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         retrieved_candidates = await async_retrieve_identity_key(
             device_registration, cache=cache, device_id=canonic_id
         )
-    except SpotApiEmptyResponseError:
-        raise  # Auth/session errors must propagate for reauth flow
     except Exception as exc:
         if early_unwrapped_identity_key is not None:
             _LOGGER.debug(
