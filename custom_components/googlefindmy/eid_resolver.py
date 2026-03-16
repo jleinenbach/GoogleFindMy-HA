@@ -1594,7 +1594,7 @@ class GoogleFindMyEIDResolver:
         """Return a valid `EidVariant` value string for persistence."""
 
         try:
-            return EidVariant(raw).value
+            return EidVariant(str(raw)).value
         except Exception:
             pass
 
@@ -1606,12 +1606,12 @@ class GoogleFindMyEIDResolver:
                 except Exception:
                     if stripped.isdigit():
                         try:
-                            return EidVariant(int(stripped)).value
+                            return EidVariant(str(int(stripped))).value
                         except Exception:
                             pass
         elif isinstance(raw, int) and not isinstance(raw, bool):
             try:
-                return EidVariant(raw).value
+                return EidVariant(str(raw)).value
             except Exception:
                 pass
 

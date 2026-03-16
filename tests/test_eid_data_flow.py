@@ -82,7 +82,7 @@ def _create_test_coordinator(eid_resolver: Any = None) -> Any:
 
     # Add minimal required methods
     coordinator._entry_id = lambda: coordinator.config_entry.entry_id
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._extract_our_identifier = None
 
     # Shared tracker support attributes
@@ -187,7 +187,7 @@ class TestEidDataPersistence:
         async def mock_refresh_coro() -> None:
             pass
 
-        mock_resolver.async_refresh = lambda: mock_refresh_coro()
+        mock_resolver.async_refresh = mock_refresh_coro
 
         # Create coordinator with eid_resolver in hass.data[DOMAIN][DATA_EID_RESOLVER]
         coordinator = _create_test_coordinator(eid_resolver=mock_resolver)

@@ -90,7 +90,7 @@ def test_async_step_discovery_new_entry(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 
@@ -217,7 +217,7 @@ def test_async_step_discovery_existing_entry_updates(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 
@@ -348,7 +348,7 @@ def test_async_step_discovery_update_info_existing_entry(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 
@@ -476,7 +476,7 @@ def test_async_step_discovery_update_info_invalid_payload() -> None:
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 
@@ -609,7 +609,7 @@ def test_async_step_discovery_update_info_ingest_invalid_auth(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 
@@ -786,7 +786,7 @@ def test_async_step_discovery_invalid_payload() -> None:
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 

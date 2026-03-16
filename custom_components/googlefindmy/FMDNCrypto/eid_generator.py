@@ -20,7 +20,7 @@ import hashlib
 import logging
 import warnings
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Final, Literal
 
 __all__ = [
@@ -99,7 +99,7 @@ def _get_p256_curve() -> object:
     return _P256_CURVE
 
 
-class EidVariant(str, Enum):
+class EidVariant(StrEnum):
     """Supported FHNA EID variants (explicit, no silent format changes)."""
 
     LEGACY_SECP160R1_X20_BE = "legacy_secp160r1_x20_be"
@@ -109,7 +109,7 @@ class EidVariant(str, Enum):
     MODERN_P256_X20_TRUNC_LE = "modern_p256_x20_trunc_le"
 
 
-class HeuristicBasis(str, Enum):
+class HeuristicBasis(StrEnum):
     """Time basis modes for heuristic EID generation.
 
     Android phones with "Offline Finding" may use different time bases than

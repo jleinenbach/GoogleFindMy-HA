@@ -41,7 +41,7 @@ def _build_coordinator(monkeypatch):
     coordinator.hass = _StubHass()
     coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = {"device-1"}
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._extract_our_identifier = lambda device: getattr(
         device, "identifier", None
     )

@@ -147,7 +147,7 @@ def _ensure_button_dependencies() -> None:
             def async_register_entity_service(self, *_: Any, **__: Any) -> None:
                 return None
 
-        entity_platform_module.async_get_current_platform = lambda: _StubPlatform()
+        entity_platform_module.async_get_current_platform = _StubPlatform
 
     if "homeassistant.helpers.entity" not in sys.modules:
         entity_module = ModuleType("homeassistant.helpers.entity")

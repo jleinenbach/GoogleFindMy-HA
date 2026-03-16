@@ -114,7 +114,7 @@ async def test_predictive_polling_defers_until_predicted_window(
     )
 
     scheduled: list[float] = []
-    coordinator._schedule_short_retry = lambda delay: scheduled.append(delay)
+    coordinator._schedule_short_retry = scheduled.append
 
     poll_cycle = AsyncMock()
     coordinator._async_start_poll_cycle = poll_cycle
@@ -183,7 +183,7 @@ async def test_predictive_polling_triggers_overdue_poll(
     coordinator._async_start_poll_cycle = poll_cycle
 
     short_retries: list[float] = []
-    coordinator._schedule_short_retry = lambda delay: short_retries.append(delay)
+    coordinator._schedule_short_retry = short_retries.append
 
     await coordinator._async_update_data()
     poll_tasks = [

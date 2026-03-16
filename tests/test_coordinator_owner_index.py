@@ -56,7 +56,7 @@ def owner_index_coordinator(
     coordinator._async_start_poll_cycle = AsyncMock()
     coordinator._ensure_registry_for_devices = lambda *_args, **_kwargs: 0
     coordinator._schedule_short_retry = lambda *_args, **_kwargs: None
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._is_fcm_ready_soft = lambda: True
     coordinator._set_fcm_status(FcmStatus.CONNECTED)
 

@@ -1221,9 +1221,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             _encrypted_report_count += 1
             enc = loc.geoLocation.encryptedReport
             encrypted_location: bytes = enc.encryptedLocation
-            public_key_random: bytes = enc.publicKeyRandom
+            public_key_random = enc.publicKeyRandom
 
             if public_key_random == b"":  # Own report
+                if active_identity_key is None:
+                    raise ValueError("No identity key available for own-report decryption")
                 decrypted_location_raw = await _offload_decrypt_aes(
                     active_identity_key, encrypted_location
                 )

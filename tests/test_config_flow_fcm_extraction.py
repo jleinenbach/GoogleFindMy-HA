@@ -58,7 +58,7 @@ async def test_secrets_json_extracts_fcm_credentials(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 

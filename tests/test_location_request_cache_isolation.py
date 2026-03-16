@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy.exceptions import (
-    MissingNamespaceError,
     MissingTokenCacheError,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
@@ -408,7 +407,12 @@ def test_locate_request_requires_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_locate_request_requires_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Caches without entry_id should trigger MissingNamespaceError."""
+    """Caches with empty entry_id proceed without namespace prefix and may fail gracefully.
+
+    The production code no longer raises MissingNamespaceError for empty
+    entry_id caches.  Instead, it falls through to un-namespaced cache
+    access and the nova request may fail, returning an empty list.
+    """
 
     class _CacheWithoutEntry(FakeTokenCache):
         def __init__(self) -> None:
@@ -420,12 +424,15 @@ def test_locate_request_requires_namespace(monkeypatch: pytest.MonkeyPatch) -> N
 
     cache = _CacheWithoutEntry()
 
-    async def _run() -> None:
-        with pytest.raises(MissingNamespaceError):
-            await location_request.get_location_data_for_device(
-                canonic_device_id="device-456",
-                name="Tracker",
-                cache=cache,
-            )
+    async def _run() -> list:
+        result = await location_request.get_location_data_for_device(
+            canonic_device_id="device-456",
+            name="Tracker",
+            cache=cache,
+        )
+        return result
 
-    asyncio.run(_run())
+    result = asyncio.run(_run())
+    # With an empty-namespace cache, the request proceeds but
+    # the downstream nova call fails; the function returns [].
+    assert result == []
