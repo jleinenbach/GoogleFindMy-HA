@@ -967,13 +967,33 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
     raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
 
-    identity_key_candidates = (
-        [early_unwrapped_identity_key]
-        if early_unwrapped_identity_key is not None
-        else await async_retrieve_identity_key(
+    # Bug 6 fix: Always generate the full candidate set (MCU flip variants,
+    # owner + shared keys) so that foreign/crowdsourced FMDN reports can try
+    # all identity-key candidates.  Prepend the early-unwrapped key when
+    # available — it is the most likely correct key and avoids extra work on
+    # the happy path.
+    try:
+        retrieved_candidates = await async_retrieve_identity_key(
             device_registration, cache=cache, device_id=canonic_id
         )
-    )
+    except Exception as exc:
+        if early_unwrapped_identity_key is not None:
+            _LOGGER.debug(
+                "async_retrieve_identity_key failed (%s), using early-unwrapped key only.",
+                exc,
+            )
+            retrieved_candidates = []
+        else:
+            raise
+
+    if early_unwrapped_identity_key is not None:
+        early_bytes = bytes(early_unwrapped_identity_key)
+        if early_bytes not in retrieved_candidates:
+            identity_key_candidates = [early_bytes] + retrieved_candidates
+        else:
+            identity_key_candidates = retrieved_candidates
+    else:
+        identity_key_candidates = retrieved_candidates
     identity_key = identity_key_candidates[0] if identity_key_candidates else None
     identity_key_bytes = bytes(identity_key) if identity_key is not None else None
     identity_key_candidate_bytes = [
