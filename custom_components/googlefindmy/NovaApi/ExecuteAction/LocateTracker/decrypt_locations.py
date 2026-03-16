@@ -1272,6 +1272,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                         if candidate_key != active_identity_key:
                             active_identity_key = candidate_key
                             identity_key_bytes = bytes(candidate_key)
+                            # Sync metadata_update so the promoted key
+                            # persists to cache/payload instead of the
+                            # original stale value (codex review fix).
+                            metadata_update["identity_key"] = identity_key_bytes
+                            metadata_update["identityKey"] = identity_key_bytes
                             _LOGGER.info(
                                 "Foreign decryption succeeded with alternate "
                                 "identity key candidate (index=%d)",
