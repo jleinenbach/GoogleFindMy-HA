@@ -976,6 +976,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         retrieved_candidates = await async_retrieve_identity_key(
             device_registration, cache=cache, device_id=canonic_id
         )
+    except SpotApiEmptyResponseError:
+        # Auth/session errors must propagate for reauth flow (AGENTS.md §74).
+        # The early-unwrapped key cannot substitute for a valid session —
+        # re-raise so location_request.py stores the error on the callback
+        # context and the coordinator triggers ConfigEntryAuthFailed.
+        raise
     except Exception as exc:
         if early_unwrapped_identity_key is not None:
             _LOGGER.debug(
