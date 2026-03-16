@@ -40,7 +40,7 @@ def _build_coordinator(
     coordinator.hass = SimpleNamespace(async_create_task=lambda coro: coro, data={})
     coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = set()
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator.data = []
     coordinator._device_location_data = {}
     coordinator._record_semantic_label = lambda *_args, **_kwargs: None

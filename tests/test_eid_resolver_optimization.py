@@ -30,7 +30,7 @@ async def test_known_time_basis_skips_alternate_strategies(
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        async_create_task=lambda coro: asyncio.create_task(coro),
+        async_create_task=asyncio.create_task,
         data={},
     )
     resolver._store = SimpleNamespace(

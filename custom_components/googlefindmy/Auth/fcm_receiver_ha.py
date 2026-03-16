@@ -74,7 +74,7 @@ from collections.abc import (
 )
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientError
 from cryptography.exceptions import InvalidTag
@@ -160,9 +160,6 @@ _LOGGER = logging.getLogger(__name__)
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
-_P = ParamSpec("_P")
-_T = TypeVar("_T")
-
 _MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
 _BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
 _MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
@@ -171,14 +168,14 @@ _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
 
 
-async def _call_in_executor(
-    func: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs
-) -> _T:
+async def _call_in_executor[**P, T](
+    func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs
+) -> T:
     """Run ``func`` in a background thread with wide Python compatibility."""
 
     to_thread_obj = getattr(asyncio, "to_thread", None)
     if to_thread_obj is not None:
-        to_thread = cast(Callable[..., Awaitable[_T]], to_thread_obj)
+        to_thread = cast(Callable[..., Awaitable[T]], to_thread_obj)
         return await to_thread(func, *args, **kwargs)
 
     try:
@@ -569,9 +566,9 @@ class FcmReceiverHA:
                 evt.set()
                 nudged = True
             return nudged
-        evt = self._retry_nudge_evts.get(key)
-        if evt is not None:
-            evt.set()
+        nudge_evt = self._retry_nudge_evts.get(key)
+        if nudge_evt is not None:
+            nudge_evt.set()
             return True
         return False
 

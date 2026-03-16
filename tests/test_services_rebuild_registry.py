@@ -363,7 +363,7 @@ async def test_rebuild_registry_detaches_orphaned_tracker(
         data=[],
         name="Coordinator",
         _ensure_registry_for_devices=lambda devices, ignored: 0,
-        _get_ignored_set=lambda: set(),
+        _get_ignored_set=set,
         _ensure_service_device_exists=lambda: None,
         get_subentry_metadata=_metadata,
     )
@@ -679,7 +679,7 @@ async def test_rebuild_registry_detaches_redundant_hub_link(
         data=[],
         name="Coordinator",
         _ensure_registry_for_devices=lambda devices, ignored: 0,
-        _get_ignored_set=lambda: set(),
+        _get_ignored_set=set,
         _ensure_service_device_exists=lambda: None,
         get_subentry_metadata=_metadata,
     )
@@ -870,7 +870,7 @@ async def test_rebuild_registry_handles_legacy_remove_config_subentry_kwarg(
         data=[],
         name="Coordinator",
         _ensure_registry_for_devices=lambda devices, ignored: 0,
-        _get_ignored_set=lambda: set(),
+        _get_ignored_set=set,
         _ensure_service_device_exists=lambda: None,
         get_subentry_metadata=_metadata,
     )

@@ -52,7 +52,7 @@ def _make_resolver_with_state(
     states = {device_id: state}
     return SimpleNamespace(
         _ble_battery_state=states,
-        get_ble_battery_state=lambda did: states.get(did),
+        get_ble_battery_state=states.get,
     )
 
 
@@ -190,7 +190,7 @@ class TestUWTModeSensorIsOn:
         )
         states: dict[str, BLEBatteryState] = {"dev-1": state_false}
         resolver = SimpleNamespace(
-            get_ble_battery_state=lambda did: states.get(did),
+            get_ble_battery_state=states.get,
         )
         sensor = _build_uwt_sensor(device_id="dev-1", resolver=resolver)
 

@@ -43,7 +43,7 @@ def _build_coordinator(
     coordinator.hass = _StubHass()
     coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = {"device-1"}
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._extract_our_identifier = lambda device: getattr(
         device, "identifier", None
     )
@@ -130,7 +130,7 @@ def test_cache_update_triggers_resolver_reset(
 
     reset_calls: list[str] = []
     refresh_calls: list[bool] = []
-    coordinator._reset_resolver_offset = lambda dev_id: reset_calls.append(dev_id)
+    coordinator._reset_resolver_offset = reset_calls.append
     coordinator._schedule_eid_resolver_refresh = lambda: refresh_calls.append(True)
 
     caplog.set_level(logging.INFO)

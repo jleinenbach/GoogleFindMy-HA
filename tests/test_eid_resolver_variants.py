@@ -30,7 +30,7 @@ def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
     _ = monkeypatch
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        async_create_task=lambda coro: asyncio.create_task(coro),
+        async_create_task=asyncio.create_task,
         data={},
     )
 

@@ -101,7 +101,7 @@ def test_poll_timeout_sets_update_error(monkeypatch: pytest.MonkeyPatch) -> None
     coordinator.api = _TimeoutAPI()
     coordinator._get_google_home_filter = lambda: None
     coordinator._is_fcm_ready_soft = lambda: True
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._last_device_list = [{"id": "dev-1", "name": "Device"}]
 
     coordinator.data = []
@@ -152,7 +152,7 @@ def test_poll_auth_failure_raises_auth_failed(monkeypatch: pytest.MonkeyPatch) -
     coordinator.api = _AuthFailureAPI()
     coordinator._get_google_home_filter = lambda: None
     coordinator._is_fcm_ready_soft = lambda: True
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._last_device_list = [{"id": "dev-1", "name": "Device"}]
 
     coordinator.data = []
@@ -206,7 +206,7 @@ def test_poll_timeout_still_processes_other_devices(
     coordinator.api = api
     coordinator._get_google_home_filter = lambda: None
     coordinator._is_fcm_ready_soft = lambda: True
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._last_device_list = [
         {"id": "dev-timeout", "name": "Timeout Device"},
         {"id": "dev-success", "name": "Success Device"},

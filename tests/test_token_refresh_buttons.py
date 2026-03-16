@@ -153,7 +153,7 @@ class TestTokenRefreshButtonSetup:
         assert len(token_buttons) == 2
 
         unique_ids = {entity.unique_id for entity, _ in token_buttons}
-        assert any("regenerate_aas_token" in uid for uid in unique_ids)
+        assert any("regenerate_fcm_token" in uid for uid in unique_ids)
         assert any("regenerate_adm_token" in uid for uid in unique_ids)
 
     @pytest.mark.asyncio
@@ -248,18 +248,18 @@ class TestTokenRefreshButtonAttributes:
         await button.async_setup_entry(hass, entry, add_entities)
         await asyncio.gather(*pending)
 
-        # Find AAS token button
-        aas_button = next(
+        # Find FCM token button
+        fcm_button = next(
             (
                 entity
                 for entity, _ in added
-                if "regenerate_aas_token" in (getattr(entity, "unique_id", "") or "")
+                if "regenerate_fcm_token" in (getattr(entity, "unique_id", "") or "")
             ),
             None,
         )
 
-        assert aas_button is not None
-        assert aas_button.available is True
+        assert fcm_button is not None
+        assert fcm_button.available is True
 
     @pytest.mark.asyncio
     async def test_button_unavailable_when_on_cooldown(
@@ -303,18 +303,18 @@ class TestTokenRefreshButtonAttributes:
         # Record cooldown
         _record_refresh(entry.entry_id)
 
-        # Find AAS token button
-        aas_button = next(
+        # Find FCM token button
+        fcm_button = next(
             (
                 entity
                 for entity, _ in added
-                if "regenerate_aas_token" in (getattr(entity, "unique_id", "") or "")
+                if "regenerate_fcm_token" in (getattr(entity, "unique_id", "") or "")
             ),
             None,
         )
 
-        assert aas_button is not None
-        assert aas_button.available is False
+        assert fcm_button is not None
+        assert fcm_button.available is False
 
     @pytest.mark.asyncio
     async def test_button_extra_state_attributes(
@@ -353,18 +353,18 @@ class TestTokenRefreshButtonAttributes:
         await button.async_setup_entry(hass, entry, add_entities)
         await asyncio.gather(*pending)
 
-        # Find AAS token button
-        aas_button = next(
+        # Find FCM token button
+        fcm_button = next(
             (
                 entity
                 for entity, _ in added
-                if "regenerate_aas_token" in (getattr(entity, "unique_id", "") or "")
+                if "regenerate_fcm_token" in (getattr(entity, "unique_id", "") or "")
             ),
             None,
         )
 
-        assert aas_button is not None
-        attrs = aas_button.extra_state_attributes
+        assert fcm_button is not None
+        attrs = fcm_button.extra_state_attributes
 
         assert "cooldown_seconds" in attrs
         assert attrs["cooldown_seconds"] == TOKEN_REFRESH_COOLDOWN_S
@@ -378,10 +378,10 @@ class TestTokenRefreshButtonPress:
         clear_all_cooldowns()
 
     @pytest.mark.asyncio
-    async def test_aas_button_press_calls_regenerate(
+    async def test_fcm_button_press_calls_regenerate(
         self, stub_coordinator_factory: Any
     ) -> None:
-        """Pressing AAS button should call the regeneration function."""
+        """Pressing FCM button should call the regeneration function."""
         loop = asyncio.get_running_loop()
         hass = _make_hass(loop)
 
@@ -414,25 +414,25 @@ class TestTokenRefreshButtonPress:
         await button.async_setup_entry(hass, entry, add_entities)
         await asyncio.gather(*pending)
 
-        # Find AAS token button
-        aas_button = next(
+        # Find FCM token button
+        fcm_button = next(
             (
                 entity
                 for entity, _ in added
-                if "regenerate_aas_token" in (getattr(entity, "unique_id", "") or "")
+                if "regenerate_fcm_token" in (getattr(entity, "unique_id", "") or "")
             ),
             None,
         )
 
-        assert aas_button is not None
+        assert fcm_button is not None
 
         # Mock the regeneration function - patch where it's used inside the method
         with patch(
-            "custom_components.googlefindmy.Auth.token_refresh.async_regenerate_aas_token",
+            "custom_components.googlefindmy.Auth.token_refresh.async_regenerate_fcm_token",
             new_callable=AsyncMock,
             return_value=True,
         ) as mock_regenerate:
-            await aas_button.async_press()
+            await fcm_button.async_press()
 
         mock_regenerate.assert_called_once()
 
@@ -537,26 +537,26 @@ class TestTokenRefreshButtonPress:
         # Record cooldown before pressing
         _record_refresh(entry.entry_id)
 
-        # Find AAS token button
-        aas_button = next(
+        # Find FCM token button
+        fcm_button = next(
             (
                 entity
                 for entity, _ in added
-                if "regenerate_aas_token" in (getattr(entity, "unique_id", "") or "")
+                if "regenerate_fcm_token" in (getattr(entity, "unique_id", "") or "")
             ),
             None,
         )
 
-        assert aas_button is not None
-        assert aas_button.available is False
+        assert fcm_button is not None
+        assert fcm_button.available is False
 
         # Mock the regeneration function - should NOT be called
         with patch(
-            "custom_components.googlefindmy.Auth.token_refresh.async_regenerate_aas_token",
+            "custom_components.googlefindmy.Auth.token_refresh.async_regenerate_fcm_token",
             new_callable=AsyncMock,
             return_value=True,
         ) as mock_regenerate:
-            await aas_button.async_press()
+            await fcm_button.async_press()
 
         mock_regenerate.assert_not_called()
 

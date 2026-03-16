@@ -125,8 +125,24 @@ class TestCooldownMechanism:
         assert not is_refresh_on_cooldown("entry-2")[0]
 
 
-class TestAasTokenRegeneration:
-    """Test AAS token regeneration."""
+class _MockHass:
+    """Minimal Home Assistant mock for FCM token refresh tests."""
+
+    def __init__(self, entry_id: str = "test-entry") -> None:
+        self._entry_id = entry_id
+        self._receiver = AsyncMock()
+        self._receiver.async_reregister_fcm = AsyncMock(return_value=True)
+        from custom_components.googlefindmy.const import DOMAIN
+
+        self.data: dict[str, Any] = {
+            DOMAIN: {
+                "fcm_receivers": {entry_id: self._receiver},
+            }
+        }
+
+
+class TestFcmTokenRegeneration:
+    """Test FCM token regeneration."""
 
     def setup_method(self) -> None:
         """Clear cooldowns before each test."""
@@ -137,126 +153,76 @@ class TestAasTokenRegeneration:
         clear_all_cooldowns()
 
     @pytest.mark.asyncio
-    async def test_aas_regeneration_invalidates_tokens(self) -> None:
-        """AAS regeneration should invalidate both AAS and ADM tokens."""
-        cache = _MockTokenCache("test-entry")
-        cache._data["aas_token"] = "old-aas-token"
-        cache._data["adm_token_test@example.com"] = "old-adm-token"
+    async def test_fcm_regeneration_calls_receiver(self) -> None:
+        """FCM regeneration should call the FCM receiver to re-register."""
+        hass = _MockHass("test-entry")
 
-        with (
-            patch(
-                "custom_components.googlefindmy.Auth.aas_token_retrieval.async_get_aas_token",
-                new_callable=AsyncMock,
-                return_value="new-aas-token",
-            ),
-            patch(
-                "custom_components.googlefindmy.Auth.username_provider.async_get_username",
-                new_callable=AsyncMock,
-                return_value="test@example.com",
-            ),
-        ):
-            from custom_components.googlefindmy.Auth.token_refresh import (
-                async_regenerate_aas_token,
-            )
-
-            result = await async_regenerate_aas_token(cache=cache)
-
-        assert result is True
-        # Check that both tokens were invalidated
-        invalidated_keys = [k for k, v in cache.set_calls if v is None]
-        assert "aas_token" in invalidated_keys
-        assert "adm_token_test@example.com" in invalidated_keys
-
-    @pytest.mark.asyncio
-    async def test_aas_regeneration_blocked_by_cooldown(self) -> None:
-        """AAS regeneration should be blocked when on cooldown."""
         from custom_components.googlefindmy.Auth.token_refresh import (
-            _record_refresh,
-            async_regenerate_aas_token,
+            async_regenerate_fcm_token,
         )
 
-        cache = _MockTokenCache("test-entry")
+        result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
+
+        assert result is True
+        hass._receiver.async_reregister_fcm.assert_called_once_with("test-entry")
+
+    @pytest.mark.asyncio
+    async def test_fcm_regeneration_blocked_by_cooldown(self) -> None:
+        """FCM regeneration should be blocked when on cooldown."""
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            _record_refresh,
+            async_regenerate_fcm_token,
+        )
+
+        hass = _MockHass("test-entry")
         _record_refresh("test-entry")
 
-        # Should not call the actual token generation - the function returns early
-        result = await async_regenerate_aas_token(cache=cache)
+        result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_aas_regeneration_records_cooldown(self) -> None:
-        """Successful AAS regeneration should record cooldown."""
-        cache = _MockTokenCache("test-entry")
+    async def test_fcm_regeneration_records_cooldown(self) -> None:
+        """Successful FCM regeneration should record cooldown."""
+        hass = _MockHass("test-entry")
 
-        with (
-            patch(
-                "custom_components.googlefindmy.Auth.aas_token_retrieval.async_get_aas_token",
-                new_callable=AsyncMock,
-                return_value="new-aas-token",
-            ),
-            patch(
-                "custom_components.googlefindmy.Auth.username_provider.async_get_username",
-                new_callable=AsyncMock,
-                return_value="test@example.com",
-            ),
-        ):
-            from custom_components.googlefindmy.Auth.token_refresh import (
-                async_regenerate_aas_token,
-                is_refresh_on_cooldown,
-            )
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            async_regenerate_fcm_token,
+            is_refresh_on_cooldown,
+        )
 
-            await async_regenerate_aas_token(cache=cache)
+        await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
         on_cooldown, _ = is_refresh_on_cooldown("test-entry")
         assert on_cooldown
 
     @pytest.mark.asyncio
-    async def test_aas_regeneration_returns_false_on_empty_token(self) -> None:
-        """AAS regeneration should return False if token generation returns empty."""
-        cache = _MockTokenCache("test-entry")
+    async def test_fcm_regeneration_returns_false_when_receiver_fails(self) -> None:
+        """FCM regeneration should return False if receiver returns False."""
+        hass = _MockHass("test-entry")
+        hass._receiver.async_reregister_fcm = AsyncMock(return_value=False)
 
-        with (
-            patch(
-                "custom_components.googlefindmy.Auth.aas_token_retrieval.async_get_aas_token",
-                new_callable=AsyncMock,
-                return_value=None,
-            ),
-            patch(
-                "custom_components.googlefindmy.Auth.username_provider.async_get_username",
-                new_callable=AsyncMock,
-                return_value="test@example.com",
-            ),
-        ):
-            from custom_components.googlefindmy.Auth.token_refresh import (
-                async_regenerate_aas_token,
-            )
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            async_regenerate_fcm_token,
+        )
 
-            result = await async_regenerate_aas_token(cache=cache)
+        result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_aas_regeneration_handles_exception(self) -> None:
-        """AAS regeneration should return False on exception."""
-        cache = _MockTokenCache("test-entry")
+    async def test_fcm_regeneration_handles_exception(self) -> None:
+        """FCM regeneration should return False on exception."""
+        hass = _MockHass("test-entry")
+        hass._receiver.async_reregister_fcm = AsyncMock(
+            side_effect=Exception("FCM registration failed")
+        )
 
-        with (
-            patch(
-                "custom_components.googlefindmy.Auth.aas_token_retrieval.async_get_aas_token",
-                new_callable=AsyncMock,
-                side_effect=Exception("Token generation failed"),
-            ),
-            patch(
-                "custom_components.googlefindmy.Auth.username_provider.async_get_username",
-                new_callable=AsyncMock,
-                return_value="test@example.com",
-            ),
-        ):
-            from custom_components.googlefindmy.Auth.token_refresh import (
-                async_regenerate_aas_token,
-            )
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            async_regenerate_fcm_token,
+        )
 
-            result = await async_regenerate_aas_token(cache=cache)
+        result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
         assert result is False
 
@@ -377,30 +343,20 @@ class TestSharedCooldown:
         clear_all_cooldowns()
 
     @pytest.mark.asyncio
-    async def test_aas_refresh_blocks_adm_refresh(self) -> None:
-        """AAS refresh should block subsequent ADM refresh."""
-        cache = _MockTokenCache("test-entry")
+    async def test_fcm_refresh_blocks_adm_refresh(self) -> None:
+        """FCM refresh should block subsequent ADM refresh."""
+        hass = _MockHass("test-entry")
 
-        with (
-            patch(
-                "custom_components.googlefindmy.Auth.aas_token_retrieval.async_get_aas_token",
-                new_callable=AsyncMock,
-                return_value="new-aas-token",
-            ),
-            patch(
-                "custom_components.googlefindmy.Auth.username_provider.async_get_username",
-                new_callable=AsyncMock,
-                return_value="test@example.com",
-            ),
-        ):
-            from custom_components.googlefindmy.Auth.token_refresh import (
-                async_regenerate_aas_token,
-            )
+        from custom_components.googlefindmy.Auth.token_refresh import (
+            async_regenerate_fcm_token,
+        )
 
-            result = await async_regenerate_aas_token(cache=cache)
-            assert result is True
+        result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
+        assert result is True
 
         # Now ADM should be blocked
+        cache = _MockTokenCache("test-entry")
+
         from custom_components.googlefindmy.Auth.token_refresh import (
             async_regenerate_adm_token,
         )
@@ -410,8 +366,8 @@ class TestSharedCooldown:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_adm_refresh_blocks_aas_refresh(self) -> None:
-        """ADM refresh should block subsequent AAS refresh."""
+    async def test_adm_refresh_blocks_fcm_refresh(self) -> None:
+        """ADM refresh should block subsequent FCM refresh."""
         cache = _MockTokenCache("test-entry")
 
         with (
@@ -433,12 +389,14 @@ class TestSharedCooldown:
             result = await async_regenerate_adm_token(cache=cache)
             assert result is True
 
-        # Now AAS should be blocked
+        # Now FCM should be blocked
+        hass = _MockHass("test-entry")
+
         from custom_components.googlefindmy.Auth.token_refresh import (
-            async_regenerate_aas_token,
+            async_regenerate_fcm_token,
         )
 
-        result = await async_regenerate_aas_token(cache=cache)
+        result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
         assert result is False
 
