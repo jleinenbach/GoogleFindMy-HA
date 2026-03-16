@@ -976,12 +976,23 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         retrieved_candidates = await async_retrieve_identity_key(
             device_registration, cache=cache, device_id=canonic_id
         )
-    except SpotApiEmptyResponseError:
-        # Auth/session errors must propagate for reauth flow (AGENTS.md §74).
-        # The early-unwrapped key cannot substitute for a valid session —
-        # re-raise so location_request.py stores the error on the callback
-        # context and the coordinator triggers ConfigEntryAuthFailed.
-        raise
+    except SpotApiEmptyResponseError as exc:
+        # The E2EE metadata probe inside key retrieval can raise this on
+        # transient trailers-only responses, not only on true auth expiry.
+        # Before Bug 6, this call was skipped entirely when early_unwrapped
+        # was available, so re-raising unconditionally would regress devices
+        # that previously worked fine.  Fall back to the early key when we
+        # have one; re-raise only when there is no fallback so the
+        # coordinator can trigger ConfigEntryAuthFailed / reauth.
+        if early_unwrapped_identity_key is not None:
+            _LOGGER.warning(
+                "Identity-key retrieval returned SpotApiEmptyResponseError "
+                "(%s); falling back to early-unwrapped key.",
+                exc,
+            )
+            retrieved_candidates = []
+        else:
+            raise
     except Exception as exc:
         if early_unwrapped_identity_key is not None:
             _LOGGER.debug(
