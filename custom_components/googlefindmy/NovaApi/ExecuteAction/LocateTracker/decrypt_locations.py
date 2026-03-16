@@ -976,6 +976,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         retrieved_candidates = await async_retrieve_identity_key(
             device_registration, cache=cache, device_id=canonic_id
         )
+    except SpotApiEmptyResponseError:
+        raise  # Auth/session errors must propagate for reauth flow
     except Exception as exc:
         if early_unwrapped_identity_key is not None:
             _LOGGER.debug(
@@ -1277,6 +1279,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                             # original stale value (codex review fix).
                             metadata_update["identity_key"] = identity_key_bytes
                             metadata_update["identityKey"] = identity_key_bytes
+                            # Reorder candidates so the promoted key is
+                            # tried first for remaining reports.
+                            all_identity_keys.remove(candidate_key)
+                            all_identity_keys.insert(0, candidate_key)
                             _LOGGER.info(
                                 "Foreign decryption succeeded with alternate "
                                 "identity key candidate (index=%d)",
