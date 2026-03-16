@@ -1267,8 +1267,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                             time_offset,
                         )
                         # Promote successful alternate candidate for remaining reports
+                        # and sync identity_key_bytes so payload construction uses
+                        # the key that actually decrypted.
                         if candidate_key != active_identity_key:
                             active_identity_key = candidate_key
+                            identity_key_bytes = bytes(candidate_key)
                             _LOGGER.info(
                                 "Foreign decryption succeeded with alternate "
                                 "identity key candidate (index=%d)",
