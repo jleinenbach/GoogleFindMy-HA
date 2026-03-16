@@ -977,8 +977,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             device_registration, cache=cache, device_id=canonic_id
         )
     except SpotApiEmptyResponseError as exc:
-        # The E2EE metadata probe inside key retrieval can raise this on
-        # transient trailers-only responses, not only on true auth expiry.
+        # This handler is only reachable from the secondary async_get_eid_info()
+        # diagnostic call inside async_retrieve_identity_key (line ~511), NOT
+        # from the primary owner-key path (which converts to ConfigEntryAuthFailed,
+        # caught by the generic except Exception below).
         # Before Bug 6, this call was skipped entirely when early_unwrapped
         # was available, so re-raising unconditionally would regress devices
         # that previously worked fine.  Fall back to the early key when we
@@ -1300,6 +1302,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                             # tried first for remaining reports.
                             all_identity_keys.remove(candidate_key)
                             all_identity_keys.insert(0, candidate_key)
+                            # Keep payload-facing list in sync so
+                            # persisted candidates reflect the promotion.
+                            identity_key_candidate_bytes = list(all_identity_keys)
                             _LOGGER.info(
                                 "Foreign decryption succeeded with alternate "
                                 "identity key candidate (index=%d)",

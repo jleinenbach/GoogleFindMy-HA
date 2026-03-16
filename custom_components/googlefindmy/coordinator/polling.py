@@ -856,10 +856,8 @@ class PollingOperations(_MixinBase):
                     cached_ts = _normalize_epoch_seconds(
                         existing_cache.get("last_seen")
                     )
-                    if (
-                        cached_ts is not None
-                        and incoming_ts is not None
-                        and incoming_ts <= cached_ts
+                    if cached_ts is not None and (
+                        incoming_ts is None or incoming_ts <= cached_ts
                     ):
                         continue  # Cache has fresher or equal data, skip seed
 
