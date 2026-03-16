@@ -843,6 +843,26 @@ class PollingOperations(_MixinBase):
                 if not self._normalize_coords(dev, device_label=dev_id):
                     continue
 
+                # FIX #155: Skip seeding if cache already has fresher data
+                # (e.g., from FCM push delivered between device list refreshes).
+                # This prevents stale device-list coordinates from entering the
+                # cache pipeline and causing unnecessary fusion/churn.
+                incoming_ts = _normalize_epoch_seconds(dev.get("last_seen"))
+                existing_cache = self._device_location_data.get(dev_id)
+                if (
+                    isinstance(existing_cache, Mapping)
+                    and existing_cache.get("latitude") is not None
+                ):
+                    cached_ts = _normalize_epoch_seconds(
+                        existing_cache.get("last_seen")
+                    )
+                    if (
+                        cached_ts is not None
+                        and incoming_ts is not None
+                        and incoming_ts <= cached_ts
+                    ):
+                        continue  # Cache has fresher or equal data, skip seed
+
                 cache_seed = dict(dev)
 
                 # Avoid poisoning the cache with explicit None accuracy values so
@@ -850,7 +870,7 @@ class PollingOperations(_MixinBase):
                 if cache_seed.get("accuracy") is None:
                     cache_seed.pop("accuracy", None)
 
-                self.update_device_cache(dev_id, cache_seed)
+                self.update_device_cache(dev_id, cache_seed, source="seed")
 
             # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
             self._ensure_service_device_exists()
@@ -1295,7 +1315,7 @@ class PollingOperations(_MixinBase):
 
                         helper = getattr(self.update_device_cache, "__func__", None)
                         if helper is _CoordinatorClass.update_device_cache:
-                            self.update_device_cache(dev_id, location)
+                            self.update_device_cache(dev_id, location, source="poll")
                         else:
                             location.pop("_fusion_preapplied", None)
                             location.pop("_report_hint", None)

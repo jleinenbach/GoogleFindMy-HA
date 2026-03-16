@@ -1167,6 +1167,21 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     _auth_failures = 0  # Track MAC / InvalidTag failures across all reports
     _encrypted_report_count = 0  # Count non-SEMANTIC reports attempted
 
+    # FIX #155: Prepare all identity key candidates for multi-candidate retry.
+    # async_retrieve_identity_key can return multiple candidates (MCU bit-flip
+    # variants, owner+shared key sources). The primary candidate may work for
+    # own-reports (AES-GCM) but fail for foreign/crowdsourced reports (ECDH +
+    # AES-EAX with different key derivation). Trying all candidates prevents
+    # silent loss of all crowdsourced location data.
+    all_identity_keys: list[bytes] = [
+        bytes(k) for k in (identity_key_candidates or [])
+        if k is not None and len(k) == _EIK_LEN
+    ]
+    # Track the active key; promote alternate candidates on success
+    active_identity_key: bytes | None = (
+        all_identity_keys[0] if all_identity_keys else identity_key
+    )
+
     if len(network_locations) != len(network_locations_time):
         _LOGGER.debug(
             "Mismatched report arrays: locations=%s timestamps=%s (dropping unmatched entries)",
@@ -1178,6 +1193,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     ):
         if loc is None or time_ts is None:
             continue
+        # Defaults for diagnostic logging in except handlers
+        public_key_random = b""
+        time_offset = 0
         try:
             ts = _parse_epoch_seconds(time_ts, now_wall)
             if ts is None:
@@ -1207,16 +1225,41 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
             if public_key_random == b"":  # Own report
                 decrypted_location_raw = await _offload_decrypt_aes(
-                    identity_key, encrypted_location
+                    active_identity_key, encrypted_location
                 )
             else:
+                # FIX #155: Foreign/crowdsourced reports use ECDH + AES-EAX
+                # with a different key derivation path than own reports.
+                # Try all identity key candidates before giving up.
                 time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
-                decrypted_location_raw = await _offload_decrypt_foreign(
-                    identity_key,
-                    encrypted_location,
-                    public_key_random,
-                    time_offset,
-                )
+                decrypted_location_raw = None
+                _last_foreign_exc: Exception | None = None
+                for _candidate_idx, candidate_key in enumerate(
+                    all_identity_keys or ([active_identity_key] if active_identity_key else [])
+                ):
+                    try:
+                        decrypted_location_raw = await _offload_decrypt_foreign(
+                            candidate_key,
+                            encrypted_location,
+                            public_key_random,
+                            time_offset,
+                        )
+                        # Promote successful alternate candidate for remaining reports
+                        if candidate_key != active_identity_key:
+                            active_identity_key = candidate_key
+                            _LOGGER.info(
+                                "Foreign decryption succeeded with alternate "
+                                "identity key candidate (index=%d)",
+                                _candidate_idx,
+                            )
+                        _last_foreign_exc = None
+                        break
+                    except (InvalidTag, ValueError) as _candidate_exc:
+                        _last_foreign_exc = _candidate_exc
+                        continue
+
+                if decrypted_location_raw is None and _last_foreign_exc is not None:
+                    raise _last_foreign_exc
 
             decrypted_location = _ensure_bytes(decrypted_location_raw)
             if decrypted_location is None:
@@ -1240,9 +1283,14 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             # InvalidTag means AES-GCM authentication failed during decryption.
             _auth_failures += 1
             _LOGGER.warning(
-                "Decryption auth failed (InvalidTag): report could not be "
-                "authenticated. This often happens when Google authentication is "
-                "stale - try re-authenticating the account in the Google app."
+                "Decryption auth failed (InvalidTag) for %s report "
+                "(time_offset=%s, key_len=%s, candidates=%d): "
+                "report could not be authenticated. "
+                "Try re-authenticating the account in the Google app.",
+                "own" if public_key_random == b"" else "foreign",
+                time_offset if public_key_random != b"" else "N/A",
+                len(active_identity_key) if active_identity_key else 0,
+                len(all_identity_keys),
             )
         except ValueError as ve:
             # FIX: PyCryptodome's AES-EAX decrypt_and_verify() raises
@@ -1252,9 +1300,13 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             if "mac" in str(ve).lower():
                 _auth_failures += 1
                 _LOGGER.warning(
-                    "Decryption auth failed (MAC check): report could not be "
-                    "authenticated. This often happens when the identity key is "
-                    "stale or Google authentication has expired."
+                    "Decryption auth failed (MAC check) for %s report "
+                    "(time_offset=%s, key_len=%s, candidates=%d): %s",
+                    "own" if public_key_random == b"" else "foreign",
+                    time_offset if public_key_random != b"" else "N/A",
+                    len(active_identity_key) if active_identity_key else 0,
+                    len(all_identity_keys),
+                    ve,
                 )
             else:
                 _LOGGER.warning(

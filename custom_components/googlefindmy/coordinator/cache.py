@@ -474,8 +474,10 @@ class CacheOperations(_MixinBase):
 
         self._device_location_data[device_id] = slot
 
-        # Increment background updates
-        self.increment_stat("background_updates")
+        # FIX #155: Only count background_updates for non-poll sources
+        # to avoid double-counting with polled_updates.
+        if source != "poll":
+            self.increment_stat("background_updates")
 
         # Register identity key and propagate to shared devices
         effective_identity_key = incoming_identity_key or cached_identity_key
