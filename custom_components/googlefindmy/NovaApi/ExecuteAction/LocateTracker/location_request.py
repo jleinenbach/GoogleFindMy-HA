@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import traceback
 from collections.abc import Awaitable, Callable
 from importlib import import_module
@@ -167,7 +166,10 @@ def create_location_request(
 
     normalized_mode = _normalize_contributor_mode(contributor_mode)
     if last_mode_switch is None or last_mode_switch <= 0:
-        last_mode_switch = int(time.time())
+        # Use 0 to request all available historical reports.  The previous
+        # default of ``int(time.time())`` effectively told the server we just
+        # subscribed, causing it to drop reports between polling intervals.
+        last_mode_switch = 0
 
     action_request = create_action_request(
         canonic_device_id, fcm_registration_id, request_uuid=request_uuid
@@ -595,7 +597,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 resolved_last_mode_switch = int(cached_switch)
 
     if resolved_last_mode_switch is None:
-        resolved_last_mode_switch = int(time.time())
+        resolved_last_mode_switch = 0
 
     try:
         await ns_set(CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch)

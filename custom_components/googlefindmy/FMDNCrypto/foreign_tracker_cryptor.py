@@ -248,7 +248,9 @@ def calculate_r(identity_key: bytes, time_counter_u32: int) -> int:
     prf_output = prf_aes_256_ecb(identity_key, prf_input)
     r_dash_int = int.from_bytes(prf_output, byteorder="big", signed=False)
     order: int = int(_get_curve().order)
-    return (r_dash_int % (order - 1)) + 1
+    # Must match _derive_scalar(include_zero_endpoint=True) used by
+    # generate_eid_variant for LEGACY_SECP160R1_X20_BE.
+    return r_dash_int % order
 
 
 def encrypt(message: bytes, random: bytes, eid: bytes) -> tuple[bytes, bytes]:

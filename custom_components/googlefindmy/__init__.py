@@ -7495,6 +7495,13 @@ async def _async_save_secrets_data(
 
     owner_key = secrets_data.get("owner_key")
     shared_key = secrets_data.get("shared_key")
+    if not shared_key:
+        _LOGGER.warning(
+            "No 'shared_key' found in secrets bundle for %s. "
+            "FMDN network (crowdsourced) location reports will fail to decrypt. "
+            "Re-authenticate to obtain a current secrets.json that includes the shared_key.",
+            google_email or "(unknown)",
+        )
     if google_email:
         email_key = str(google_email)
         try:

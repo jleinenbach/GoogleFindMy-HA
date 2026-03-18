@@ -222,10 +222,20 @@ async def _get_or_generate_shared_key_hex(
     *,
     cache: TokenCache,
     username: str | None,
+    force_refresh: bool = False,
 ) -> str:
     """Return the shared key hex string with proper scoping & one-time migration."""
     if cache is None:
         raise ValueError("TokenCache instance is required for multi-account safety.")
+
+    if force_refresh:
+        _LOGGER.info("Force-refreshing shared_key (clearing cached value)")
+        try:
+            await cache.set(_CACHE_KEY_BASE, None)
+            if isinstance(username, str) and username:
+                await cache.set(_user_scoped_key(username), None)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Failed to clear cached shared_key during force refresh")
 
     # Primary key in entry-scoped mode
     existing = await cache.get(_CACHE_KEY_BASE)
@@ -269,6 +279,7 @@ async def async_get_shared_key(
     *,
     cache: TokenCache,
     username: str | None = None,
+    force_refresh: bool = False,
 ) -> bytes:
     """Return the 32-byte shared key (entry-scoped capable).
 
@@ -277,6 +288,9 @@ async def async_get_shared_key(
         - Global legacy mode: use per-user key "shared_key_<username>" with migration.
         - Normalizes base64/base64url/PEM-like stored values to hex on first read.
         - Enforces a strict 32-byte length.
+        - When ``force_refresh`` is True, cached values are cleared before
+          retrieval.  In HA (non-interactive) mode this raises RuntimeError,
+          which triggers the reauth flow.
 
     Returns:
         bytes: a 32-byte key.
@@ -287,7 +301,9 @@ async def async_get_shared_key(
     if cache is None:
         raise ValueError("TokenCache instance is required for multi-account safety.")
 
-    hex_value = await _get_or_generate_shared_key_hex(cache=cache, username=username)
+    hex_value = await _get_or_generate_shared_key_hex(
+        cache=cache, username=username, force_refresh=force_refresh
+    )
 
     # Validate and return as bytes; self-heal non-hex to hex
     try:

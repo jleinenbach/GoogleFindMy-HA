@@ -285,11 +285,18 @@ class LocateOperations(_MixinBase):
                 return {}
 
             if not self._api_push_ready():
-                _LOGGER.warning(
-                    "Manual locate for %s is currently disabled (push transport not ready).",
+                # Only hard-block during the post-failure cooldown window;
+                # otherwise allow the attempt (mirrors can_play_sound logic).
+                if time.monotonic() < self._push_cooldown_until:
+                    _LOGGER.warning(
+                        "Manual locate for %s blocked (push transport recovering).",
+                        name,
+                    )
+                    return {}
+                _LOGGER.debug(
+                    "Push transport not confirmed ready for %s; attempting locate anyway.",
                     name,
                 )
-                return {}
 
             # Enter in-flight and set a lower-bound cooldown window
             self._locate_inflight.add(device_id)

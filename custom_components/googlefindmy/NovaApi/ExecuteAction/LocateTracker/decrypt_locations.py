@@ -593,10 +593,11 @@ async def async_retrieve_identity_key(
             username = await cache.get(username_string)
             if isinstance(username, str) and username:
                 await cache.set(f"owner_key_{username}", None)
-            # Note: shared_key is NOT cleared here. The shared key is stable
-            # and does not rotate with owner key versions. Clearing it would
-            # trigger the browser flow on retry, which fails on Windows due
-            # to ChromeDriver file locks and opens multiple browser windows.
+                await cache.set(f"shared_key_{username}", None)
+            # Also clear the bare key (written by generic secrets loop).
+            # In HA mode this triggers RuntimeError → ConfigEntryAuthFailed
+            # → reauth flow, where the user provides a fresh secrets bundle.
+            await cache.set("shared_key", None)
         except Exception as cache_exc:  # noqa: BLE001
             _LOGGER.debug("Failed to clear cached keys: %s", cache_exc)
         try:
