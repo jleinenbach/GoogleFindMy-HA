@@ -199,10 +199,21 @@ prf_output = AES-256-ECB(identity_key, prf_input)
 
 ### Scalar Derivation
 
+The reduction formula depends on the curve variant:
+
 ```
-r' = int(prf_output)  (big-endian)
-r = (r' mod (order - 1)) + 1  (ensures r ≠ 0)
+r' = int(prf_output)  (big-endian for SECP160r1, endianness varies for P-256)
+
+Legacy SECP160r1:   r = r' mod order            (range [0, order-1])
+Modern P-256:       r = (r' mod (order - 1)) + 1  (range [1, order-1])
 ```
+
+**CRITICAL**: The `calculate_r` function used for *decryption* must use the
+same reduction as the EID generator. For SECP160r1, this is `r' mod order`
+(with `include_zero_endpoint=True` in `_derive_scalar`). Using the P-256
+formula `(r' mod (order-1)) + 1` for SECP160r1 produces a different scalar,
+breaking ECDH key agreement and causing MAC verification failures on all
+crowdsourced location reports.
 
 ### EID Computation
 
