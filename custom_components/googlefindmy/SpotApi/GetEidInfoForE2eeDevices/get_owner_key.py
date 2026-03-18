@@ -173,7 +173,7 @@ async def _retrieve_owner_key(
     if shared_key_getter is not None:
         shared_key: Any = await shared_key_getter()
     else:
-        shared_key = await async_get_shared_key(cache=cache)
+        shared_key = await async_get_shared_key(cache=cache, username=username)
 
     if not isinstance(shared_key, (bytes, bytearray)) or not shared_key:
         raise RuntimeError("Shared key is missing or empty; cannot decrypt owner key")

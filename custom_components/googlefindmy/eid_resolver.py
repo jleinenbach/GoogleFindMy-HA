@@ -23,6 +23,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .Auth.username_provider import username_string
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
@@ -1784,7 +1785,11 @@ class GoogleFindMyEIDResolver:
 
         key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
         try:
-            shared_key = await async_get_shared_key(cache=cache)
+            _cached_user = await cache.get(username_string)
+            shared_key = await async_get_shared_key(
+                cache=cache,
+                username=_cached_user if isinstance(_cached_user, str) else None,
+            )
         except Exception:  # pragma: no cover - best-effort
             shared_key = None
         if shared_key is not None:

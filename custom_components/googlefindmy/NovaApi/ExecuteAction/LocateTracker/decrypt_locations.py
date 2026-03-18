@@ -593,7 +593,8 @@ async def async_retrieve_identity_key(
             username = await cache.get(username_string)
             if isinstance(username, str) and username:
                 await cache.set(f"owner_key_{username}", None)
-            # Also clear shared_key so it can be re-supplied via reauth.
+                await cache.set(f"shared_key_{username}", None)
+            # Also clear the bare key (written by generic secrets loop).
             # In HA mode this triggers RuntimeError → ConfigEntryAuthFailed
             # → reauth flow, where the user provides a fresh secrets bundle.
             await cache.set("shared_key", None)
