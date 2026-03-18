@@ -3599,6 +3599,19 @@ class ConfigFlow(
                                         elif DATA_AAS_TOKEN in updated_data:
                                             updated_data.pop(DATA_AAS_TOKEN, None)
                                         await self._async_clear_cached_aas_token(entry)
+                                        _reauth_shared = parsed.get("shared_key")
+                                        if _reauth_shared:
+                                            _LOGGER.info(
+                                                "Reauth for %s: shared_key present in secrets bundle",
+                                                fixed_email,
+                                            )
+                                        else:
+                                            _LOGGER.warning(
+                                                "Reauth for %s: no shared_key in secrets bundle — "
+                                                "FMDN crowdsourced reports cannot be decrypted. "
+                                                "Re-run GoogleFindMyTools to obtain the shared_key first.",
+                                                fixed_email,
+                                            )
                                         success_reason = self.context.get(
                                             "reauth_success_reason_override",
                                             "reauth_successful",

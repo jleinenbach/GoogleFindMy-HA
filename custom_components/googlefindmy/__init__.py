@@ -7511,6 +7511,9 @@ async def _async_save_secrets_data(
                 await cache.async_set_cached_value(
                     f"shared_key_{email_key}", shared_key
                 )
+                # Also write canonical entry-scoped key so
+                # async_get_shared_key() finds it directly.
+                await cache.async_set_cached_value("shared_key", shared_key)
         except (OSError, TypeError) as err:
             _LOGGER.warning(
                 "Failed to save encrypted key bundle to persistent cache for %s: %s",
