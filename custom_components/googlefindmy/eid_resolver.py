@@ -68,6 +68,20 @@ RAW_HEADER_LENGTH = 1
 SERVICE_DATA_OFFSET = 8
 AESGCM_NONCE_LENGTH = 12
 
+# FMDN hashed_flags byte: bit-extraction constants for the XOR-decoded byte.
+# Why these constants exist: the FMDN spec numbers bits MSB-first while
+# Python uses LSB-first arithmetic — a naive translation flips the
+# battery and UWT fields silently. The constants make the mapping explicit
+# and grep-stable; the canonical spec quote, bit-layout table and the
+# anti-pattern warning live at the decode site (see
+# GoogleFindMyEIDResolver._update_ble_battery — CANONICAL SPEC ANCHOR).
+# Reference: https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+# (retrieved 2026-06-02). Drift between code and spec is guarded by
+# tests/test_ble_battery_sensor.py::TestFmdnHashedFlagsConstantsMatchSpec.
+FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
+FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
+FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
+
 # Curve parameters for compute_flags_xor_mask(), keyed by EidVariant.
 # (curve_byte_len, curve_order): Legacy uses secp160r1 (None=default), P256 uses P256_ORDER.
 _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
@@ -100,20 +114,6 @@ LOCK_CONFIRMATION_TTL_SECONDS = 90 * 60
 TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 KNOWN_OFFSET_KEY_LENGTH = 2
-
-# FMDN hashed_flags byte: bit-extraction constants for the XOR-decoded byte.
-# SPEC QUOTE (verbatim, retrieved 2026-06-02):
-#   "bits are referenced from most significant to least significant"
-# https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
-#
-# Spec bit numbering vs. standard LSB-first arithmetic:
-#   spec bit 5-6 (battery, 2 bit) == standard bits 2-1  -> mask 0x03 after shift >> 1
-#   spec bit 7   (UWT mode, 1 bit) == standard bit  0   -> mask 0x01
-# Full anti-pattern doc and regression test anchors live at the decode site
-# (see _update_ble_battery; do NOT shorten the warning there).
-FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
-FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
-FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
 
 # LOCK_TRACKING_WINDOW_STEPS: Number of rotation periods to scan around the
 # expected counter when tracking a locked device. ±2 periods covers ~34 minutes
@@ -2472,7 +2472,7 @@ class GoogleFindMyEIDResolver:
             flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
 
         # ---- Decode and store ----
-        # FMDN hashed_flags byte layout (Google Fast Pair / FHN spec).
+        # CANONICAL SPEC ANCHOR for FMDN hashed_flags decoding.
         # SPEC QUOTE (verbatim, retrieved 2026-06-02):
         #   "bits are referenced from most significant to least significant"
         # https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
@@ -2485,17 +2485,23 @@ class GoogleFindMyEIDResolver:
         # Mapping to standard (LSB-first) bit indices used below:
         #   spec bits 5-6 (battery, 2 bit)  == standard bits 2-1 (mask 0x06, shift >> 1)
         #   spec bit  7   (UWT mode, 1 bit) == standard bit  0   (mask 0x01)
+        # Module constants `FMDN_HASHED_FLAGS_BATTERY_MASK`,
+        # `FMDN_HASHED_FLAGS_BATTERY_SHIFT`, `FMDN_HASHED_FLAGS_UWT_MODE_MASK`
+        # in `eid_resolver.py` (top of module, FMDN frame-type cluster)
+        # encode this mapping; their numeric values are drift-guarded by
+        # `tests/test_ble_battery_sensor.py::TestFmdnHashedFlagsConstantsMatchSpec`.
         #
         # ANTI-PATTERN -- DO NOT "fix" this to (decoded >> 5) & 0x03 / decoded & 0x80.
         # That reads spec bits 2-3 (reserved zeros) instead of the battery field
         # and silently breaks normal/low/critical advertisements. The MSB-first
-        # qualifier in the spec is the load-bearing detail. Regression guard:
+        # qualifier in the spec is the load-bearing detail. Doing so also fails:
         #   tests/test_ble_battery_sensor.py::TestHashedFlagsMsbFirstConvention
         #   tests/test_ble_battery_sensor.py::TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation
         # See also docs/BLE_BATTERY_SENSOR.md L45.
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
-            # Mask/shift centralized in FMDN_HASHED_FLAGS_* constants (see module top).
+            # Mask/shift centralized in FMDN_HASHED_FLAGS_* constants
+            # (top of module, FMDN frame-type cluster).
             battery_raw = (
                 decoded >> FMDN_HASHED_FLAGS_BATTERY_SHIFT
             ) & FMDN_HASHED_FLAGS_BATTERY_MASK

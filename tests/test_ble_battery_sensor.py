@@ -819,9 +819,10 @@ _MSB_BATTERY_LABELS = {0: "UNSUPPORTED", 1: "NORMAL", 2: "LOW", 3: "CRITICALLY_L
 # Do NOT replace them with imports of FMDN_HASHED_FLAGS_BATTERY_MASK /
 # FMDN_HASHED_FLAGS_BATTERY_SHIFT / FMDN_HASHED_FLAGS_UWT_MODE_MASK from
 # eid_resolver.py — that would make these tests tautological (they verify
-# the constants against the Google FHN spec, not against themselves).
-# Drift between the module constants and the spec is caught by
-# TestFmdnHashedFlagsConstantsMatchSpec below.
+# the constants against the Google FHN spec, not against themselves) and
+# would remove the only independent encoder of the spec's MSB-first bit
+# layout (TestFmdnHashedFlagsConstantsMatchSpec below catches numeric
+# drift in the constants, but only this encoder pins down what they mean).
 def _encode_msb_first_flags_byte(battery: int, uwt: bool) -> int:
     """Build a decoded hashed-flags byte per FMDN MSB-first spec.
 
@@ -1001,6 +1002,24 @@ class TestFmdnHashedFlagsConstantsMatchSpec:
             FMDN_HASHED_FLAGS_BATTERY_MASK << FMDN_HASHED_FLAGS_BATTERY_SHIFT
         )
         assert battery_field_in_byte & FMDN_HASHED_FLAGS_UWT_MODE_MASK == 0
+
+    def test_constants_round_trip_through_msb_first_encoder(self) -> None:
+        """End-to-end: spec-correct MSB-first encoder -> module constants -> back.
+
+        Independent of the in-resolver decode site. Catches the case where all
+        three constants AND the decode expression are mutated consistently
+        (e.g. SHIFT=2 / MASK=0x07): the dedicated value tests above still pass
+        in isolation, but this round-trip flips for at least one (battery, uwt)
+        combination because the spec encoder uses verbatim spec values.
+        """
+        for battery in range(4):
+            for uwt in (False, True):
+                decoded = _encode_msb_first_flags_byte(battery, uwt)
+                decoded_battery = (
+                    decoded >> FMDN_HASHED_FLAGS_BATTERY_SHIFT
+                ) & FMDN_HASHED_FLAGS_BATTERY_MASK
+                decoded_uwt = bool(decoded & FMDN_HASHED_FLAGS_UWT_MODE_MASK)
+                assert (decoded_battery, decoded_uwt) == (battery, uwt)
 
 
 # ===========================================================================
