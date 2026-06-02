@@ -2375,7 +2375,7 @@ class GoogleFindMyEIDResolver:
     # ------------------------------------------------------------------
     # FMDN BLE battery decode + store
     # ------------------------------------------------------------------
-    def _update_ble_battery(
+    def _update_ble_battery(  # noqa: PLR0912
         self,
         raw: bytes,
         observed_frame: int | None,
@@ -2404,6 +2404,19 @@ class GoogleFindMyEIDResolver:
         xor_mask: int | None = metadata.get("flags_xor_mask")
 
         # ---- Determine the hashed-flags byte position ----
+        # FMDN frame-type semantics for 0x40/0x41 are not publicly fixed and
+        # are accessory-generation specific (see docs/FMDN.md). The strict
+        # mapping in docs/BLE_BATTERY_SENSOR.md (0x40<->20-byte EID,
+        # 0x41<->32-byte EID) describes the common case, but variants with
+        # 0x41 carrying a 20-byte legacy EID have been observed and are
+        # already tolerated in `_extract_candidates` (raw-header path, see
+        # the `RAW_HEADER_LENGTH + LEGACY_EID_LENGTH <= length <= +1` branch).
+        # The lenient elif branches below mirror that tolerance for the
+        # flags-byte lookup so a 29-byte service-data payload or a 22-byte
+        # raw-header payload with `byte[frame_pos] == MODERN_FRAME_TYPE`
+        # still decodes the UT-mode/battery flags instead of silently
+        # dropping them. Range is intentionally narrow (legacy_min..legacy_min+1)
+        # to match the existing tolerance and limit false-positive decodes.
         flags_byte: int | None = None
         # Service-data format: [header(7)][frame(1)][EID(N)][flags(1)]
         if (
@@ -2416,6 +2429,14 @@ class GoogleFindMyEIDResolver:
             and raw[7] == MODERN_FRAME_TYPE
         ):
             flags_byte = raw[SERVICE_DATA_OFFSET + MODERN_EID_LENGTH]
+        elif (
+            SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+            <= length
+            <= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 2
+            and raw[7] == MODERN_FRAME_TYPE
+        ):
+            # Lenient: 0x41 frame with legacy-length payload (UT-mode variant).
+            flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
         # Raw-header format: [frame(1)][EID(N)][flags(1)]
         elif (
             length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
@@ -2427,12 +2448,24 @@ class GoogleFindMyEIDResolver:
             and raw[0] == MODERN_FRAME_TYPE
         ):
             flags_byte = raw[RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
+        elif (
+            RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+            <= length
+            <= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 2
+            and raw[0] == MODERN_FRAME_TYPE
+        ):
+            # Lenient: 0x41 frame with legacy-length payload (UT-mode variant).
+            flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
 
         # ---- Decode and store ----
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
-            battery_raw = (decoded >> 1) & 0x03  # FMDN spec bits [6:5] (MSB-first = standard bits 2:1)
-            uwt_mode = bool(decoded & 0x01)  # FMDN spec bit [7] (MSB-first = standard bit 0)
+            battery_raw = (
+                decoded >> 1
+            ) & 0x03  # FMDN spec bits [6:5] (MSB-first = standard bits 2:1)
+            uwt_mode = bool(
+                decoded & 0x01
+            )  # FMDN spec bit [7] (MSB-first = standard bit 0)
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 
@@ -2444,7 +2477,12 @@ class GoogleFindMyEIDResolver:
                 observed_at_wall=now_wall,
             )
 
-            battery_labels = {0: "UNSUPPORTED", 1: "NORMAL", 2: "LOW", 3: "CRITICALLY_LOW"}
+            battery_labels = {
+                0: "UNSUPPORTED",
+                1: "NORMAL",
+                2: "LOW",
+                3: "CRITICALLY_LOW",
+            }
             battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
 
             # Store for ALL matches (shared-device propagation).

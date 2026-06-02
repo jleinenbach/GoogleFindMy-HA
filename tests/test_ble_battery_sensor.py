@@ -635,13 +635,167 @@ class TestUpdateBLEBattery:
         assert state.battery_pct == 25
 
     def test_modern_frame_too_short_cannot_decode(self) -> None:
-        """Modern frame type at position 7 but payload too short for 32-byte EID."""
+        """Modern frame type at position 7 but payload too short for flags byte."""
         resolver = _make_resolver()
-        # 7 header + 1 frame + 20 bytes (too short for 32-byte EID + 1 flags)
+        # 7 header + 1 frame + 20 bytes (=28, no room for flags byte at all)
         raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20
         match = _match("dev-modern-short")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
         assert resolver._ble_battery_state.get("dev-modern-short") is None
+
+    # ---- Lenient 0x41 + legacy-length variants (Codex review on PR #169) ----
+    # The FMDN frame-type semantics for 0x40 vs 0x41 are not publicly fixed
+    # (see docs/FMDN.md). _extract_candidates already tolerates 0x41 with a
+    # 20-byte legacy EID in the raw-header path (Z. 2678-2688). The lenient
+    # branches in _update_ble_battery mirror that tolerance for the flags-byte
+    # lookup. Range is intentionally narrow (legacy_min..legacy_min+1) to
+    # match the existing tolerance and limit false-positive decodes.
+
+    def test_lenient_0x41_legacy_service_data_decode(self) -> None:
+        """0x41 at byte 7 with 29-byte payload (legacy EID + 1 flag) decodes via lenient branch."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        xor_mask = 0x55
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
+        flags_byte = desired_decoded ^ xor_mask
+
+        # Build with MODERN_FRAME_TYPE but LEGACY_EID_LENGTH -> length 29
+        header = b"\x00" * 7
+        raw = header + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte])
+        assert len(raw) == 29  # explicit length anchor
+
+        match = _match("dev-lenient-sd-29")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-sd-29")
+        assert state is not None
+        assert state.battery_level == 1
+        assert state.battery_pct == 100
+        assert state.uwt_mode is False
+
+    def test_lenient_0x41_legacy_service_data_uwt(self) -> None:
+        """0x41 at byte 7 with 30-byte payload (legacy EID + 1 flag + 1 trailing) decodes UWT-mode."""
+        resolver = _make_resolver()
+        eid = b"\xbb" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_00_1  # battery=0, uwt=1
+        flags_byte = desired_decoded ^ xor_mask
+
+        # length 30 = SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 2 (upper lenient bound)
+        header = b"\x00" * 7
+        raw = header + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte]) + b"\xff"
+        assert len(raw) == 30
+
+        match = _match("dev-lenient-sd-30")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-sd-30")
+        assert state is not None
+        assert state.uwt_mode is True
+
+    def test_lenient_0x41_legacy_raw_header_decode(self) -> None:
+        """0x41 at byte 0 with 22-byte payload (legacy EID + 1 flag) decodes via lenient branch."""
+        resolver = _make_resolver()
+        eid = b"\xcc" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_10_0  # battery=2 (LOW)
+        flags_byte = desired_decoded ^ xor_mask
+
+        # length 22 = RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+        raw = bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte])
+        assert len(raw) == 22
+
+        match = _match("dev-lenient-rh-22")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-rh-22")
+        assert state is not None
+        assert state.battery_level == 2
+        assert state.battery_pct == 25
+
+    def test_lenient_0x41_legacy_raw_header_upper_bound(self) -> None:
+        """0x41 at byte 0 with 23-byte payload decodes via lenient branch (upper bound)."""
+        resolver = _make_resolver()
+        eid = b"\xdd" * LEGACY_EID_LENGTH
+        xor_mask = 0xAA
+        desired_decoded = 0b00000_11_1  # battery=3 (CRITICAL), uwt=1
+        flags_byte = desired_decoded ^ xor_mask
+
+        # length 23 = RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 2 (upper lenient bound)
+        raw = bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte]) + b"\xff"
+        assert len(raw) == 23
+
+        match = _match("dev-lenient-rh-23")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-rh-23")
+        assert state is not None
+        assert state.battery_level == 3
+        assert state.uwt_mode is True
+
+    def test_branch_order_anchor_modern_41_byte_payload(self) -> None:
+        """Regression anchor: length==41 with 0x41 must use raw[40] (strict modern), NOT raw[28] (lenient)."""
+        resolver = _make_resolver()
+        eid = b"\xee" * MODERN_EID_LENGTH  # 32 bytes
+        xor_mask = 0x00
+        modern_decoded = 0b00000_01_0  # battery=1 (NORMAL) at strict offset 40
+        lenient_decoded = 0b00000_11_0  # battery=3 (CRITICAL) at lenient offset 28
+        modern_flags = modern_decoded ^ xor_mask
+        lenient_decoy = lenient_decoded ^ xor_mask
+
+        # Build a 41-byte payload: header(7) + frame(1) + EID(32) + flags(1) = 41
+        # Place a decoy at offset 28 (would be raw[SERVICE_DATA_OFFSET+LEGACY_EID_LENGTH])
+        # and the real flags at offset 40. With correct branch order the
+        # strict modern branch wins and battery decodes to 1, not 3.
+        eid_with_decoy = bytearray(eid)
+        eid_with_decoy[20] = lenient_decoy  # at position 20 of EID = raw offset 28
+        header = b"\x00" * 7
+        raw = (
+            header
+            + bytes([_MODERN_FRAME_TYPE])
+            + bytes(eid_with_decoy)
+            + bytes([modern_flags])
+        )
+        assert len(raw) == 41
+
+        match = _match("dev-branch-order")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-branch-order")
+        assert state is not None
+        # Must read raw[40] (modern strict), NOT raw[28] (lenient legacy)
+        assert state.battery_level == 1, (
+            "Branch ordering broken: lenient branch fired despite length>=41"
+        )
+        assert state.battery_pct == 100
+
+    def test_lenient_0x41_legacy_too_short_no_decode(self) -> None:
+        """0x41 at byte 7 with 28-byte payload (no room for flags) -> no decode."""
+        resolver = _make_resolver()
+        # length 28 = SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH (no flags byte)
+        raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20
+        assert len(raw) == 28
+        match = _match("dev-lenient-too-short")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
+        assert resolver._ble_battery_state.get("dev-lenient-too-short") is None
+
+    def test_lenient_0x41_legacy_above_range_no_decode(self) -> None:
+        """0x41 at byte 7 with 31-byte payload (above lenient upper bound, below modern min) -> no decode."""
+        resolver = _make_resolver()
+        # length 31 = SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 3 (above ±1 tolerance)
+        # and < 41 (below modern threshold). Should NOT match any branch.
+        raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20 + b"\xff\xff\xff"
+        assert len(raw) == 31
+        match = _match("dev-lenient-above")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
+        assert resolver._ble_battery_state.get("dev-lenient-above") is None
+
+    def test_lenient_0x41_no_xor_mask_does_not_crash(self) -> None:
+        """Lenient branch with missing xor_mask -> graceful no-decode."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        header = b"\x00" * 7
+        raw = header + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([0x00])
+        assert len(raw) == 29
+        match = _match("dev-lenient-no-mask")
+        # No xor mask in metadata -> flags_byte found but decode skipped
+        resolver._update_ble_battery(raw, None, {}, [match])
+        assert resolver._ble_battery_state.get("dev-lenient-no-mask") is None
 
 
 # ===========================================================================

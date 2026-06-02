@@ -38,7 +38,7 @@ development so that future contributors avoid the same pitfalls.
 
 | # | Where | What happens |
 |---|-------|-------------|
-| 1 | **Tracker** | Broadcasts a BLE advertisement with Frame Type `0x40` (legacy, 20-byte EID) or `0x41` (modern P-256, 32-byte EID), and an optional 1-byte hashed-flags field. |
+| 1 | **Tracker** | Broadcasts a BLE advertisement with Frame Type `0x40` (typically legacy, 20-byte EID) or `0x41` (typically modern P-256, 32-byte EID), plus an optional 1-byte hashed-flags field. Frame-type vs. EID-length mapping is accessory-generation specific (see `docs/FMDN.md`); `_update_ble_battery()` tolerates 0x41 with a 20-byte legacy EID as a defensive variant. |
 | 2 | **Bermuda** (`fmdn/extraction.py`) | `extract_raw_fmdn_payloads()` extracts the **unmodified** service-data bytes (including the hashed-flags byte). |
 | 3 | **Bermuda** (`fmdn/integration.py`) | `normalize_eid_bytes()` converts the type to `bytes` (no content stripping), then calls `resolver.resolve_eid(payload)` or `resolver.resolve_eid_all(payload)`. |
 | 4 | **Resolver** (`eid_resolver.py`) | `_resolve_eid_internal()` looks up the EID in the precomputed cache. If found, returns `list[EIDMatch]` plus the raw payload and frame metadata. |
