@@ -541,16 +541,23 @@ class FcmRegister:
             _logger.error(msg, exc_info=last_error)
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
-        # If the retry budget was exhausted on persistent 404/HTML responses
+        # If the retry budget was exhausted on persistent 401/404 responses
         # from /c2dm/register3, the endpoint is fatal for this credential
-        # set — surface as FcmRegisterHTTPError(404) so the caller can run
-        # the dedicated 404 retry budget (with token invalidation) instead
-        # of treating it as a transient runtime error.
-        if isinstance(last_error, str) and "status=404" in last_error:
-            raise FcmRegisterHTTPError(
-                f"GCM register fatal status 404 (persisted after {retries} attempts)",
-                status=404,
-            )
+        # set — surface as FcmRegisterHTTPError(status=…) so the caller can
+        # run the dedicated auth retry budget (401, with token invalidation
+        # via _invalidate_fcm_tokens) or the endpoint retry budget (404)
+        # instead of treating it as a transient runtime error. Mirrors
+        # _FATAL_HTTP_STATUSES used by gcm_check_in, fcm_install,
+        # fcm_register, and fcm_refresh_install_token.
+        if isinstance(last_error, str):
+            for fatal_status in _FATAL_HTTP_STATUSES:
+                marker = f"status={int(fatal_status)}"
+                if marker in last_error:
+                    raise FcmRegisterHTTPError(
+                        f"GCM register fatal status {int(fatal_status)} "
+                        f"(persisted after {retries} attempts)",
+                        status=int(fatal_status),
+                    )
         return None
 
     # ---------------------------------------------------------------------

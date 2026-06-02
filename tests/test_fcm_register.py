@@ -376,3 +376,40 @@ def test_gcm_register_raises_on_persistent_404(
         )
 
     assert exc_info.value.status == 404
+
+
+def test_gcm_register_raises_on_persistent_401(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the retry budget is exhausted on persistent 401 responses
+    without a parsed ``Error=`` body (for example an HTML/empty
+    unauthorized response), gcm_register must raise
+    FcmRegisterHTTPError(status=401) so the supervisor's auth path
+    (token invalidation via _invalidate_fcm_tokens) runs instead of
+    treating the auth denial as a transient runtime error.
+    """
+    responses = [
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        asyncio.run(
+            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+        )
+
+    assert exc_info.value.status == 401
