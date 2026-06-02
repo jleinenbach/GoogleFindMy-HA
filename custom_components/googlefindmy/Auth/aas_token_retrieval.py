@@ -289,8 +289,9 @@ async def _exchange_oauth_for_aas(
                 "user": _mask_email_for_logs(username),
             },
         )
+        error_kind = str(error_value)[:32] if error_value else "(none)"
         raise RuntimeError(
-            f"Missing 'Token' in gpsoauth response (Error={error_value or '(none)'})"
+            f"Missing 'Token' in gpsoauth response (kind={error_kind})"
         )
     return resp
 
