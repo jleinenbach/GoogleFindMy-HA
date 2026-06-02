@@ -142,23 +142,49 @@ def _normalize_service(service: str) -> str:
     return cleaned
 
 
-def _is_non_retryable_auth(err: Exception) -> bool:
-    """Return True if the error indicates a non-recoverable auth problem."""
-    if isinstance(err, InvalidAasTokenError):
-        return True
-    text = _clip(err)
-    low = text.lower()
-    signals = (
+# Closed-set values that ``error_kind`` can carry from the gpsoauth exchange
+# paths in this module. Kept module-local (not shared with aas) so each helper
+# remains import-isolated and can evolve independently.
+_NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
+    {
+        "auth_error",
+        "exchange_error",
         "badauthentication",
         "invalid_grant",
-        "missing 'auth' in gpsoauth response",
-        "neither 'token' nor 'auth' found",
-        "missing 'token'/'auth' in gpsoauth response",
-    )
-    if any(signal in low for signal in signals):
+    }
+)
+
+# Substrings that surface in ``_clip(err)`` for callers that raise
+# ``RuntimeError`` without the ``error_kind`` attribute (legacy paths and the
+# existing test suite). HTTP-status substrings are kept here so plain text
+# surfaces like "server returned 401 unauthorized" stay non-retryable.
+_NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
+    "badauthentication",
+    "invalid_grant",
+    "missing 'auth' in gpsoauth response",
+    "neither 'token' nor 'auth' found",
+    "missing 'token'/'auth' in gpsoauth response",
+    "unauthorized",
+    "forbidden",
+    "401",
+    "403",
+)
+
+
+def _is_non_retryable_auth(err: Exception) -> bool:
+    """Return True if the error indicates a non-recoverable auth problem.
+
+    Mirrors the aas-side helper: prefers the structured ``error_kind``
+    attribute, then falls back to clipped substring matching for callers that
+    raise plain ``RuntimeError`` instances.
+    """
+    if isinstance(err, InvalidAasTokenError):
         return True
-    # Treat obvious HTTP-style auth denials as non-retryable as well
-    return "401" in low or "403" in low or "unauthorized" in low or "forbidden" in low
+    kind = getattr(err, "error_kind", "")
+    if isinstance(kind, str) and kind.lower() in _NON_RETRYABLE_KINDS:
+        return True
+    text = _clip(err).lower()
+    return any(pattern in text for pattern in _NON_RETRYABLE_PATTERNS)
 
 
 async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
@@ -609,9 +635,11 @@ async def _perform_oauth_with_provided_aas(
         )
         if not isinstance(resp, dict):
             # Never include the raw `resp` in logs/errors
-            raise RuntimeError(
+            non_dict_err = RuntimeError(
                 f"gpsoauth.perform_oauth returned non-dict response ({type(resp).__name__})"
             )
+            non_dict_err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+            raise non_dict_err
         token_value = resp.get("Token")
         if not isinstance(token_value, str) or not token_value:
             legacy_value = resp.get("Auth")
@@ -621,9 +649,19 @@ async def _perform_oauth_with_provided_aas(
         if isinstance(token_value, str) and token_value:
             return token_value
 
-        # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict)
+        # Typical error shape: {"Error": "BadAuthentication"} (do not print full dict).
+        # Mirror the aas helper: clip + lowercase the closed-set ``Error`` value so
+        # it carries the same privacy guarantees and feeds ``_is_non_retryable_auth``
+        # through the structured attribute path.
         err = resp.get("Error", "unknown")
-        raise RuntimeError(f"Missing 'Token'/'Auth' in gpsoauth response (error={err})")
+        error_kind = (
+            str(err)[:32].lower() if err and err != "unknown" else "exchange_error"
+        )
+        missing_err = RuntimeError(
+            f"Missing 'Token'/'Auth' in gpsoauth response (kind={error_kind})"
+        )
+        missing_err.error_kind = error_kind  # type: ignore[attr-defined]
+        raise missing_err
 
     loop = asyncio.get_running_loop()
     try:

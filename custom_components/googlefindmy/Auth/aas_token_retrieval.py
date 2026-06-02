@@ -124,6 +124,31 @@ def _disqualifies_oauth_for_exchange(token: str) -> str | None:
     return None
 
 
+# Closed-set values that ``error_kind`` can carry from the gpsoauth exchange
+# paths in this module (``auth_error`` / ``exchange_error``) and the lowercased
+# gpsoauth ``Error`` field values (BadAuthentication, NeedsBrowser, ...) plus
+# the OAuth ``invalid_grant`` equivalent.
+_NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
+    {
+        "auth_error",
+        "exchange_error",
+        "badauthentication",
+        "invalid_grant",
+    }
+)
+
+# Substrings that surface in ``_clip(err)`` for callers that raise
+# ``RuntimeError`` without the ``error_kind`` attribute (e.g. HTTP-status
+# surfaces in sibling modules and the existing test suite).
+_NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
+    "badauthentication",
+    "invalid_grant",
+    "unauthorized",
+    "forbidden",
+    "missing 'token' in gpsoauth response",
+)
+
+
 def _is_non_retryable_auth(err: Exception) -> bool:
     """Return True if the error indicates a non-recoverable auth problem.
 
@@ -134,25 +159,10 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     existing test suite).
     """
     kind = getattr(err, "error_kind", "")
-    if isinstance(kind, str) and kind:
-        normalized = kind.lower()
-        if normalized in {"auth_error", "exchange_error"}:
-            return True
-        # gpsoauth ``Error`` field values (BadAuthentication, NeedsBrowser, ...)
-        # surface here lowercased; ``invalid_grant`` is the OAuth equivalent.
-        if normalized in {"badauthentication", "invalid_grant"}:
-            return True
+    if isinstance(kind, str) and kind.lower() in _NON_RETRYABLE_KINDS:
+        return True
     text = _clip(err).lower()
-    if "badauthentication" in text:
-        return True
-    if "invalid_grant" in text:
-        return True
-    if "unauthorized" in text or "forbidden" in text:
-        return True
-    # gpsoauth sometimes returns dicts with {"Error": ...}; these are wrapped in our error text
-    if "missing 'token' in gpsoauth response" in text:
-        return True
-    return False
+    return any(pattern in text for pattern in _NON_RETRYABLE_PATTERNS)
 
 
 def _coerce_android_id(value: object, source: str) -> int | None:

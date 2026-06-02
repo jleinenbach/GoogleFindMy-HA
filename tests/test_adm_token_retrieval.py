@@ -194,6 +194,41 @@ def test_is_non_retryable_auth_allows_transient_errors() -> None:
     assert adm_token_retrieval._is_non_retryable_auth(err) is False
 
 
+def test_is_non_retryable_auth_via_error_kind_exchange_error() -> None:
+    """error_kind attribute path (R2 symmetry with aas)."""
+
+    err = RuntimeError("sanitized message")
+    err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_via_error_kind_badauthentication() -> None:
+    """gpsoauth Error field values surface via error_kind (case-insensitive)."""
+
+    err = RuntimeError("sanitized message")
+    err.error_kind = "BadAuthentication"  # type: ignore[attr-defined]
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_string_fallback_still_works() -> None:
+    """RuntimeError without error_kind attribute still matches via substring."""
+
+    err = RuntimeError("server returned 401 unauthorized")
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_falsy_error_kind_falls_back_to_string() -> None:
+    """F4: empty error_kind must not short-circuit the string path."""
+
+    err = RuntimeError("temporary network outage")
+    err.error_kind = ""  # type: ignore[attr-defined]
+
+    assert adm_token_retrieval._is_non_retryable_auth(err) is False
+
+
 def test_generate_adm_token_falls_back_to_provider_when_aas_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
