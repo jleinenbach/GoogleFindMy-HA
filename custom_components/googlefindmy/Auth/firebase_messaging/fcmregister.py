@@ -75,6 +75,25 @@ from .proto.checkin_pb2 import (
 _logger = logging.getLogger(__name__)
 
 
+class FcmRegisterHTTPError(RuntimeError):
+    """Raised when an FCM/GCM endpoint returns a fatal HTTP status (401/404).
+
+    Carries the numeric ``status`` so callers can classify the failure as an
+    authentication error (401) or endpoint/credential rotation (404) and apply
+    the appropriate retry budget. Inherits from ``RuntimeError`` to remain
+    compatible with existing ``except RuntimeError`` callers, while allowing
+    a dedicated ``except FcmRegisterHTTPError`` branch to escalate ahead of
+    the generic transient-error handling.
+    """
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+_FATAL_HTTP_STATUSES = (HTTPStatus.UNAUTHORIZED, HTTPStatus.NOT_FOUND)
+
+
 _SHA1_HEX_LENGTH = 40
 
 
@@ -304,8 +323,21 @@ class FcmRegister:
                         status,
                         text[:200],
                     )
+                    if status in _FATAL_HTTP_STATUSES:
+                        # 401/404 indicate invalid credentials or a moved
+                        # endpoint — retrying with the same payload only
+                        # multiplies the failure. Surface as fatal so the
+                        # caller can rotate tokens or re-register.
+                        raise FcmRegisterHTTPError(
+                            f"GCM check-in fatal status {status}",
+                            status=int(status),
+                        )
                     # After a failure, retry **without** android_id/security_token once
                     payload = self._get_checkin_payload()
+            except FcmRegisterHTTPError:
+                # Propagate fatal HTTP status to the caller; do not swallow
+                # into the generic transient-retry loop below.
+                raise
             except Exception as e:
                 _logger.warning(
                     "GCM check-in error (attempt %d/%d) at url=%s: %s",
@@ -509,6 +541,16 @@ class FcmRegister:
             _logger.error(msg, exc_info=last_error)
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
+        # If the retry budget was exhausted on persistent 404/HTML responses
+        # from /c2dm/register3, the endpoint is fatal for this credential
+        # set — surface as FcmRegisterHTTPError(404) so the caller can run
+        # the dedicated 404 retry budget (with token invalidation) instead
+        # of treating it as a transient runtime error.
+        if isinstance(last_error, str) and "status=404" in last_error:
+            raise FcmRegisterHTTPError(
+                f"GCM register fatal status 404 (persisted after {retries} attempts)",
+                status=404,
+            )
         return None
 
     # ---------------------------------------------------------------------
@@ -587,6 +629,11 @@ class FcmRegister:
                     resp.status,
                     text[:300],
                 )
+                if resp.status in _FATAL_HTTP_STATUSES:
+                    raise FcmRegisterHTTPError(
+                        f"fcm_install fatal status {resp.status}",
+                        status=int(resp.status),
+                    )
                 return None
 
     async def fcm_refresh_install_token(self) -> JSONDict | None:
@@ -651,6 +698,11 @@ class FcmRegister:
                         "response_length": len(text),
                     },
                 )
+                if resp.status in _FATAL_HTTP_STATUSES:
+                    raise FcmRegisterHTTPError(
+                        f"fcm_refresh_install_token fatal status {resp.status}",
+                        status=int(resp.status),
+                    )
                 return None
 
     def generate_keys(self) -> dict[str, str]:
@@ -745,6 +797,15 @@ class FcmRegister:
                             status,
                             text[:400],
                         )
+                        if status in _FATAL_HTTP_STATUSES:
+                            # Retrying 401/404 with the same payload only
+                            # multiplies the failure — propagate immediately.
+                            raise FcmRegisterHTTPError(
+                                f"FCM register fatal status {status}",
+                                status=int(status),
+                            )
+            except FcmRegisterHTTPError:
+                raise
             except Exception as e:
                 last_error = e
                 _logger.error(

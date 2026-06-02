@@ -18,6 +18,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.const import (
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegister,
     FcmRegisterConfig,
+    FcmRegisterHTTPError,
 )
 
 
@@ -340,3 +341,38 @@ def test_checkin_or_register_reuses_cached_credentials(
     assert result is cached_creds
     assert recorded["android_id"] == cached_creds["gcm"]["android_id"]
     assert recorded["security_token"] == cached_creds["gcm"]["security_token"]
+
+
+def test_gcm_register_raises_on_persistent_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the retry budget is exhausted on persistent 404 responses,
+    gcm_register must raise FcmRegisterHTTPError(status=404) so the caller
+    can run the dedicated endpoint retry budget instead of treating it as
+    a transient runtime error.
+    """
+    responses = [
+        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        asyncio.run(
+            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+        )
+
+    assert exc_info.value.status == 404

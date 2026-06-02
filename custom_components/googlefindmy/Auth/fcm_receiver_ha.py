@@ -81,6 +81,9 @@ from cryptography.exceptions import InvalidTag
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
+    FcmRegisterHTTPError,
+)
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -1077,6 +1080,43 @@ class FcmReceiverHA:
             err,
         )
 
+    @staticmethod
+    def _raise_if_fatal_http_error(
+        entry_id: str, err: FcmRegisterHTTPError
+    ) -> None:
+        """Map ``FcmRegisterHTTPError`` to ``FatalRegistrationError``.
+
+        ``FcmRegisterHTTPError`` is raised inside the firebase_messaging helper
+        functions (``fcm_install``, ``fcm_register``, ``fcm_refresh_install_token``,
+        ``gcm_check_in``, ``gcm_register``) when an FCM/GCM endpoint returns 401
+        or 404. Because those helpers do not propagate aiohttp ``ClientError``,
+        the existing ``_raise_if_fatal_client_error`` path cannot see those
+        statuses; this companion classifier closes that gap so the
+        ``_register_for_fcm_entry`` retry budget (auth vs. endpoint) runs.
+        """
+        status_int = int(err.status)
+
+        if status_int == _HTTP_UNAUTHORIZED:
+            raise FatalRegistrationError(
+                f"FCM registration auth failed ({status_int}): "
+                "token renewal needed",
+                is_auth_error=True,
+            ) from err
+
+        if status_int == _HTTP_NOT_FOUND:
+            raise FatalRegistrationError(
+                f"FCM registration endpoint not found ({status_int}): "
+                "may be transient",
+                is_auth_error=False,
+            ) from err
+
+        _LOGGER.error(
+            "[entry=%s] FCM register fatal HTTP error (status=%s): %s",
+            entry_id,
+            status_int,
+            err,
+        )
+
     async def _register_for_fcm_entry(self, entry_id: str) -> bool:
         """Single registration attempt for a specific entry."""
         pc = self.pcs.get(entry_id)
@@ -1120,6 +1160,14 @@ class FcmReceiverHA:
             raise
         except ClientError as err:
             self._raise_if_fatal_client_error(entry_id, err)
+            return False
+        except FcmRegisterHTTPError as err:
+            # MUST precede the generic RuntimeError catch below, because
+            # FcmRegisterHTTPError is a RuntimeError subclass. This branch
+            # turns persistent 401/404 from the firebase_messaging helpers
+            # into a FatalRegistrationError so the supervisor's auth/endpoint
+            # retry budget (with _invalidate_fcm_tokens) runs.
+            self._raise_if_fatal_http_error(entry_id, err)
             return False
         except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
             # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
