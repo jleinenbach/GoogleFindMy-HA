@@ -717,7 +717,11 @@ async def test_async_get_aas_token_no_retry_on_auth_error(
 
     monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
 
-    with pytest.raises(RuntimeError, match="BadAuthentication"):
+    # The exchange wrapper sanitises the raised RuntimeError per
+    # Auth/AGENTS.md: the raw "BadAuthentication" marker becomes the
+    # structured ``error_kind`` and is surfaced as ``kind=auth_error`` in
+    # the public message. The classifier treats this as non-retryable.
+    with pytest.raises(RuntimeError, match="kind=auth_error"):
         await aas_token_retrieval.async_get_aas_token(cache=cache, retries=3)
 
     assert len(attempts) == 1  # No retries

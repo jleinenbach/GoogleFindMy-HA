@@ -125,13 +125,15 @@ def _disqualifies_oauth_for_exchange(token: str) -> str | None:
 
 
 # Closed-set values that ``error_kind`` can carry from the gpsoauth exchange
-# paths in this module (``auth_error`` / ``exchange_error``) and the lowercased
-# gpsoauth ``Error`` field values (BadAuthentication, NeedsBrowser, ...) plus
-# the OAuth ``invalid_grant`` equivalent.
+# paths and that mark a definitively non-recoverable auth problem:
+# ``auth_error`` (explicit gpsoauth ``AuthError`` surface) and the lowercased
+# gpsoauth ``Error`` field values (``badauthentication``, ``invalid_grant``,
+# ...). ``exchange_error`` is intentionally *not* listed: it is a catch-all
+# wrapper for arbitrary executor failures (incl. transient network errors)
+# and must remain retryable.
 _NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
     {
         "auth_error",
-        "exchange_error",
         "badauthentication",
         "invalid_grant",
     }
@@ -287,16 +289,30 @@ async def _exchange_oauth_for_aas(
             )
             new_err.error_kind = "auth_error"  # type: ignore[attr-defined]
             raise new_err from err
-        _LOGGER.error(
+        # Some callers (and test doubles) raise a plain ``RuntimeError`` with a
+        # known auth marker embedded in the message instead of an
+        # ``AuthError``. Surface those as ``auth_error`` (non-retryable) so the
+        # retry loop matches the explicit ``AuthError`` branch above; otherwise
+        # fall back to the generic ``exchange_error`` (retryable) wrapper.
+        clipped_lower = _clip(err).lower()
+        if "badauthentication" in clipped_lower or "invalid_grant" in clipped_lower:
+            wrapped_kind = "auth_error"
+            wrapped_msg = "gpsoauth authentication failed (kind=auth_error)"
+            log_level = _LOGGER.warning
+        else:
+            wrapped_kind = "exchange_error"
+            wrapped_msg = "gpsoauth exchange failed (kind=exchange_error)"
+            log_level = _LOGGER.error
+        log_level(
             "gpsoauth exchange failed unexpectedly.",
             extra={
                 "user": _mask_email_for_logs(username),
-                "error_kind": "exchange_error",
+                "error_kind": wrapped_kind,
             },
             exc_info=err,
         )
-        new_err = RuntimeError("gpsoauth exchange failed (kind=exchange_error)")
-        new_err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+        new_err = RuntimeError(wrapped_msg)
+        new_err.error_kind = wrapped_kind  # type: ignore[attr-defined]
         raise new_err from err
 
     _LOGGER.debug(

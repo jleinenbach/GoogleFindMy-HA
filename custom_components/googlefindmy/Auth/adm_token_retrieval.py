@@ -143,12 +143,14 @@ def _normalize_service(service: str) -> str:
 
 
 # Closed-set values that ``error_kind`` can carry from the gpsoauth exchange
-# paths in this module. Kept module-local (not shared with aas) so each helper
-# remains import-isolated and can evolve independently.
+# paths and that mark a definitively non-recoverable auth problem. Mirrors the
+# aas-side constant: ``exchange_error`` is intentionally *not* listed because
+# it is a catch-all wrapper that may also be raised for transient executor
+# failures and must remain retryable. Kept module-local (not shared with aas)
+# so each helper remains import-isolated and can evolve independently.
 _NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
     {
         "auth_error",
-        "exchange_error",
         "badauthentication",
         "invalid_grant",
     }
@@ -638,7 +640,7 @@ async def _perform_oauth_with_provided_aas(
             non_dict_err = RuntimeError(
                 f"gpsoauth.perform_oauth returned non-dict response ({type(resp).__name__})"
             )
-            non_dict_err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+            non_dict_err.error_kind = "exchange_error"
             raise non_dict_err
         token_value = resp.get("Token")
         if not isinstance(token_value, str) or not token_value:
