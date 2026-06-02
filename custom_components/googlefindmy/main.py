@@ -2,6 +2,25 @@
 #  GoogleFindMyTools - A set of tools to interact with the Google Find My API
 #  Copyright © 2024 Leon Böttger. All rights reserved.
 #
+"""Standalone CLI entry point for GoogleFindMy functionality.
+
+Usage:
+    python -m custom_components.googlefindmy.main [--reauth] [--entry ENTRY_ID]
+    python custom_components/googlefindmy/main.py [--reauth] [--entry ENTRY_ID]
+
+Flags:
+    --reauth   Force re-authentication by clearing cached tokens and running the
+               Chrome login flow.  Only active in standalone mode (flat directory
+               layout); in repo/HA layout the flag is currently a no-op and emits
+               a stderr warning.
+    --entry    Target config entry ID.  Required when secrets.json contains caches
+               for multiple HA config entries.  May also be set via the
+               ``GOOGLEFINDMY_ENTRY_ID`` environment variable.
+
+The module selects between two code paths via ``_standalone``:
+    * standalone (flat directory):  runs the full token-bootstrap pipeline.
+    * non-standalone (HA repo layout): delegates to ``nbe_list_devices._async_cli_main``.
+"""
 
 import sys
 import types
@@ -148,8 +167,7 @@ else:
                 target: object = None,
             ) -> "importlib.machinery.ModuleSpec | None":
                 if (
-                    fullname == "homeassistant"
-                    or fullname.startswith("homeassistant.")
+                    fullname == "homeassistant" or fullname.startswith("homeassistant.")
                 ) and fullname not in sys.modules:
                     return importlib.machinery.ModuleSpec(
                         fullname,
@@ -159,7 +177,9 @@ else:
                 return None
 
             # Loader protocol -------------------------------------------------
-            def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType:
+            def create_module(
+                self, spec: importlib.machinery.ModuleSpec
+            ) -> types.ModuleType:
                 mod = _StubHAModule(spec.name)
                 mod.__path__ = []
                 return mod
@@ -183,10 +203,10 @@ else:
         sys.modules["homeassistant.helpers.storage"] = _ha_storage
 
         _ha_exceptions = _StubHAExceptions("homeassistant.exceptions")
-        setattr(_ha_exceptions, "HomeAssistantError", _ha_exceptions._HomeAssistantError)
+        setattr(
+            _ha_exceptions, "HomeAssistantError", _ha_exceptions._HomeAssistantError
+        )
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
-
-from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import list_devices  # noqa: E402
 
 
 def _register_file_cache() -> object:
@@ -350,9 +370,8 @@ def _ensure_authenticated() -> None:
             pass
 
     has_user = isinstance(data.get("username"), str) and data["username"]
-    has_token = (
-        (isinstance(data.get("oauth_token"), str) and data["oauth_token"])
-        or (isinstance(data.get("aas_token"), str) and data["aas_token"])
+    has_token = (isinstance(data.get("oauth_token"), str) and data["oauth_token"]) or (
+        isinstance(data.get("aas_token"), str) and data["aas_token"]
     )
     if has_user and has_token:
         return  # Already authenticated
@@ -526,8 +545,8 @@ async def _setup_fcm_receiver(cache: object) -> Any:
         is_device_present=lambda _cid: True,
         get_device_display_name=lambda _cid: None,
         _device_location_data=_standalone_loc_data,
-        update_device_cache=lambda device_id, payload, **_kw: _standalone_loc_data.__setitem__(
-            device_id, payload
+        update_device_cache=lambda device_id, payload, **_kw: (
+            _standalone_loc_data.__setitem__(device_id, payload)
         ),
         increment_stat=lambda _name: None,
         push_updated=lambda _ids: None,
@@ -598,7 +617,9 @@ def _clear_stale_tokens_for_reauth() -> None:
     with open(secrets_path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
 
-    print(f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n")
+    print(
+        f"Cleared {len(keys_to_remove)} cached token(s). Re-authentication required.\n"
+    )
 
 
 if __name__ == "__main__":
@@ -614,6 +635,14 @@ if __name__ == "__main__":
         "--reauth",
         action="store_true",
         help="Force re-authentication by clearing cached tokens and running Chrome login",
+    )
+    _cli_parser.add_argument(
+        "--entry",
+        default=None,
+        help=(
+            "Target config entry ID. Alternative to GOOGLEFINDMY_ENTRY_ID env var. "
+            "Required when secrets.json contains caches for multiple HA config entries."
+        ),
     )
     _cli_args = _cli_parser.parse_args()
 
@@ -638,7 +667,7 @@ if __name__ == "__main__":
             await _clear_stale_adm_token(_file_cache)
             fcm = await _setup_fcm_receiver(_file_cache)
             try:
-                await _async_cli_main(session=session)
+                await _async_cli_main(entry_id=_cli_args.entry, session=session)
             finally:
                 with __import__("contextlib").suppress(Exception):
                     await fcm.async_stop()
@@ -649,4 +678,18 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\nExiting.")
     else:
-        list_devices()
+        # Repo/HA layout: --reauth is a standalone-only feature (see module
+        # docstring).  Warn explicitly instead of silently ignoring the flag.
+        if _cli_args.reauth:
+            print(
+                "warning: --reauth is only honored in standalone mode; ignoring.",
+                file=sys.stderr,
+            )
+        # Bypass list_devices() so we can forward --entry into _async_cli_main.
+        # list_devices() is a deliberately minimal upstream-API wrapper that
+        # takes no entry_id argument; extending its signature would change a
+        # public helper for a CLI-local concern.
+        try:
+            asyncio.run(_async_cli_main(_cli_args.entry))
+        except KeyboardInterrupt:
+            print("\nExiting.")

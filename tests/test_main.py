@@ -81,6 +81,61 @@ class TestDunderMain:
         # exit 0 (if argparse is reached) or fail.  Just verify it imports.
         assert result.returncode in (0, 1, 2)
 
+    def test_dunder_main_lists_entry_in_help(self) -> None:
+        """--entry and --reauth must appear in --help output.
+
+        Regression test for Codex review on c902169104: the argparse parser
+        in main.py declared only --reauth, so `python -m … --entry XYZ`
+        broke with "unrecognized arguments".  This test verifies both flags
+        are recognized by the top-level parser before delegation.
+        """
+        result = subprocess.run(
+            [sys.executable, "-m", "custom_components.googlefindmy.main", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={**dict(__import__("os").environ), "PYTHONPATH": "."},
+        )
+        assert result.returncode == 0, (
+            f"--help must exit 0; got {result.returncode}\n"
+            f"stdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        assert "--entry" in result.stdout, (
+            f"--entry missing from --help output:\n{result.stdout}"
+        )
+        assert "--reauth" in result.stdout, (
+            f"--reauth missing from --help output:\n{result.stdout}"
+        )
+
+    def test_dunder_main_accepts_entry_flag(self) -> None:
+        """--entry XYZ must not fail with 'unrecognized arguments'.
+
+        The token cache is empty in CI, so the command will fail downstream
+        (missing oauth_token).  We only assert the argparse-level acceptance,
+        not the runtime success.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "custom_components.googlefindmy.main",
+                "--entry",
+                "nonexistent_entry_id",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env={**dict(__import__("os").environ), "PYTHONPATH": "."},
+        )
+        assert "unrecognized arguments" not in result.stderr, (
+            f"--entry must be recognized; stderr was:\n{result.stderr}"
+        )
+        assert "error: argument --entry" not in result.stderr, (
+            f"--entry argparse error; stderr was:\n{result.stderr}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Functional / integration test
