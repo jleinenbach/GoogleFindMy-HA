@@ -2458,14 +2458,31 @@ class GoogleFindMyEIDResolver:
             flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
 
         # ---- Decode and store ----
+        # FMDN hashed_flags byte layout (Google Fast Pair / FHN spec).
+        # SPEC QUOTE (verbatim, retrieved 2026-06-02):
+        #   "bits are referenced from most significant to least significant"
+        # https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+        #
+        # Spec bit numbering vs. standard LSB-first arithmetic:
+        #   spec bit:  0    1    2    3    4    5    6    7
+        #   value:    0x80 0x40 0x20 0x10 0x08 0x04 0x02 0x01   (spec bit 0 = MSB)
+        #   meaning:  rsv  rsv  rsv  rsv  rsv  bat  bat  uwt
+        #
+        # Mapping to standard (LSB-first) bit indices used below:
+        #   spec bits 5-6 (battery, 2 bit)  == standard bits 2-1 (mask 0x06, shift >> 1)
+        #   spec bit  7   (UWT mode, 1 bit) == standard bit  0   (mask 0x01)
+        #
+        # ANTI-PATTERN -- DO NOT "fix" this to (decoded >> 5) & 0x03 / decoded & 0x80.
+        # That reads spec bits 2-3 (reserved zeros) instead of the battery field
+        # and silently breaks normal/low/critical advertisements. The MSB-first
+        # qualifier in the spec is the load-bearing detail. Regression guard:
+        #   tests/test_ble_battery_sensor.py::TestHashedFlagsMsbFirstConvention
+        #   tests/test_ble_battery_sensor.py::TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation
+        # See also docs/BLE_BATTERY_SENSOR.md L45.
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
-            battery_raw = (
-                decoded >> 1
-            ) & 0x03  # FMDN spec bits [6:5] (MSB-first = standard bits 2:1)
-            uwt_mode = bool(
-                decoded & 0x01
-            )  # FMDN spec bit [7] (MSB-first = standard bit 0)
+            battery_raw = (decoded >> 1) & 0x03  # spec bits 5-6 (MSB-first)
+            uwt_mode = bool(decoded & 0x01)  # spec bit 7 (MSB-first)
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 

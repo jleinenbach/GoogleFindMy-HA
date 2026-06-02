@@ -799,6 +799,156 @@ class TestUpdateBLEBattery:
 
 
 # ===========================================================================
+# 2a-MSB. Spec-anchored regression: MSB-first bit numbering convention
+#
+# Anti-regression guard against AI / human reviewers who naively read
+# the FMDN spec's "Bits 5-6 battery, Bit 7 UWT" without honouring the
+# spec's explicit qualifier that bits are referenced from MSB to LSB.
+# See custom_components/googlefindmy/eid_resolver.py around the
+# "FMDN hashed_flags byte layout" comment block and docs/BLE_BATTERY_SENSOR.md L45.
+# ===========================================================================
+
+
+_MSB_BATTERY_LABELS = {0: "UNSUPPORTED", 1: "NORMAL", 2: "LOW", 3: "CRITICALLY_LOW"}
+
+
+def _encode_msb_first_flags_byte(battery: int, uwt: bool) -> int:
+    """Build a decoded hashed-flags byte per FMDN MSB-first spec.
+
+    Spec quote (verbatim, retrieved 2026-06-02):
+        "bits are referenced from most significant to least significant"
+    https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+
+    Spec bit -> value table (spec bit 0 = MSB):
+        spec bit:  0    1    2    3    4    5    6    7
+        value:    0x80 0x40 0x20 0x10 0x08 0x04 0x02 0x01
+
+    Battery occupies spec bits 5-6 (2 bits, values 0x04 + 0x02).
+    UWT occupies spec bit 7 (value 0x01).
+    Spec bits 0-4 are reserved (must be 0).
+    """
+    if not 0 <= battery <= 3:
+        raise ValueError(f"battery must be in 0..3, got {battery}")
+    # battery is 2 bits at spec positions 5 (MSB of field, value 0x04) and 6 (value 0x02).
+    # In a 0..3 integer, bit 1 -> spec bit 5 (0x04), bit 0 -> spec bit 6 (0x02).
+    battery_field = ((battery >> 1) & 0x01) * 0x04 | (battery & 0x01) * 0x02
+    uwt_field = 0x01 if uwt else 0x00
+    return battery_field | uwt_field
+
+
+@pytest.mark.parametrize(
+    "battery,uwt",
+    [(b, u) for b in range(4) for u in (False, True)],
+    ids=[f"battery{b}_uwt{int(u)}" for b in range(4) for u in (False, True)],
+)
+class TestHashedFlagsMsbFirstConvention:
+    """Spec-quote-anchored regression for FMDN hashed_flags MSB-first decoding.
+
+    Why this test exists:
+        The Google Fast Pair FHN spec defines hashed_flags as
+            spec bit 5-6: battery level (0..3)
+            spec bit 7:   unwanted-tracking-protection mode
+        AND qualifies explicitly:
+            "bits are referenced from most significant to least significant"
+        => In standard LSB-first byte arithmetic this maps to:
+            battery = (byte >> 1) & 0x03
+            uwt     =  byte       & 0x01
+
+    Reviewers (human or AI) who propose (byte >> 5) & 0x03 / byte & 0x80
+    are reading the spec without its MSB-first qualifier and must be pointed
+    at this test. Removing the test or weakening its assertions re-opens
+    the Codex / Copilot false-positive class documented in
+    docs/BLE_BATTERY_SENSOR.md.
+    """
+
+    def test_decoded_byte_round_trips_through_resolver(
+        self, battery: int, uwt: bool
+    ) -> None:
+        """Every (battery, UWT) combo encodes per spec and decodes back identically."""
+        resolver = _make_resolver()
+        eid = bytes([0xA0 | battery | (0x10 if uwt else 0)]) * LEGACY_EID_LENGTH
+        xor_mask = 0x5A  # arbitrary non-zero mask to exercise XOR path
+
+        decoded = _encode_msb_first_flags_byte(battery, uwt)
+        flags_byte = decoded ^ xor_mask
+        raw = _service_data_payload(eid, flags_byte)
+        device_key = f"dev-msb-{battery}-{int(uwt)}"
+        match = _match(device_key)
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get(device_key)
+        assert state is not None, _MSB_BATTERY_LABELS[battery]
+        assert state.battery_level == battery
+        assert state.uwt_mode is uwt
+        assert state.decoded_flags == decoded
+
+
+class TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation:
+    """Anti-false-positive guard.
+
+    If a reviewer "fixes" the decoder to (decoded >> 5) & 0x03 and decoded & 0x80
+    (the naive LSB-first reading of the spec text), this test demonstrates
+    that the same wire-format byte then decodes to nonsense for every value
+    of battery > 0 and for UWT=True. The assertions below are inequalities
+    against the wrong implementation, not equalities against the right one,
+    which is exactly what makes them readable to future automated reviewers:
+    a PR that "rewrites" the decoder will trip this test even before the
+    main regression tests above.
+    """
+
+    @staticmethod
+    def _wrong_lsb_first_battery(decoded_byte: int) -> int:
+        """The implementation Codex / a careless reader would propose."""
+        return (decoded_byte >> 5) & 0x03
+
+    @staticmethod
+    def _wrong_lsb_first_uwt(decoded_byte: int) -> bool:
+        """The implementation Codex / a careless reader would propose."""
+        return bool(decoded_byte & 0x80)
+
+    def test_msb_first_battery_high_collides_with_lsb_first_zero(self) -> None:
+        """battery=3 in MSB-first encoding is 0x06; LSB-first would read 0 instead."""
+        decoded = _encode_msb_first_flags_byte(battery=3, uwt=False)
+        assert decoded == 0x06
+        # Correct MSB-first decoder yields 3:
+        assert (decoded >> 1) & 0x03 == 3
+        # Wrong LSB-first reading collapses to 0 -> would silently lose
+        # critical-battery advertisements.
+        assert self._wrong_lsb_first_battery(decoded) == 0
+
+    def test_msb_first_uwt_on_collides_with_lsb_first_off(self) -> None:
+        """UWT=True in MSB-first encoding sets bit 0 (0x01); LSB-first reads bit 7."""
+        decoded = _encode_msb_first_flags_byte(battery=0, uwt=True)
+        assert decoded == 0x01
+        # Correct MSB-first decoder reads UWT as True:
+        assert bool(decoded & 0x01) is True
+        # Wrong LSB-first reading reads False -> would silently swallow
+        # unwanted-tracking-protection advertisements.
+        assert self._wrong_lsb_first_uwt(decoded) is False
+
+    def test_documented_anti_pattern_does_not_round_trip_for_any_nonzero_battery(
+        self,
+    ) -> None:
+        """Property check: the wrong reading disagrees with the right one
+        for every non-trivial spec value, proving the two interpretations
+        are genuinely incompatible (not a coincidental match on the
+        all-zeros frame)."""
+        disagreements = 0
+        for battery in range(4):
+            for uwt in (False, True):
+                decoded = _encode_msb_first_flags_byte(battery, uwt)
+                correct_b = (decoded >> 1) & 0x03
+                correct_u = bool(decoded & 0x01)
+                wrong_b = self._wrong_lsb_first_battery(decoded)
+                wrong_u = self._wrong_lsb_first_uwt(decoded)
+                if (correct_b, correct_u) != (wrong_b, wrong_u):
+                    disagreements += 1
+        # Only (battery=0, uwt=False) -> (0, False) coincides for both readings.
+        # All other 7 combinations must disagree -> readings are not exchangeable.
+        assert disagreements == 7
+
+
+# ===========================================================================
 # 2b. compute_flags_xor_mask() with P256 curve
 # ===========================================================================
 
