@@ -768,7 +768,12 @@ class FcmReceiverHA:
                         ok_reg = await self._register_for_fcm_entry(entry_id)
                     except FatalRegistrationError as err:
                         message = str(err) or "FCM registration failed"
-                        self._fatal_errors[entry_id] = message
+                        # Publish to ``_fatal_errors`` only once the retry
+                        # budget is exhausted (see ``break`` paths below);
+                        # otherwise the coordinator's 401-substring match
+                        # in ``coordinator/helpers/update.py`` escalates
+                        # to ``ConfigEntryAuthFailed`` before this loop
+                        # gets a chance to renew tokens.
                         _LOGGER.error(
                             "[entry=%s] FCM registration failed: %s",
                             entry_id,
@@ -798,6 +803,7 @@ class FcmReceiverHA:
                             max_retries = _MAX_FATAL_AUTH_RETRIES
                             if fatal_count >= max_retries:
                                 self._fatal_error = message
+                                self._fatal_errors[entry_id] = message
                                 _LOGGER.error(
                                     "[entry=%s] FCM auth failed %d "
                                     "consecutive times; giving up. "
@@ -826,6 +832,7 @@ class FcmReceiverHA:
                             max_retries = _MAX_FATAL_ENDPOINT_RETRIES
                             if fatal_count >= max_retries:
                                 self._fatal_error = message
+                                self._fatal_errors[entry_id] = message
                                 _LOGGER.error(
                                     "[entry=%s] FCM endpoint 404 "
                                     "persisted for %d attempts; "
