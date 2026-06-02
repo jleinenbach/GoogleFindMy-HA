@@ -356,10 +356,14 @@ def test_is_non_retryable_auth_error_kind_auth_error() -> None:
 
 
 def test_is_non_retryable_auth_error_kind_exchange_error() -> None:
-    """exchange_error from the executor path should not be retryable."""
+    """exchange_error is a catch-all wrapper for arbitrary executor failures
+    (including transient network errors) and MUST remain retryable. Only
+    explicit auth markers (auth_error, badauthentication, invalid_grant)
+    are treated as non-retryable.
+    """
     err = RuntimeError("gpsoauth exchange failed (kind=exchange_error)")
     err.error_kind = "exchange_error"  # type: ignore[attr-defined]
-    assert aas_token_retrieval._is_non_retryable_auth(err) is True
+    assert aas_token_retrieval._is_non_retryable_auth(err) is False
 
 
 def test_is_non_retryable_auth_error_kind_unknown_falls_back_to_string() -> None:

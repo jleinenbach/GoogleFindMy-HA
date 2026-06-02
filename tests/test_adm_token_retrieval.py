@@ -194,13 +194,17 @@ def test_is_non_retryable_auth_allows_transient_errors() -> None:
     assert adm_token_retrieval._is_non_retryable_auth(err) is False
 
 
-def test_is_non_retryable_auth_via_error_kind_exchange_error() -> None:
-    """error_kind attribute path (R2 symmetry with aas)."""
+def test_is_non_retryable_auth_via_error_kind_exchange_error_is_retryable() -> None:
+    """exchange_error mirrors the aas-side contract: catch-all wrapper for
+    executor failures (including transient errors), MUST remain retryable.
+    Only explicit auth markers (auth_error, badauthentication,
+    invalid_grant) surface as non-retryable through the attribute path.
+    """
 
     err = RuntimeError("sanitized message")
     err.error_kind = "exchange_error"  # type: ignore[attr-defined]
 
-    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+    assert adm_token_retrieval._is_non_retryable_auth(err) is False
 
 
 def test_is_non_retryable_auth_via_error_kind_badauthentication() -> None:
