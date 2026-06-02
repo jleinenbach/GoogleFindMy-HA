@@ -415,7 +415,8 @@ class GoogleFindMyMapView(HomeAssistantView):
     <script>
         var map = L.map('map').setView([{center_lat}, {center_lon}], 13);
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors'
+            attribution: '© OpenStreetMap contributors',
+            referrerPolicy: 'origin'
         }}).addTo(map);
 
         var locations = {locations_json};
