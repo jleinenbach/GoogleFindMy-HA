@@ -125,7 +125,23 @@ def _disqualifies_oauth_for_exchange(token: str) -> str | None:
 
 
 def _is_non_retryable_auth(err: Exception) -> bool:
-    """Return True if the error indicates a non-recoverable auth problem."""
+    """Return True if the error indicates a non-recoverable auth problem.
+
+    Prefers the structured ``error_kind`` attribute (set by the gpsoauth
+    exchange paths in this module). Falls back to inspecting the clipped
+    string representation for callers that raise ``RuntimeError`` without
+    an attribute (e.g. HTTP-status surfaces in sibling modules and the
+    existing test suite).
+    """
+    kind = getattr(err, "error_kind", "")
+    if isinstance(kind, str) and kind:
+        normalized = kind.lower()
+        if normalized in {"auth_error", "exchange_error"}:
+            return True
+        # gpsoauth ``Error`` field values (BadAuthentication, NeedsBrowser, ...)
+        # surface here lowercased; ``invalid_grant`` is the OAuth equivalent.
+        if normalized in {"badauthentication", "invalid_grant"}:
+            return True
     text = _clip(err).lower()
     if "badauthentication" in text:
         return True
@@ -245,18 +261,33 @@ async def _exchange_oauth_for_aas(
         resp = await loop.run_in_executor(None, _run)
     except Exception as err:  # noqa: BLE001
         if gpsoauth_exceptions and isinstance(err, gpsoauth_exceptions.AuthError):
+            # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw exception
+            # text out of the log message; surface a sanitized ``error_kind``
+            # via ``extra`` and preserve traceback context via ``exc_info``.
             _LOGGER.warning(
-                "gpsoauth authentication error for %s: %s",
-                _mask_email_for_logs(username),
-                _clip(err),
+                "gpsoauth authentication error.",
+                extra={
+                    "user": _mask_email_for_logs(username),
+                    "error_kind": "auth_error",
+                },
+                exc_info=err,
             )
-            raise RuntimeError(f"gpsoauth authentication failed: {_clip(err)}") from err
+            new_err = RuntimeError(
+                "gpsoauth authentication failed (kind=auth_error)"
+            )
+            new_err.error_kind = "auth_error"  # type: ignore[attr-defined]
+            raise new_err from err
         _LOGGER.error(
-            "gpsoauth exchange failed unexpectedly for %s: %s",
-            _mask_email_for_logs(username),
-            _clip(err),
+            "gpsoauth exchange failed unexpectedly.",
+            extra={
+                "user": _mask_email_for_logs(username),
+                "error_kind": "exchange_error",
+            },
+            exc_info=err,
         )
-        raise RuntimeError(f"gpsoauth exchange failed: {_clip(err)}") from err
+        new_err = RuntimeError("gpsoauth exchange failed (kind=exchange_error)")
+        new_err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+        raise new_err from err
 
     _LOGGER.debug(
         "gpsoauth exchange response received: type=%s, keys=%s",
@@ -290,9 +321,11 @@ async def _exchange_oauth_for_aas(
             },
         )
         error_kind = str(error_value)[:32] if error_value else "(none)"
-        raise RuntimeError(
+        new_err = RuntimeError(
             f"Missing 'Token' in gpsoauth response (kind={error_kind})"
         )
+        new_err.error_kind = error_kind  # type: ignore[attr-defined]
+        raise new_err
     return resp
 
 

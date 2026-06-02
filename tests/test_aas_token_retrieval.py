@@ -348,6 +348,27 @@ def test_is_non_retryable_auth_transient() -> None:
     assert aas_token_retrieval._is_non_retryable_auth(err) is False
 
 
+def test_is_non_retryable_auth_error_kind_auth_error() -> None:
+    """error_kind attribute should take precedence over string inspection."""
+    err = RuntimeError("gpsoauth authentication failed (kind=auth_error)")
+    err.error_kind = "auth_error"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_error_kind_exchange_error() -> None:
+    """exchange_error from the executor path should not be retryable."""
+    err = RuntimeError("gpsoauth exchange failed (kind=exchange_error)")
+    err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_error_kind_unknown_falls_back_to_string() -> None:
+    """Unknown error_kind values must fall through to string inspection."""
+    err = RuntimeError("temporary network failure")
+    err.error_kind = "unknown_kind"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is False
+
+
 def test_coerce_android_id_int() -> None:
     """Integer android_id should be returned unchanged."""
     assert aas_token_retrieval._coerce_android_id(12345, "test") == 12345
