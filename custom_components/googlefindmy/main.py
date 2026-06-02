@@ -22,6 +22,7 @@ The module selects between two code paths via ``_standalone``:
     * non-standalone (HA repo layout): delegates to ``nbe_list_devices._async_cli_main``.
 """
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -209,12 +210,20 @@ else:
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
 
 
-def _register_file_cache() -> object:
+def _register_file_cache(entry_id: str = "") -> object:
     """Create a file-backed TokenCache and register it for standalone CLI use.
 
     Reads/writes ``Auth/secrets.json`` (the upstream GoogleFindMyTools layout)
     so that ``_resolve_cli_cache`` in ``nbe_list_devices`` finds a registered
     cache and the CLI flow works without Home Assistant.
+
+    Args:
+        entry_id: Registry key under which the cache is registered.  An empty
+            string (the default) preserves the legacy single-entry behaviour;
+            a non-empty value must match exactly what is later passed to
+            ``_async_cli_main`` / ``_resolve_cli_cache`` (either via the
+            ``--entry`` CLI flag or the ``GOOGLEFINDMY_ENTRY_ID`` env var),
+            otherwise the cache lookup raises "Unknown entry_id ...".
 
     Returns the cache instance so callers can pass it to the FCM setup.
     """
@@ -344,8 +353,8 @@ def _register_file_cache() -> object:
 
     # Register as a TokenCache instance so _resolve_cli_cache finds it.
     # mypy: _FileCache is duck-typed, not a real TokenCache subclass.
-    _register_instance("", file_cache)  # type: ignore[arg-type]
-    _set_default_entry_id("", force=True)
+    _register_instance(entry_id, file_cache)  # type: ignore[arg-type]
+    _set_default_entry_id(entry_id, force=True)
     return file_cache
 
 
@@ -367,7 +376,14 @@ def _ensure_authenticated() -> None:
             if isinstance(raw, dict):
                 data = raw
         except Exception:  # noqa: BLE001
-            pass
+            import logging  # noqa: PLC0415
+
+            logging.getLogger(__name__).warning(
+                "Failed to load %s; treating as missing credentials and "
+                "starting authentication flow.",
+                secrets_path,
+                exc_info=True,
+            )
 
     has_user = isinstance(data.get("username"), str) and data["username"]
     has_token = (isinstance(data.get("oauth_token"), str) and data["oauth_token"]) or (
@@ -565,8 +581,23 @@ async def _setup_fcm_receiver(cache: object) -> Any:
         )
 
         api_register(_get_fcm)
+    except ImportError:
+        import logging  # noqa: PLC0415
+
+        # api.py provider hook is optional; the location_request hook
+        # registered above is sufficient for the standalone CLI path.
+        logging.getLogger(__name__).debug(
+            "custom_components.googlefindmy.api not importable; "
+            "FCM provider only registered via location_request."
+        )
     except Exception:  # noqa: BLE001
-        pass
+        import logging  # noqa: PLC0415
+
+        logging.getLogger(__name__).warning(
+            "Failed to register FCM provider via api.py; "
+            "falling back to location_request registration.",
+            exc_info=True,
+        )
 
     return fcm
 
@@ -622,6 +653,22 @@ def _clear_stale_tokens_for_reauth() -> None:
     )
 
 
+def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) -> str:
+    """Resolve the effective entry id from CLI flag and env var.
+
+    Priority: ``--entry`` > ``GOOGLEFINDMY_ENTRY_ID`` > "" (default).
+    Returns the stripped value; whitespace-only input collapses to "".
+
+    Extracted from the ``__main__`` block so the resolution rule is unit-
+    testable without spawning a subprocess.
+    """
+    if cli_entry is not None:
+        return cli_entry.strip()
+    if env_entry:
+        return env_entry.strip()
+    return ""
+
+
 if __name__ == "__main__":
     import argparse  # noqa: PLC0415
     import asyncio  # noqa: PLC0415
@@ -650,7 +697,14 @@ if __name__ == "__main__":
         if _cli_args.reauth:
             _clear_stale_tokens_for_reauth()
         _ensure_authenticated()
-        _file_cache = _register_file_cache()
+        # Resolve the effective entry id (CLI > env > ""). Without this,
+        # _async_cli_main forwards a non-empty hint that _resolve_cli_cache
+        # would reject as "Unknown entry_id" because the cache was only
+        # registered under "".  Codex review on 694f6883aa.
+        _effective_entry_id = _resolve_effective_entry_id(
+            _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+        )
+        _file_cache = _register_file_cache(_effective_entry_id)
 
         async def _cli_main() -> None:
             import aiohttp  # noqa: PLC0415

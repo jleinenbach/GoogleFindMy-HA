@@ -162,3 +162,132 @@ class TestFunctionalCLI:
         )
         # Should fail because no token cache is registered, but NOT with ImportError
         assert "ImportError" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# _register_file_cache + _resolve_effective_entry_id (Codex 694f6883aa)
+# ---------------------------------------------------------------------------
+
+
+class TestEntryIdCacheRegistration:
+    """Regression tests for the standalone --entry cache-registration bug.
+
+    Background: ``_register_file_cache`` previously hard-coded the registry
+    key to ``""``. When the user followed the documented ``--entry foo`` (or
+    ``GOOGLEFINDMY_ENTRY_ID=foo``) path, ``_resolve_cli_cache("foo")`` raised
+    ``RuntimeError: Unknown entry_id 'foo'`` before listing devices because
+    the lookup never found the empty-keyed entry. Codex review on
+    694f6883aa surfaced the issue; fix registers the cache under the
+    effective entry id resolved from CLI > env > "".
+    """
+
+    @staticmethod
+    def _reset_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Wipe the module-global TokenCache registry so tests don't leak."""
+        from custom_components.googlefindmy.Auth import token_cache
+
+        monkeypatch.setattr(token_cache, "_INSTANCES", {}, raising=False)
+        # _STATE is a dict; reset the default_entry_id key explicitly.
+        monkeypatch.setitem(token_cache._STATE, "default_entry_id", None)
+
+    @staticmethod
+    def _prepare_secrets_dir(tmp_path) -> object:  # type: ignore[no-untyped-def]
+        """Create a minimal Auth/secrets.json so _FileCache loads cleanly."""
+        import json
+
+        auth_dir = tmp_path / "Auth"
+        auth_dir.mkdir(parents=True, exist_ok=True)
+        (auth_dir / "secrets.json").write_text(
+            json.dumps({"oauth_token": "dummy"}), encoding="utf-8"
+        )
+        return tmp_path
+
+    def test_register_file_cache_with_entry_id_registers_under_that_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Happy path: ``--entry foo`` makes ``get_cache_for_entry('foo')`` succeed."""
+        self._reset_registry(monkeypatch)
+        self._prepare_secrets_dir(tmp_path)
+
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.Auth.token_cache import (
+            get_cache_for_entry,
+            get_registered_entry_ids,
+        )
+
+        monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+
+        cache = cli_main._register_file_cache("entry_xyz")
+
+        assert "entry_xyz" in get_registered_entry_ids()
+        assert get_cache_for_entry("entry_xyz") is cache
+
+    def test_register_file_cache_default_keeps_empty_registration(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Backward compatibility: no ``--entry`` keeps the legacy "" key."""
+        self._reset_registry(monkeypatch)
+        self._prepare_secrets_dir(tmp_path)
+
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.Auth.token_cache import (
+            get_registered_entry_ids,
+        )
+
+        monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+
+        cli_main._register_file_cache()  # default entry_id=""
+
+        assert "" in get_registered_entry_ids()
+
+    def test_register_file_cache_sets_default_entry_id(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ) -> None:  # type: ignore[no-untyped-def]
+        """Side-effect: _set_default_entry_id must follow the registry key."""
+        self._reset_registry(monkeypatch)
+        self._prepare_secrets_dir(tmp_path)
+
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.Auth import token_cache
+
+        monkeypatch.setattr(cli_main, "_this_dir", tmp_path, raising=True)
+
+        cli_main._register_file_cache("entry_xyz")
+
+        assert token_cache._STATE["default_entry_id"] == "entry_xyz"
+
+
+class TestResolveEffectiveEntryId:
+    """Unit tests for the CLI > env > "" priority helper."""
+
+    def test_cli_wins_over_env(self) -> None:
+        from custom_components.googlefindmy.main import _resolve_effective_entry_id
+
+        assert _resolve_effective_entry_id("cli_value", "env_value") == "cli_value"
+
+    def test_env_used_when_cli_absent(self) -> None:
+        from custom_components.googlefindmy.main import _resolve_effective_entry_id
+
+        assert _resolve_effective_entry_id(None, "env_value") == "env_value"
+
+    def test_empty_default_when_neither_set(self) -> None:
+        from custom_components.googlefindmy.main import _resolve_effective_entry_id
+
+        assert _resolve_effective_entry_id(None, None) == ""
+
+    def test_whitespace_collapses_to_empty(self) -> None:
+        from custom_components.googlefindmy.main import _resolve_effective_entry_id
+
+        assert _resolve_effective_entry_id("   ", None) == ""
+        assert _resolve_effective_entry_id(None, "   ") == ""
+
+    def test_cli_explicit_empty_string_overrides_env(self) -> None:
+        """``--entry ""`` (explicit empty) must defeat env-var fallback.
+
+        Documented CLI > env priority must hold even when the CLI value is
+        an explicit empty string.  Without the ``is not None`` check this
+        would silently fall through to env.
+        """
+        from custom_components.googlefindmy.main import _resolve_effective_entry_id
+
+        assert _resolve_effective_entry_id("", "env_value") == ""
