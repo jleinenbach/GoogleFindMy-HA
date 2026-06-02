@@ -16,6 +16,9 @@ import custom_components.googlefindmy.eid_resolver as resolver_module
 from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_BATTERY_PCT,
+    FMDN_HASHED_FLAGS_BATTERY_MASK,
+    FMDN_HASHED_FLAGS_BATTERY_SHIFT,
+    FMDN_HASHED_FLAGS_UWT_MODE_MASK,
     BLEBatteryState,
     EIDMatch,
     GoogleFindMyEIDResolver,
@@ -812,6 +815,13 @@ class TestUpdateBLEBattery:
 _MSB_BATTERY_LABELS = {0: "UNSUPPORTED", 1: "NORMAL", 2: "LOW", 3: "CRITICALLY_LOW"}
 
 
+# Intentional: spec constants (0x03, 0x01, shift 1) are duplicated here.
+# Do NOT replace them with imports of FMDN_HASHED_FLAGS_BATTERY_MASK /
+# FMDN_HASHED_FLAGS_BATTERY_SHIFT / FMDN_HASHED_FLAGS_UWT_MODE_MASK from
+# eid_resolver.py — that would make these tests tautological (they verify
+# the constants against the Google FHN spec, not against themselves).
+# Drift between the module constants and the spec is caught by
+# TestFmdnHashedFlagsConstantsMatchSpec below.
 def _encode_msb_first_flags_byte(battery: int, uwt: bool) -> int:
     """Build a decoded hashed-flags byte per FMDN MSB-first spec.
 
@@ -946,6 +956,51 @@ class TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation:
         # Only (battery=0, uwt=False) -> (0, False) coincides for both readings.
         # All other 7 combinations must disagree -> readings are not exchangeable.
         assert disagreements == 7
+
+
+# ===========================================================================
+# 2a-CONST. Drift guard: module constants must match Google FHN spec values
+# ===========================================================================
+
+
+class TestFmdnHashedFlagsConstantsMatchSpec:
+    """Drift guard for the FMDN hashed_flags bit-extraction constants.
+
+    Spec quote (verbatim, retrieved 2026-06-02):
+        "bits are referenced from most significant to least significant"
+    https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+
+    Spec bit layout (spec bit 0 = MSB):
+        bits 0-4: reserved (must be 0)
+        bits 5-6: battery level (2 bit field)
+        bit 7:    unwanted-tracking-protection mode (1 bit)
+
+    Mapping to standard LSB-first arithmetic on the XOR-decoded byte:
+        battery_raw = (decoded >> 1) & 0x03   -> shift=1, mask=0x03
+        uwt_mode    = bool(decoded & 0x01)    -> mask=0x01
+
+    If a future refactor renames or changes the numeric value of any of these
+    constants, this test fails -- preventing silent drift between module code
+    and the spec. The behaviour test for the decode path itself lives in
+    TestHashedFlagsMsbFirstConvention (which deliberately keeps the literals
+    inline to avoid tautology).
+    """
+
+    def test_battery_mask_is_2_bit(self) -> None:
+        assert FMDN_HASHED_FLAGS_BATTERY_MASK == 0x03
+
+    def test_battery_shift_is_one(self) -> None:
+        assert FMDN_HASHED_FLAGS_BATTERY_SHIFT == 1
+
+    def test_uwt_mode_mask_is_1_bit(self) -> None:
+        assert FMDN_HASHED_FLAGS_UWT_MODE_MASK == 0x01
+
+    def test_battery_field_is_disjoint_from_uwt_field(self) -> None:
+        """Battery and UWT bits must not overlap in the post-decode byte."""
+        battery_field_in_byte = (
+            FMDN_HASHED_FLAGS_BATTERY_MASK << FMDN_HASHED_FLAGS_BATTERY_SHIFT
+        )
+        assert battery_field_in_byte & FMDN_HASHED_FLAGS_UWT_MODE_MASK == 0
 
 
 # ===========================================================================

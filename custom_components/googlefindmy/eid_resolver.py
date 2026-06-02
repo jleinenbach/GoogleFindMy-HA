@@ -101,6 +101,20 @@ TRUNCATED_FRAME_LOG_WINDOW_SECONDS = 60
 VALID_ANCHOR_BASES: set[str] = {"unix", "pair_date", "secrets_creation_date"}
 KNOWN_OFFSET_KEY_LENGTH = 2
 
+# FMDN hashed_flags byte: bit-extraction constants for the XOR-decoded byte.
+# SPEC QUOTE (verbatim, retrieved 2026-06-02):
+#   "bits are referenced from most significant to least significant"
+# https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+#
+# Spec bit numbering vs. standard LSB-first arithmetic:
+#   spec bit 5-6 (battery, 2 bit) == standard bits 2-1  -> mask 0x03 after shift >> 1
+#   spec bit 7   (UWT mode, 1 bit) == standard bit  0   -> mask 0x01
+# Full anti-pattern doc and regression test anchors live at the decode site
+# (see _update_ble_battery; do NOT shorten the warning there).
+FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
+FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
+FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
+
 # LOCK_TRACKING_WINDOW_STEPS: Number of rotation periods to scan around the
 # expected counter when tracking a locked device. ±2 periods covers ~34 minutes
 # of clock drift at 1024s rotation.
@@ -2481,8 +2495,11 @@ class GoogleFindMyEIDResolver:
         # See also docs/BLE_BATTERY_SENSOR.md L45.
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
-            battery_raw = (decoded >> 1) & 0x03  # spec bits 5-6 (MSB-first)
-            uwt_mode = bool(decoded & 0x01)  # spec bit 7 (MSB-first)
+            # Mask/shift centralized in FMDN_HASHED_FLAGS_* constants (see module top).
+            battery_raw = (
+                decoded >> FMDN_HASHED_FLAGS_BATTERY_SHIFT
+            ) & FMDN_HASHED_FLAGS_BATTERY_MASK
+            uwt_mode = bool(decoded & FMDN_HASHED_FLAGS_UWT_MODE_MASK)
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 
