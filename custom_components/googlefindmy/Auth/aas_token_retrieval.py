@@ -272,14 +272,19 @@ async def _exchange_oauth_for_aas(
         error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
         error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
         resp_keys = list(resp.keys()) if isinstance(resp, dict) else "N/A"
+        # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw gpsoauth
+        # response bodies (esp. ``ErrorDetails``) out of the log message;
+        # surface only sanitized flags/keys via ``extra``. The gpsoauth
+        # ``Error`` field is a small closed set (e.g. ``NeedsBrowser``,
+        # ``BadAuthentication``) and is exposed as ``error_kind``.
         _LOGGER.warning(
-            "gpsoauth response missing token. Error=%s, ErrorDetails=%s, keys=%s, user=%s",
-            error_value or "(none)",
-            error_details or "(none)",
-            resp_keys,
+            "gpsoauth response missing token (user=%s, keys=%d)",
             _mask_email_for_logs(username),
+            len(resp_keys) if isinstance(resp_keys, list) else 0,
             extra={
                 "error_field_present": bool(error_value),
+                "error_kind": (str(error_value)[:32] if error_value else None),
+                "details_present": bool(error_details),
                 "response_keys": resp_keys,
                 "user": _mask_email_for_logs(username),
             },
