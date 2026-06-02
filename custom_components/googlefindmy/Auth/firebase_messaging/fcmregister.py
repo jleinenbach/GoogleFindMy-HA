@@ -359,12 +359,15 @@ class FcmRegister:
             ``None``.
 
         Notes:
-            Legacy upstream clients always used the legacy server key sender, which
-            still succeeds instantly for most accounts. We keep that behaviour as
-            the first attempt and only fall back to the configured numeric sender
-            when Google rejects the legacy key (HTML/404 or explicit error). This
-            matches observed production success rates while retaining support for
-            modern projects that require the numeric sender.
+            Upstream GoogleFindMyTools always uses the legacy server key
+            (``GCM_SERVER_KEY_B64``) and never falls back to the configured
+            numeric sender. We mirror that policy: the legacy key is the only
+            sender candidate, regardless of HTTP 404, HTML responses, or
+            ``PHONE_REGISTRATION_ERROR``. Earlier versions rotated to the
+            numeric sender on rejection, which wasted the entire retry budget
+            because the numeric sender returns persistent 404 for the affected
+            account class (see commit ``ba186349`` for the upstream-alignment
+            rationale).
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
