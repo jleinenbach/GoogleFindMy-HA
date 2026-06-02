@@ -383,7 +383,7 @@ def _prepare_coordinator(loop: asyncio.AbstractEventLoop) -> GoogleFindMyCoordin
     )
     coordinator._get_google_home_filter = lambda: None
     coordinator._is_fcm_ready_soft = lambda: True
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._last_device_list = [{"id": "dev-1", "name": "Device"}]
     coordinator.data = []
     coordinator.last_update_success = True

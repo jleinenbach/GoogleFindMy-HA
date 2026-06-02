@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import types
 from typing import Any
@@ -31,7 +30,7 @@ class _DummyCache:
 
 
 def test_resolve_cli_cache_requires_entry(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_resolve_cli_cache should enforce entry selection and return the cache."""
+    """_resolve_cli_cache should auto-select a single entry and return the cache."""
 
     cache = _DummyCache("entry-one")
     monkeypatch.setattr(
@@ -39,13 +38,17 @@ def test_resolve_cli_cache_requires_entry(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setattr(nbe_list_devices, "get_cache_for_entry", lambda entry: cache)
 
+    # Explicit hint works as before
     resolved_cache, namespace = nbe_list_devices._resolve_cli_cache("entry-one")
     assert resolved_cache is cache
     assert namespace == "entry-one"
 
-    with pytest.raises(MissingTokenCacheError):
-        nbe_list_devices._resolve_cli_cache(None)
+    # With exactly one entry registered, None hint auto-selects it
+    resolved_cache, namespace = nbe_list_devices._resolve_cli_cache(None)
+    assert resolved_cache is cache
+    assert namespace == "entry-one"
 
+    # With no entries registered, any hint raises
     monkeypatch.setattr(nbe_list_devices, "get_registered_entry_ids", lambda: [])
     with pytest.raises(MissingTokenCacheError):
         nbe_list_devices._resolve_cli_cache("entry-one")
@@ -70,7 +73,7 @@ def test_resolve_cli_cache_multiple_entries_require_hint(
     assert "GOOGLEFINDMY_ENTRY_ID" in message
 
 
-def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI helper should forward the selected cache/namespace to API calls."""
 
     cache = _DummyCache("entry-one")
@@ -124,9 +127,13 @@ def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -> None
         fake_location_module,
     )
 
-    monkeypatch.setattr("builtins.input", lambda prompt="": "1")
+    # Respond "1" to select the first tracker, then "q" to quit the loop.
+    _inputs = iter(["1", "q"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(_inputs))
 
-    asyncio.run(nbe_list_devices._async_cli_main("entry-one"))
+    # Use await instead of asyncio.run() to avoid creating a separate event
+    # loop that leaves pycares DNS resolver threads dangling on shutdown.
+    await nbe_list_devices._async_cli_main("entry-one")
 
     assert called["list_cache"] is cache
     assert called["list_namespace"] == "entry-one"

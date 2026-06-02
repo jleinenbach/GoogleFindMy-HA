@@ -971,12 +971,12 @@ def test_hass_data_layout(
         monkeypatch.setattr(
             entity_platform_module,
             "async_get_current_platform",
-            lambda: _StubPlatform(),
+            _StubPlatform,
             raising=False,
         )
         monkeypatch.setattr(
             "homeassistant.helpers.entity_platform.async_get_current_platform",
-            lambda: _StubPlatform(),
+            _StubPlatform,
             raising=False,
         )
 
@@ -1049,7 +1049,7 @@ def test_hass_data_layout(
         monkeypatch.setattr(
             button_module.entity_platform,
             "async_get_current_platform",
-            lambda: _StubPlatform(),
+            _StubPlatform,
             raising=False,
         )
         entry = harness.entry

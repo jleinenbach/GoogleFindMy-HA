@@ -24,12 +24,71 @@ When multiple modules need the same small utility (for example, `_mask_email_for
 
 The FCM supervisor uses a shared activity-health helper (freshness window + snapshot structure) to decide when a client is healthy, stale, or needs a restart. Reuse the existing helper and timestamp fields (`last_activity_monotonic`, freshness window constants, snapshot shape) rather than introducing new window values or parallel health calculations so diagnostics and coordinator state remain consistent across entries.
 
+## Token lifecycle & standalone persistence
+
+### Token hierarchy
+
+The integration uses a three-tier token chain derived from Google Play Services authentication:
+
+```
+Chrome Cookie (oauth2_4/***, single-use, consumed after first exchange)
+  → gpsoauth.exchange_token()
+  → AAS / Master Token (aas_et/***, quasi-permanent)
+    → gpsoauth.perform_oauth(service=...) — repeatable indefinitely
+    → ADM / Scoped Token (ya29.***, ~1 hour TTL)
+      → Nova API requests
+```
+
+* **Chrome OAuth cookie:** Obtained once via `accounts.google.com/EmbeddedSetup` (see `auth_flow.py`). It is **single-use** — after `exchange_token()` consumes it, the cookie is worthless. Never overwrite `CONF_OAUTH_TOKEN` with an AAS token; `adm_token_retrieval.py:450-454` guards the OAuth-fallback path with `not startswith("aas_et/")`.
+* **AAS master token:** Long-lived. Only invalidated by password change, manual revocation in Google account settings, or Google security heuristics. Can generate unlimited scoped ADM tokens via `perform_oauth()`.
+* **ADM scoped token:** Short-lived (~1 hour, measured adaptively by `TTLPolicy` in `nova_request.py`). Regenerated automatically from the AAS token on expiry.
+
+### Architecture note: OAuth fallback lives in the ADM layer
+
+When `gpsoauth.perform_oauth()` rejects the AAS token (`InvalidAasTokenError`), the retry logic in `adm_token_retrieval.py:449-482` attempts an **OAuth fallback**: it reads `CONF_OAUTH_TOKEN`, switches `DATA_AUTH_METHOD` to `"individual_tokens"`, and retries — which causes the next iteration to call `async_get_aas_token()` → `_generate_aas_token()` → `gpsoauth.exchange_token(oauth_cookie)` to produce a fresh AAS token from the Chrome cookie.
+
+This is architecturally an **AAS regeneration** triggered from the ADM layer. It works for HA where the Chrome cookie may still be fresh (e.g., during initial config validation), but is ineffective in standalone mode where the cookie is already consumed. A future refactor could move this fallback into `aas_token_retrieval.py` where it logically belongs; for now it is documented here so contributors understand the cross-layer dependency.
+
+### HA vs standalone persistence
+
+| Layer | HA mode | Standalone CLI (`main.py`) |
+|-------|---------|----------------------------|
+| **Volatile** | `TokenCache` (in-memory dict) | `_FileCache._data` (in-memory dict) |
+| **Persistent** | `entry.data` (HA database) — survives `cache.set(key, None)` and is re-seeded on every restart (`__init__.py:6897-6901`) | `secrets.json` — **only store**; a naive `set(key, None)` would permanently delete the value |
+
+### Soft invalidation (standalone)
+
+To bridge the architectural gap, `_FileCache` applies **soft invalidation** for the `aas_token` key (see `_SOFT_INVALIDATE_KEYS`). When `cache.set("aas_token", None)` is called during a runtime 401 recovery:
+
+1. The key is added to `_soft_invalidated` (in-memory set).
+2. `get("aas_token")` returns `None` for the remainder of the process — the runtime sees the token as invalidated and can attempt regeneration or fail fast.
+3. `_save()` is **not** called — `secrets.json` still contains the AAS token.
+4. On the next process start, `_soft_invalidated` is empty, so `get("aas_token")` returns the value from the file, effectively recovering the token.
+
+This mirrors HA's two-layer model where `entry.data` preserves the AAS token even after the volatile `TokenCache` is cleared.
+
+### When re-authentication is required
+
+If Google genuinely revokes the AAS master token (password change, security event), no cached value can recover it. The standalone CLI logs an explicit error:
+
+```
+AAS token exchange failed with a likely-expired OAuth cookie.
+The Chrome OAuth cookie is single-use and cannot be reused.
+Please re-authenticate: python -m custom_components.googlefindmy --reauth
+```
+
+In HA mode, the equivalent path raises `ConfigEntryAuthFailed`, which triggers the reconfiguration UI.
+
 ## Cache key conventions
 
 Android IDs and related identifiers stored in `TokenCache` must follow predictable, per-user keys so helpers avoid collisions between accounts:
 
 * **AAS/FCM Android IDs:** `android_id_<username>` — always the normalized username string (entry-scoped) as the suffix.
 * **FCM credential bundle:** `fcm_credentials` — contains the `gcm.android_id` value that downstream helpers normalize and cache under the key above.
+* **AAS token:** `aas_token` (`DATA_AAS_TOKEN`) — the master token. In standalone mode this key is **soft-invalidated** (hidden in memory but preserved in `secrets.json`). Do not add it to hard-delete flows.
+* **OAuth token:** `oauth_token` (`CONF_OAUTH_TOKEN`) — the original Chrome cookie. Must remain as-is after initial storage; never overwrite with an AAS token value.
+* **Shared key:** `shared_key` — the 32-byte vault-backed key used to decrypt the owner key. In HA mode, pre-populated from the secrets bundle as `shared_key_<email>` and migrated to `shared_key` on first access. In standalone CLI mode, obtained via the interactive browser flow on first run.
+* **Owner key:** `owner_key_<username>` — the decrypted owner key (hex string). Cleared during `--reauth` and during blind-refresh retries when EIK decryption fails.
 
 When adding new cache-backed helpers under this directory, reuse these patterns (prefix + username suffix) so multi-account setups remain isolated and future helpers can retrieve existing values without guessing.
 

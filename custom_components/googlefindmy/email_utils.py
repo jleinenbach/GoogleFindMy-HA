@@ -1,4 +1,4 @@
-# custom_components/googlefindmy/email.py
+# custom_components/googlefindmy/email_utils.py
 """Shared helpers for normalizing account identifiers."""
 
 from __future__ import annotations

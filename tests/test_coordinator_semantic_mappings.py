@@ -78,7 +78,7 @@ def _base_coordinator(
     coordinator.location_poll_interval = 0
     coordinator.data = []
     coordinator._last_device_list = []
-    coordinator._get_ignored_set = lambda: set()
+    coordinator._get_ignored_set = set
     coordinator._build_snapshot_from_cache = lambda *_args, **_kwargs: []
     coordinator._get_google_home_filter = lambda: google_filter
     coordinator.api = _DummyAPI(api_payload)

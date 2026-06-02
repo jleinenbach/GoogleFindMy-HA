@@ -13,12 +13,12 @@ import pytest
 
 from custom_components.googlefindmy.Auth.firebase_messaging.const import (
     GCM_REGISTER3_URL,
-    GCM_REGISTER_URL,
     GCM_SERVER_KEY_B64,
 )
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegister,
     FcmRegisterConfig,
+    FcmRegisterHTTPError,
 )
 
 
@@ -84,16 +84,13 @@ def test_gcm_register_prefers_legacy_sender_first(
     assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_html_response_triggers_sender_fallback(
+def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """HTML/404 responses trigger a sender fallback before the next attempt."""
+    """HTML/404 responses retry on the same endpoint without switching sender (upstream alignment)."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
-        _FakeResponse(
-            404, "<!doctype html>legacy not found", {"Content-Type": "text/html"}
-        ),
         _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
     ]
     session = _FakeSession(responses)
@@ -118,67 +115,21 @@ def test_gcm_register_html_response_triggers_sender_fallback(
 
     assert result["token"] == "abc123"
     assert result["android_id"] == 42
+    # Both attempts use the same endpoint — no rotation (upstream alignment)
     assert [call["url"] for call in session.calls] == [
         GCM_REGISTER3_URL,
         GCM_REGISTER3_URL,
-        GCM_REGISTER_URL,
     ]
     assert [call["data"]["sender"] for call in session.calls] == [
         GCM_SERVER_KEY_B64,
-        "1234567890123",
-        "1234567890123",
+        GCM_SERVER_KEY_B64,
     ]
-    assert any(
-        "switching sender from" in record.getMessage()
-        and "HTML/404" in record.getMessage()
-        and "1234567890123" in record.getMessage()
-        and GCM_SERVER_KEY_B64 in record.getMessage()
-        for record in caplog.records
-    )
 
 
-def test_gcm_register_rotation_logs_reason_and_sender(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Endpoint rotation still logs details when no fallback sender is available."""
-
-    responses = [
-        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
-        _FakeResponse(200, "token=abc123", {"Content-Type": "text/plain"}),
-    ]
-    session = _FakeSession(responses)
-    config = FcmRegisterConfig(
-        project_id="proj",
-        app_id="app",
-        api_key="key",
-        messaging_sender_id=GCM_SERVER_KEY_B64,
-        bundle_id="bundle",
-    )
-    register = FcmRegister(config, http_client_session=session)
-
-    async def fast_sleep(_: float) -> None:
-        return None
-
-    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
-
-    with caplog.at_level(logging.WARNING):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 11, "securityToken": 22})
-        )
-
-    assert result["token"] == "abc123"
-    assert any(
-        "GCM register switching endpoint /c2dm/register3 -> /c2dm/register due to HTTP 404"
-        in record.getMessage()
-        and f"sender={GCM_SERVER_KEY_B64} (legacy server key)" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_gcm_register_fallback_succeeds_on_second_attempt(
+def test_gcm_register_404_retries_with_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failing attempt triggers a sender fallback and succeeds immediately."""
+    """A 404 retries on the same endpoint with the same legacy sender."""
 
     responses = [
         _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"}),
@@ -202,13 +153,15 @@ def test_gcm_register_fallback_succeeds_on_second_attempt(
     result = asyncio.run(register.gcm_register({"androidId": 11, "securityToken": 22}))
 
     assert result["token"] == "abc123"
+    # No endpoint rotation — always /c2dm/register3 (upstream alignment)
     assert [call["url"] for call in session.calls] == [
         GCM_REGISTER3_URL,
         GCM_REGISTER3_URL,
     ]
+    # Sender stays legacy — no switch to numeric
     assert [call["data"]["sender"] for call in session.calls] == [
         GCM_SERVER_KEY_B64,
-        "1234567890123",
+        GCM_SERVER_KEY_B64,
     ]
 
 
@@ -274,10 +227,10 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
     assert len(session.calls) == 2
 
 
-def test_gcm_register_falls_back_to_numeric_sender(
+def test_gcm_register_phone_registration_error_retries_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """PHONE_REGISTRATION_ERROR triggers a second attempt using the numeric sender."""
+    """PHONE_REGISTRATION_ERROR is transient — retries with the same sender (no switch)."""
 
     responses = [
         _FakeResponse(
@@ -306,14 +259,15 @@ def test_gcm_register_falls_back_to_numeric_sender(
 
     assert result["token"] == "xyz"
     assert len(session.calls) == 2
+    # Both attempts use the same legacy sender — no switch to numeric
     assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
-    assert session.calls[1]["data"]["sender"] == "1234567890123"
+    assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_phone_registration_error_logs_sender(
+def test_gcm_register_phone_registration_error_logs_transient(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """PHONE_REGISTRATION_ERROR debug log reports which sender was active."""
+    """PHONE_REGISTRATION_ERROR log reports the error as transient."""
 
     responses = [
         _FakeResponse(
@@ -336,7 +290,7 @@ def test_gcm_register_phone_registration_error_logs_sender(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.INFO):
         result = asyncio.run(
             register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
         )
@@ -344,12 +298,7 @@ def test_gcm_register_phone_registration_error_logs_sender(
     assert result["token"] == "xyz"
     assert any(
         "PHONE_REGISTRATION_ERROR" in record.getMessage()
-        and f"sender={GCM_SERVER_KEY_B64} (legacy server key)" in record.getMessage()
-        for record in caplog.records
-    )
-    assert any(
-        "switching sender fallback" in record.getMessage()
-        and "sender=1234567890123" in record.getMessage()
+        and "transient" in record.getMessage()
         for record in caplog.records
     )
 
@@ -392,3 +341,75 @@ def test_checkin_or_register_reuses_cached_credentials(
     assert result is cached_creds
     assert recorded["android_id"] == cached_creds["gcm"]["android_id"]
     assert recorded["security_token"] == cached_creds["gcm"]["security_token"]
+
+
+def test_gcm_register_raises_on_persistent_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the retry budget is exhausted on persistent 404 responses,
+    gcm_register must raise FcmRegisterHTTPError(status=404) so the caller
+    can run the dedicated endpoint retry budget instead of treating it as
+    a transient runtime error.
+    """
+    responses = [
+        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        asyncio.run(
+            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+        )
+
+    assert exc_info.value.status == 404
+
+
+def test_gcm_register_raises_on_persistent_401(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the retry budget is exhausted on persistent 401 responses
+    without a parsed ``Error=`` body (for example an HTML/empty
+    unauthorized response), gcm_register must raise
+    FcmRegisterHTTPError(status=401) so the supervisor's auth path
+    (token invalidation via _invalidate_fcm_tokens) runs instead of
+    treating the auth denial as a transient runtime error.
+    """
+    responses = [
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        asyncio.run(
+            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+        )
+
+    assert exc_info.value.status == 401

@@ -161,7 +161,7 @@ def coordinator(
     coord._async_start_poll_cycle = AsyncMock()
     coord._ensure_registry_for_devices = lambda *_args, **_kwargs: 0
     coord._schedule_short_retry = lambda *_args, **_kwargs: None
-    coord._get_ignored_set = lambda: set()
+    coord._get_ignored_set = set
     coord._is_fcm_ready_soft = lambda: True
     coord._set_fcm_status(FcmStatus.CONNECTED)
     yield coord

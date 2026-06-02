@@ -23,6 +23,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_inter
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .Auth.username_provider import username_string
 from .const import DOMAIN
 from .coordinator import DeviceIdentity, GoogleFindMyCoordinator
 from .FMDNCrypto._lazy_crypto import get_aesgcm_class, get_invalid_tag_exception
@@ -30,6 +31,7 @@ from .FMDNCrypto.eid_generator import (
     FHNA_COUNTER_MASK,
     LEGACY_EID_LENGTH,
     MODERN_EID_LENGTH,
+    P256_ORDER,
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
     ROTATION_PERIOD_3600,
@@ -65,6 +67,30 @@ MODERN_FRAME_TYPE = 0x41
 RAW_HEADER_LENGTH = 1
 SERVICE_DATA_OFFSET = 8
 AESGCM_NONCE_LENGTH = 12
+
+# FMDN hashed_flags byte: bit-extraction constants for the XOR-decoded byte.
+# Why these constants exist: the FMDN spec numbers bits MSB-first while
+# Python uses LSB-first arithmetic — a naive translation flips the
+# battery and UWT fields silently. The constants make the mapping explicit
+# and grep-stable; the canonical spec quote, bit-layout table and the
+# anti-pattern warning live at the decode site (see
+# GoogleFindMyEIDResolver._update_ble_battery — CANONICAL SPEC ANCHOR).
+# Reference: https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+# (retrieved 2026-06-02). Drift between code and spec is guarded by
+# tests/test_ble_battery_sensor.py::TestFmdnHashedFlagsConstantsMatchSpec.
+FMDN_HASHED_FLAGS_BATTERY_MASK = 0x03  # 2-bit field after right-shift
+FMDN_HASHED_FLAGS_BATTERY_SHIFT = 1
+FMDN_HASHED_FLAGS_UWT_MODE_MASK = 0x01  # 1-bit field, standard LSB
+
+# Curve parameters for compute_flags_xor_mask(), keyed by EidVariant.
+# (curve_byte_len, curve_order): Legacy uses secp160r1 (None=default), P256 uses P256_ORDER.
+_VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
+    EidVariant.LEGACY_SECP160R1_X20_BE: (LEGACY_EID_LENGTH, None),
+    EidVariant.MODERN_P256_X32_BE: (MODERN_EID_LENGTH, P256_ORDER),
+    EidVariant.MODERN_P256_X20_TRUNC_BE: (MODERN_EID_LENGTH, P256_ORDER),
+    EidVariant.MODERN_P256_X32_LE_SCALAR: (MODERN_EID_LENGTH, P256_ORDER),
+    EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
+}
 
 # Strategy Configuration
 # ENABLE_ABSOLUTE_UNIX_BASIS: If True, scans for EIDs based on absolute Unix time (Deep Scan).
@@ -157,9 +183,9 @@ class BLEBatteryState:
     """Decoded battery state from FMDN hashed-flags BLE advertisement.
 
     Attributes:
-        battery_level: Raw FMDN value (0=GOOD, 1=LOW, 2=CRITICAL, 3=RESERVED).
-        battery_pct: Mapped percentage (100, 25, 5) or None for RESERVED (3).
-        uwt_mode: True if Unwanted Tracking mode is active (bit 7).
+        battery_level: Raw FMDN value (0=UNSUPPORTED, 1=NORMAL, 2=LOW, 3=CRITICALLY_LOW).
+        battery_pct: Mapped percentage (100, 25, 5) or None for UNSUPPORTED (0).
+        uwt_mode: True if Unwanted Tracking mode is active.
         decoded_flags: Fully decoded flags byte (after XOR).
         observed_at_wall: Wall-clock timestamp of the BLE observation (time.time()).
     """
@@ -192,10 +218,10 @@ class BLEScanInfo:
 
 
 # Mapping from FMDN 2-bit battery level to percentage.
-# Aligned with HA Core convention (cf. homeassistant/components/fitbit/const.py)
-# and HA icon thresholds in homeassistant/helpers/icon.py:
+# Per Google FMDN spec: 0=Unsupported, 1=Normal, 2=Low, 3=Critically Low.
+# HA icon thresholds in homeassistant/helpers/icon.py:
 #   100% → mdi:battery, 25% → mdi:battery-20, 5% → mdi:battery-alert
-FMDN_BATTERY_PCT: dict[int, int] = {0: 100, 1: 25, 2: 5}
+FMDN_BATTERY_PCT: dict[int, int | None] = {0: None, 1: 100, 2: 25, 3: 5}
 
 
 @runtime_checkable
@@ -1532,10 +1558,15 @@ class GoogleFindMyEIDResolver:
                 variants = self._compute_variants(work_item, window)
                 for variant_spec in variants:
                     xor_mask: int | None = None
+                    curve_len, curve_ord = _VARIANT_CURVE_PARAMS.get(
+                        variant_spec.variant, (LEGACY_EID_LENGTH, None)
+                    )
                     try:
                         xor_mask = compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
+                            curve_byte_len=curve_len,
+                            curve_order=curve_ord,
                         )
                     except Exception:  # noqa: BLE001
                         pass
@@ -1578,7 +1609,7 @@ class GoogleFindMyEIDResolver:
         """Return a valid `EidVariant` value string for persistence."""
 
         try:
-            return EidVariant(raw).value
+            return EidVariant(str(raw)).value
         except Exception:
             pass
 
@@ -1590,12 +1621,12 @@ class GoogleFindMyEIDResolver:
                 except Exception:
                     if stripped.isdigit():
                         try:
-                            return EidVariant(int(stripped)).value
+                            return EidVariant(str(int(stripped))).value
                         except Exception:
                             pass
         elif isinstance(raw, int) and not isinstance(raw, bool):
             try:
-                return EidVariant(raw).value
+                return EidVariant(str(raw)).value
             except Exception:
                 pass
 
@@ -1768,7 +1799,11 @@ class GoogleFindMyEIDResolver:
 
         key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
         try:
-            shared_key = await async_get_shared_key(cache=cache)
+            _cached_user = await cache.get(username_string)
+            shared_key = await async_get_shared_key(
+                cache=cache,
+                username=_cached_user if isinstance(_cached_user, str) else None,
+            )
         except Exception:  # pragma: no cover - best-effort
             shared_key = None
         if shared_key is not None:
@@ -2354,7 +2389,7 @@ class GoogleFindMyEIDResolver:
     # ------------------------------------------------------------------
     # FMDN BLE battery decode + store
     # ------------------------------------------------------------------
-    def _update_ble_battery(
+    def _update_ble_battery(  # noqa: PLR0912
         self,
         raw: bytes,
         observed_frame: int | None,
@@ -2383,25 +2418,94 @@ class GoogleFindMyEIDResolver:
         xor_mask: int | None = metadata.get("flags_xor_mask")
 
         # ---- Determine the hashed-flags byte position ----
+        # FMDN frame-type semantics for 0x40/0x41 are not publicly fixed and
+        # are accessory-generation specific (see docs/FMDN.md). The strict
+        # mapping in docs/BLE_BATTERY_SENSOR.md (0x40<->20-byte EID,
+        # 0x41<->32-byte EID) describes the common case, but variants with
+        # 0x41 carrying a 20-byte legacy EID have been observed and are
+        # already tolerated in `_extract_candidates` (raw-header path, see
+        # the `RAW_HEADER_LENGTH + LEGACY_EID_LENGTH <= length <= +1` branch).
+        # The lenient elif branches below mirror that tolerance for the
+        # flags-byte lookup so a 29-byte service-data payload or a 22-byte
+        # raw-header payload with `byte[frame_pos] == MODERN_FRAME_TYPE`
+        # still decodes the UT-mode/battery flags instead of silently
+        # dropping them. Range is intentionally narrow (legacy_min..legacy_min+1)
+        # to match the existing tolerance and limit false-positive decodes.
         flags_byte: int | None = None
+        # Service-data format: [header(7)][frame(1)][EID(N)][flags(1)]
         if (
             length >= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
             and raw[7] == FMDN_FRAME_TYPE
         ):
-            # Service-data format: [header(7)][frame(1)][EID(20)][flags(1)]
             flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+        elif (
+            length >= SERVICE_DATA_OFFSET + MODERN_EID_LENGTH + 1
+            and raw[7] == MODERN_FRAME_TYPE
+        ):
+            flags_byte = raw[SERVICE_DATA_OFFSET + MODERN_EID_LENGTH]
+        elif (
+            SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 1
+            <= length
+            <= SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 2
+            and raw[7] == MODERN_FRAME_TYPE
+        ):
+            # Lenient: 0x41 frame with legacy-length payload (UT-mode variant).
+            flags_byte = raw[SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH]
+        # Raw-header format: [frame(1)][EID(N)][flags(1)]
         elif (
             length >= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
             and raw[0] == FMDN_FRAME_TYPE
         ):
-            # Raw-header format: [frame(1)][EID(20)][flags(1)]
+            flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
+        elif (
+            length >= RAW_HEADER_LENGTH + MODERN_EID_LENGTH + 1
+            and raw[0] == MODERN_FRAME_TYPE
+        ):
+            flags_byte = raw[RAW_HEADER_LENGTH + MODERN_EID_LENGTH]
+        elif (
+            RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+            <= length
+            <= RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 2
+            and raw[0] == MODERN_FRAME_TYPE
+        ):
+            # Lenient: 0x41 frame with legacy-length payload (UT-mode variant).
             flags_byte = raw[RAW_HEADER_LENGTH + LEGACY_EID_LENGTH]
 
         # ---- Decode and store ----
+        # CANONICAL SPEC ANCHOR for FMDN hashed_flags decoding.
+        # SPEC QUOTE (verbatim, retrieved 2026-06-02):
+        #   "bits are referenced from most significant to least significant"
+        # https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+        #
+        # Spec bit numbering vs. standard LSB-first arithmetic:
+        #   spec bit:  0    1    2    3    4    5    6    7
+        #   value:    0x80 0x40 0x20 0x10 0x08 0x04 0x02 0x01   (spec bit 0 = MSB)
+        #   meaning:  rsv  rsv  rsv  rsv  rsv  bat  bat  uwt
+        #
+        # Mapping to standard (LSB-first) bit indices used below:
+        #   spec bits 5-6 (battery, 2 bit)  == standard bits 2-1 (mask 0x06, shift >> 1)
+        #   spec bit  7   (UWT mode, 1 bit) == standard bit  0   (mask 0x01)
+        # Module constants `FMDN_HASHED_FLAGS_BATTERY_MASK`,
+        # `FMDN_HASHED_FLAGS_BATTERY_SHIFT`, `FMDN_HASHED_FLAGS_UWT_MODE_MASK`
+        # in `eid_resolver.py` (top of module, FMDN frame-type cluster)
+        # encode this mapping; their numeric values are drift-guarded by
+        # `tests/test_ble_battery_sensor.py::TestFmdnHashedFlagsConstantsMatchSpec`.
+        #
+        # ANTI-PATTERN -- DO NOT "fix" this to (decoded >> 5) & 0x03 / decoded & 0x80.
+        # That reads spec bits 2-3 (reserved zeros) instead of the battery field
+        # and silently breaks normal/low/critical advertisements. The MSB-first
+        # qualifier in the spec is the load-bearing detail. Doing so also fails:
+        #   tests/test_ble_battery_sensor.py::TestHashedFlagsMsbFirstConvention
+        #   tests/test_ble_battery_sensor.py::TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation
+        # See also docs/BLE_BATTERY_SENSOR.md L45.
         if flags_byte is not None and xor_mask is not None:
             decoded = flags_byte ^ xor_mask
-            battery_raw = (decoded >> 5) & 0x03  # bits 5-6
-            uwt_mode = bool((decoded >> 7) & 0x01)  # bit 7
+            # Mask/shift centralized in FMDN_HASHED_FLAGS_* constants
+            # (top of module, FMDN frame-type cluster).
+            battery_raw = (
+                decoded >> FMDN_HASHED_FLAGS_BATTERY_SHIFT
+            ) & FMDN_HASHED_FLAGS_BATTERY_MASK
+            uwt_mode = bool(decoded & FMDN_HASHED_FLAGS_UWT_MODE_MASK)
             battery_pct = FMDN_BATTERY_PCT.get(battery_raw)
             now_wall = time.time()
 
@@ -2413,7 +2517,12 @@ class GoogleFindMyEIDResolver:
                 observed_at_wall=now_wall,
             )
 
-            battery_labels = {0: "GOOD", 1: "LOW", 2: "CRITICAL", 3: "RESERVED"}
+            battery_labels = {
+                0: "UNSUPPORTED",
+                1: "NORMAL",
+                2: "LOW",
+                3: "CRITICALLY_LOW",
+            }
             battery_label = battery_labels.get(battery_raw, f"UNKNOWN({battery_raw})")
 
             # Store for ALL matches (shared-device propagation).
@@ -2459,7 +2568,7 @@ class GoogleFindMyEIDResolver:
                         battery_raw,
                     )
         else:
-            # Cannot decode — log once per device at DEBUG for diagnostics
+            # Cannot decode — log once per device at INFO for diagnostics
             for match in matches:
                 storage_key = match.canonical_id or match.device_id
                 if storage_key not in self._flags_logged_devices:
@@ -2469,7 +2578,7 @@ class GoogleFindMyEIDResolver:
                         if length <= _max_hex
                         else raw[:_max_hex].hex() + "..."
                     )
-                    _LOGGER.debug(
+                    _LOGGER.info(
                         "FMDN_FLAGS_PROBE device=%s canonical=%s "
                         "CANNOT_DECODE observed_frame=%s payload_len=%d "
                         "has_xor_mask=%s flags_byte_found=%s raw_hex=%s",

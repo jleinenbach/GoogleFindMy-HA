@@ -950,28 +950,29 @@ class TestFmdnBatteryPct:
     """Tests for FMDN_BATTERY_PCT mapping correctness."""
 
     def test_good_maps_to_100(self) -> None:
-        assert FMDN_BATTERY_PCT[0] == 100
+        assert FMDN_BATTERY_PCT[1] == 100
 
     def test_low_maps_to_25(self) -> None:
-        assert FMDN_BATTERY_PCT[1] == 25
+        assert FMDN_BATTERY_PCT[2] == 25
 
     def test_critical_maps_to_5(self) -> None:
-        assert FMDN_BATTERY_PCT[2] == 5
+        assert FMDN_BATTERY_PCT[3] == 5
 
-    def test_unknown_level_not_in_map(self) -> None:
-        """Level 3 (reserved) should not be in the map."""
-        assert 3 not in FMDN_BATTERY_PCT
+    def test_unsupported_maps_to_none(self) -> None:
+        """Level 0 (unsupported) should map to None."""
+        assert FMDN_BATTERY_PCT[0] is None
 
-    def test_exactly_three_entries(self) -> None:
-        assert len(FMDN_BATTERY_PCT) == 3
+    def test_exactly_four_entries(self) -> None:
+        assert len(FMDN_BATTERY_PCT) == 4
 
-    def test_all_values_positive(self) -> None:
+    def test_all_known_values_positive(self) -> None:
         for level, pct in FMDN_BATTERY_PCT.items():
-            assert pct > 0, f"Level {level} has non-positive percentage {pct}"
+            if pct is not None:
+                assert pct > 0, f"Level {level} has non-positive percentage {pct}"
 
     def test_values_descending_with_levels(self) -> None:
         """Higher levels should map to lower percentages."""
-        assert FMDN_BATTERY_PCT[0] > FMDN_BATTERY_PCT[1] > FMDN_BATTERY_PCT[2]
+        assert FMDN_BATTERY_PCT[1] > FMDN_BATTERY_PCT[2] > FMDN_BATTERY_PCT[3]
 
 
 # ===========================================================================

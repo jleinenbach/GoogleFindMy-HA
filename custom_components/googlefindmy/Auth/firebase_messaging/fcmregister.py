@@ -59,7 +59,6 @@ from .const import (
     FCM_SEND_URL,
     GCM_CHECKIN_URL,
     GCM_REGISTER3_URL,
-    GCM_REGISTER_URL,
     GCM_SERVER_KEY_B64,
     SDK_VERSION,
 )
@@ -74,6 +73,36 @@ from .proto.checkin_pb2 import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+class FcmRegisterHTTPError(RuntimeError):
+    """Raised when an FCM/GCM endpoint returns a fatal HTTP status (401/404).
+
+    Carries the numeric ``status`` so callers can classify the failure as an
+    authentication error (401) or endpoint/credential rotation (404) and apply
+    the appropriate retry budget. Inherits from ``RuntimeError`` to remain
+    compatible with existing ``except RuntimeError`` callers, while allowing
+    a dedicated ``except FcmRegisterHTTPError`` branch to escalate ahead of
+    the generic transient-error handling.
+    """
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+_FATAL_HTTP_STATUSES = (HTTPStatus.UNAUTHORIZED, HTTPStatus.NOT_FOUND)
+
+
+_SHA1_HEX_LENGTH = 40
+
+
+def _normalize_sha1_fingerprint(v: str) -> str:
+    """Strip colons/spaces and validate a SHA-1 hex fingerprint."""
+    v = v.replace(":", "").replace(" ", "").strip().lower()
+    if len(v) != _SHA1_HEX_LENGTH or not all(c in "0123456789abcdef" for c in v):
+        raise ValueError(f"Invalid SHA-1 fingerprint: {v!r}")
+    return v
 
 
 @dataclass
@@ -99,6 +128,10 @@ class FcmRegisterConfig:
           to avoid server errors.
         - If Google rejects the numeric sender with `PHONE_REGISTRATION_ERROR`, we
           automatically fall back to the legacy server key used by upstream tools.
+        - `android_cert_sha1` is the SHA-1 fingerprint of the Android signing
+          certificate. When set together with `bundle_id`, both values are sent as
+          ``X-Android-Package`` / ``X-Android-Cert`` headers on Firebase API calls
+          so that API-key restrictions are satisfied.
     """
 
     project_id: str
@@ -111,11 +144,16 @@ class FcmRegisterConfig:
     vapid_key: str | None = GCM_SERVER_KEY_B64
     persistent_ids: list[str] | None = None
     heartbeat_interval_ms: int = 5 * 60 * 1000  # 5 mins
+    android_cert_sha1: str | None = None
 
     def __post_init__(self) -> None:
         """Post-initialization hook to set default for persistent_ids."""
         if self.persistent_ids is None:
             self.persistent_ids = []
+        if self.android_cert_sha1 is not None:
+            self.android_cert_sha1 = _normalize_sha1_fingerprint(
+                self.android_cert_sha1
+            )
 
 
 class FcmRegister:
@@ -158,6 +196,13 @@ class FcmRegister:
     # ---------------------------------------------------------------------
     # Helpers (logging / URL handling / redaction)
     # ---------------------------------------------------------------------
+    def _add_android_restriction_headers(self, headers: dict[str, str]) -> None:
+        """Add X-Android-Package/Cert headers when configured."""
+        if self.config.bundle_id:
+            headers["X-Android-Package"] = self.config.bundle_id
+        if self.config.android_cert_sha1:
+            headers["X-Android-Cert"] = self.config.android_cert_sha1
+
     @staticmethod
     def _redact(value: Any, keep_tail: int = 6) -> str:
         """Return a redacted version of tokens/ids for safe logging."""
@@ -278,8 +323,21 @@ class FcmRegister:
                         status,
                         text[:200],
                     )
+                    if status in _FATAL_HTTP_STATUSES:
+                        # 401/404 indicate invalid credentials or a moved
+                        # endpoint — retrying with the same payload only
+                        # multiplies the failure. Surface as fatal so the
+                        # caller can rotate tokens or re-register.
+                        raise FcmRegisterHTTPError(
+                            f"GCM check-in fatal status {status}",
+                            status=int(status),
+                        )
                     # After a failure, retry **without** android_id/security_token once
                     payload = self._get_checkin_payload()
+            except FcmRegisterHTTPError:
+                # Propagate fatal HTTP status to the caller; do not swallow
+                # into the generic transient-retry loop below.
+                raise
             except Exception as e:
                 _logger.warning(
                     "GCM check-in error (attempt %d/%d) at url=%s: %s",
@@ -333,12 +391,15 @@ class FcmRegister:
             ``None``.
 
         Notes:
-            Legacy upstream clients always used the legacy server key sender, which
-            still succeeds instantly for most accounts. We keep that behaviour as
-            the first attempt and only fall back to the configured numeric sender
-            when Google rejects the legacy key (HTML/404 or explicit error). This
-            matches observed production success rates while retaining support for
-            modern projects that require the numeric sender.
+            Upstream GoogleFindMyTools always uses the legacy server key
+            (``GCM_SERVER_KEY_B64``) and never falls back to the configured
+            numeric sender. We mirror that policy: the legacy key is the only
+            sender candidate, regardless of HTTP 404, HTML responses, or
+            ``PHONE_REGISTRATION_ERROR``. Earlier versions rotated to the
+            numeric sender on rejection, which wasted the entire retry budget
+            because the numeric sender returns persistent 404 for the affected
+            account class (see commit ``ba186349`` for the upstream-alignment
+            rationale).
         """
         gcm_app_id = f"wp:{self.config.bundle_id}#{uuid.uuid4()}"
         android_id = options["androidId"]
@@ -349,77 +410,23 @@ class FcmRegister:
             "Content-Type": "application/x-www-form-urlencoded",
         }
 
-        sender_candidates: list[str] = []
-
-        # Prefer the legacy server key because it consistently succeeds without
-        # additional retries for existing deployments.
-        sender_candidates.append(GCM_SERVER_KEY_B64)
-
-        if (
-            isinstance(self.config.messaging_sender_id, str)
-            and self.config.messaging_sender_id
-            and self.config.messaging_sender_id != GCM_SERVER_KEY_B64
-        ):
-            sender_candidates.append(self.config.messaging_sender_id)
-
         body = {
             "app": self.config.chrome_id,
             "X-subtype": gcm_app_id,
             "device": android_id,
-            "sender": sender_candidates[0],
+            "sender": GCM_SERVER_KEY_B64,
         }
 
         last_error: str | Exception | None = None
-        sender_index = 0
         attempt = 1
-        endpoints = (GCM_REGISTER3_URL, GCM_REGISTER_URL)
-        endpoint_index = 0
-
-        def sender_mode(sender: str) -> str:
-            """Return a human readable label for the active sender."""
-
-            if sender == GCM_SERVER_KEY_B64:
-                return "legacy server key"
-            if sender == self.config.messaging_sender_id:
-                return "configured numeric sender"
-            return "custom sender"
-
-        def log_endpoint_switch(
-            reason: str, current_index: int, next_index: int
-        ) -> None:
-            """Log when we switch between /register3 and /register endpoints."""
-
-            current_indicator = (
-                "/c2dm/register3"
-                if endpoints[current_index] == GCM_REGISTER3_URL
-                else "/c2dm/register"
-            )
-            next_indicator = (
-                "/c2dm/register3"
-                if endpoints[next_index] == GCM_REGISTER3_URL
-                else "/c2dm/register"
-            )
-            _logger.warning(
-                "GCM register switching endpoint %s -> %s due to %s; sender=%s (%s)",
-                current_indicator,
-                next_indicator,
-                reason,
-                body["sender"],
-                sender_mode(body["sender"]),
-            )
 
         while attempt <= retries:
-            url = endpoints[endpoint_index]
-            indicator = (
-                "/c2dm/register3" if url == GCM_REGISTER3_URL else "/c2dm/register"
-            )
 
             if self._log_debug_verbose:
                 _logger.debug(
-                    "GCM Registration request attempt %d/%d via %s: app=%s, X-subtype=%s, device=%s, sender=%s",
+                    "GCM Registration request attempt %d/%d via /c2dm/register3: app=%s, X-subtype=%s, device=%s, sender=%s",
                     attempt,
                     retries,
-                    indicator,
                     body["app"],
                     self._redact(body["X-subtype"]),
                     self._redact(body["device"]),
@@ -428,7 +435,7 @@ class FcmRegister:
 
             try:
                 async with self._session.post(
-                    url=url,
+                    url=GCM_REGISTER3_URL,
                     headers=headers,
                     data=body,
                     timeout=self.CLIENT_TIMEOUT,
@@ -439,20 +446,12 @@ class FcmRegister:
             except Exception as exc:  # network or aiohttp failure
                 last_error = exc
                 _logger.warning(
-                    "GCM register request failed via %s (attempt %d/%d): %s",
-                    indicator,
+                    "GCM register request failed via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
                     retries,
                     exc,
                 )
                 if attempt < retries:
-                    next_index = (endpoint_index + 1) % len(endpoints)
-                    log_endpoint_switch(
-                        f"exception={exc.__class__.__name__}",
-                        endpoint_index,
-                        next_index,
-                    )
-                    endpoint_index = next_index
                     await asyncio.sleep(1)
                 attempt += 1
                 continue
@@ -464,42 +463,14 @@ class FcmRegister:
             if status == HTTPStatus.NOT_FOUND or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
-                fallback_triggered = False
-                if sender_index + 1 < len(sender_candidates):
-                    # Treat persistent HTML/404 responses as a signal to advance to the
-                    # next sender candidate so we do not waste the entire retry budget
-                    # on an endpoint that is not provisioned for the numeric sender.
-                    previous_sender = body["sender"]
-                    sender_index += 1
-                    body["sender"] = sender_candidates[sender_index]
-                    endpoint_index = 0
-                    fallback_triggered = True
-                    _logger.warning(
-                        "GCM register received HTML/404 via %s; switching sender from %s (%s) to %s (%s)",
-                        indicator,
-                        previous_sender,
-                        sender_mode(previous_sender),
-                        body["sender"],
-                        sender_mode(body["sender"]),
-                    )
+                _logger.warning(
+                    "GCM register 404/HTML via /c2dm/register3 (attempt %d/%d, status=%s)",
+                    attempt,
+                    retries,
+                    status,
+                )
                 if attempt < retries:
-                    if not fallback_triggered:
-                        next_index = (endpoint_index + 1) % len(endpoints)
-                        log_endpoint_switch(
-                            f"HTTP {status}", endpoint_index, next_index
-                        )
-                        endpoint_index = next_index
-                    elif self._log_debug_verbose:
-                        _logger.debug(
-                            "GCM register resetting endpoint rotation after HTML/404 sender fallback"
-                        )
-                    await asyncio.sleep(1 if fallback_triggered else 0.5)
-                else:
-                    _logger.warning(
-                        "GCM register 404/HTML via %s (status=%s); no retries left.",
-                        indicator,
-                        status,
-                    )
+                    await asyncio.sleep(1)
                 attempt += 1
                 continue
 
@@ -516,12 +487,10 @@ class FcmRegister:
 
             if token:
                 _logger.info(
-                    "GCM register succeeded via %s on attempt %d/%d using sender=%s (%s)",
-                    indicator,
+                    "GCM register succeeded via /c2dm/register3 on attempt %d/%d using sender=%s (legacy server key)",
                     attempt,
                     retries,
                     body["sender"],
-                    sender_mode(body["sender"]),
                 )
                 return {
                     "token": token,
@@ -532,61 +501,38 @@ class FcmRegister:
 
             if error_code:
                 last_error = f"Error={error_code}"
-                if error_code == "PHONE_REGISTRATION_ERROR" and sender_index + 1 < len(
-                    sender_candidates
-                ):
-                    _logger.debug(
-                        "GCM register encountered PHONE_REGISTRATION_ERROR with sender=%s (%s)",
-                        body["sender"],
-                        sender_mode(body["sender"]),
-                    )
-                    sender_index += 1
-                    body["sender"] = sender_candidates[sender_index]
-                    label = (
-                        "legacy server key"
-                        if sender_candidates[sender_index] == GCM_SERVER_KEY_B64
-                        else "configured numeric sender"
-                    )
-                    _logger.warning(
-                        "GCM register error %s encountered; switching sender fallback to %s (sender=%s)",
+                if error_code == "PHONE_REGISTRATION_ERROR":
+                    # Transient error — just retry with the same sender.
+                    # Upstream GoogleFindMyTools treats this as transient and
+                    # retries without switching sender, which eventually succeeds.
+                    _logger.info(
+                        "GCM register %s (transient, attempt %d/%d); "
+                        "retrying with same sender=%s (legacy server key)",
                         error_code,
-                        label,
+                        attempt,
+                        retries,
                         body["sender"],
                     )
-                    if attempt < retries:
-                        await asyncio.sleep(1)
-                    attempt += 1
-                    continue
-
-                _logger.warning(
-                    "GCM register error via %s (attempt %d/%d): %s",
-                    indicator,
-                    attempt,
-                    retries,
-                    last_error,
-                )
+                else:
+                    _logger.warning(
+                        "GCM register error via /c2dm/register3 (attempt %d/%d): %s",
+                        attempt,
+                        retries,
+                        last_error,
+                    )
             else:
                 snippet = response_text[:200]
                 if html_like:
                     snippet += " [html]"
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
                 _logger.warning(
-                    "GCM register unexpected response via %s (attempt %d/%d): %s",
-                    indicator,
+                    "GCM register unexpected response via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
                     retries,
                     last_error,
                 )
 
             if attempt < retries:
-                rotation_reason = (
-                    f"HTTP {status}" if status else last_error or "unknown"
-                )
-                if error_code:
-                    rotation_reason = f"error_code={error_code}"
-                next_index = (endpoint_index + 1) % len(endpoints)
-                log_endpoint_switch(rotation_reason, endpoint_index, next_index)
-                endpoint_index = next_index
                 await asyncio.sleep(1)
             attempt += 1
 
@@ -595,6 +541,23 @@ class FcmRegister:
             _logger.error(msg, exc_info=last_error)
         else:
             _logger.error("%s, last error was: %s", msg, last_error)
+        # If the retry budget was exhausted on persistent 401/404 responses
+        # from /c2dm/register3, the endpoint is fatal for this credential
+        # set — surface as FcmRegisterHTTPError(status=…) so the caller can
+        # run the dedicated auth retry budget (401, with token invalidation
+        # via _invalidate_fcm_tokens) or the endpoint retry budget (404)
+        # instead of treating it as a transient runtime error. Mirrors
+        # _FATAL_HTTP_STATUSES used by gcm_check_in, fcm_install,
+        # fcm_register, and fcm_refresh_install_token.
+        if isinstance(last_error, str):
+            for fatal_status in _FATAL_HTTP_STATUSES:
+                marker = f"status={int(fatal_status)}"
+                if marker in last_error:
+                    raise FcmRegisterHTTPError(
+                        f"GCM register fatal status {int(fatal_status)} "
+                        f"(persisted after {retries} attempts)",
+                        status=int(fatal_status),
+                    )
         return None
 
     # ---------------------------------------------------------------------
@@ -640,6 +603,7 @@ class FcmRegister:
             "x-firebase-client": hb_header,
             "x-goog-api-key": self.config.api_key,
         }
+        self._add_android_restriction_headers(headers)
         payload = {
             "appId": self.config.app_id,
             "authVersion": AUTH_VERSION,
@@ -672,6 +636,11 @@ class FcmRegister:
                     resp.status,
                     text[:300],
                 )
+                if resp.status in _FATAL_HTTP_STATUSES:
+                    raise FcmRegisterHTTPError(
+                        f"fcm_install fatal status {resp.status}",
+                        status=int(resp.status),
+                    )
                 return None
 
     async def fcm_refresh_install_token(self) -> JSONDict | None:
@@ -704,6 +673,7 @@ class FcmRegister:
             "x-firebase-client": hb_header,
             "x-goog-api-key": self.config.api_key,
         }
+        self._add_android_restriction_headers(headers)
         payload = {
             "installation": {"sdkVersion": SDK_VERSION, "appId": self.config.app_id}
         }
@@ -735,6 +705,11 @@ class FcmRegister:
                         "response_length": len(text),
                     },
                 )
+                if resp.status in _FATAL_HTTP_STATUSES:
+                    raise FcmRegisterHTTPError(
+                        f"fcm_refresh_install_token fatal status {resp.status}",
+                        status=int(resp.status),
+                    )
                 return None
 
     def generate_keys(self) -> dict[str, str]:
@@ -781,6 +756,7 @@ class FcmRegister:
             "x-goog-api-key": self.config.api_key,
             "x-goog-firebase-installations-auth": installation["token"],
         }
+        self._add_android_restriction_headers(headers)
         # If vapid_key is the default do not send it here or it will error
         vapid_key = (
             self.config.vapid_key
@@ -828,6 +804,15 @@ class FcmRegister:
                             status,
                             text[:400],
                         )
+                        if status in _FATAL_HTTP_STATUSES:
+                            # Retrying 401/404 with the same payload only
+                            # multiplies the failure — propagate immediately.
+                            raise FcmRegisterHTTPError(
+                                f"FCM register fatal status {status}",
+                                status=int(status),
+                            )
+            except FcmRegisterHTTPError:
+                raise
             except Exception as e:
                 last_error = e
                 _logger.error(
@@ -878,6 +863,93 @@ class FcmRegister:
         if credentials is None:
             raise RuntimeError("Registration did not yield credentials")
         return credentials
+
+    async def _fallback_full_register(
+        self, reason: str
+    ) -> MutableJSONMapping:
+        """Run a full ``register()`` as fallback and notify the callback."""
+        _logger.warning("%s; falling back to full register()", reason)
+        self.credentials = await self.register()
+        if self.credentials_updated_callback and self.credentials:
+            try:
+                self.credentials_updated_callback(self.credentials)
+            except Exception as e:
+                _logger.debug(
+                    "credentials_updated_callback raised", exc_info=e
+                )
+        if self.credentials is None:
+            raise RuntimeError("Fallback registration did not yield credentials")
+        return self.credentials
+
+    async def reregister_keeping_identity(self) -> MutableJSONMapping:
+        """Re-register FCM tokens while preserving GCM device identity.
+
+        Performs a check-in with the existing android_id/security_token,
+        then obtains fresh GCM and FCM tokens.  Falls back to full
+        ``register()`` if the identity is no longer valid.
+
+        :return: The full credentials dict with same android_id but fresh tokens.
+        """
+        if not self.credentials or "gcm" not in self.credentials:
+            return await self._fallback_full_register(
+                "No existing GCM identity"
+            )
+
+        android_id = self.credentials["gcm"]["android_id"]
+        security_token = self.credentials["gcm"]["security_token"]
+
+        # Step 1: Check-in with existing device identity
+        try:
+            gcm_response = await self.gcm_check_in(android_id, security_token)
+        except Exception as e:
+            _logger.debug("Check-in exception detail", exc_info=e)
+            return await self._fallback_full_register(
+                "Check-in with existing identity failed"
+            )
+
+        if not gcm_response:
+            return await self._fallback_full_register(
+                "Check-in returned empty response"
+            )
+
+        # Step 2: Re-register GCM token (uses same android_id/security_token)
+        gcm_data = await self.gcm_register(gcm_response)
+        if not gcm_data:
+            raise RuntimeError(
+                "GCM re-registration failed with existing identity"
+            )
+
+        # Step 3: Generate fresh keys and re-register FCM
+        keys = self.generate_keys()
+        fcm_data = await self.fcm_install_and_register(gcm_data, keys)
+        if not fcm_data:
+            raise RuntimeError("FCM re-registration failed")
+
+        res: dict[str, Any] = {
+            "keys": keys,
+            "gcm": gcm_data,
+            "fcm": fcm_data,
+            "config": {
+                "bundle_id": self.config.bundle_id,
+                "project_id": self.config.project_id,
+                "vapid_key": self.config.vapid_key,
+            },
+        }
+
+        self.credentials = res
+        if self.credentials_updated_callback:
+            try:
+                self.credentials_updated_callback(res)
+            except Exception as e:
+                _logger.debug(
+                    "credentials_updated_callback raised", exc_info=e
+                )
+
+        _logger.info(
+            "Re-registered FCM with existing device identity "
+            "(android_id preserved)"
+        )
+        return res
 
     async def register(self) -> JSONDict:
         """Register GCM and FCM tokens for configured sender_id/app.

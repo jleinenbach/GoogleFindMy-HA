@@ -10,7 +10,11 @@ from typing import Any, cast
 import pytest
 
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
+from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
+    FcmRegisterHTTPError,
+)
 from custom_components.googlefindmy.const import DOMAIN
+from custom_components.googlefindmy.exceptions import FatalRegistrationError
 
 _MODULE = importlib.import_module("custom_components.googlefindmy")
 _async_acquire_shared_fcm = cast(
@@ -370,3 +374,70 @@ async def test_credentials_update_clears_latched_fatal_error(
         ("token-abc", {entry_id}),
         ("save", {entry_id}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_register_raises_fatal_on_fcm_register_http_401() -> None:
+    """fcm_install/fcm_register raising FcmRegisterHTTPError(401) must surface
+    as FatalRegistrationError(is_auth_error=True), not as a transient runtime
+    error swallowed by the generic catch.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-401"
+
+    class _PcRaising401:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise FcmRegisterHTTPError(
+                "fcm_install fatal status 401", status=401
+            )
+
+    receiver.pcs[entry_id] = _PcRaising401()
+
+    with pytest.raises(FatalRegistrationError) as exc_info:
+        await receiver._register_for_fcm_entry(entry_id)
+
+    assert exc_info.value.is_auth_error is True
+    assert "401" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_register_raises_fatal_on_fcm_register_http_404() -> None:
+    """FcmRegisterHTTPError(404) must surface as FatalRegistrationError
+    (is_auth_error=False) so the endpoint retry budget runs.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-404"
+
+    class _PcRaising404:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise FcmRegisterHTTPError(
+                "fcm_register fatal status 404", status=404
+            )
+
+    receiver.pcs[entry_id] = _PcRaising404()
+
+    with pytest.raises(FatalRegistrationError) as exc_info:
+        await receiver._register_for_fcm_entry(entry_id)
+
+    assert exc_info.value.is_auth_error is False
+    assert "404" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_register_keeps_transient_runtime_error_transient() -> None:
+    """Plain RuntimeError (non-FcmRegisterHTTPError) must remain transient —
+    must not be escalated to FatalRegistrationError.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-transient"
+
+    class _PcRaisingPlain:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise RuntimeError("Registration did not yield credentials")
+
+    receiver.pcs[entry_id] = _PcRaisingPlain()
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is False
+    assert entry_id not in receiver._fatal_errors

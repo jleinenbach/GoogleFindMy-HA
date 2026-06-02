@@ -931,16 +931,18 @@ def test_async_ttl_policy_invalidate_aas_token_clears_both_bare_and_namespaced()
 def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Persistent 401 errors after token refresh must invalidate the AAS token.
+    """Persistent 401 errors after token refresh must raise a permanent error.
 
-    With the new retry sequence:
+    With the current retry sequence:
     - Step 1: First 401 → refresh ADM → 6s → retry
-    - Step 2: Second 401 → 61s → invalidate AAS, refresh AAS+ADM → 6s → retry
+    - Step 2: Second 401 → 61s → refresh ADM (AAS retained) → 6s → retry
     - Step 3: Third 401 → 501s → retry
     - Step 4: Fourth 401 → permanent error
 
-    The AAS token is invalidated in step 2, enabling fresh token generation
-    in subsequent poll cycles.
+    The AAS token is NOT invalidated during the retry sequence. If the AAS
+    were truly rejected, Step 1 would have raised NovaAuthPermanentError via
+    InvalidAasTokenError. Persistent 401s indicate propagation delay, not
+    AAS invalidity.
     """
 
     cache = _StubCache()
@@ -957,7 +959,7 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
     aas_invalidation_calls: list[str] = []
 
     async def _exercise() -> None:
-        # Seed the AAS token that should be invalidated
+        # Seed the AAS token
         await cache.set(DATA_AAS_TOKEN, "stale-aas-token")
 
         async def _fake_get_adm_token(
@@ -976,7 +978,7 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
         async def _instant_sleep(_: float) -> None:
             pass
 
-        # Spy on async_invalidate_aas_token to verify it's called
+        # Spy on async_invalidate_aas_token to verify it's NOT called
         original_invalidate = AsyncTTLPolicy.async_invalidate_aas_token
 
         async def _spy_invalidate(self: AsyncTTLPolicy) -> None:
@@ -1011,19 +1013,24 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
     assert err.value.status == 401
     assert err.value.is_permanent is True
 
-    # AAS invalidation happens in step 2 (after second 401)
-    assert len(aas_invalidation_calls) == 1
-    assert aas_invalidation_calls[0] == "user@example.com"
+    # AAS invalidation should NOT happen - persistent 401s are treated as
+    # propagation delay, not AAS invalidity
+    assert len(aas_invalidation_calls) == 0
 
 
 def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After AAS invalidation, next poll cycle should generate fresh token chain.
+    """AAS token is retained across poll cycles since it is not invalidated on 401.
 
-    This test verifies the complete bug fix scenario:
-    1. First poll cycle: persistent 401s -> AAS token invalidated
-    2. Second poll cycle: AAS token is None -> success (simulating fresh generation)
+    The current retry sequence does NOT invalidate the AAS token during 401
+    retries.  If the AAS were truly rejected, gpsoauth would raise
+    InvalidAasTokenError during the ADM refresh step.  Persistent 401s are
+    treated as propagation delay.
+
+    This test verifies:
+    1. First poll cycle: persistent 401s -> AAS token is preserved
+    2. Second poll cycle: succeeds (simulating eventual propagation)
     """
 
     cache = _StubCache()
@@ -1033,7 +1040,7 @@ def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
     async def _exercise() -> tuple[str | None, str | None]:
         nonlocal poll_cycle
 
-        # Seed initial stale AAS token
+        # Seed initial AAS token
         await cache.set(DATA_AAS_TOKEN, "stale-aas")
         await cache.set(username_string, "user@example.com")
 
@@ -1058,7 +1065,7 @@ def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
         )
         monkeypatch.setattr("asyncio.sleep", _instant_sleep)
 
-        # First poll cycle: all 401s -> should invalidate AAS token
+        # First poll cycle: all 401s -> AAS token is NOT invalidated
         poll_cycle = 1
         aas_states_before_request.append((poll_cycle, await cache.get(DATA_AAS_TOKEN)))
         session1 = _DummySession(
@@ -1082,10 +1089,10 @@ def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
         except NovaAuthError:
             pass  # Expected
 
-        # Verify AAS token was cleared after first cycle
+        # AAS token is preserved (not invalidated) after first cycle
         aas_after_first = await cache.get(DATA_AAS_TOKEN)
 
-        # Second poll cycle: success with fresh AAS
+        # Second poll cycle: success
         poll_cycle = 2
         session2 = _DummySession([_DummyResponse(200, b"\xca\xfe")])
 
@@ -1102,15 +1109,14 @@ def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
 
     aas_after_first, second_result = asyncio.run(_exercise())
 
-    # AAS should be None after first failed cycle
-    assert aas_after_first is None
+    # AAS should be preserved after first failed cycle (not invalidated)
+    assert aas_after_first == "stale-aas"
 
-    # Second cycle should succeed with fresh token chain
+    # Second cycle should succeed
     assert second_result == "cafe"
 
     # Verify AAS state progression:
-    # Cycle 1: AAS = "stale-aas" (before request)
-    # After cycle 1: AAS = None (invalidated due to persistent 401s)
+    # Cycle 1: AAS = "stale-aas" (before request, and preserved after)
     assert aas_states_before_request[0] == (1, "stale-aas")
 
 
@@ -1196,10 +1202,11 @@ def test_async_nova_request_preserves_aas_token_on_successful_401_recovery(
 def test_async_nova_request_no_double_aas_invalidation_on_repeated_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AAS invalidation must happen exactly once per failed request cycle.
+    """AAS invalidation must NOT happen during the 401 retry sequence.
 
     When 401s persist through all retries, async_invalidate_aas_token should
-    be called exactly once, not multiple times per retry.
+    not be called at all.  The production code treats persistent 401s as
+    propagation delay rather than AAS invalidity.
     """
 
     cache = _StubCache()
@@ -1265,19 +1272,18 @@ def test_async_nova_request_no_double_aas_invalidation_on_repeated_failures(
     with pytest.raises(NovaAuthError):
         asyncio.run(_exercise())
 
-    # Invalidation should happen exactly once per failed cycle
-    assert invalidation_call_count == 1
+    # No AAS invalidation should occur during 401 retries
+    assert invalidation_call_count == 0
 
 
 def test_async_nova_request_loop_prevention_across_multiple_cycles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Token renewal loop prevention must work across multiple consecutive failed cycles.
+    """AAS token is preserved across multiple consecutive failed poll cycles.
 
-    This test simulates the exact bug scenario: multiple poll cycles where each
-    cycle exhausts retries. The fix ensures that each cycle invalidates AAS,
-    allowing fresh token generation on subsequent cycles, eventually breaking
-    the loop when valid tokens are available.
+    The production code no longer invalidates the AAS token during 401 retries.
+    Persistent 401s are treated as propagation delay.  The AAS token remains
+    intact so that subsequent cycles can retry with the same token chain.
     """
 
     cache = _StubCache()
@@ -1371,18 +1377,14 @@ def test_async_nova_request_loop_prevention_across_multiple_cycles(
     # Final cycle should succeed
     assert result == "dead"
 
-    # AAS should be invalidated once per failed cycle (cycles 1, 2, 3)
-    assert aas_invalidations == [1, 2, 3]
+    # AAS should NOT be invalidated during 401 retries
+    assert aas_invalidations == []
 
-    # Verify the AAS token state progression:
-    # Cycle 1: AAS = "initial-stale-aas" (before invalidation)
-    # Cycle 2: AAS = None (after cycle 1 invalidated it)
-    # Cycle 3: AAS = None (after cycle 2 invalidated it)
-    # Cycle 4: AAS = None (after cycle 3 invalidated it)
+    # AAS token is preserved across all cycles (never invalidated)
     assert aas_states_at_cycle_start[0] == (1, "initial-stale-aas")
-    assert aas_states_at_cycle_start[1][1] is None  # Cycle 2 sees None
-    assert aas_states_at_cycle_start[2][1] is None  # Cycle 3 sees None
-    assert aas_states_at_cycle_start[3][1] is None  # Cycle 4 sees None
+    assert aas_states_at_cycle_start[1][1] == "initial-stale-aas"
+    assert aas_states_at_cycle_start[2][1] == "initial-stale-aas"
+    assert aas_states_at_cycle_start[3][1] == "initial-stale-aas"
 
 
 def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
@@ -1478,18 +1480,19 @@ def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
 def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When ADM-only refresh fails, the entire AAS+ADM chain must be refreshed.
+    """When ADM-only refresh fails, Step 2 retries ADM with AAS retained.
 
-    This test verifies the new retry sequence:
+    This test verifies the current retry sequence:
     - Step 1: First 401 → refresh ADM only → 6s → retry
-    - Step 2: Second 401 → 61s cooldown → invalidate AAS → refresh AAS+ADM → 6s → retry
-    - Success on third request proves full chain refresh was needed
+    - Step 2: Second 401 → 61s cooldown → refresh ADM (AAS retained) → 6s → retry
+    - Success on third request proves the retry was sufficient
 
-    The AAS token should be invalidated after the second 401.
+    The AAS token is NOT invalidated; persistent 401s are treated as
+    propagation delay.
     """
 
     cache = _StubCache()
-    # Two 401s (ADM-only fails), then success after full chain refresh
+    # Two 401s (ADM-only fails), then success after second ADM refresh
     session = _DummySession(
         [
             _DummyResponse(401, b"Unauthorized"),
@@ -1517,7 +1520,6 @@ def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
 
         async def _refresh() -> str:
             adm_refresh_calls.append("refresh")
-            # After AAS invalidation, this simulates generating fresh tokens
             return "refreshed-adm"
 
         async def _tracking_sleep(delay: float) -> None:
@@ -1557,15 +1559,16 @@ def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
     # Request should succeed
     assert result == "deadbeef"
 
-    # ADM refresh should have been called twice (once for step 1, once for step 2)
-    assert len(adm_refresh_calls) == 2
+    # ADM refresh is called once in Step 1; in Step 2, async_on_401 sees the
+    # recent refresh (stampede guard) and returns the cached token without
+    # calling the refresh function again.
+    assert len(adm_refresh_calls) == 1
 
-    # AAS token should be invalidated exactly once (in step 2)
-    assert len(aas_invalidation_calls) == 1
-    assert aas_invalidation_calls[0] == "user@example.com"
+    # AAS token should NOT be invalidated (AAS retained in step 2)
+    assert len(aas_invalidation_calls) == 0
 
-    # AAS should be None after invalidation
-    assert final_aas is None
+    # AAS should be preserved
+    assert final_aas == "stale-aas"
 
     # Verify the delay sequence: 6s (step 1) + 61s (step 2 cooldown) + 6s (step 2 propagation)
     assert sleep_delays == [6.0, 61.0, 6.0]
@@ -1578,7 +1581,7 @@ def test_async_nova_request_full_retry_sequence_exhausted(
 
     This test verifies the complete retry sequence:
     - Step 1: First 401 → refresh ADM → 6s → retry
-    - Step 2: Second 401 → 61s → invalidate AAS, refresh AAS+ADM → 6s → retry
+    - Step 2: Second 401 → 61s → refresh ADM (AAS retained) → 6s → retry
     - Step 3: Third 401 → 501s long cooldown → retry
     - Step 4: Fourth 401 → permanent error (re-auth required)
 
@@ -1654,11 +1657,13 @@ def test_async_nova_request_full_retry_sequence_exhausted(
     assert err.value.is_permanent is True
     assert "re-authentication required" in str(err.value).lower()
 
-    # ADM refresh should have been called twice (step 1 and step 2)
-    assert len(adm_refresh_calls) == 2
+    # ADM refresh is called once in Step 1; in Step 2, async_on_401 sees the
+    # recent refresh (stampede guard) and returns the cached token without
+    # calling the refresh function again.
+    assert len(adm_refresh_calls) == 1
 
-    # AAS invalidation should have been called once (step 2)
-    assert len(aas_invalidation_calls) == 1
+    # AAS invalidation should NOT have been called (AAS retained)
+    assert len(aas_invalidation_calls) == 0
 
     # Verify the complete delay sequence: 6s + 61s + 6s + 501s
     assert sleep_delays == [6.0, 61.0, 6.0, 501.0]
@@ -1789,10 +1794,15 @@ def test_async_ttl_policy_aas_ttl_learning_records_observed_lifetime() -> None:
 
 
 def test_async_ttl_policy_aas_proactive_refresh_triggers_near_expiry() -> None:
-    """AAS proactive refresh should trigger when approaching learned TTL.
+    """AAS proactive refresh should NOT trigger even when approaching learned TTL.
 
-    When the AAS token age approaches the learned TTL minus margin,
-    async_check_aas_proactive_refresh should return True and invalidate the token.
+    The production code no longer proactively invalidates the AAS token.
+    In CLI mode the OAuth cookie is single-use and consumed, so destroying
+    the AAS would be fatal.  Even in HA mode, premature invalidation is
+    wasteful.  Instead, gpsoauth validates the AAS on the next ADM refresh.
+
+    async_check_aas_proactive_refresh now always returns False and logs
+    that validation will happen on the next ADM refresh.
     """
 
     async def _run() -> None:
@@ -1825,20 +1835,18 @@ def test_async_ttl_policy_aas_proactive_refresh_triggers_near_expiry() -> None:
             await cache.set(policy.k_aas_bestttl, 3600.0)
 
             # AAS token issued 57 minutes ago (past the threshold + max jitter)
-            # Threshold = 3600 - 300 = 3300s, jitter = ±90s, so max threshold = 3390s
-            # 57 min = 3420s > 3390s, so it will always trigger
             issued_time = time.time() - (57 * 60)  # 57 minutes ago
             await cache.set(policy.k_aas_issued, issued_time)
             await cache.set(DATA_AAS_TOKEN, "old-aas")
 
-            # Check proactive refresh - should trigger
+            # Check proactive refresh - should NOT trigger
             result = await policy.async_check_aas_proactive_refresh()
 
-            # Should have triggered proactive refresh
-            assert result is True
+            # Should NOT have triggered proactive refresh
+            assert result is False
 
-            # AAS token should be invalidated
-            assert await cache.get(DATA_AAS_TOKEN) is None
+            # AAS token should be preserved (not invalidated)
+            assert await cache.get(DATA_AAS_TOKEN) == "old-aas"
 
         finally:
             await cache.close()

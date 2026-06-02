@@ -177,7 +177,7 @@ def _prepare_reconfigure_flow(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
             self.tasks: list[asyncio.Task[Any]] = []
@@ -449,7 +449,7 @@ def test_manual_config_flow_with_master_token(monkeypatch: pytest.MonkeyPatch) -
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
             self.data: dict[str, Any] = {config_flow.DOMAIN: {}}
@@ -1226,7 +1226,7 @@ async def test_async_step_reconfigure_updates_entry(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
             self.tasks: list[asyncio.Task[Any]] = []
@@ -1369,7 +1369,7 @@ async def test_async_step_reconfigure_legacy_update_preserves_options(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
             self.tasks: list[asyncio.Task[Any]] = []
@@ -1557,7 +1557,7 @@ async def test_async_step_reconfigure_resets_context_and_prunes_stale_ids(
         def __init__(self) -> None:
             prepare_flow_hass_config_entries(
                 self,
-                lambda: _ConfigEntries(),
+                _ConfigEntries,
                 frame_module=frame,
             )
 

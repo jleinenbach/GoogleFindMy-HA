@@ -38,11 +38,11 @@ development so that future contributors avoid the same pitfalls.
 
 | # | Where | What happens |
 |---|-------|-------------|
-| 1 | **Tracker** | Broadcasts a BLE advertisement with Frame Type `0x40`, a 20-byte EID, and an optional 1-byte hashed-flags field. |
+| 1 | **Tracker** | Broadcasts a BLE advertisement with Frame Type `0x40` (typically legacy, 20-byte EID) or `0x41` (typically modern P-256, 32-byte EID), plus an optional 1-byte hashed-flags field. Frame-type vs. EID-length mapping is accessory-generation specific (see `docs/FMDN.md`); `_update_ble_battery()` tolerates 0x41 with a 20-byte legacy EID as a defensive variant. |
 | 2 | **Bermuda** (`fmdn/extraction.py`) | `extract_raw_fmdn_payloads()` extracts the **unmodified** service-data bytes (including the hashed-flags byte). |
 | 3 | **Bermuda** (`fmdn/integration.py`) | `normalize_eid_bytes()` converts the type to `bytes` (no content stripping), then calls `resolver.resolve_eid(payload)` or `resolver.resolve_eid_all(payload)`. |
 | 4 | **Resolver** (`eid_resolver.py`) | `_resolve_eid_internal()` looks up the EID in the precomputed cache. If found, returns `list[EIDMatch]` plus the raw payload and frame metadata. |
-| 5 | **Resolver** (`_update_ble_battery()`) | Locates the hashed-flags byte by frame format, XOR-decodes it with `compute_flags_xor_mask()`, extracts 2-bit battery level (bits 5-6) and UWT mode (bit 7). Stores a `BLEBatteryState` keyed by **`canonical_id`**. |
+| 5 | **Resolver** (`_update_ble_battery()`) | Locates the hashed-flags byte by frame format, XOR-decodes it with `compute_flags_xor_mask()`, extracts 2-bit battery level and UWT mode. The FMDN spec qualifies the hashed-flags byte explicitly: *"bits are referenced from most significant to least significant"* (verbatim, [FHN spec §Hashed Flags](https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags), retrieved 2026-06-02). So spec bits 5-6 (battery) map to standard LSB-first bits 2-1 and spec bit 7 (UWT) maps to standard bit 0, i.e. `battery = (byte >> 1) & 0x03` and `uwt = byte & 0x01`. The naive LSB-first reading `(byte >> 5) & 0x03` / `byte & 0x80` is wrong and is anti-regression-guarded by `tests/test_ble_battery_sensor.py::TestHashedFlagsMsbFirstConvention` and `::TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation`. Stores a `BLEBatteryState` keyed by **`canonical_id`**. |
 | 6 | **Sensor** (`sensor.py` → `_build_entities()`) | On every coordinator update, iterates devices and calls `resolver.get_ble_battery_state(dev_id)` where `dev_id = device["id"]` (the canonical_id). If non-None, creates a `GoogleFindMyBLEBatterySensor`. |
 | 7 | **Sensor** (`native_value` property) | On each HA state poll, reads the latest `BLEBatteryState` from the resolver and returns `battery_pct`. |
 
@@ -100,10 +100,10 @@ Bit layout (decoded):
   Bit  7:     UWT mode (Unwanted Tracking protection active)
 
 Battery mapping:
-  0 → GOOD       → 100%
-  1 → LOW        →  25%
-  2 → CRITICAL   →   5%
-  3 → RESERVED   →   0%
+  0 → UNSUPPORTED → None (unknown)
+  1 → NORMAL      → 100%
+  2 → LOW         →  25%
+  3 → CRITICALLY_LOW → 5%
 ```
 
 The XOR mask is computed for **all** EID windows (previous, current,
@@ -231,7 +231,7 @@ extract the flags byte.
 Tests live in `tests/test_ble_battery_sensor.py` and cover:
 
 - Battery state storage and retrieval via canonical_id
-- All battery levels (GOOD, LOW, CRITICAL, RESERVED)
+- All battery levels (UNSUPPORTED, NORMAL, LOW, CRITICALLY_LOW)
 - UWT mode detection
 - Sensor creation, availability, and restore behavior
 - Shared-device propagation (multiple matches per advertisement)

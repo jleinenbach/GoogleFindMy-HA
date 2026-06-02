@@ -471,7 +471,21 @@ class PollingOperations(_MixinBase):
             _LOGGER.info("FCM/push is ready; resuming scheduled polling.")
         self._fcm_defer_started_mono = 0.0
         self._fcm_last_stage = 0
+        self._degraded_mode_warned = False
         self._set_fcm_status(FcmStatus.CONNECTED)
+
+    def _nudge_fcm_supervisor(self) -> None:
+        """Ask the FCM supervisor to wake up and retry connection immediately."""
+        try:
+            fcm = self.hass.data.get(DOMAIN, {}).get("fcm_receiver")
+            if fcm is None:
+                return
+            nudge_fn = getattr(fcm, "nudge_retry", None)
+            if callable(nudge_fn):
+                entry_id = self._entry_id()
+                nudge_fn(entry_id)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -------------------- Poll timing prediction --------------------
     def _get_predicted_poll_time(self) -> float | None:
@@ -639,8 +653,18 @@ class PollingOperations(_MixinBase):
                         _LOGGER.debug("FCM wait error: %s", fcm_wait_err)
                 self._startup_complete = True
 
-            if self._is_fcm_ready_soft():
+            fcm_now_ready = self._is_fcm_ready_soft()
+            if fcm_now_ready:
                 self._set_fcm_status(FcmStatus.CONNECTED)
+                # FIX: Clear deferral state as soon as FCM comes back, regardless
+                # of whether a poll is due.  Without this, a forced poll during
+                # an outage would update _last_poll_mono and the deferral would
+                # linger until the next due window (up to effective_interval).
+                if self._fcm_defer_started_mono:
+                    self._clear_fcm_deferral()
+                    # Trigger an immediate poll so we don't wait the full
+                    # interval after a prolonged outage.
+                    self.force_poll_due()
             elif self._fcm_last_stage < 2:
                 self._set_fcm_status(
                     FcmStatus.DEGRADED,
@@ -819,6 +843,24 @@ class PollingOperations(_MixinBase):
                 if not self._normalize_coords(dev, device_label=dev_id):
                     continue
 
+                # FIX #155: Skip seeding if cache already has fresher data
+                # (e.g., from FCM push delivered between device list refreshes).
+                # This prevents stale device-list coordinates from entering the
+                # cache pipeline and causing unnecessary fusion/churn.
+                incoming_ts = _normalize_epoch_seconds(dev.get("last_seen"))
+                existing_cache = self._device_location_data.get(dev_id)
+                if (
+                    isinstance(existing_cache, Mapping)
+                    and existing_cache.get("latitude") is not None
+                ):
+                    cached_ts = _normalize_epoch_seconds(
+                        existing_cache.get("last_seen")
+                    )
+                    if cached_ts is not None and (
+                        incoming_ts is None or incoming_ts <= cached_ts
+                    ):
+                        continue  # Cache has fresher or equal data, skip seed
+
                 cache_seed = dict(dev)
 
                 # Avoid poisoning the cache with explicit None accuracy values so
@@ -826,7 +868,7 @@ class PollingOperations(_MixinBase):
                 if cache_seed.get("accuracy") is None:
                     cache_seed.pop("accuracy", None)
 
-                self.update_device_cache(dev_id, cache_seed)
+                self.update_device_cache(dev_id, cache_seed, source="seed")
 
             # 2.5) Ensure Device Registry entries exist (service device + end-devices, namespaced)
             self._ensure_service_device_exists()
@@ -903,10 +945,17 @@ class PollingOperations(_MixinBase):
 
                 if fcm_ready or force_poll:
                     if force_poll:
-                        _LOGGER.warning(
-                            "Push transport unavailable for %ds; forcing poll cycle.",
-                            _PUSH_NOT_READY_TIMEOUT_S,
-                        )
+                        if not self._degraded_mode_warned:
+                            _LOGGER.warning(
+                                "Push transport unavailable for %ds; forcing poll cycle.",
+                                _PUSH_NOT_READY_TIMEOUT_S,
+                            )
+                        else:
+                            _LOGGER.debug(
+                                "Push transport still unavailable; forcing poll cycle.",
+                            )
+                        # Nudge FCM supervisor to retry connection sooner
+                        self._nudge_fcm_supervisor()
                     _LOGGER.debug(
                         "Scheduling background polling cycle (devices=%d, interval=%ds)",
                         len(devices_to_poll),
@@ -1023,9 +1072,15 @@ class PollingOperations(_MixinBase):
                     self._note_fcm_deferral(time.monotonic())
                     self._schedule_short_retry(5.0)
                     return
-                _LOGGER.warning(
-                    "Starting poll cycle without push transport; continuing in degraded mode."
-                )
+                if not self._degraded_mode_warned:
+                    _LOGGER.warning(
+                        "Starting poll cycle without push transport; continuing in degraded mode."
+                    )
+                    self._degraded_mode_warned = True
+                else:
+                    _LOGGER.debug(
+                        "Poll cycle still without push transport (degraded mode)."
+                    )
             elif self._fcm_defer_started_mono:
                 # If we were deferring previously, clear the escalation timeline.
                 self._clear_fcm_deferral()
@@ -1037,6 +1092,7 @@ class PollingOperations(_MixinBase):
             google_home_filter = self._get_google_home_filter()
 
             last_exception: Exception | None = None
+            _any_device_got_data = False
             try:
                 cycle_failed = False
                 for idx, dev in enumerate(devices):
@@ -1257,7 +1313,7 @@ class PollingOperations(_MixinBase):
 
                         helper = getattr(self.update_device_cache, "__func__", None)
                         if helper is _CoordinatorClass.update_device_cache:
-                            self.update_device_cache(dev_id, location)
+                            self.update_device_cache(dev_id, location, source="poll")
                         else:
                             location.pop("_fusion_preapplied", None)
                             location.pop("_report_hint", None)
@@ -1269,6 +1325,7 @@ class PollingOperations(_MixinBase):
 
                         self.increment_stat("polled_updates")
                         self._consecutive_timeouts = 0
+                        _any_device_got_data = True
 
                         # Immediate per-device update for more responsive UI during long poll cycles.
                         self.push_updated([dev_id])
@@ -1419,7 +1476,18 @@ class PollingOperations(_MixinBase):
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
             finally:
-                # Update scheduling baseline and clear flag, then push end snapshot
+                # Update scheduling baseline and clear flag, then push end snapshot.
+                # Always advance the poll baseline to prevent high-frequency
+                # forced-poll loops that bypass min_poll_interval.  When push
+                # transport reconnects, push_updated() resets the baseline so
+                # there is no "dead zone" risk.
+                if force and not _any_device_got_data:
+                    _LOGGER.debug(
+                        "Forced poll returned no data; scheduling retry "
+                        "after min_poll_interval (%ds).",
+                        self.min_poll_interval,
+                    )
+                    self._schedule_short_retry(self.min_poll_interval)
                 self._last_poll_mono = time.monotonic()
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())

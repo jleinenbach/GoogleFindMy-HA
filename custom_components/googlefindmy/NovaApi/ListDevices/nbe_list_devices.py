@@ -216,7 +216,9 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
                 "Multiple token caches registered. Provide the ConfigEntry ID via "
                 f"the CLI argument or set GOOGLEFINDMY_ENTRY_ID. Available IDs: {available}."
             )
-        raise MissingTokenCacheError()
+        # Exactly one entry registered — use it directly (no ambiguity).
+        sole_id = entry_ids[0]
+        return get_cache_for_entry(sole_id), sole_id
 
     normalized = entry_id_hint.strip()
 
@@ -231,19 +233,60 @@ def _resolve_cli_cache(entry_id_hint: str | None) -> tuple[TokenCache, str]:
     return cache, normalized
 
 
-async def _async_cli_main(entry_id: str | None = None) -> None:
+def _print_locations(locations: list[dict[str, object]]) -> None:
+    """Pretty-print location results to the console."""
+    if not locations:
+        print(
+            "\nNo location data received. "
+            "The tracker may be out of range or the request timed out."
+        )
+        return
+
+    import datetime as _dt  # noqa: PLC0415
+
+    for loc in locations:
+        lat = loc.get("latitude")
+        lon = loc.get("longitude")
+        if lat is not None and lon is not None:
+            print(f"\nLocation: {lat}, {lon}")
+            acc = loc.get("accuracy")
+            if acc is not None:
+                print(f"Accuracy: {acc}m")
+            last_seen = loc.get("last_seen")
+            if last_seen is not None:
+                dt = _dt.datetime.fromtimestamp(float(str(last_seen)), tz=_dt.UTC)
+                print(f"Last seen: {dt:%Y-%m-%d %H:%M:%S UTC}")
+            print(
+                f"Google Maps: https://www.google.com/maps/search/"
+                f"?api=1&query={lat},{lon}"
+            )
+        elif loc.get("semantic_name"):
+            print(f"\nSemantic location: {loc['semantic_name']}")
+
+
+async def _async_cli_main(
+    entry_id: str | None = None,
+    *,
+    session: ClientSession | None = None,
+) -> None:
     """Asynchronous main function for the CLI experience (single event loop).
 
     This function provides an interactive command-line interface for fetching
     device locations or registering new microcontroller-based trackers.
     It is intended for development and testing purposes.
+
+    Args:
+        entry_id: Optional config entry ID to scope the CLI session.
+        session: Optional shared aiohttp session to avoid ephemeral per-request sessions.
     """
     cache, namespace = _resolve_cli_cache(
         entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
     )
 
     print("Loading...")
-    result_hex = await async_request_device_list(cache=cache, namespace=namespace)
+    result_hex = await async_request_device_list(
+        cache=cache, namespace=namespace, session=session
+    )
 
     device_list = parse_device_list_protobuf(result_hex)
 
@@ -267,43 +310,67 @@ async def _async_cli_main(entry_id: str | None = None) -> None:
     for idx, (device_name, canonic_id) in enumerate(canonic_ids, start=1):
         print(f"{idx}. {device_name}: {canonic_id}")
 
-    selected_value = input(
-        "\nIf you want to see locations of a tracker, type the number of the tracker and press 'Enter'.\n"
-        "If you want to register a new ESP32- or Zephyr-based tracker, type 'r' and press 'Enter': "
-    )
-
-    if selected_value == "r":
-        print("Loading...")
-
-        def _register_esp32_cli() -> None:
-            """Synchronous helper to register a new ESP32 device."""
-            # Lazy import to avoid touching spot token logic at HA startup
-            register_esp32 = import_module(
-                "custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device"
-            ).register_esp32
-
-            register_esp32()
-
-        # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
-        await asyncio.to_thread(_register_esp32_cli)
-    else:
-        selected_idx = int(selected_value) - 1
-        selected_device_name = canonic_ids[selected_idx][0]
-        selected_canonic_id = canonic_ids[selected_idx][1]
-
-        print("Fetching location...")
-
-        # Lazy import: only needed for the CLI branch
-        get_location_data_for_device = import_module(
-            "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
-        ).get_location_data_for_device
-
-        await get_location_data_for_device(
-            selected_canonic_id,
-            selected_device_name,
-            cache=cache,
-            namespace=namespace,
+    while True:
+        selected_value = input(
+            "\nType the number of a tracker to locate it, 'r' to register a new tracker, or 'q' to quit: "
         )
+
+        if selected_value.strip().lower() == "q":
+            print("Goodbye!")
+            break
+
+        if selected_value == "r":
+            print("Loading...")
+
+            def _register_esp32_cli() -> None:
+                """Synchronous helper to register a new ESP32 device."""
+                # Lazy import to avoid touching spot token logic at HA startup
+                register_esp32 = import_module(
+                    "custom_components.googlefindmy.SpotApi.CreateBleDevice.create_ble_device"
+                ).register_esp32
+
+                register_esp32(cache=cache)
+
+            # Run potential blocking/IO work in a worker thread to avoid blocking the loop.
+            await asyncio.to_thread(_register_esp32_cli)
+        else:
+            try:
+                selected_idx = int(selected_value) - 1
+                selected_device_name = canonic_ids[selected_idx][0]
+                selected_canonic_id = canonic_ids[selected_idx][1]
+            except (ValueError, IndexError):
+                print("Invalid selection. Please try again.")
+                continue
+
+            print("Fetching location...")
+
+            # Lazy import: only needed for the CLI branch
+            get_location_data_for_device = import_module(
+                "custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.location_request"
+            ).get_location_data_for_device
+
+            locations = await get_location_data_for_device(
+                selected_canonic_id,
+                selected_device_name,
+                session=session,
+                cache=cache,
+                namespace=namespace,
+            )
+
+            _print_locations(locations)
+
+
+def list_devices() -> None:
+    """Interactive CLI entry point (sync wrapper around _async_cli_main).
+
+    This matches the upstream GoogleFindMyTools API: ``main.py`` simply calls
+    ``list_devices()`` and everything runs synchronously from the caller's
+    perspective.
+    """
+    try:
+        asyncio.run(_async_cli_main())
+    except KeyboardInterrupt:
+        print("\nExiting.")
 
 
 def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:

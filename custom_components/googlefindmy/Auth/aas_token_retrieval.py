@@ -124,19 +124,47 @@ def _disqualifies_oauth_for_exchange(token: str) -> str | None:
     return None
 
 
+# Closed-set values that ``error_kind`` can carry from the gpsoauth exchange
+# paths and that mark a definitively non-recoverable auth problem:
+# ``auth_error`` (explicit gpsoauth ``AuthError`` surface) and the lowercased
+# gpsoauth ``Error`` field values (``badauthentication``, ``invalid_grant``,
+# ...). ``exchange_error`` is intentionally *not* listed: it is a catch-all
+# wrapper for arbitrary executor failures (incl. transient network errors)
+# and must remain retryable.
+_NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
+    {
+        "auth_error",
+        "badauthentication",
+        "invalid_grant",
+    }
+)
+
+# Substrings that surface in ``_clip(err)`` for callers that raise
+# ``RuntimeError`` without the ``error_kind`` attribute (e.g. HTTP-status
+# surfaces in sibling modules and the existing test suite).
+_NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
+    "badauthentication",
+    "invalid_grant",
+    "unauthorized",
+    "forbidden",
+    "missing 'token' in gpsoauth response",
+)
+
+
 def _is_non_retryable_auth(err: Exception) -> bool:
-    """Return True if the error indicates a non-recoverable auth problem."""
+    """Return True if the error indicates a non-recoverable auth problem.
+
+    Prefers the structured ``error_kind`` attribute (set by the gpsoauth
+    exchange paths in this module). Falls back to inspecting the clipped
+    string representation for callers that raise ``RuntimeError`` without
+    an attribute (e.g. HTTP-status surfaces in sibling modules and the
+    existing test suite).
+    """
+    kind = getattr(err, "error_kind", "")
+    if isinstance(kind, str) and kind.lower() in _NON_RETRYABLE_KINDS:
+        return True
     text = _clip(err).lower()
-    if "badauthentication" in text:
-        return True
-    if "invalid_grant" in text:
-        return True
-    if "unauthorized" in text or "forbidden" in text:
-        return True
-    # gpsoauth sometimes returns dicts with {"Error": ...}; these are wrapped in our error text
-    if "missing 'token' in gpsoauth response" in text:
-        return True
-    return False
+    return any(pattern in text for pattern in _NON_RETRYABLE_PATTERNS)
 
 
 def _coerce_android_id(value: object, source: str) -> int | None:
@@ -245,18 +273,47 @@ async def _exchange_oauth_for_aas(
         resp = await loop.run_in_executor(None, _run)
     except Exception as err:  # noqa: BLE001
         if gpsoauth_exceptions and isinstance(err, gpsoauth_exceptions.AuthError):
+            # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw exception
+            # text out of the log message; surface a sanitized ``error_kind``
+            # via ``extra`` and preserve traceback context via ``exc_info``.
             _LOGGER.warning(
-                "gpsoauth authentication error for %s: %s",
-                _mask_email_for_logs(username),
-                _clip(err),
+                "gpsoauth authentication error.",
+                extra={
+                    "user": _mask_email_for_logs(username),
+                    "error_kind": "auth_error",
+                },
+                exc_info=err,
             )
-            raise RuntimeError(f"gpsoauth authentication failed: {_clip(err)}") from err
-        _LOGGER.error(
-            "gpsoauth exchange failed unexpectedly for %s: %s",
-            _mask_email_for_logs(username),
-            _clip(err),
+            new_err = RuntimeError(
+                "gpsoauth authentication failed (kind=auth_error)"
+            )
+            new_err.error_kind = "auth_error"  # type: ignore[attr-defined]
+            raise new_err from err
+        # Some callers (and test doubles) raise a plain ``RuntimeError`` with a
+        # known auth marker embedded in the message instead of an
+        # ``AuthError``. Surface those as ``auth_error`` (non-retryable) so the
+        # retry loop matches the explicit ``AuthError`` branch above; otherwise
+        # fall back to the generic ``exchange_error`` (retryable) wrapper.
+        clipped_lower = _clip(err).lower()
+        if "badauthentication" in clipped_lower or "invalid_grant" in clipped_lower:
+            wrapped_kind = "auth_error"
+            wrapped_msg = "gpsoauth authentication failed (kind=auth_error)"
+            log_level = _LOGGER.warning
+        else:
+            wrapped_kind = "exchange_error"
+            wrapped_msg = "gpsoauth exchange failed (kind=exchange_error)"
+            log_level = _LOGGER.error
+        log_level(
+            "gpsoauth exchange failed unexpectedly.",
+            extra={
+                "user": _mask_email_for_logs(username),
+                "error_kind": wrapped_kind,
+            },
+            exc_info=err,
         )
-        raise RuntimeError(f"gpsoauth exchange failed: {_clip(err)}") from err
+        new_err = RuntimeError(wrapped_msg)
+        new_err.error_kind = wrapped_kind  # type: ignore[attr-defined]
+        raise new_err from err
 
     _LOGGER.debug(
         "gpsoauth exchange response received: type=%s, keys=%s",
@@ -269,20 +326,32 @@ async def _exchange_oauth_for_aas(
             f"Invalid response from gpsoauth: {_summarize_response(resp)}"
         )
     if "Token" not in resp:
-        resp_keys: list[str] | str = "N/A"
-        error_details_present = False
-        if isinstance(resp, dict):
-            resp_keys = list(resp.keys())
-            error_details_present = bool(resp.get("ErrorDetails") or resp.get("Error"))
+        error_value = resp.get("Error", "") if isinstance(resp, dict) else ""
+        error_details = resp.get("ErrorDetails", "") if isinstance(resp, dict) else ""
+        resp_keys = list(resp.keys()) if isinstance(resp, dict) else "N/A"
+        # Per Auth/AGENTS.md (lines 99-102, 133-135): keep raw gpsoauth
+        # response bodies (esp. ``ErrorDetails``) out of the log message;
+        # surface only sanitized flags/keys via ``extra``. The gpsoauth
+        # ``Error`` field is a small closed set (e.g. ``NeedsBrowser``,
+        # ``BadAuthentication``) and is exposed as ``error_kind``.
         _LOGGER.warning(
-            "gpsoauth response missing token; response details recorded in extras.",
+            "gpsoauth response missing token (user=%s, keys=%d)",
+            _mask_email_for_logs(username),
+            len(resp_keys) if isinstance(resp_keys, list) else 0,
             extra={
-                "error_field_present": error_details_present,
+                "error_field_present": bool(error_value),
+                "error_kind": (str(error_value)[:32] if error_value else None),
+                "details_present": bool(error_details),
                 "response_keys": resp_keys,
                 "user": _mask_email_for_logs(username),
             },
         )
-        raise RuntimeError("Missing 'Token' in gpsoauth response")
+        error_kind = str(error_value)[:32] if error_value else "(none)"
+        new_err = RuntimeError(
+            f"Missing 'Token' in gpsoauth response (kind={error_kind})"
+        )
+        new_err.error_kind = error_kind  # type: ignore[attr-defined]
+        raise new_err
     return resp
 
 
@@ -379,7 +448,17 @@ async def _generate_aas_token(*, cache: TokenCache) -> str:  # noqa: PLR0912, PL
     android_id = await _get_or_generate_android_id(username, cache=cache)
 
     # 3) Exchange OAuth → AAS (blocking call executed in executor).
-    resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+    try:
+        resp = await _exchange_oauth_for_aas(username, oauth_token, android_id)
+    except RuntimeError:
+        if not oauth_token.startswith("aas_et/"):
+            _LOGGER.error(
+                "AAS token exchange failed with a likely-expired OAuth cookie. "
+                "The Chrome OAuth cookie is single-use and cannot be reused. "
+                "Please re-authenticate: "
+                "python -m custom_components.googlefindmy --reauth",
+            )
+        raise
 
     # 4) Persist normalized email if gpsoauth returns it (keeps cache consistent).
     if isinstance(resp.get("Email"), str) and resp["Email"]:
@@ -500,17 +579,20 @@ async def async_get_aas_token(
     return token
 
 
-# ----------------------- Legacy sync wrapper (unsupported) -----------------------
+# ----------------------- Legacy sync wrapper (CLI/offline only) -----------------------
 
 
-def get_aas_token() -> (
-    str
-):  # pragma: no cover - legacy path kept for compatibility messaging
-    """Legacy sync API is intentionally unsupported to prevent event loop deadlocks.
+def get_aas_token(*, cache: TokenCache) -> str:
+    """Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
 
     Raises:
-        NotImplementedError: Always. Use `await async_get_aas_token()` instead.
+        RuntimeError: If called from within a running event loop.
     """
-    raise NotImplementedError(
-        "Use `await async_get_aas_token(cache=...)` instead of the synchronous get_aas_token()."
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_get_aas_token(cache=cache))
+    raise RuntimeError(
+        "Sync get_aas_token() called from the event loop. "
+        "Use `await async_get_aas_token()` instead."
     )

@@ -348,6 +348,31 @@ def test_is_non_retryable_auth_transient() -> None:
     assert aas_token_retrieval._is_non_retryable_auth(err) is False
 
 
+def test_is_non_retryable_auth_error_kind_auth_error() -> None:
+    """error_kind attribute should take precedence over string inspection."""
+    err = RuntimeError("gpsoauth authentication failed (kind=auth_error)")
+    err.error_kind = "auth_error"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is True
+
+
+def test_is_non_retryable_auth_error_kind_exchange_error() -> None:
+    """exchange_error is a catch-all wrapper for arbitrary executor failures
+    (including transient network errors) and MUST remain retryable. Only
+    explicit auth markers (auth_error, badauthentication, invalid_grant)
+    are treated as non-retryable.
+    """
+    err = RuntimeError("gpsoauth exchange failed (kind=exchange_error)")
+    err.error_kind = "exchange_error"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is False
+
+
+def test_is_non_retryable_auth_error_kind_unknown_falls_back_to_string() -> None:
+    """Unknown error_kind values must fall through to string inspection."""
+    err = RuntimeError("temporary network failure")
+    err.error_kind = "unknown_kind"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is False
+
+
 def test_coerce_android_id_int() -> None:
     """Integer android_id should be returned unchanged."""
     assert aas_token_retrieval._coerce_android_id(12345, "test") == 12345
@@ -696,7 +721,11 @@ async def test_async_get_aas_token_no_retry_on_auth_error(
 
     monkeypatch.setattr(aas_token_retrieval.gpsoauth, "exchange_token", fake_exchange)
 
-    with pytest.raises(RuntimeError, match="BadAuthentication"):
+    # The exchange wrapper sanitises the raised RuntimeError per
+    # Auth/AGENTS.md: the raw "BadAuthentication" marker becomes the
+    # structured ``error_kind`` and is surfaced as ``kind=auth_error`` in
+    # the public message. The classifier treats this as non-retryable.
+    with pytest.raises(RuntimeError, match="kind=auth_error"):
         await aas_token_retrieval.async_get_aas_token(cache=cache, retries=3)
 
     assert len(attempts) == 1  # No retries
@@ -750,10 +779,11 @@ async def test_async_get_aas_token_ttl_write_failure(
     assert result == "aas_token"
 
 
-def test_get_aas_token_sync_raises() -> None:
-    """Legacy sync API should raise NotImplementedError."""
-    with pytest.raises(NotImplementedError, match="async_get_aas_token"):
-        aas_token_retrieval.get_aas_token()
+async def test_get_aas_token_sync_raises() -> None:
+    """Sync API should raise RuntimeError when called from a running event loop."""
+    cache = _DummyCache()
+    with pytest.raises(RuntimeError, match="async_get_aas_token"):
+        aas_token_retrieval.get_aas_token(cache=cache)
 
 
 async def test_get_or_generate_android_id_fcm_without_gcm_block() -> None:

@@ -141,7 +141,7 @@ def test_process_background_update_uses_thread(
 
     monkeypatch.setattr(receiver, "_decode_background_location_async", decode_stub)
     monkeypatch.setattr(
-        receiver, "_schedule_flush", lambda key: schedule_calls.append(key)
+        receiver, "_schedule_flush", schedule_calls.append
     )
 
     async def _run() -> None:

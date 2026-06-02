@@ -25,7 +25,7 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        data={}, async_create_task=lambda coro: asyncio.create_task(coro)
+        data={}, async_create_task=asyncio.create_task
     )
     resolver._lookup = {}
     resolver._lookup_metadata = {}

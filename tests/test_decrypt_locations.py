@@ -273,7 +273,9 @@ async def test_async_decrypt_location_response_unwraps_60_byte_eik(
     entry = result[0]
     assert entry.get("metadata_only") is not True
     assert entry["identity_key"] == unwrapped_eik
-    assert entry["identity_key_candidates"] == [unwrapped_eik]
+    # Bug 6 fix: early-unwrapped key is prepended to retrieved candidates.
+    # fake_identity_key returns [encrypted_eik], so candidates = [unwrapped_eik, encrypted_eik].
+    assert entry["identity_key_candidates"] == [unwrapped_eik, encrypted_eik]
     assert entry["encrypted_identity_key"] == encrypted_eik
     assert entry["pair_date"] == int(base_now - 30)
     assert entry["secrets_creation_date"] == int(base_now - 15)
@@ -285,7 +287,9 @@ async def test_async_decrypt_location_response_unwraps_60_byte_eik(
     assert unwrap_calls["cache"] is cache
     assert unwrap_calls["owner_key"] == b"\xaa" * 32
     assert unwrap_calls["encrypted"] == encrypted_eik
-    assert identity_key_calls["count"] == 0
+    # Bug 6 fix: async_retrieve_identity_key is now always called to produce
+    # the full candidate set (MCU flip variants, shared key alternatives).
+    assert identity_key_calls["count"] == 1
     assert "[DIAG-ALERT] Key length" not in caplog.text
 
 

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import traceback
 from collections.abc import Awaitable, Callable
 from importlib import import_module
@@ -15,6 +14,7 @@ from types import ModuleType
 from typing import Any, Protocol, cast, runtime_checkable
 
 import aiohttp
+from cryptography.exceptions import InvalidTag
 
 # Keep heavy/protobuf-related imports lazy (done inside functions/callbacks)
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -27,10 +27,7 @@ from custom_components.googlefindmy.const import (
     LOCATION_REQUEST_TIMEOUT_S,
 )
 from custom_components.googlefindmy.example_data_provider import get_example_data
-from custom_components.googlefindmy.exceptions import (
-    MissingNamespaceError,
-    MissingTokenCacheError,
-)
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
@@ -169,7 +166,10 @@ def create_location_request(
 
     normalized_mode = _normalize_contributor_mode(contributor_mode)
     if last_mode_switch is None or last_mode_switch <= 0:
-        last_mode_switch = int(time.time())
+        # Use 0 to request all available historical reports.  The previous
+        # default of ``int(time.time())`` effectively told the server we just
+        # subscribed, causing it to drop reports between polling intervals.
+        last_mode_switch = 0
 
     action_request = create_action_request(
         canonic_device_id, fcm_registration_id, request_uuid=request_uuid
@@ -366,6 +366,7 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     DecryptionError,
                     SpotApiEmptyResponseError,
                     SpotAuthPermanentError,
+                    InvalidTag,
                 ) as err:
                     _LOGGER.error(
                         "Failed to process location data for %s: %s", name, err
@@ -375,7 +376,10 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     return
                 except Exception as err:
                     _LOGGER.error(
-                        "Unexpected error during async decryption for %s: %s", name, err
+                        "Unexpected error during async decryption for %s (%s): %s",
+                        name,
+                        type(err).__name__,
+                        err,
                     )
                     _LOGGER.debug("Traceback: %s", traceback.format_exc())
                     ctx.data = cast(list[dict[str, Any]], [])
@@ -508,9 +512,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
 
         cache_provider = _cache_provider
 
-    resolved_namespace = namespace or entry_id
-    if not resolved_namespace:
-        raise MissingNamespaceError()
+    resolved_namespace = namespace if namespace is not None else (entry_id or "")
 
     async def _cache_get_raw(key: str) -> Any:
         getter = getattr(cache_ref, "async_get_cached_value", None)
@@ -595,7 +597,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 resolved_last_mode_switch = int(cached_switch)
 
     if resolved_last_mode_switch is None:
-        resolved_last_mode_switch = int(time.time())
+        resolved_last_mode_switch = 0
 
     try:
         await ns_set(CACHE_KEY_LAST_MODE_SWITCH, resolved_last_mode_switch)

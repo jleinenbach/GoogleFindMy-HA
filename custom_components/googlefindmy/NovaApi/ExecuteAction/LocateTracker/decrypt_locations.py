@@ -20,6 +20,7 @@ from cryptography.exceptions import InvalidTag
 from custom_components.googlefindmy import get_proto_decoder
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
+from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import get_aesgcm_class
 from custom_components.googlefindmy.FMDNCrypto.foreign_tracker_cryptor import decrypt
 from custom_components.googlefindmy.FMDNCrypto.mcu_utils import (
     flip_bits,
@@ -29,6 +30,9 @@ from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     EIK_GCM_TOTAL_LEN,
     decrypt_aes_gcm,
     decrypt_eik,
+)
+from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
+    async_get_shared_key,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypted_location import (
     WrappedLocation,
@@ -140,6 +144,33 @@ def clear_eik_cache() -> None:
     _LOGGER.debug("EIK cache cleared (all entries)")
 
 
+def invalidate_eik_cache_for_key(
+    encrypted_identity_key: bytes, owner_key_version: int
+) -> int:
+    """Invalidate all cached EIK entries for a specific encrypted identity key.
+
+    Called when persistent MAC/InvalidTag failures indicate the cached decrypted
+    EIK is stale (e.g., after key rotation, re-pairing, or E2EE reset).
+
+    Returns:
+        The number of entries removed.
+    """
+    removed = 0
+    for do_flip in (False, True):
+        flipped_blob = flip_bits(encrypted_identity_key, do_flip)
+        cache_key = _get_eik_cache_key(flipped_blob, owner_key_version, do_flip)
+        if cache_key in _eik_cache:
+            del _eik_cache[cache_key]
+            removed += 1
+    if removed:
+        _LOGGER.info(
+            "Invalidated %d EIK cache entries (version=%s) due to persistent auth failures",
+            removed,
+            owner_key_version,
+        )
+    return removed
+
+
 def get_eik_cache_stats() -> dict[str, int]:
     """Return current cache statistics (for diagnostics)."""
     return {
@@ -147,6 +178,51 @@ def get_eik_cache_stats() -> dict[str, int]:
         "misses": _eik_cache_stats["misses"],
         "size": len(_eik_cache),
     }
+
+
+# -------------------------------------------------------------------------
+# AAD Envelope Unwrap (matches eid_resolver pattern)
+# -------------------------------------------------------------------------
+_AESGCM_NONCE_LEN = 12
+
+
+def _try_unwrap_aesgcm_envelope(
+    envelope: bytes, wrapping_key: bytes, device_id: str | None
+) -> bytes | None:
+    """Try AES-GCM envelope unwrap with AAD (device_id as registry_id).
+
+    Some trackers use an AES-GCM envelope format where the encrypted identity
+    key includes Additional Authenticated Data (AAD). The standard decrypt_eik
+    (without AAD) fails with InvalidTag for these. This mirrors the fallback in
+    eid_resolver._unwrap_aesgcm_envelope.
+    """
+    if device_id is None or len(envelope) <= _AESGCM_NONCE_LEN:
+        return None
+    try:
+        AESGCM = get_aesgcm_class()
+        nonce = envelope[:_AESGCM_NONCE_LEN]
+        ciphertext = envelope[_AESGCM_NONCE_LEN:]
+        return AESGCM(wrapping_key).decrypt(nonce, ciphertext, device_id.encode())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _extract_canonic_id(device_update_protobuf: Any) -> str | None:
+    """Extract the first canonical ID from a DeviceUpdate protobuf."""
+    try:
+        canonic_ids = (
+            device_update_protobuf.deviceMetadata
+            .identifierInformation
+            .canonicIds
+            .canonicId
+        )
+        for cid in canonic_ids:
+            val = getattr(cid, "id", None)
+            if isinstance(val, str) and val:
+                return val
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _get_common_pb2() -> Any:
@@ -171,7 +247,7 @@ class StaleOwnerKeyError(DecryptionError):
 
 
 async def _unwrap_encrypted_identity_key(
-    identity_key: bytes, *, cache: TokenCache
+    identity_key: bytes, *, cache: TokenCache, device_id: str | None = None
 ) -> bytes | None:
     """Unwrap a 60-byte encrypted identity key into a 32-byte EIK if possible."""
 
@@ -190,6 +266,15 @@ async def _unwrap_encrypted_identity_key(
         )
     except Exception as exc:  # pragma: no cover - defensive diagnostic path
         _LOGGER.debug("[DECRYPT] EIK unwrap failed in thread: %s", exc)
+        # Try AAD envelope fallback before giving up
+        aad_result = _try_unwrap_aesgcm_envelope(
+            identity_key, owner_key_info.key, device_id
+        )
+        if aad_result is not None and len(aad_result) == _EIK_LEN:
+            _LOGGER.debug(
+                "[DECRYPT] Successfully unwrapped 60-byte EIK via AAD envelope (early path)."
+            )
+            return bytes(aad_result)
         return None
 
     if len(decrypted_eik) != _EIK_LEN:
@@ -250,6 +335,7 @@ async def async_retrieve_identity_key(
     device_registration: DeviceRegistration,
     *,
     cache: TokenCache,
+    device_id: str | None = None,
     _retry: bool = True,
 ) -> list[bytes]:  # noqa: PLR0912, PLR0915
     """Retrieve the device Ephemeral Identity Key (EIK) asynchronously.
@@ -257,8 +343,9 @@ async def async_retrieve_identity_key(
     Flow (async-first, HA-friendly):
     - Check cache for previously decrypted EIKs (performance optimization).
     - Try both MCU bit-flip states to derive candidate keys.
-    - Obtain owner key (async).
+    - Obtain owner key + shared key (async).
     - Decrypt each candidate EIK (CPU-bound → offload to thread).
+    - On InvalidTag: try AAD envelope unwrap (matches eid_resolver pattern).
     - Cache decrypted EIKs for future requests.
     - Strictly validate length to avoid silent misuse downstream.
 
@@ -270,6 +357,7 @@ async def async_retrieve_identity_key(
     Args:
         device_registration: Tracker registration metadata containing the encrypted EIK.
         cache: Entry-scoped TokenCache used for owner key and username resolution.
+        device_id: Optional canonical device ID used as AAD for envelope unwrap.
 
     Raises:
         StaleOwnerKeyError: if tracker is encrypted with an older owner key.
@@ -287,7 +375,13 @@ async def async_retrieve_identity_key(
         )
 
     owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
-    owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+    try:
+        owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+    except (InvalidTag, RuntimeError) as exc:
+        raise DecryptionError(
+            "Owner key decryption failed (shared key may be stale). "
+            "Re-authenticate with --reauth to refresh crypto keys."
+        ) from exc
 
     # --- Proactive Owner Key Version Mismatch Check ---
     # If the tracker requires a newer owner key version than what we have cached,
@@ -304,61 +398,110 @@ async def async_retrieve_identity_key(
             owner_key_version,
             owner_key_info.version,
         )
-        owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
+        try:
+            owner_key_info = await async_get_owner_key(
+                cache=cache, force_refresh=True
+            )
+        except (InvalidTag, RuntimeError) as exc:
+            raise DecryptionError(
+                "Owner key refresh failed (InvalidTag). "
+                "Re-authenticate with --reauth to refresh crypto keys."
+            ) from exc
+
+    # Build key sources list (matches eid_resolver pattern: try owner + shared)
+    key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
+    try:
+        _cached_user = await cache.get(username_string)
+        shared_key = await async_get_shared_key(
+            cache=cache,
+            username=_cached_user if isinstance(_cached_user, str) else None,
+        )
+        if shared_key is not None:
+            key_sources.append(("shared", shared_key))
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
 
     candidates: list[bytes] = []
     decrypt_errors: list[Exception] = []
 
-    for do_flip in (False, True):
-        flipped_blob = flip_bits(raw_encrypted_identity_key, do_flip)
+    for _key_source, wrapping_key in key_sources:
+        for do_flip in (False, True):
+            flipped_blob = flip_bits(raw_encrypted_identity_key, do_flip)
 
-        # --- EIK Cache Lookup (Performance Optimization) ---
-        eik_cache_key = _get_eik_cache_key(flipped_blob, owner_key_version, do_flip)
-        cached_eik = _eik_cache.get(eik_cache_key)
-        if cached_eik is not None:
-            _eik_cache_stats["hits"] += 1
-            _LOGGER.debug(
-                "EIK cache hit (version=%s, flip=%s)", owner_key_version, do_flip
+            # --- EIK Cache Lookup (Performance Optimization) ---
+            eik_cache_key = _get_eik_cache_key(
+                flipped_blob, owner_key_version, do_flip
             )
-            if cached_eik not in candidates:
-                candidates.append(cached_eik)
-            continue
-
-        _eik_cache_stats["misses"] += 1
-        _LOGGER.debug(
-            "EIK cache miss (version=%s, flip=%s), decrypting...",
-            owner_key_version,
-            do_flip,
-        )
-
-        try:
-            # CPU-heavy → do not block the event loop
-            eik_bytes = await asyncio.to_thread(
-                decrypt_eik, owner_key_info.key, flipped_blob
-            )
-            if (
-                not isinstance(eik_bytes, (bytes, bytearray))
-                or len(eik_bytes) != _EIK_LEN
-            ):
-                raise DecryptionError(
-                    f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes)."
+            cached_eik = _eik_cache.get(eik_cache_key)
+            if cached_eik is not None:
+                _eik_cache_stats["hits"] += 1
+                _LOGGER.debug(
+                    "EIK cache hit (version=%s, flip=%s)",
+                    owner_key_version,
+                    do_flip,
                 )
+                if cached_eik not in candidates:
+                    candidates.append(cached_eik)
+                continue
 
-            key_bytes = bytes(eik_bytes)
-
-            # Cache the decrypted EIK for future requests
-            _eik_cache[eik_cache_key] = key_bytes
+            _eik_cache_stats["misses"] += 1
             _LOGGER.debug(
-                "EIK cached (version=%s, flip=%s, cache_size=%d)",
+                "EIK cache miss (version=%s, flip=%s, source=%s), decrypting...",
                 owner_key_version,
                 do_flip,
-                len(_eik_cache),
+                _key_source,
             )
 
-            if key_bytes not in candidates:
-                candidates.append(key_bytes)
-        except Exception as exc:  # Capture and continue to try the other flip state
-            decrypt_errors.append(exc)
+            try:
+                # CPU-heavy → do not block the event loop
+                eik_bytes = await asyncio.to_thread(
+                    decrypt_eik, wrapping_key, flipped_blob
+                )
+                if (
+                    not isinstance(eik_bytes, (bytes, bytearray))
+                    or len(eik_bytes) != _EIK_LEN
+                ):
+                    raise DecryptionError(
+                        f"Ephemeral identity key invalid (expected {_EIK_LEN} bytes)."
+                    )
+
+                key_bytes = bytes(eik_bytes)
+
+                # Cache the decrypted EIK for future requests
+                _eik_cache[eik_cache_key] = key_bytes
+                _LOGGER.debug(
+                    "EIK cached (version=%s, flip=%s, cache_size=%d)",
+                    owner_key_version,
+                    do_flip,
+                    len(_eik_cache),
+                )
+
+                if key_bytes not in candidates:
+                    candidates.append(key_bytes)
+            except InvalidTag:
+                # Fallback: try AESGCM envelope with AAD (matches eid_resolver)
+                envelope_result = _try_unwrap_aesgcm_envelope(
+                    flipped_blob, wrapping_key, device_id=device_id
+                )
+                if (
+                    envelope_result is not None
+                    and len(envelope_result) == _EIK_LEN
+                ):
+                    key_bytes = bytes(envelope_result)
+                    _eik_cache[eik_cache_key] = key_bytes
+                    _LOGGER.info(
+                        "EIK decrypted via AAD envelope fallback "
+                        "(version=%s, flip=%s, source=%s)",
+                        owner_key_version,
+                        do_flip,
+                        _key_source,
+                    )
+                    if key_bytes not in candidates:
+                        candidates.append(key_bytes)
+                    continue
+                decrypt_errors.append(InvalidTag())
+            except Exception as exc:  # Capture and continue to try other states
+                decrypt_errors.append(exc)
 
     if candidates and not decrypt_errors:
         return candidates
@@ -423,6 +566,7 @@ async def async_retrieve_identity_key(
             return await async_retrieve_identity_key(
                 device_registration,
                 cache=cache,
+                device_id=device_id,
                 _retry=False,
             )
 
@@ -436,6 +580,35 @@ async def async_retrieve_identity_key(
         raise StaleOwnerKeyError(
             "Tracker was encrypted with a stale owner key version."
         ) from last_exc
+
+    # Blind refresh: version check unavailable but key is clearly wrong.
+    # This mirrors the version-mismatch retry above but works when SPOT gRPC
+    # fails to provide current_owner_key_version (common in standalone CLI).
+    if not candidates and current_owner_key_version is None and _retry:
+        _LOGGER.info(
+            "EIK decryption failed and SPOT version check unavailable; "
+            "attempting blind owner key refresh."
+        )
+        try:
+            username = await cache.get(username_string)
+            if isinstance(username, str) and username:
+                await cache.set(f"owner_key_{username}", None)
+                await cache.set(f"shared_key_{username}", None)
+            # Also clear the bare key (written by generic secrets loop).
+            # In HA mode this triggers RuntimeError → ConfigEntryAuthFailed
+            # → reauth flow, where the user provides a fresh secrets bundle.
+            await cache.set("shared_key", None)
+        except Exception as cache_exc:  # noqa: BLE001
+            _LOGGER.debug("Failed to clear cached keys: %s", cache_exc)
+        try:
+            return await async_retrieve_identity_key(
+                device_registration,
+                cache=cache,
+                device_id=device_id,
+                _retry=False,
+            )
+        except Exception as refresh_exc:  # noqa: BLE001
+            _LOGGER.warning("Blind owner key refresh also failed: %s", refresh_exc)
 
     if candidates:
         return candidates
@@ -687,6 +860,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         _LOGGER.error("Device registration metadata missing or invalid: %s", exc)
         raise
 
+    # Extract canonical device ID for AAD envelope unwrap (matches eid_resolver)
+    canonic_id = _extract_canonic_id(device_update_protobuf)
+
     encrypted_user_secrets = device_registration.encryptedUserSecrets
     raw_encrypted_identity_key: bytes = b""
     early_unwrapped_identity_key: bytes | None = None
@@ -710,7 +886,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and len(raw_encrypted_identity_key) == EIK_GCM_TOTAL_LEN
         ):
             early_unwrapped_identity_key = await _unwrap_encrypted_identity_key(
-                raw_encrypted_identity_key, cache=cache
+                raw_encrypted_identity_key, cache=cache, device_id=canonic_id
             )
 
         _LOGGER.debug(
@@ -745,9 +921,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and raw_encrypted_identity_key
             and len(raw_encrypted_identity_key) != _EIK_LEN
         ):
-            _LOGGER.warning(
-                "[DIAG-ALERT] Key length is %d (expected %d for raw EIK)."
-                " This suggests wrapping/encryption!",
+            _LOGGER.debug(
+                "[DIAG] Key length is %d (expected %d for raw EIK);"
+                " likely GCM-wrapped (normal for Moto Tag / Chipolo).",
                 len(raw_encrypted_identity_key),
                 _EIK_LEN,
             )
@@ -757,9 +933,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             and raw_encrypted_identity_key
             and len(raw_encrypted_identity_key) > _EIK_LEN
         ):
-            _LOGGER.warning(
-                "[DIAG-ALERT] Key length %d bytes exceeds expected raw EIK length (%d)."
-                " Probable wrapped key container or HKDF-required envelope.",
+            _LOGGER.debug(
+                "[DIAG] Key length %d bytes exceeds expected raw EIK length (%d);"
+                " probable GCM-wrapped key (will attempt unwrap).",
                 len(raw_encrypted_identity_key),
                 _EIK_LEN,
             )
@@ -792,11 +968,52 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     raw_encrypted_identity_key = bytes(raw_encrypted_identity_key)
     raw_owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
 
-    identity_key_candidates = (
-        [early_unwrapped_identity_key]
-        if early_unwrapped_identity_key is not None
-        else await async_retrieve_identity_key(device_registration, cache=cache)
-    )
+    # Bug 6 fix: Always generate the full candidate set (MCU flip variants,
+    # owner + shared keys) so that foreign/crowdsourced FMDN reports can try
+    # all identity-key candidates.  Prepend the early-unwrapped key when
+    # available — it is the most likely correct key and avoids extra work on
+    # the happy path.
+    try:
+        retrieved_candidates = await async_retrieve_identity_key(
+            device_registration, cache=cache, device_id=canonic_id
+        )
+    except SpotApiEmptyResponseError as exc:
+        # This handler is only reachable from the secondary async_get_eid_info()
+        # diagnostic call inside async_retrieve_identity_key (line ~511), NOT
+        # from the primary owner-key path (which converts to ConfigEntryAuthFailed,
+        # caught by the generic except Exception below).
+        # Before Bug 6, this call was skipped entirely when early_unwrapped
+        # was available, so re-raising unconditionally would regress devices
+        # that previously worked fine.  Fall back to the early key when we
+        # have one; re-raise only when there is no fallback so the
+        # coordinator can trigger ConfigEntryAuthFailed / reauth.
+        if early_unwrapped_identity_key is not None:
+            _LOGGER.warning(
+                "Identity-key retrieval returned SpotApiEmptyResponseError "
+                "(%s); falling back to early-unwrapped key.",
+                exc,
+            )
+            retrieved_candidates = []
+        else:
+            raise
+    except Exception as exc:
+        if early_unwrapped_identity_key is not None:
+            _LOGGER.debug(
+                "async_retrieve_identity_key failed (%s), using early-unwrapped key only.",
+                exc,
+            )
+            retrieved_candidates = []
+        else:
+            raise
+
+    if early_unwrapped_identity_key is not None:
+        early_bytes = bytes(early_unwrapped_identity_key)
+        if early_bytes not in retrieved_candidates:
+            identity_key_candidates = [early_bytes] + retrieved_candidates
+        else:
+            identity_key_candidates = retrieved_candidates
+    else:
+        identity_key_candidates = retrieved_candidates
     identity_key = identity_key_candidates[0] if identity_key_candidates else None
     identity_key_bytes = bytes(identity_key) if identity_key is not None else None
     identity_key_candidate_bytes = [
@@ -816,7 +1033,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 identity_key_candidate_bytes = [identity_key_bytes]
                 identity_key = identity_key_bytes
         except Exception as exc:  # pragma: no cover - diagnostics only
-            _LOGGER.debug("[DECRYPT] Failed to unwrap: %s", exc)
+            _LOGGER.warning(
+                "[DECRYPT] Failed to unwrap 60-byte EIK: %s. "
+                "The owner key in secrets.json may be outdated.",
+                type(exc).__name__,
+            )
 
     if identity_key is None:
         raise DecryptionError("Identity key derivation returned no candidates.")
@@ -983,6 +1204,24 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         network_locations_time = network_locations_time[:_MAX_REPORTS]
 
     wrapped: list[WrappedLocation] = []
+    _auth_failures = 0  # Track MAC / InvalidTag failures across all reports
+    _encrypted_report_count = 0  # Count non-SEMANTIC reports attempted
+
+    # FIX #155: Prepare all identity key candidates for multi-candidate retry.
+    # async_retrieve_identity_key can return multiple candidates (MCU bit-flip
+    # variants, owner+shared key sources). The primary candidate may work for
+    # own-reports (AES-GCM) but fail for foreign/crowdsourced reports (ECDH +
+    # AES-EAX with different key derivation). Trying all candidates prevents
+    # silent loss of all crowdsourced location data.
+    all_identity_keys: list[bytes] = [
+        bytes(k) for k in (identity_key_candidates or [])
+        if k is not None and len(k) == _EIK_LEN
+    ]
+    # Track the active key; promote alternate candidates on success
+    active_identity_key: bytes | None = (
+        all_identity_keys[0] if all_identity_keys else identity_key
+    )
+
     if len(network_locations) != len(network_locations_time):
         _LOGGER.debug(
             "Mismatched report arrays: locations=%s timestamps=%s (dropping unmatched entries)",
@@ -994,6 +1233,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     ):
         if loc is None or time_ts is None:
             continue
+        # Defaults for diagnostic logging in except handlers
+        public_key_random = b""
+        time_offset = 0
         try:
             ts = _parse_epoch_seconds(time_ts, now_wall)
             if ts is None:
@@ -1016,22 +1258,67 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 )
                 continue
 
+            _encrypted_report_count += 1
             enc = loc.geoLocation.encryptedReport
             encrypted_location: bytes = enc.encryptedLocation
-            public_key_random: bytes = enc.publicKeyRandom
+            public_key_random = enc.publicKeyRandom
 
             if public_key_random == b"":  # Own report
+                if active_identity_key is None:
+                    raise ValueError("No identity key available for own-report decryption")
                 decrypted_location_raw = await _offload_decrypt_aes(
-                    identity_key, encrypted_location
+                    active_identity_key, encrypted_location
                 )
             else:
+                # FIX #155: Foreign/crowdsourced reports use ECDH + AES-EAX
+                # with a different key derivation path than own reports.
+                # Try all identity key candidates before giving up.
                 time_offset = 0 if is_mcu else loc.geoLocation.deviceTimeOffset
-                decrypted_location_raw = await _offload_decrypt_foreign(
-                    identity_key,
-                    encrypted_location,
-                    public_key_random,
-                    time_offset,
-                )
+                decrypted_location_raw = None
+                _last_foreign_exc: Exception | None = None
+                for _candidate_idx, candidate_key in enumerate(
+                    all_identity_keys or ([active_identity_key] if active_identity_key else [])
+                ):
+                    try:
+                        decrypted_location_raw = await _offload_decrypt_foreign(
+                            candidate_key,
+                            encrypted_location,
+                            public_key_random,
+                            time_offset,
+                        )
+                        # Promote successful alternate candidate for remaining reports
+                        # and sync identity_key_bytes so payload construction uses
+                        # the key that actually decrypted.
+                        if candidate_key != active_identity_key:
+                            active_identity_key = candidate_key
+                            identity_key_bytes = bytes(candidate_key)
+                            # Sync metadata_update and metadata so the
+                            # promoted key persists to cache/payload
+                            # instead of the original stale value.
+                            metadata_update["identity_key"] = identity_key_bytes
+                            metadata_update["identityKey"] = identity_key_bytes
+                            metadata["identity_key"] = identity_key_bytes
+                            metadata["identityKey"] = identity_key_bytes
+                            # Reorder candidates so the promoted key is
+                            # tried first for remaining reports.
+                            all_identity_keys.remove(candidate_key)
+                            all_identity_keys.insert(0, candidate_key)
+                            # Keep payload-facing list in sync so
+                            # persisted candidates reflect the promotion.
+                            identity_key_candidate_bytes = list(all_identity_keys)
+                            _LOGGER.info(
+                                "Foreign decryption succeeded with alternate "
+                                "identity key candidate (index=%d)",
+                                _candidate_idx,
+                            )
+                        _last_foreign_exc = None
+                        break
+                    except (InvalidTag, ValueError) as _candidate_exc:
+                        _last_foreign_exc = _candidate_exc
+                        continue
+
+                if decrypted_location_raw is None and _last_foreign_exc is not None:
+                    raise _last_foreign_exc
 
             decrypted_location = _ensure_bytes(decrypted_location_raw)
             if decrypted_location is None:
@@ -1051,24 +1338,45 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     name="",
                 )
             )
-        except (AttributeError, KeyError, TypeError, ValueError) as expected_exc:
+        except InvalidTag:
+            # InvalidTag means AES-GCM authentication failed during decryption.
+            _auth_failures += 1
+            _LOGGER.warning(
+                "Decryption auth failed (InvalidTag) for %s report "
+                "(time_offset=%s, key_len=%s, candidates=%d): "
+                "report could not be authenticated. "
+                "Try re-authenticating the account in the Google app.",
+                "own" if public_key_random == b"" else "foreign",
+                time_offset if public_key_random != b"" else "N/A",
+                len(active_identity_key) if active_identity_key else 0,
+                len(all_identity_keys),
+            )
+        except ValueError as ve:
+            # FIX: PyCryptodome's AES-EAX decrypt_and_verify() raises
+            # ValueError("MAC check failed") on tag mismatch.  This is NOT
+            # malformed data — it is an authentication failure identical in
+            # meaning to InvalidTag from the cryptography library.
+            if "mac" in str(ve).lower():
+                _auth_failures += 1
+                _LOGGER.warning(
+                    "Decryption auth failed (MAC check) for %s report "
+                    "(time_offset=%s, key_len=%s, candidates=%d): %s",
+                    "own" if public_key_random == b"" else "foreign",
+                    time_offset if public_key_random != b"" else "N/A",
+                    len(active_identity_key) if active_identity_key else 0,
+                    len(all_identity_keys),
+                    ve,
+                )
+            else:
+                _LOGGER.warning(
+                    "Failed to process one location report (malformed data): %s",
+                    ve,
+                )
+        except (AttributeError, KeyError, TypeError) as expected_exc:
             # Expected errors from malformed protobuf data - log at warning level
             _LOGGER.warning(
                 "Failed to process one location report (malformed data): %s",
                 expected_exc,
-            )
-        except InvalidTag:
-            # InvalidTag means AES-GCM authentication failed during decryption.
-            # This is usually NOT a bug - common causes include:
-            # - Google authentication expired (user needs to re-auth in Google app)
-            # - Shared device where the sharing account's auth is stale
-            # - Tracker offline/dead battery causing stale encrypted data
-            # Log as warning (not error) since user action typically resolves this.
-            _LOGGER.warning(
-                "Decryption failed (InvalidTag): The location report could not be "
-                "authenticated. This often happens when Google authentication is "
-                "stale - try re-authenticating the account in the Google app. "
-                "For shared devices, the sharing account may need to re-authenticate."
             )
         except Exception as unexpected_exc:
             # Unexpected errors indicate bugs or API changes - log with stack trace
@@ -1076,6 +1384,34 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 "Unexpected error processing location report: %s",
                 unexpected_exc,
                 exc_info=True,
+            )
+
+    # FIX: When ALL encrypted reports fail authentication, the cached EIK is
+    # likely stale (e.g., after key rotation, re-pairing, or E2EE reset).
+    # Invalidate the cache so the next attempt forces a fresh key derivation.
+    if (
+        _auth_failures > 0
+        and _encrypted_report_count > 0
+        and _auth_failures >= _encrypted_report_count
+        and raw_encrypted_identity_key
+    ):
+        owner_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
+        removed = invalidate_eik_cache_for_key(raw_encrypted_identity_key, owner_ver)
+        if removed:
+            _LOGGER.warning(
+                "All %d encrypted location reports failed authentication. "
+                "Invalidated %d cached identity key(s) to force re-derivation "
+                "on next poll. If this persists, re-authenticate the account "
+                "or check if E2EE keys have been reset.",
+                _auth_failures,
+                removed,
+            )
+        else:
+            _LOGGER.warning(
+                "All %d encrypted location reports failed authentication "
+                "but no cached keys found to invalidate. The identity key "
+                "derivation may be failing. Re-authenticate the account.",
+                _auth_failures,
             )
 
     if not wrapped:

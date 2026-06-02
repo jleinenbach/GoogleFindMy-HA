@@ -27,7 +27,7 @@ async def test_pair_date_offset_beats_drifted_unix(
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        async_create_task=lambda coro: asyncio.create_task(coro),
+        async_create_task=asyncio.create_task,
         data={},
     )
 

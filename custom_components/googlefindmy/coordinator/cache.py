@@ -374,25 +374,15 @@ class CacheOperations(_MixinBase):
         fused_applied = slot.pop("_fused_applied", False)
 
         status = slot.get("status")
-        is_stationary_logic = (
-            status in ("Fused (Weighted)", "Stationary (at Anchor)") or is_replay
-        )
 
         # Track fused update statistics
         if fused_applied and status == "Fused (Weighted)":
             self.increment_stat("fused_updates")
 
-        # Apply report type cooldown for stationary updates
-        if is_stationary_logic:
-            apply_cooldown = getattr(self, "_apply_report_type_cooldown", None)
-            if callable(apply_cooldown):
-                apply_cooldown(device_id, report_hint)
-        else:
-            _LOGGER.debug(
-                "Skipping throttle cooldown for %s despite '%s' hint (movement detected)",
-                device_id,
-                report_hint,
-            )
+        # Report-type cooldown removed: location_poll_interval (default 300s)
+        # already provides sufficient protection against excessive polling.
+        # The previous 600s cooldown for crowdsourced reports caused a feedback
+        # loop where replays kept extending the cooldown indefinitely.
 
         # Track crowd-sourced updates when hint is present
         if report_hint:
@@ -407,10 +397,6 @@ class CacheOperations(_MixinBase):
         # Track device interval
         raw_last_seen = _normalize_epoch_seconds(slot.get("last_seen"))
         self._track_device_interval(device_id, raw_last_seen)
-
-        # Increment crowdsourced stats for push/manual commits
-        if slot.get("source_label") == "crowdsourced":
-            self.increment_stat("crowd_sourced_updates")
 
         # Significance check
         if not self._is_significant_update(device_id, slot):
@@ -484,8 +470,10 @@ class CacheOperations(_MixinBase):
 
         self._device_location_data[device_id] = slot
 
-        # Increment background updates
-        self.increment_stat("background_updates")
+        # FIX #155: Only count background_updates for non-poll sources
+        # to avoid double-counting with polled_updates.
+        if source != "poll":
+            self.increment_stat("background_updates")
 
         # Register identity key and propagate to shared devices
         effective_identity_key = incoming_identity_key or cached_identity_key
@@ -825,6 +813,13 @@ class CacheOperations(_MixinBase):
                     new_data["altitude"] = existing["altitude"]
                 new_data["location_type"] = "trusted"
                 new_data["status"] = "Stationary (at Anchor)"
+            return True
+
+        # FIX #155: When BOTH sides carry the fallback accuracy, fusion
+        # degenerates to a meaningless 50/50 average that injects jitter.
+        # Accept the newer data as-is instead of blending.
+        # Placed after trusted-anchor checks so anchored devices stay pinned.
+        if existing_acc == DEFAULT_ACCURACY_FALLBACK_M and new_acc == DEFAULT_ACCURACY_FALLBACK_M:
             return True
 
         # Clear jump - no overlap, accept as-is

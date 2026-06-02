@@ -46,11 +46,14 @@ def is_mcu_tracker(
     MCU inversion quirk applies.
     """
 
-    if device_type == _MCU_DEVICE_TYPE:
-        return True
-
+    # NOTE: do NOT short-circuit on device_type alone — DEVICE_TYPE_BEACON (1)
+    # is shared by all beacon-class devices, not just MCU trackers.  Only the
+    # dedicated Fast Pair model ID ("003200") reliably identifies MCU hardware.
     fast_pair_id = fast_pair_model_id
     if fast_pair_id is None and device_registration is not None:
         fast_pair_id = getattr(device_registration, "fastPairModelId", None)
+
+    if not fast_pair_id:
+        return False
 
     return fast_pair_id == mcu_fast_pair_model_id

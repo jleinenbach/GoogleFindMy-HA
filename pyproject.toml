@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.0-3"
+version = "1.7.0-5"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -104,6 +104,7 @@ ignore = ["E501"]
     "E402",
     "UP022",
 ]
+"custom_components/googlefindmy/main.py" = ["E402", "I001"]
 "custom_components/googlefindmy/config_flow.py" = [
     "PLR0912",
     "PLR0915",

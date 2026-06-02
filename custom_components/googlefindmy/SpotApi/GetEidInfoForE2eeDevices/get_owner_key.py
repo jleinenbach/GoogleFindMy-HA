@@ -27,6 +27,7 @@ Injection points (optional):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
@@ -35,6 +36,7 @@ from binascii import unhexlify
 from collections.abc import Awaitable, Callable
 from typing import Any, NamedTuple
 
+from cryptography.exceptions import InvalidTag
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
@@ -171,7 +173,7 @@ async def _retrieve_owner_key(
     if shared_key_getter is not None:
         shared_key: Any = await shared_key_getter()
     else:
-        shared_key = await async_get_shared_key(cache=cache)
+        shared_key = await async_get_shared_key(cache=cache, username=username)
 
     if not isinstance(shared_key, (bytes, bytearray)) or not shared_key:
         raise RuntimeError("Shared key is missing or empty; cannot decrypt owner key")
@@ -189,9 +191,15 @@ async def _retrieve_owner_key(
             "Missing or empty 'encryptedOwnerKey' in eid_info.encryptedOwnerKeyAndMetadata"
         )
 
-    owner_key: Any = await _run_in_executor(
-        decrypt_owner_key, shared_key, encrypted_owner_key
-    )
+    try:
+        owner_key: Any = await _run_in_executor(
+            decrypt_owner_key, shared_key, encrypted_owner_key
+        )
+    except InvalidTag as exc:
+        raise RuntimeError(
+            "Owner key decryption failed (InvalidTag): the shared key may be "
+            "stale or incompatible. Try re-authenticating with --reauth."
+        ) from exc
     owner_key_version = getattr(metadata, "ownerKeyVersion", None)
 
     if not isinstance(owner_key, (bytes, bytearray)) or len(owner_key) == 0:
@@ -420,19 +428,21 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
 
 
 # ---------------------------------------------------------------------------
-# Legacy sync facade (disabled by design)
+# Legacy sync facade (CLI/offline only)
 # ---------------------------------------------------------------------------
 
 
-def get_owner_key() -> bytes:  # pragma: no cover - kept for import compatibility
-    """Legacy sync facade - intentionally unsupported inside Home Assistant.
-
-    This function exists only to preserve import compatibility for external/CLI scripts.
-    It **must not** be used from within the HA event loop and intentionally raises to
-    enforce the async-first contract. CLI users should run `async_get_owner_key()` via
-    `asyncio.run(...)`.
+def get_owner_key(*, cache: TokenCache) -> OwnerKeyInfo:
+    """Synchronous facade for CLI/offline usage; not allowed in the HA event loop.
 
     Raises:
-        NotImplementedError: Always. Use `async_get_owner_key()` instead.
+        RuntimeError: If called from within a running event loop.
     """
-    raise NotImplementedError("Use async_get_owner_key() instead.")
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_get_owner_key(cache=cache))
+    raise RuntimeError(
+        "Sync get_owner_key() called from the event loop. "
+        "Use `await async_get_owner_key()` instead."
+    )

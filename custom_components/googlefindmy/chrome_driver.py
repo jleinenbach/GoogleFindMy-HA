@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import os
@@ -13,6 +14,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
 from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
 
 # Platform-specific import for Windows registry access
 _winreg: ModuleType | None = None
@@ -337,6 +339,7 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         LOGGER.debug("webdriver-manager not available, skipping fallback")
         return None
 
+    driver: WebDriver | None = None
     try:
         LOGGER.info("Attempting webdriver-manager fallback...")
         service = _chrome_service_cls(_chrome_driver_manager_cls().install())
@@ -345,23 +348,24 @@ def _try_webdriver_manager_fallback() -> WebDriver | None:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
 
-        driver: WebDriver = _selenium_webdriver.Chrome(service=service, options=options)
+        driver = _selenium_webdriver.Chrome(service=service, options=options)
         LOGGER.warning(
             "Started using webdriver-manager (standard Selenium). "
             "This uses standard Selenium without bot detection bypass!"
         )
         return driver
     except Exception as err:  # noqa: BLE001 - fallback should not raise
+        _quit_driver(driver)
         LOGGER.debug("webdriver-manager fallback failed: %s", err)
         return None
 
 
-def safe_quit_driver(driver: WebDriver | None) -> None:
+def safe_quit_driver(driver: RemoteWebDriver | None) -> None:
     """Safely quit the Chrome driver, handling WinError 6 and other errors.
 
     Parameters
     ----------
-    driver: WebDriver | None
+    driver: RemoteWebDriver | None
         The WebDriver instance to quit, or None.
     """
     if driver is None:
@@ -394,6 +398,13 @@ def safe_quit_driver(driver: WebDriver | None) -> None:
             pass
 
 
+def _quit_driver(driver: WebDriver | None) -> None:
+    """Silently quit a partially-initialized driver to avoid leftover Chrome windows."""
+    if driver is not None:
+        with contextlib.suppress(Exception):
+            driver.quit()
+
+
 def create_driver(
     chrome_path: str | None = None, *, headless: bool = False
 ) -> WebDriver:
@@ -405,7 +416,54 @@ def create_driver(
     3. Fallback without specifying version
     4. Headless mode
     5. webdriver-manager fallback (standard Selenium)
+
+    On Windows, ``undetected_chromedriver`` may fail with ``WinError 32``
+    (file in use) if a previous ChromeDriver process hasn't fully released
+    its lock on ``chromedriver.exe``.  This function retries up to 3 times
+    with a short delay to handle transient file locks.
     """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            return _create_driver_inner(chrome_path=chrome_path, headless=headless)
+        except (PermissionError, OSError) as err:
+            # WinError 32 (file in use) or WinError 183 (file already exists)
+            err_str = str(err)
+            is_file_lock = "WinError 32" in err_str or "WinError 183" in err_str
+            if not is_file_lock or attempt >= max_retries - 1:
+                raise
+            LOGGER.info(
+                "ChromeDriver file lock detected (attempt %d/3), "
+                "waiting for lock release...",
+                attempt + 1,
+            )
+            time.sleep(3)
+        except RuntimeError:
+            if attempt >= max_retries - 1 or platform.system() != "Windows":
+                raise
+            # All strategies failed — on Windows this may be due to file locks;
+            # retry after a delay.
+            LOGGER.info(
+                "All ChromeDriver strategies failed (attempt %d/3), "
+                "retrying after delay...",
+                attempt + 1,
+            )
+            time.sleep(3)
+
+    # Should not reach here, but satisfy type checker
+    return _create_driver_inner(chrome_path=chrome_path, headless=headless)
+
+
+def _is_file_lock_error(err: BaseException) -> bool:
+    """Check if an exception is a Windows file lock error (WinError 32/183)."""
+    msg = str(err)
+    return "WinError 32" in msg or "WinError 183" in msg
+
+
+def _create_driver_inner(  # noqa: PLR0912, PLR0915
+    chrome_path: str | None = None, *, headless: bool = False
+) -> WebDriver:
+    """Internal driver creation with multiple strategy fallbacks."""
     # Kill any existing Chrome processes to avoid conflicts
     _kill_existing_chrome_processes()
 
@@ -417,7 +475,11 @@ def create_driver(
         if version_main:
             LOGGER.debug("Detected Chrome version: %d", version_main)
 
+    # Track whether all failures are file-lock related (Windows)
+    _all_file_lock = True
+
     # Strategy 1: Default with version_main if detected
+    driver: WebDriver | None = None
     try:
         options = get_options(headless=headless)
         if resolved_path:
@@ -429,6 +491,9 @@ def create_driver(
         LOGGER.debug("ChromeDriver started successfully.")
         return driver
     except Exception as err:  # noqa: BLE001
+        _quit_driver(driver)
+        if not _is_file_lock_error(err):
+            _all_file_lock = False
         LOGGER.warning("Strategy 1 (default) failed: %s", err)
 
     # Strategy 2: Use browser_executable_path parameter (if supported)
@@ -446,6 +511,9 @@ def create_driver(
             LOGGER.debug("ChromeDriver started with browser_executable_path.")
             return driver
         except Exception as err:  # noqa: BLE001
+            _quit_driver(driver)
+            if not _is_file_lock_error(err):
+                _all_file_lock = False
             LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
 
     # Strategy 3: Try without specifying version
@@ -459,6 +527,9 @@ def create_driver(
         LOGGER.debug("ChromeDriver started without explicit version.")
         return driver
     except Exception as err:  # noqa: BLE001
+        _quit_driver(driver)
+        if not _is_file_lock_error(err):
+            _all_file_lock = False
         LOGGER.warning("Strategy 3 (no version) failed: %s", err)
 
     # Strategy 4: Try headless mode
@@ -477,12 +548,23 @@ def create_driver(
             LOGGER.debug("ChromeDriver started in headless mode.")
             return driver
         except Exception as err:  # noqa: BLE001
+            _quit_driver(driver)
+            if not _is_file_lock_error(err):
+                _all_file_lock = False
             LOGGER.warning("Strategy 4 (headless) failed: %s", err)
 
     # Strategy 5: webdriver-manager fallback
     fallback_driver = _try_webdriver_manager_fallback()
     if fallback_driver is not None:
         return fallback_driver
+
+    # If all failures were file-lock related, raise PermissionError so the
+    # outer retry loop in create_driver() can wait and retry.
+    if _all_file_lock and platform.system() == "Windows":
+        raise PermissionError(
+            "All ChromeDriver strategies failed due to file lock (WinError 32/183). "
+            "A previous ChromeDriver process may still be running."
+        )
 
     # All strategies failed
     raise RuntimeError(

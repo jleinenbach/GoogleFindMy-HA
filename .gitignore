@@ -11,3 +11,4 @@ node_modules/
 jscpd-report/
 coverage.xml
 .venv/
+.plans/

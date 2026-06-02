@@ -800,15 +800,18 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         :return: The FCM token which is used to identify you with the push end
             point application.
         """
-        self.register = FcmRegister(
+        # Capture in a local variable so concurrent calls on the same instance
+        # cannot overwrite ``self.register`` and leak the previous session.
+        register = FcmRegister(
             self.fcm_config,
             self.credentials,
             self.credentials_updated_callback,
             http_client_session=self._http_client_session,
         )
+        self.register = register
 
         try:
-            credentials = await self.register.checkin_or_register()
+            credentials = await register.checkin_or_register()
             self.credentials = credentials
 
             fcm_section = credentials.get("fcm")
@@ -825,9 +828,43 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
             return registration_token
         finally:
-            register = self.register
-            if register is not None:
-                await register.close()
+            await register.close()
+            if self.register is register:
+                self.register = None
+
+    async def reregister_keeping_identity(self) -> str:
+        """Re-register FCM tokens while preserving GCM device identity.
+
+        :return: The FCM token.
+        """
+        register = FcmRegister(
+            self.fcm_config,
+            self.credentials,
+            self.credentials_updated_callback,
+            http_client_session=self._http_client_session,
+        )
+        self.register = register
+
+        try:
+            credentials = await register.reregister_keeping_identity()
+            self.credentials = credentials
+
+            fcm_section = credentials.get("fcm")
+            registration_token: str | None = None
+            if isinstance(fcm_section, Mapping):
+                registration_section = fcm_section.get("registration")
+                if isinstance(registration_section, Mapping):
+                    token_candidate = registration_section.get("token")
+                    if isinstance(token_candidate, str):
+                        registration_token = token_candidate
+
+            if registration_token is None:
+                raise RuntimeError("FCM registration token missing from credentials.")
+
+            return registration_token
+        finally:
+            await register.close()
+            if self.register is register:
                 self.register = None
 
     async def _start_heartbeat_sender(self) -> None:

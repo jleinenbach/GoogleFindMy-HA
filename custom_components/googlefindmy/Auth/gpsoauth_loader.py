@@ -44,7 +44,42 @@ def require_gpsoauth() -> GpsoauthModule:
     invoke this helper immediately before using gpsoauth APIs.
     """
 
-    return cast(GpsoauthModule, import_module("gpsoauth"))
+    mod = cast(GpsoauthModule, import_module("gpsoauth"))
+    _patch_perform_auth(mod)
+    return mod
+
+
+def _patch_perform_auth(mod: Any) -> None:
+    """Monkey-patch gpsoauth._perform_auth_request to inject missing params.
+
+    Since ~February 2026 Google requires ``droidguard_results`` with the
+    value ``"null"`` in auth requests.  gpsoauth 2.0.0 either omits it
+    (``perform_oauth``) or sends ``"dummy123"`` (``perform_master_login``,
+    ``exchange_token``), both of which cause authentication failures.
+
+    This patch unconditionally sets the value to ``"null"`` (the string,
+    not Python ``None``), matching the fix adopted by AuroraStore
+    (commit 3ee8c13, 2026-02-11).
+
+    References:
+        https://github.com/simon-weber/gpsoauth/issues/81
+        AuroraStore commit 50e3034b (GitLab whyorean/AuroraStore)
+        https://github.com/BSkando/GoogleFindMy-HA/issues/114
+    """
+
+    if getattr(mod, "_gfm_patched", False):
+        return  # already patched — avoid wrapping twice after cache_clear()
+
+    orig = getattr(mod, "_perform_auth_request", None)
+    if orig is None:
+        return  # function not found — nothing to patch
+
+    def _patched_perform_auth(data: dict[str, Any], proxies: Any = None) -> Any:
+        data["droidguard_results"] = "null"
+        return orig(data, proxies)
+
+    mod._perform_auth_request = _patched_perform_auth
+    mod._gfm_patched = True
 
 
 @lru_cache(maxsize=1)

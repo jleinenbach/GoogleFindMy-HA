@@ -74,14 +74,19 @@ from collections.abc import (
 )
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import ClientError
+from cryptography.exceptions import InvalidTag
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
+    FcmRegisterHTTPError,
+)
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
     StaleOwnerKeyError,
     async_decrypt_location_response_locations,
 )
@@ -158,20 +163,22 @@ _LOGGER = logging.getLogger(__name__)
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
-_P = ParamSpec("_P")
-_T = TypeVar("_T")
+_MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
+_BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
+_MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
+_MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
+_HTTP_UNAUTHORIZED = 401
+_HTTP_NOT_FOUND = 404
 
-_BACKOFF_WARNING_THRESHOLD_S = 1024.0
 
-
-async def _call_in_executor(
-    func: Callable[_P, _T], /, *args: _P.args, **kwargs: _P.kwargs
-) -> _T:
+async def _call_in_executor[**P, T](
+    func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs
+) -> T:
     """Run ``func`` in a background thread with wide Python compatibility."""
 
     to_thread_obj = getattr(asyncio, "to_thread", None)
     if to_thread_obj is not None:
-        to_thread = cast(Callable[..., Awaitable[_T]], to_thread_obj)
+        to_thread = cast(Callable[..., Awaitable[T]], to_thread_obj)
         return await to_thread(func, *args, **kwargs)
 
     try:
@@ -254,6 +261,7 @@ class FcmReceiverHA:
 
         self._fatal_error: str | None = None
         self._fatal_errors: dict[str, str] = {}
+        self._fatal_retry_counts: dict[str, int] = {}  # "entry:auth"|"entry:endpoint" -> count
 
         # Aggregate telemetry
         self.last_start_monotonic: float = 0.0
@@ -280,6 +288,9 @@ class FcmReceiverHA:
 
         # Active background tasks for exception tracking (P0 fix)
         self._active_tasks: set[asyncio.Task[Any]] = set()
+
+        # Per-entry nudge events: allows coordinator to wake up a sleeping supervisor
+        self._retry_nudge_evts: dict[str, asyncio.Event] = {}
 
     def _clear_fatal_error_for_entry(
         self, entry_id: str, *, reason: str | None = None
@@ -543,10 +554,31 @@ class FcmReceiverHA:
 
     ready = is_ready  # alias used by callers
 
+    def nudge_retry(self, entry_id: str | None = None) -> bool:
+        """Wake a sleeping supervisor so it retries FCM connection immediately.
+
+        Called by the polling coordinator when it enters degraded mode and wants
+        the supervisor to attempt reconnection sooner than the backoff timer.
+        Returns True if a nudge event was set.
+        """
+        key = entry_id or self._default_entry_id
+        if not key:
+            # Nudge all entries
+            nudged = False
+            for evt in self._retry_nudge_evts.values():
+                evt.set()
+                nudged = True
+            return nudged
+        nudge_evt = self._retry_nudge_evts.get(key)
+        if nudge_evt is not None:
+            nudge_evt.set()
+            return True
+        return False
+
     def get_last_connected_wall_time(self, entry_id: str | None) -> float | None:
         """Return the last wall-clock timestamp when the entry marked healthy."""
 
-        entry_key = entry_id or self._default_entry_id
+        entry_key = entry_id if entry_id is not None else self._default_entry_id
         if entry_key is None:
             return None
 
@@ -614,7 +646,7 @@ class FcmReceiverHA:
             self._entry_caches[entry_id] = cache
             await self._prime_cache_state(entry_id, cache)
 
-        if entry_id and self._default_entry_id is None:
+        if entry_id is not None and self._default_entry_id is None:
             self._default_entry_id = entry_id
 
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
@@ -661,6 +693,7 @@ class FcmReceiverHA:
                 api_key=self.api_key,
                 messaging_sender_id=self.message_sender_id,
                 bundle_id="com.google.android.apps.adm",
+                android_cert_sha1="38918a453d07199354f8b19af05ec6562ced5788",
             )
 
             # Per-entry credentials update callback
@@ -709,23 +742,43 @@ class FcmReceiverHA:
         stop_evt = self._stop_evts.setdefault(entry_id, asyncio.Event())
 
         async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
+            nudge_evt = self._retry_nudge_evts.setdefault(
+                entry_id, asyncio.Event()
+            )
+
+            async def _nudge_sleep(seconds: float) -> bool:
+                """Sleep up to *seconds*, returning True if nudged early."""
+                nudge_evt.clear()
+                try:
+                    await asyncio.wait_for(nudge_evt.wait(), timeout=seconds)
+                    return True  # nudged
+                except TimeoutError:
+                    return False
+
             backoff = 1.0
             try:
                 while not stop_evt.is_set():
                     pc = await self._ensure_client_for_entry(entry_id, cache)
                     if not pc:
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 4096.0)
+                        nudged = await _nudge_sleep(backoff)
+                        if nudged:
+                            backoff = 1.0
+                        else:
+                            backoff = min(backoff * 2, _MAX_SUPERVISOR_BACKOFF_S)
                         continue
 
                     try:
                         ok_reg = await self._register_for_fcm_entry(entry_id)
                     except FatalRegistrationError as err:
                         message = str(err) or "FCM registration failed"
-                        self._fatal_error = message
-                        self._fatal_errors[entry_id] = message
+                        # Publish to ``_fatal_errors`` only once the retry
+                        # budget is exhausted (see ``break`` paths below);
+                        # otherwise the coordinator's 401-substring match
+                        # in ``coordinator/helpers/update.py`` escalates
+                        # to ``ConfigEntryAuthFailed`` before this loop
+                        # gets a chance to renew tokens.
                         _LOGGER.error(
-                            "[entry=%s] FCM registration failed permanently; credentials may be invalid: %s",
+                            "[entry=%s] FCM registration failed: %s",
                             entry_id,
                             message,
                         )
@@ -736,7 +789,74 @@ class FcmReceiverHA:
                         finally:
                             async with self._lock:
                                 self.pcs.pop(entry_id, None)
-                        break
+
+                        is_auth = getattr(err, "is_auth_error", False)
+                        counter_key = (
+                            f"{entry_id}:auth"
+                            if is_auth
+                            else f"{entry_id}:endpoint"
+                        )
+                        fatal_count = (
+                            self._fatal_retry_counts.get(counter_key, 0) + 1
+                        )
+                        self._fatal_retry_counts[counter_key] = fatal_count
+
+                        if is_auth:
+                            # 401: Token renewal while preserving android_id
+                            max_retries = _MAX_FATAL_AUTH_RETRIES
+                            if fatal_count >= max_retries:
+                                self._fatal_error = message
+                                self._fatal_errors[entry_id] = message
+                                _LOGGER.error(
+                                    "[entry=%s] FCM auth failed %d "
+                                    "consecutive times; giving up. "
+                                    "Re-authentication may be required.",
+                                    entry_id,
+                                    fatal_count,
+                                )
+                                break
+
+                            await self._invalidate_fcm_tokens(entry_id)
+
+                            delay = 60.0 * fatal_count
+                            _LOGGER.warning(
+                                "[entry=%s] FCM auth error 401 (%d/%d); "
+                                "renewing tokens (android_id preserved), "
+                                "retry in %.0fs",
+                                entry_id,
+                                fatal_count,
+                                max_retries,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            # 404: Endpoint rotation — just retry
+                            max_retries = _MAX_FATAL_ENDPOINT_RETRIES
+                            if fatal_count >= max_retries:
+                                self._fatal_error = message
+                                self._fatal_errors[entry_id] = message
+                                _LOGGER.error(
+                                    "[entry=%s] FCM endpoint 404 "
+                                    "persisted for %d attempts; "
+                                    "giving up.",
+                                    entry_id,
+                                    fatal_count,
+                                )
+                                break
+
+                            delay = min(300.0, 30.0 * fatal_count)
+                            _LOGGER.warning(
+                                "[entry=%s] FCM endpoint 404 (%d/%d); "
+                                "retrying in %.0fs (likely Google "
+                                "endpoint rotation)",
+                                entry_id,
+                                fatal_count,
+                                max_retries,
+                                delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
 
                     if not ok_reg:
                         try:
@@ -769,8 +889,11 @@ class FcmReceiverHA:
                                 entry_id,
                                 delay,
                             )
-                        await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 4096.0)
+                        nudged = await _nudge_sleep(delay)
+                        if nudged:
+                            backoff = 1.0
+                        else:
+                            backoff = min(backoff * 2, _MAX_SUPERVISOR_BACKOFF_S)
                         continue
 
                     # Telemetry (aggregate counters)
@@ -790,12 +913,11 @@ class FcmReceiverHA:
                         self._update_last_activity_for_entry(
                             entry_id, pc, time.monotonic()
                         )
+                        backoff = 1.0  # reset only after a successful start
                     except Exception as err:
                         _LOGGER.info(
                             "[entry=%s] FCM client failed to start: %s", entry_id, err
                         )
-
-                    backoff = 1.0  # reset after a successful start
 
                     while not stop_evt.is_set():
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
@@ -872,8 +994,11 @@ class FcmReceiverHA:
                         _LOGGER.info(
                             "[entry=%s] Restarting FCM client in %.1fs", entry_id, delay
                         )
-                        await asyncio.sleep(delay)
-                        backoff = min(backoff * 2, 4096.0)
+                        nudged = await _nudge_sleep(delay)
+                        if nudged:
+                            backoff = 1.0
+                        else:
+                            backoff = min(backoff * 2, _MAX_SUPERVISOR_BACKOFF_S)
             except asyncio.CancelledError:
                 _LOGGER.debug("[entry=%s] FCM supervisor cancelled", entry_id)
                 raise
@@ -882,6 +1007,7 @@ class FcmReceiverHA:
             finally:
                 _LOGGER.info("[entry=%s] FCM supervisor stopped", entry_id)
                 self._update_entry_health(entry_id, False)
+                self._retry_nudge_evts.pop(entry_id, None)
 
         task = asyncio.create_task(
             _supervisor(), name=f"{DOMAIN}.fcm_supervisor[{entry_id}]"
@@ -889,13 +1015,132 @@ class FcmReceiverHA:
         self.supervisors[entry_id] = task
         _LOGGER.info("Started FCM supervisor for entry %s", entry_id)
 
+    async def _invalidate_fcm_tokens(self, entry_id: str) -> None:
+        """Clear renewable FCM tokens while preserving GCM device identity.
+
+        After this, the next registration attempt will use
+        ``reregister_keeping_identity()`` to get fresh FCM tokens with
+        the same android_id/security_token.
+        """
+        creds = self.creds.get(entry_id)
+        if creds and isinstance(creds, dict):
+            # Remove FCM-related parts, keep GCM device identity
+            creds.pop("fcm", None)
+            creds.pop("keys", None)
+            gcm = creds.get("gcm")
+            if isinstance(gcm, dict):
+                gcm.pop("token", None)
+                gcm.pop("app_id", None)
+
+            # Persist partial credentials so restarts also trigger re-register
+            entry_cache = self._entry_caches.get(entry_id)
+            if entry_cache is not None:
+                try:
+                    await entry_cache.set("fcm_credentials", creds)
+                except Exception:
+                    pass
+
+            _LOGGER.info(
+                "[entry=%s] Invalidated FCM tokens; "
+                "android_id/security_token preserved for re-registration",
+                entry_id,
+            )
+
+    @staticmethod
+    def _raise_if_fatal_client_error(
+        entry_id: str, err: ClientError
+    ) -> None:
+        """Raise ``FatalRegistrationError`` for 401/404 client errors."""
+        status_raw = getattr(err, "status", None)
+        if status_raw is None:
+            status_raw = getattr(err, "status_code", None)
+        try:
+            status_int = int(cast(int | str, status_raw))
+        except (TypeError, ValueError):
+            status_int = None
+
+        if status_int == _HTTP_UNAUTHORIZED:
+            raise FatalRegistrationError(
+                f"FCM registration auth failed ({status_int}): "
+                "token renewal needed",
+                is_auth_error=True,
+            ) from err
+
+        if status_int == _HTTP_NOT_FOUND:
+            raise FatalRegistrationError(
+                f"FCM registration endpoint not found ({status_int}): "
+                "may be transient",
+                is_auth_error=False,
+            ) from err
+
+        _LOGGER.error(
+            "[entry=%s] FCM registration client error (status=%s): %s",
+            entry_id,
+            status_raw,
+            err,
+        )
+
+    @staticmethod
+    def _raise_if_fatal_http_error(
+        entry_id: str, err: FcmRegisterHTTPError
+    ) -> None:
+        """Map ``FcmRegisterHTTPError`` to ``FatalRegistrationError``.
+
+        ``FcmRegisterHTTPError`` is raised inside the firebase_messaging helper
+        functions (``fcm_install``, ``fcm_register``, ``fcm_refresh_install_token``,
+        ``gcm_check_in``, ``gcm_register``) when an FCM/GCM endpoint returns 401
+        or 404. Because those helpers do not propagate aiohttp ``ClientError``,
+        the existing ``_raise_if_fatal_client_error`` path cannot see those
+        statuses; this companion classifier closes that gap so the
+        ``_register_for_fcm_entry`` retry budget (auth vs. endpoint) runs.
+        """
+        status_int = int(err.status)
+
+        if status_int == _HTTP_UNAUTHORIZED:
+            raise FatalRegistrationError(
+                f"FCM registration auth failed ({status_int}): "
+                "token renewal needed",
+                is_auth_error=True,
+            ) from err
+
+        if status_int == _HTTP_NOT_FOUND:
+            raise FatalRegistrationError(
+                f"FCM registration endpoint not found ({status_int}): "
+                "may be transient",
+                is_auth_error=False,
+            ) from err
+
+        _LOGGER.error(
+            "[entry=%s] FCM register fatal HTTP error (status=%s): %s",
+            entry_id,
+            status_int,
+            err,
+        )
+
     async def _register_for_fcm_entry(self, entry_id: str) -> bool:
         """Single registration attempt for a specific entry."""
         pc = self.pcs.get(entry_id)
         if not pc:
             return False
         try:
-            token_or_creds = await pc.checkin_or_register()
+            creds = getattr(pc, "credentials", None)
+            # If FCM tokens were invalidated (partial creds with only GCM
+            # identity), re-register while preserving android_id.
+            needs_reregister = (
+                isinstance(creds, dict)
+                and "gcm" in creds
+                and "fcm" not in creds
+            )
+            if needs_reregister:
+                _LOGGER.info(
+                    "[entry=%s] Partial credentials detected; "
+                    "re-registering with existing device identity",
+                    entry_id,
+                )
+                token_or_creds = await pc.reregister_keeping_identity()
+            else:
+                token_or_creds = await pc.checkin_or_register()
+
             if token_or_creds:
                 _LOGGER.info("[entry=%s] FCM registered successfully", entry_id)
                 token = self.get_fcm_token(entry_id)
@@ -905,32 +1150,24 @@ class FcmReceiverHA:
                 self._clear_fatal_error_for_entry(
                     entry_id, reason="Registration succeeded"
                 )
+                # Reset fatal retry counters on success
+                self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
+                self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
             return False
         except FatalRegistrationError:
             raise
         except ClientError as err:
-            status_raw = getattr(err, "status", None)
-            if status_raw is None:
-                status_raw = getattr(err, "status_code", None)
-            try:
-                status_int = int(cast(int | str, status_raw))
-            except (TypeError, ValueError):
-                status_int = None
-
-            if status_int in {401, 404}:
-                message = f"GCM Registration failed ({status_int}): Credentials invalid"
-                self._fatal_error = message
-                self._fatal_errors[entry_id] = message
-                raise FatalRegistrationError(message) from err
-
-            _LOGGER.error(
-                "[entry=%s] FCM registration client error (status=%s): %s",
-                entry_id,
-                status_raw,
-                err,
-            )
+            self._raise_if_fatal_client_error(entry_id, err)
+            return False
+        except FcmRegisterHTTPError as err:
+            # MUST precede the generic RuntimeError catch below, because
+            # FcmRegisterHTTPError is a RuntimeError subclass. This branch
+            # turns persistent 401/404 from the firebase_messaging helpers
+            # into a FatalRegistrationError so the supervisor's auth/endpoint
+            # retry budget (with _invalidate_fcm_tokens) runs.
+            self._raise_if_fatal_http_error(entry_id, err)
             return False
         except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
             # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
@@ -1076,7 +1313,7 @@ class FcmReceiverHA:
         except ValueError:
             pass  # already removed
 
-        if entry_id:
+        if entry_id is not None:
             replacement = None
             for other in self.coordinators:
                 other_entry = getattr(other, "config_entry", None)
@@ -1215,7 +1452,7 @@ class FcmReceiverHA:
         if token and token in self._token_to_entries:
             return set(self._token_to_entries[token]), "token"
 
-        if entry_id:
+        if entry_id is not None:
             return {entry_id}, "client"
 
         owner_entry = self._lookup_owner_entry(canonic_id)
@@ -1606,7 +1843,7 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
-    async def _decode_background_location_async(
+    async def _decode_background_location_async(  # noqa: PLR0911
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
         """Decode background location using protobuf decoders.
@@ -1637,6 +1874,22 @@ class FcmReceiverHA:
                 except StaleOwnerKeyError:
                     _LOGGER.info(
                         "Background location update skipped (stale key) for entry %s",
+                        entry_id,
+                    )
+                    return {}
+                except DecryptionError as dec_err:
+                    _LOGGER.warning(
+                        "Background location decryption failed for entry %s: %s. "
+                        "This may resolve after re-authentication or key refresh.",
+                        entry_id,
+                        dec_err,
+                    )
+                    return {}
+                except InvalidTag:
+                    _LOGGER.warning(
+                        "Background location decryption auth failed (InvalidTag) "
+                        "for entry %s. Cached identity key may be stale; "
+                        "will retry on next update.",
                         entry_id,
                     )
                     return {}
@@ -1672,12 +1925,13 @@ class FcmReceiverHA:
                     best_record = record
                     best_key = key
 
-            if best_record is not None:
-                return dict(best_record)
-
-            return dict(locations[0])
+            return dict(best_record) if best_record is not None else dict(locations[0])
         except Exception as err:  # noqa: BLE001
-            _LOGGER.error("Failed to decode background location data: %s", err)
+            _LOGGER.error(
+                "Failed to decode background location data (%s): %s",
+                type(err).__name__,
+                err,
+            )
             return {}
 
     # -------------------- Credentials & stop --------------------
@@ -1762,6 +2016,62 @@ class FcmReceiverHA:
             if task:
                 task.cancel()
 
+    async def async_reregister_fcm(self, entry_id: str) -> bool:
+        """Public API: invalidate FCM tokens and re-register for a specific entry.
+
+        Preserves the GCM device identity (android_id/security_token) and
+        obtains fresh GCM + FCM tokens via ``reregister_keeping_identity()``.
+
+        Returns True if re-registration was initiated (supervisor restarted),
+        False if the entry is not known to this receiver.
+        """
+        if entry_id not in self.pcs and entry_id not in self.creds:
+            _LOGGER.warning(
+                "[entry=%s] Cannot re-register FCM: entry not known to receiver",
+                entry_id,
+            )
+            return False
+
+        # 1. Invalidate FCM tokens (keeps GCM identity)
+        await self._invalidate_fcm_tokens(entry_id)
+
+        # 2. Stop the supervisor for this entry
+        stop_evt = self._stop_evts.get(entry_id)
+        if stop_evt is not None:
+            stop_evt.set()
+        task = self.supervisors.pop(entry_id, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+        # 3. Reset the stop event BEFORE stopping the client to prevent
+        #    a race where concurrent code sees the old (set) event.
+        self._stop_evts[entry_id] = asyncio.Event()
+
+        # 4. Stop the client so it can be re-created
+        pc = self.pcs.pop(entry_id, None)
+        if pc is not None:
+            try:
+                await asyncio.wait_for(pc.stop(), timeout=5.0)
+            except (TimeoutError, ConnectionError, asyncio.CancelledError):
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 5. Restart the supervisor (will re-register with fresh tokens)
+        cache = self._entry_caches.get(entry_id)
+        await self._start_supervisor_for_entry(entry_id, cache)
+
+        _LOGGER.info(
+            "[entry=%s] FCM re-registration initiated; "
+            "supervisor restarted with invalidated tokens",
+            entry_id,
+        )
+        return True
+
     async def async_stop(self, timeout: float = 5.0) -> None:
         """Stop all supervisors and clients (graceful, bounded)."""
         for eid, evt in self._stop_evts.items():
@@ -1831,7 +2141,7 @@ class FcmReceiverHA:
         Otherwise returns the token for the receiver's default entry when set,
         falling back to the first available token across clients.
         """
-        target_entry = entry_id or self._default_entry_id
+        target_entry = entry_id if entry_id is not None else self._default_entry_id
 
         if target_entry:
             creds = self.creds.get(target_entry)
@@ -1861,7 +2171,7 @@ class FcmReceiverHA:
     def set_default_entry_id(self, entry_id: str | None) -> None:
         """Record the preferred entry_id for legacy token lookups."""
 
-        if entry_id and isinstance(entry_id, str):
+        if isinstance(entry_id, str):
             self._default_entry_id = entry_id
             return
         self._default_entry_id = None
@@ -1882,7 +2192,7 @@ class FcmReceiverHA:
             candidate_entry = (
                 getattr(entry, "entry_id", None) if entry is not None else None
             )
-            if not candidate_entry:
+            if candidate_entry is None:
                 continue
 
             candidate_cache = self._entry_caches.get(candidate_entry)
@@ -1991,6 +2301,32 @@ class FcmReceiverHA:
 
             self._update_token_routing(token, {entry_id})
             await self._persist_routing_token(entry_id, token)
+
+            # Wait for the FCM client to be actively listening before sending
+            # the location request.  Without this, the push notification from
+            # Google may arrive before the MCS connection is established.
+            pc = self.pcs.get(entry_id)
+            if pc is not None:
+                _MAX_READY_WAIT_S = 15.0
+                _POLL_INTERVAL_S = 0.3
+                waited = 0.0
+                while waited < _MAX_READY_WAIT_S:
+                    run_state = getattr(pc, "run_state", None)
+                    if (
+                        FcmPushClientRunState is not None
+                        and run_state == FcmPushClientRunState.STARTED
+                    ):
+                        break
+                    await asyncio.sleep(_POLL_INTERVAL_S)
+                    waited += _POLL_INTERVAL_S
+                else:
+                    _LOGGER.warning(
+                        "[entry=%s] FCM client not in STARTED state after %.1fs; "
+                        "location request may time out",
+                        entry_id,
+                        _MAX_READY_WAIT_S,
+                    )
+
             _LOGGER.info(
                 "[entry=%s] Manual locate registration ready for %s",
                 entry_id,

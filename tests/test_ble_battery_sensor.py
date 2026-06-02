@@ -16,12 +16,18 @@ import custom_components.googlefindmy.eid_resolver as resolver_module
 from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_BATTERY_PCT,
+    FMDN_HASHED_FLAGS_BATTERY_MASK,
+    FMDN_HASHED_FLAGS_BATTERY_SHIFT,
+    FMDN_HASHED_FLAGS_UWT_MODE_MASK,
     BLEBatteryState,
     EIDMatch,
     GoogleFindMyEIDResolver,
 )
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     LEGACY_EID_LENGTH,
+    MODERN_EID_LENGTH,
+    P256_ORDER,
+    compute_flags_xor_mask,
 )
 from custom_components.googlefindmy.sensor import (
     BLE_BATTERY_DESCRIPTION,
@@ -32,6 +38,7 @@ from custom_components.googlefindmy.sensor import (
 # Constants used to build test payloads
 # ---------------------------------------------------------------------------
 _FMDN_FRAME_TYPE = resolver_module.FMDN_FRAME_TYPE  # 0x40
+_MODERN_FRAME_TYPE = resolver_module.MODERN_FRAME_TYPE  # 0x41
 _SERVICE_DATA_OFFSET = resolver_module.SERVICE_DATA_OFFSET  # 8
 _RAW_HEADER_LENGTH = resolver_module.RAW_HEADER_LENGTH  # 1
 
@@ -110,6 +117,19 @@ def _raw_header_payload(eid: bytes, flags_byte: int) -> bytes:
     return frame + eid + bytes([flags_byte])
 
 
+def _modern_service_data_payload(eid: bytes, flags_byte: int) -> bytes:
+    """Build a modern service-data payload: [header(7)][frame(1)][EID(32)][flags(1)]."""
+    header = b"\x00" * 7
+    frame = bytes([_MODERN_FRAME_TYPE])
+    return header + frame + eid + bytes([flags_byte])
+
+
+def _modern_raw_header_payload(eid: bytes, flags_byte: int) -> bytes:
+    """Build a modern raw-header payload: [frame(1)][EID(32)][flags(1)]."""
+    frame = bytes([_MODERN_FRAME_TYPE])
+    return frame + eid + bytes([flags_byte])
+
+
 def _fake_coordinator(
     device_id: str = "dev-1",
     present: bool = True,
@@ -183,30 +203,29 @@ class TestBLEBatteryStateDataclass:
 
     def test_dataclass_fields(self) -> None:
         state = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
-        assert state.battery_level == 0
+        assert state.battery_level == 1
         assert state.battery_pct == 100
         assert state.uwt_mode is False
-        assert state.decoded_flags == 0x00
+        assert state.decoded_flags == 0x02
         assert state.observed_at_wall == 1000.0
 
     def test_battery_pct_mapping(self) -> None:
-        """FMDN_BATTERY_PCT should map 0->100, 1->25, 2->5."""
-        assert FMDN_BATTERY_PCT == {0: 100, 1: 25, 2: 5}
+        """FMDN_BATTERY_PCT: 0->None (unsupported), 1->100, 2->25, 3->5."""
+        assert FMDN_BATTERY_PCT == {0: None, 1: 100, 2: 25, 3: 5}
 
-    def test_battery_pct_reserved_raw_returns_none(self) -> None:
-        """An unrecognized raw value (3=RESERVED) should map to None, not 0.
+    def test_battery_pct_unsupported_raw_returns_none(self) -> None:
+        """Raw value 0 (UNSUPPORTED) should map to None.
 
-        A tracker sending battery_raw=3 can still transmit (battery is not
-        physically dead).  Mapping to 0% would be a false positive — the
-        correct representation is None (HA shows 'unknown').
+        A tracker sending battery_raw=0 does not support battery indication.
+        The correct representation is None (HA shows 'unknown').
         """
-        assert FMDN_BATTERY_PCT.get(3) is None
+        assert FMDN_BATTERY_PCT.get(0) is None
 
     def test_slots_optimization(self) -> None:
         """BLEBatteryState uses __slots__ for memory efficiency."""
@@ -220,10 +239,10 @@ class TestBLEBatteryStateDataclass:
         ensures the correct attribute name is used and no alias exists.
         """
         state = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         # Correct attribute exists and is accessible
@@ -238,10 +257,10 @@ class TestBLEBatteryStateDataclass:
         _build_entities() when logging BLE battery sensor creation.
         """
         state = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=1000.0,
         )
         # Reproduce the log format string from sensor.py _build_entities()
@@ -269,32 +288,51 @@ class TestUpdateBLEBattery:
         resolver._update_ble_battery(raw, None, metadata, [])
         assert len(resolver._ble_battery_state) == 0
 
-    def test_decode_good_service_data(self) -> None:
-        """Battery level 0 (GOOD) -> 100% via service-data format."""
+    def test_decode_unsupported_service_data(self) -> None:
+        """Battery level 0 (UNSUPPORTED) -> None via service-data format."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x55
 
-        desired_decoded = 0b00_000000  # battery=0, uwt=0
+        desired_decoded = 0b00000_00_0  # battery=0, uwt=0
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
-        match = _match("dev-good")
+        match = _match("dev-unsup")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
-        state = resolver._ble_battery_state.get("dev-good")
+        state = resolver._ble_battery_state.get("dev-unsup")
         assert state is not None
         assert state.battery_level == 0
-        assert state.battery_pct == 100
+        assert state.battery_pct is None
         assert state.uwt_mode is False
 
-    def test_decode_low_service_data(self) -> None:
-        """Battery level 1 (LOW) -> 25% via service-data format."""
+    def test_decode_normal_service_data(self) -> None:
+        """Battery level 1 (NORMAL) -> 100% via service-data format."""
         resolver = _make_resolver()
         eid = b"\xbb" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        desired_decoded = 0b00_100000
+        desired_decoded = 0b00000_01_0  # battery=1 at bits 2:1
+        flags_byte = desired_decoded ^ xor_mask
+
+        raw = _service_data_payload(eid, flags_byte)
+        match = _match("dev-normal")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get("dev-normal")
+        assert state is not None
+        assert state.battery_level == 1
+        assert state.battery_pct == 100
+        assert state.uwt_mode is False
+
+    def test_decode_low_service_data(self) -> None:
+        """Battery level 2 (LOW) -> 25% via service-data format."""
+        resolver = _make_resolver()
+        eid = b"\xcc" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+
+        desired_decoded = 0b00000_10_0  # battery=2 at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -303,36 +341,17 @@ class TestUpdateBLEBattery:
 
         state = resolver._ble_battery_state.get("dev-low")
         assert state is not None
-        assert state.battery_level == 1
+        assert state.battery_level == 2
         assert state.battery_pct == 25
         assert state.uwt_mode is False
 
-    def test_decode_critical_service_data(self) -> None:
-        """Battery level 2 (CRITICAL) -> 5% via service-data format."""
-        resolver = _make_resolver()
-        eid = b"\xcc" * LEGACY_EID_LENGTH
-        xor_mask = 0x00
-
-        desired_decoded = 0b01_000000
-        flags_byte = desired_decoded ^ xor_mask
-
-        raw = _service_data_payload(eid, flags_byte)
-        match = _match("dev-crit")
-        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
-
-        state = resolver._ble_battery_state.get("dev-crit")
-        assert state is not None
-        assert state.battery_level == 2
-        assert state.battery_pct == 5
-        assert state.uwt_mode is False
-
     def test_decode_uwt_mode_active(self) -> None:
-        """UWT mode bit 7 set -> uwt_mode=True."""
+        """UWT mode (bit 0 in standard notation) set -> uwt_mode=True."""
         resolver = _make_resolver()
         eid = b"\xdd" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        desired_decoded = 0b10_000000
+        desired_decoded = 0b00000_00_1  # battery=0, uwt=1 (bit 0)
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -342,7 +361,7 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-uwt")
         assert state is not None
         assert state.battery_level == 0
-        assert state.battery_pct == 100
+        assert state.battery_pct is None
         assert state.uwt_mode is True
 
     def test_decode_raw_header_format(self) -> None:
@@ -351,7 +370,7 @@ class TestUpdateBLEBattery:
         eid = b"\xee" * LEGACY_EID_LENGTH
         xor_mask = 0x00
 
-        desired_decoded = 0b00_100000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL) at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _raw_header_payload(eid, flags_byte)
@@ -361,14 +380,14 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-raw")
         assert state is not None
         assert state.battery_level == 1
-        assert state.battery_pct == 25
+        assert state.battery_pct == 100
 
     def test_shared_device_propagation(self) -> None:
         """When one BLE packet matches 2 accounts, battery stores for BOTH device_ids."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
 
         raw = _service_data_payload(eid, flags_byte)
@@ -410,7 +429,7 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        flags_byte = 0b00_000000 ^ xor_mask
+        flags_byte = 0b00000_01_0 ^ xor_mask  # battery=1 (NORMAL)
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-time")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
@@ -423,7 +442,7 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        flags_byte = 0b00_000000 ^ xor_mask
+        flags_byte = 0b00000_01_0 ^ xor_mask  # battery=1 (NORMAL)
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-log")
 
@@ -449,46 +468,41 @@ class TestUpdateBLEBattery:
         xor_mask = 0x00
         match = _match("dev-change")
 
-        # First: GOOD (0)
-        decoded_good = 0b00_000000
-        raw = _service_data_payload(eid, decoded_good ^ xor_mask)
+        # First: NORMAL (1) → 100%
+        decoded_normal = 0b00000_01_0  # battery=1 at bits 2:1
+        raw = _service_data_payload(eid, decoded_normal ^ xor_mask)
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-change"].battery_pct == 100
 
-        # Second: LOW (1) — triggers battery-changed DEBUG log
-        decoded_low = 0b00_100000
+        # Second: LOW (2) → 25% — triggers battery-changed DEBUG log
+        decoded_low = 0b00000_10_0  # battery=2 at bits 2:1
         raw = _service_data_payload(eid, decoded_low ^ xor_mask)
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-change"].battery_pct == 25
-        assert resolver._ble_battery_state["dev-change"].battery_level == 1
+        assert resolver._ble_battery_state["dev-change"].battery_level == 2
 
-    def test_reserved_battery_raw_3_maps_to_none_pct(self) -> None:
-        """Raw battery value 3 (RESERVED) maps to None via FMDN_BATTERY_PCT.get.
-
-        A device transmitting battery_raw=3 is still operational (it can send
-        RF packets), so 0% would be a false-positive empty-battery alarm.
-        None causes HA to display the sensor as 'unknown'.
-        """
+    def test_critically_low_battery_raw_3(self) -> None:
+        """Raw battery value 3 (CRITICALLY_LOW) maps to 5%."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b01_100000
+        desired_decoded = 0b00000_11_0  # battery=3 at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
-        match = _match("dev-reserved")
+        match = _match("dev-crit")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
-        state = resolver._ble_battery_state.get("dev-reserved")
+        state = resolver._ble_battery_state.get("dev-crit")
         assert state is not None
         assert state.battery_level == 3
-        assert state.battery_pct is None
+        assert state.battery_pct == 5
 
     def test_combined_battery_and_uwt(self) -> None:
-        """Battery CRITICAL + UWT -> battery_pct=5, uwt_mode=True."""
+        """Battery LOW + UWT -> battery_pct=25, uwt_mode=True."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b11_000000
+        desired_decoded = 0b00000_10_1  # battery=2 (LOW) + uwt=1 (bit 0)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-combo")
@@ -497,16 +511,16 @@ class TestUpdateBLEBattery:
         state = resolver._ble_battery_state.get("dev-combo")
         assert state is not None
         assert state.battery_level == 2
-        assert state.battery_pct == 5
+        assert state.battery_pct == 25
         assert state.uwt_mode is True
-        assert state.decoded_flags == 0xC0
+        assert state.decoded_flags == 0x05
 
     def test_observed_frame_format_in_log(self) -> None:
         """When observed_frame is an int, the info log should format it as hex."""
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-frame")
@@ -566,16 +580,16 @@ class TestUpdateBLEBattery:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        decoded_good = 0b00_000000
-        raw = _service_data_payload(eid, decoded_good ^ xor_mask)
+        decoded_normal = 0b00000_01_0  # battery=1 (NORMAL)
+        raw = _service_data_payload(eid, decoded_normal ^ xor_mask)
         match = _match("dev-same")
 
-        # First decode — GOOD, INFO log
+        # First decode — NORMAL, INFO log
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-same"].battery_pct == 100
         assert "dev-same" in resolver._flags_logged_devices
 
-        # Second decode — same level (GOOD), no change log emitted
+        # Second decode — same level (NORMAL), no change log emitted
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
         assert resolver._ble_battery_state["dev-same"].battery_pct == 100
 
@@ -587,6 +601,476 @@ class TestUpdateBLEBattery:
         match = _match("dev-flags-no-mask")
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": None}, [match])
         assert resolver._ble_battery_state.get("dev-flags-no-mask") is None
+
+    def test_decode_modern_service_data(self) -> None:
+        """Modern frame 0x41 with 32-byte EID via service-data format."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * MODERN_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
+        flags_byte = desired_decoded ^ xor_mask
+
+        raw = _modern_service_data_payload(eid, flags_byte)
+        match = _match("dev-modern-sd")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get("dev-modern-sd")
+        assert state is not None
+        assert state.battery_level == 1
+        assert state.battery_pct == 100
+        assert state.uwt_mode is False
+
+    def test_decode_modern_raw_header(self) -> None:
+        """Modern frame 0x41 with 32-byte EID via raw-header format."""
+        resolver = _make_resolver()
+        eid = b"\xbb" * MODERN_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_10_0  # battery=2 (LOW)
+        flags_byte = desired_decoded ^ xor_mask
+
+        raw = _modern_raw_header_payload(eid, flags_byte)
+        match = _match("dev-modern-raw")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get("dev-modern-raw")
+        assert state is not None
+        assert state.battery_level == 2
+        assert state.battery_pct == 25
+
+    def test_modern_frame_too_short_cannot_decode(self) -> None:
+        """Modern frame type at position 7 but payload too short for flags byte."""
+        resolver = _make_resolver()
+        # 7 header + 1 frame + 20 bytes (=28, no room for flags byte at all)
+        raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20
+        match = _match("dev-modern-short")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
+        assert resolver._ble_battery_state.get("dev-modern-short") is None
+
+    # ---- Lenient 0x41 + legacy-length variants (Codex review on PR #169) ----
+    # The FMDN frame-type semantics for 0x40 vs 0x41 are not publicly fixed
+    # (see docs/FMDN.md). _extract_candidates already tolerates 0x41 with a
+    # 20-byte legacy EID in the raw-header path (Z. 2678-2688). The lenient
+    # branches in _update_ble_battery mirror that tolerance for the flags-byte
+    # lookup. Range is intentionally narrow (legacy_min..legacy_min+1) to
+    # match the existing tolerance and limit false-positive decodes.
+
+    def test_lenient_0x41_legacy_service_data_decode(self) -> None:
+        """0x41 at byte 7 with 29-byte payload (legacy EID + 1 flag) decodes via lenient branch."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        xor_mask = 0x55
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
+        flags_byte = desired_decoded ^ xor_mask
+
+        # Build with MODERN_FRAME_TYPE but LEGACY_EID_LENGTH -> length 29
+        header = b"\x00" * 7
+        raw = header + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte])
+        assert len(raw) == 29  # explicit length anchor
+
+        match = _match("dev-lenient-sd-29")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-sd-29")
+        assert state is not None
+        assert state.battery_level == 1
+        assert state.battery_pct == 100
+        assert state.uwt_mode is False
+
+    def test_lenient_0x41_legacy_service_data_uwt(self) -> None:
+        """0x41 at byte 7 with 30-byte payload (legacy EID + 1 flag + 1 trailing) decodes UWT-mode."""
+        resolver = _make_resolver()
+        eid = b"\xbb" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_00_1  # battery=0, uwt=1
+        flags_byte = desired_decoded ^ xor_mask
+
+        # length 30 = SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 2 (upper lenient bound)
+        header = b"\x00" * 7
+        raw = header + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte]) + b"\xff"
+        assert len(raw) == 30
+
+        match = _match("dev-lenient-sd-30")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-sd-30")
+        assert state is not None
+        assert state.uwt_mode is True
+
+    def test_lenient_0x41_legacy_raw_header_decode(self) -> None:
+        """0x41 at byte 0 with 22-byte payload (legacy EID + 1 flag) decodes via lenient branch."""
+        resolver = _make_resolver()
+        eid = b"\xcc" * LEGACY_EID_LENGTH
+        xor_mask = 0x00
+        desired_decoded = 0b00000_10_0  # battery=2 (LOW)
+        flags_byte = desired_decoded ^ xor_mask
+
+        # length 22 = RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 1
+        raw = bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte])
+        assert len(raw) == 22
+
+        match = _match("dev-lenient-rh-22")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-rh-22")
+        assert state is not None
+        assert state.battery_level == 2
+        assert state.battery_pct == 25
+
+    def test_lenient_0x41_legacy_raw_header_upper_bound(self) -> None:
+        """0x41 at byte 0 with 23-byte payload decodes via lenient branch (upper bound)."""
+        resolver = _make_resolver()
+        eid = b"\xdd" * LEGACY_EID_LENGTH
+        xor_mask = 0xAA
+        desired_decoded = 0b00000_11_1  # battery=3 (CRITICAL), uwt=1
+        flags_byte = desired_decoded ^ xor_mask
+
+        # length 23 = RAW_HEADER_LENGTH + LEGACY_EID_LENGTH + 2 (upper lenient bound)
+        raw = bytes([_MODERN_FRAME_TYPE]) + eid + bytes([flags_byte]) + b"\xff"
+        assert len(raw) == 23
+
+        match = _match("dev-lenient-rh-23")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-lenient-rh-23")
+        assert state is not None
+        assert state.battery_level == 3
+        assert state.uwt_mode is True
+
+    def test_branch_order_anchor_modern_41_byte_payload(self) -> None:
+        """Regression anchor: length==41 with 0x41 must use raw[40] (strict modern), NOT raw[28] (lenient)."""
+        resolver = _make_resolver()
+        eid = b"\xee" * MODERN_EID_LENGTH  # 32 bytes
+        xor_mask = 0x00
+        modern_decoded = 0b00000_01_0  # battery=1 (NORMAL) at strict offset 40
+        lenient_decoded = 0b00000_11_0  # battery=3 (CRITICAL) at lenient offset 28
+        modern_flags = modern_decoded ^ xor_mask
+        lenient_decoy = lenient_decoded ^ xor_mask
+
+        # Build a 41-byte payload: header(7) + frame(1) + EID(32) + flags(1) = 41
+        # Place a decoy at offset 28 (would be raw[SERVICE_DATA_OFFSET+LEGACY_EID_LENGTH])
+        # and the real flags at offset 40. With correct branch order the
+        # strict modern branch wins and battery decodes to 1, not 3.
+        eid_with_decoy = bytearray(eid)
+        eid_with_decoy[20] = lenient_decoy  # at position 20 of EID = raw offset 28
+        header = b"\x00" * 7
+        raw = (
+            header
+            + bytes([_MODERN_FRAME_TYPE])
+            + bytes(eid_with_decoy)
+            + bytes([modern_flags])
+        )
+        assert len(raw) == 41
+
+        match = _match("dev-branch-order")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+        state = resolver._ble_battery_state.get("dev-branch-order")
+        assert state is not None
+        # Must read raw[40] (modern strict), NOT raw[28] (lenient legacy)
+        assert state.battery_level == 1, (
+            "Branch ordering broken: lenient branch fired despite length>=41"
+        )
+        assert state.battery_pct == 100
+
+    def test_lenient_0x41_legacy_too_short_no_decode(self) -> None:
+        """0x41 at byte 7 with 28-byte payload (no room for flags) -> no decode."""
+        resolver = _make_resolver()
+        # length 28 = SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH (no flags byte)
+        raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20
+        assert len(raw) == 28
+        match = _match("dev-lenient-too-short")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
+        assert resolver._ble_battery_state.get("dev-lenient-too-short") is None
+
+    def test_lenient_0x41_legacy_above_range_no_decode(self) -> None:
+        """0x41 at byte 7 with 31-byte payload (above lenient upper bound, below modern min) -> no decode."""
+        resolver = _make_resolver()
+        # length 31 = SERVICE_DATA_OFFSET + LEGACY_EID_LENGTH + 3 (above ±1 tolerance)
+        # and < 41 (below modern threshold). Should NOT match any branch.
+        raw = b"\x00" * 7 + bytes([_MODERN_FRAME_TYPE]) + b"\xaa" * 20 + b"\xff\xff\xff"
+        assert len(raw) == 31
+        match = _match("dev-lenient-above")
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": 0x00}, [match])
+        assert resolver._ble_battery_state.get("dev-lenient-above") is None
+
+    def test_lenient_0x41_no_xor_mask_does_not_crash(self) -> None:
+        """Lenient branch with missing xor_mask -> graceful no-decode."""
+        resolver = _make_resolver()
+        eid = b"\xaa" * LEGACY_EID_LENGTH
+        header = b"\x00" * 7
+        raw = header + bytes([_MODERN_FRAME_TYPE]) + eid + bytes([0x00])
+        assert len(raw) == 29
+        match = _match("dev-lenient-no-mask")
+        # No xor mask in metadata -> flags_byte found but decode skipped
+        resolver._update_ble_battery(raw, None, {}, [match])
+        assert resolver._ble_battery_state.get("dev-lenient-no-mask") is None
+
+
+# ===========================================================================
+# 2a-MSB. Spec-anchored regression: MSB-first bit numbering convention
+#
+# Anti-regression guard against AI / human reviewers who naively read
+# the FMDN spec's "Bits 5-6 battery, Bit 7 UWT" without honouring the
+# spec's explicit qualifier that bits are referenced from MSB to LSB.
+# See custom_components/googlefindmy/eid_resolver.py around the
+# "FMDN hashed_flags byte layout" comment block and docs/BLE_BATTERY_SENSOR.md L45.
+# ===========================================================================
+
+
+_MSB_BATTERY_LABELS = {0: "UNSUPPORTED", 1: "NORMAL", 2: "LOW", 3: "CRITICALLY_LOW"}
+
+
+# Intentional: spec constants (0x03, 0x01, shift 1) are duplicated here.
+# Do NOT replace them with imports of FMDN_HASHED_FLAGS_BATTERY_MASK /
+# FMDN_HASHED_FLAGS_BATTERY_SHIFT / FMDN_HASHED_FLAGS_UWT_MODE_MASK from
+# eid_resolver.py — that would make these tests tautological (they verify
+# the constants against the Google FHN spec, not against themselves) and
+# would remove the only independent encoder of the spec's MSB-first bit
+# layout (TestFmdnHashedFlagsConstantsMatchSpec below catches numeric
+# drift in the constants, but only this encoder pins down what they mean).
+def _encode_msb_first_flags_byte(battery: int, uwt: bool) -> int:
+    """Build a decoded hashed-flags byte per FMDN MSB-first spec.
+
+    Spec quote (verbatim, retrieved 2026-06-02):
+        "bits are referenced from most significant to least significant"
+    https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+
+    Spec bit -> value table (spec bit 0 = MSB):
+        spec bit:  0    1    2    3    4    5    6    7
+        value:    0x80 0x40 0x20 0x10 0x08 0x04 0x02 0x01
+
+    Battery occupies spec bits 5-6 (2 bits, values 0x04 + 0x02).
+    UWT occupies spec bit 7 (value 0x01).
+    Spec bits 0-4 are reserved (must be 0).
+    """
+    if not 0 <= battery <= 3:
+        raise ValueError(f"battery must be in 0..3, got {battery}")
+    # battery is 2 bits at spec positions 5 (MSB of field, value 0x04) and 6 (value 0x02).
+    # In a 0..3 integer, bit 1 -> spec bit 5 (0x04), bit 0 -> spec bit 6 (0x02).
+    battery_field = ((battery >> 1) & 0x01) * 0x04 | (battery & 0x01) * 0x02
+    uwt_field = 0x01 if uwt else 0x00
+    return battery_field | uwt_field
+
+
+@pytest.mark.parametrize(
+    "battery,uwt",
+    [(b, u) for b in range(4) for u in (False, True)],
+    ids=[f"battery{b}_uwt{int(u)}" for b in range(4) for u in (False, True)],
+)
+class TestHashedFlagsMsbFirstConvention:
+    """Spec-quote-anchored regression for FMDN hashed_flags MSB-first decoding.
+
+    Why this test exists:
+        The Google Fast Pair FHN spec defines hashed_flags as
+            spec bit 5-6: battery level (0..3)
+            spec bit 7:   unwanted-tracking-protection mode
+        AND qualifies explicitly:
+            "bits are referenced from most significant to least significant"
+        => In standard LSB-first byte arithmetic this maps to:
+            battery = (byte >> 1) & 0x03
+            uwt     =  byte       & 0x01
+
+    Reviewers (human or AI) who propose (byte >> 5) & 0x03 / byte & 0x80
+    are reading the spec without its MSB-first qualifier and must be pointed
+    at this test. Removing the test or weakening its assertions re-opens
+    the Codex / Copilot false-positive class documented in
+    docs/BLE_BATTERY_SENSOR.md.
+    """
+
+    def test_decoded_byte_round_trips_through_resolver(
+        self, battery: int, uwt: bool
+    ) -> None:
+        """Every (battery, UWT) combo encodes per spec and decodes back identically."""
+        resolver = _make_resolver()
+        eid = bytes([0xA0 | battery | (0x10 if uwt else 0)]) * LEGACY_EID_LENGTH
+        xor_mask = 0x5A  # arbitrary non-zero mask to exercise XOR path
+
+        decoded = _encode_msb_first_flags_byte(battery, uwt)
+        flags_byte = decoded ^ xor_mask
+        raw = _service_data_payload(eid, flags_byte)
+        device_key = f"dev-msb-{battery}-{int(uwt)}"
+        match = _match(device_key)
+        resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
+
+        state = resolver._ble_battery_state.get(device_key)
+        assert state is not None, _MSB_BATTERY_LABELS[battery]
+        assert state.battery_level == battery
+        assert state.uwt_mode is uwt
+        assert state.decoded_flags == decoded
+
+
+class TestMsbFirstNotLsbFirstDemonstratesCodexMisinterpretation:
+    """Anti-false-positive guard.
+
+    If a reviewer "fixes" the decoder to (decoded >> 5) & 0x03 and decoded & 0x80
+    (the naive LSB-first reading of the spec text), this test demonstrates
+    that the same wire-format byte then decodes to nonsense for every value
+    of battery > 0 and for UWT=True. The assertions below are inequalities
+    against the wrong implementation, not equalities against the right one,
+    which is exactly what makes them readable to future automated reviewers:
+    a PR that "rewrites" the decoder will trip this test even before the
+    main regression tests above.
+    """
+
+    @staticmethod
+    def _wrong_lsb_first_battery(decoded_byte: int) -> int:
+        """The implementation Codex / a careless reader would propose."""
+        return (decoded_byte >> 5) & 0x03
+
+    @staticmethod
+    def _wrong_lsb_first_uwt(decoded_byte: int) -> bool:
+        """The implementation Codex / a careless reader would propose."""
+        return bool(decoded_byte & 0x80)
+
+    def test_msb_first_battery_high_collides_with_lsb_first_zero(self) -> None:
+        """battery=3 in MSB-first encoding is 0x06; LSB-first would read 0 instead."""
+        decoded = _encode_msb_first_flags_byte(battery=3, uwt=False)
+        assert decoded == 0x06
+        # Correct MSB-first decoder yields 3:
+        assert (decoded >> 1) & 0x03 == 3
+        # Wrong LSB-first reading collapses to 0 -> would silently lose
+        # critical-battery advertisements.
+        assert self._wrong_lsb_first_battery(decoded) == 0
+
+    def test_msb_first_uwt_on_collides_with_lsb_first_off(self) -> None:
+        """UWT=True in MSB-first encoding sets bit 0 (0x01); LSB-first reads bit 7."""
+        decoded = _encode_msb_first_flags_byte(battery=0, uwt=True)
+        assert decoded == 0x01
+        # Correct MSB-first decoder reads UWT as True:
+        assert bool(decoded & 0x01) is True
+        # Wrong LSB-first reading reads False -> would silently swallow
+        # unwanted-tracking-protection advertisements.
+        assert self._wrong_lsb_first_uwt(decoded) is False
+
+    def test_documented_anti_pattern_does_not_round_trip_for_any_nonzero_battery(
+        self,
+    ) -> None:
+        """Property check: the wrong reading disagrees with the right one
+        for every non-trivial spec value, proving the two interpretations
+        are genuinely incompatible (not a coincidental match on the
+        all-zeros frame)."""
+        disagreements = 0
+        for battery in range(4):
+            for uwt in (False, True):
+                decoded = _encode_msb_first_flags_byte(battery, uwt)
+                correct_b = (decoded >> 1) & 0x03
+                correct_u = bool(decoded & 0x01)
+                wrong_b = self._wrong_lsb_first_battery(decoded)
+                wrong_u = self._wrong_lsb_first_uwt(decoded)
+                if (correct_b, correct_u) != (wrong_b, wrong_u):
+                    disagreements += 1
+        # Only (battery=0, uwt=False) -> (0, False) coincides for both readings.
+        # All other 7 combinations must disagree -> readings are not exchangeable.
+        assert disagreements == 7
+
+
+# ===========================================================================
+# 2a-CONST. Drift guard: module constants must match Google FHN spec values
+# ===========================================================================
+
+
+class TestFmdnHashedFlagsConstantsMatchSpec:
+    """Drift guard for the FMDN hashed_flags bit-extraction constants.
+
+    Spec quote (verbatim, retrieved 2026-06-02):
+        "bits are referenced from most significant to least significant"
+    https://developers.google.com/nearby/fast-pair/specifications/extensions/fmdn#hashed_flags
+
+    Spec bit layout (spec bit 0 = MSB):
+        bits 0-4: reserved (must be 0)
+        bits 5-6: battery level (2 bit field)
+        bit 7:    unwanted-tracking-protection mode (1 bit)
+
+    Mapping to standard LSB-first arithmetic on the XOR-decoded byte:
+        battery_raw = (decoded >> 1) & 0x03   -> shift=1, mask=0x03
+        uwt_mode    = bool(decoded & 0x01)    -> mask=0x01
+
+    If a future refactor renames or changes the numeric value of any of these
+    constants, this test fails -- preventing silent drift between module code
+    and the spec. The behaviour test for the decode path itself lives in
+    TestHashedFlagsMsbFirstConvention (which deliberately keeps the literals
+    inline to avoid tautology).
+    """
+
+    def test_battery_mask_is_2_bit(self) -> None:
+        assert FMDN_HASHED_FLAGS_BATTERY_MASK == 0x03
+
+    def test_battery_shift_is_one(self) -> None:
+        assert FMDN_HASHED_FLAGS_BATTERY_SHIFT == 1
+
+    def test_uwt_mode_mask_is_1_bit(self) -> None:
+        assert FMDN_HASHED_FLAGS_UWT_MODE_MASK == 0x01
+
+    def test_battery_field_is_disjoint_from_uwt_field(self) -> None:
+        """Battery and UWT bits must not overlap in the post-decode byte."""
+        battery_field_in_byte = (
+            FMDN_HASHED_FLAGS_BATTERY_MASK << FMDN_HASHED_FLAGS_BATTERY_SHIFT
+        )
+        assert battery_field_in_byte & FMDN_HASHED_FLAGS_UWT_MODE_MASK == 0
+
+    def test_constants_round_trip_through_msb_first_encoder(self) -> None:
+        """End-to-end: spec-correct MSB-first encoder -> module constants -> back.
+
+        Independent of the in-resolver decode site. Catches the case where all
+        three constants AND the decode expression are mutated consistently
+        (e.g. SHIFT=2 / MASK=0x07): the dedicated value tests above still pass
+        in isolation, but this round-trip flips for at least one (battery, uwt)
+        combination because the spec encoder uses verbatim spec values.
+        """
+        for battery in range(4):
+            for uwt in (False, True):
+                decoded = _encode_msb_first_flags_byte(battery, uwt)
+                decoded_battery = (
+                    decoded >> FMDN_HASHED_FLAGS_BATTERY_SHIFT
+                ) & FMDN_HASHED_FLAGS_BATTERY_MASK
+                decoded_uwt = bool(decoded & FMDN_HASHED_FLAGS_UWT_MODE_MASK)
+                assert (decoded_battery, decoded_uwt) == (battery, uwt)
+
+
+# ===========================================================================
+# 2b. compute_flags_xor_mask() with P256 curve
+# ===========================================================================
+
+
+class TestComputeFlagsXorMaskP256:
+    """Tests for compute_flags_xor_mask with P256 curve parameters."""
+
+    def test_p256_xor_mask_differs_from_legacy(self) -> None:
+        """Same EIK+timestamp should produce different masks for P256 vs legacy."""
+        eik = b"\x42" * 32
+        timestamp = 1000000
+
+        legacy_mask = compute_flags_xor_mask(eik, timestamp)
+        p256_mask = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=MODERN_EID_LENGTH, curve_order=P256_ORDER
+        )
+
+        # They *can* coincidentally be equal, but with overwhelming probability
+        # they differ due to different curve order and byte length.
+        # We just verify both calls succeed without error.
+        assert isinstance(legacy_mask, int)
+        assert isinstance(p256_mask, int)
+        assert 0 <= legacy_mask <= 255
+        assert 0 <= p256_mask <= 255
+
+    def test_p256_xor_mask_deterministic(self) -> None:
+        """Same inputs should always produce the same P256 mask."""
+        eik = b"\xab" * 32
+        timestamp = 2000000
+
+        mask1 = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=MODERN_EID_LENGTH, curve_order=P256_ORDER
+        )
+        mask2 = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=MODERN_EID_LENGTH, curve_order=P256_ORDER
+        )
+        assert mask1 == mask2
+
+    def test_legacy_default_backward_compatible(self) -> None:
+        """Calling without curve_order should use legacy secp160r1 (backward compatible)."""
+        eik = b"\xcd" * 32
+        timestamp = 3000000
+
+        mask_default = compute_flags_xor_mask(eik, timestamp)
+        mask_explicit = compute_flags_xor_mask(
+            eik, timestamp, curve_byte_len=LEGACY_EID_LENGTH, curve_order=None
+        )
+        assert mask_default == mask_explicit
 
 
 # ===========================================================================
@@ -604,10 +1088,10 @@ class TestGetBLEBatteryState:
     def test_returns_stored_state(self) -> None:
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=5000.0,
         )
         resolver._ble_battery_state["test-dev"] = state
@@ -619,7 +1103,7 @@ class TestGetBLEBatteryState:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_100000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("api-dev")
@@ -627,7 +1111,7 @@ class TestGetBLEBatteryState:
 
         result = resolver.get_ble_battery_state("api-dev")
         assert result is not None
-        assert result.battery_pct == 25
+        assert result.battery_pct == 100
 
 
 # ===========================================================================
@@ -681,10 +1165,10 @@ class TestBLEBatterySensorNativeValue:
         """When resolver has battery data, native_value returns battery_pct."""
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         resolver._ble_battery_state["dev-1"] = state
@@ -719,19 +1203,19 @@ class TestBLEBatterySensorNativeValue:
         assert sensor.native_value is None
 
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         assert sensor.native_value == 100
 
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=2000.0,
         )
         assert sensor.native_value == 25
@@ -763,10 +1247,10 @@ class TestBLEBatterySensorAvailability:
         """Sensor available when coordinator reports device as present."""
         resolver = _make_resolver()
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=0,
+            battery_level=1,
             battery_pct=100,
             uwt_mode=False,
-            decoded_flags=0x00,
+            decoded_flags=0x02,
             observed_at_wall=1000.0,
         )
         coordinator = _fake_coordinator(device_id="dev-1", present=True)
@@ -885,10 +1369,10 @@ class TestBLEBatterySensorExtraAttributes:
     def test_attributes_with_resolver_data(self) -> None:
         resolver = _make_resolver()
         state = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=True,
-            decoded_flags=0xA0,
+            decoded_flags=0x05,
             observed_at_wall=1700000000.0,
         )
         resolver._ble_battery_state["dev-1"] = state
@@ -897,7 +1381,7 @@ class TestBLEBatterySensorExtraAttributes:
         attrs = sensor.extra_state_attributes
 
         assert attrs is not None
-        assert attrs["battery_raw_level"] == 1
+        assert attrs["battery_raw_level"] == 2
         assert "uwt_mode" not in attrs  # UWT is its own binary sensor now
         assert attrs["google_device_id"] == "dev-1"
         assert "last_ble_observation" in attrs
@@ -925,10 +1409,10 @@ class TestBLEBatterySensorCoordinatorUpdate:
         """When resolver has battery data, update caches native_value."""
         resolver = _make_resolver()
         resolver._ble_battery_state["dev-1"] = BLEBatteryState(
-            battery_level=1,
+            battery_level=2,
             battery_pct=25,
             uwt_mode=False,
-            decoded_flags=0x20,
+            decoded_flags=0x04,
             observed_at_wall=1000.0,
         )
         coordinator = _fake_coordinator(
@@ -1327,7 +1811,7 @@ class TestIntegrationDecodeToEntity:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x33
-        desired_decoded = 0b01_000000
+        desired_decoded = 0b00000_10_0  # battery=2 (LOW) at bits 2:1
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
         match = _match("dev-pipe")
@@ -1335,7 +1819,7 @@ class TestIntegrationDecodeToEntity:
         resolver._update_ble_battery(raw, None, {"flags_xor_mask": xor_mask}, [match])
 
         sensor = _build_battery_sensor(device_id="dev-pipe", resolver=resolver)
-        assert sensor.native_value == 5
+        assert sensor.native_value == 25
 
         attrs = sensor.extra_state_attributes
         assert attrs is not None
@@ -1347,7 +1831,7 @@ class TestIntegrationDecodeToEntity:
         resolver = _make_resolver()
         eid = b"\xaa" * LEGACY_EID_LENGTH
         xor_mask = 0x00
-        desired_decoded = 0b00_000000
+        desired_decoded = 0b00000_01_0  # battery=1 (NORMAL)
         flags_byte = desired_decoded ^ xor_mask
         raw = _service_data_payload(eid, flags_byte)
 
