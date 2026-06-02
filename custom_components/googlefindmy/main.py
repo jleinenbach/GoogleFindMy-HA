@@ -15,7 +15,7 @@ _standalone = not (
 
 if not _standalone:
     # Running inside the HA repo structure – add repo root to sys.path
-    _repo_root = str(_this_dir.parents[2])
+    _repo_root = str(_this_dir.parents[1])
     if _repo_root not in sys.path:
         sys.path.insert(0, _repo_root)
 else:
