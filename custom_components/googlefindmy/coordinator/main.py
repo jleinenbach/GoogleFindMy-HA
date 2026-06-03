@@ -1150,9 +1150,11 @@ class GoogleFindMyCoordinator(
         if entry is None:
             return False
 
-        raw_mappings = entry.options.get(OPT_SEMANTIC_LOCATIONS)
+        options = getattr(entry, "options", None) or {}
+        raw_mappings = options.get(OPT_SEMANTIC_LOCATIONS)
         if not raw_mappings:
-            raw_mappings = entry.data.get(OPT_SEMANTIC_LOCATIONS)
+            data = getattr(entry, "data", None) or {}
+            raw_mappings = data.get(OPT_SEMANTIC_LOCATIONS)
         if not isinstance(raw_mappings, Mapping):
             return False
 
@@ -1872,11 +1874,44 @@ class GoogleFindMyCoordinator(
             devices_stub.append({"id": dev_id, "name": name})
 
         snapshot = self._build_snapshot_from_cache(devices_stub, wall_now=wall_now)
-        self._refresh_subentry_index(devices_stub)
-        self._store_subentry_snapshots(snapshot)
-        self.async_set_updated_data(snapshot)
+
+        # Merge this push snapshot with the existing self.data so non-pushed
+        # devices retain their last known state (fixes bouncing state bug).
+        # Dict-union (Py3.9+) preserves insertion order of existing devices and
+        # appends new device_ids at the end; on key collision the pushed value
+        # wins (new_devices second operand).
+        # NOTE: filter ignored devices from the old snapshot too (mirrors the
+        # `ids` filter above), otherwise a device added to ignored_devices
+        # after it already appeared in self.data would be re-published via
+        # the merge until a full poll rebuilds the snapshot.
+        # getattr() guards against tests/lifecycle paths where `data` is not
+        # yet set by the DataUpdateCoordinator base class.
+        old_devices = {
+            d["device_id"]: d
+            for d in (getattr(self, "data", None) or [])
+            if isinstance(d, dict)
+            and "device_id" in d
+            and d["device_id"] not in ignored
+        }
+        new_devices = {
+            d["device_id"]: d
+            for d in snapshot
+            if isinstance(d, dict) and "device_id" in d
+        }
+        merged_snapshot = list((old_devices | new_devices).values())
+
+        # Refresh the subentry index and persist snapshots with the COMPLETE
+        # merged device list so the index, storage, and the data published to
+        # entities are consistent (F-9: pass merged_snapshot instead of None
+        # to avoid the index reading stale self.data).
+        self._refresh_subentry_index(merged_snapshot)
+        self._store_subentry_snapshots(merged_snapshot)
+        self.async_set_updated_data(merged_snapshot)
         _LOGGER.debug(
-            "Pushed snapshot for %d device(s) via push_updated()", len(snapshot)
+            "Pushed snapshot for %d device(s) via push_updated() "
+            "(merged total: %d)",
+            len(snapshot),
+            len(merged_snapshot),
         )
 
     # ---------------------------- Play sound helpers ------------------------

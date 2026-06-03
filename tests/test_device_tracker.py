@@ -395,3 +395,132 @@ def test_device_tracker_avoids_duplicate_accuracy_logs(
             TRACKER_SUBENTRY_KEY, "device-accuracy"
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the show_location_age option (PR #167).
+# T4: default True publishes attribute, rounded to 60s; T5: False omits it;
+# T6: switching the option at runtime takes effect on the next sync.
+# ---------------------------------------------------------------------------
+
+
+class _ShowAgeCoordinatorStub:
+    """Tiny coordinator stub that lets us drive _sync_location_attrs directly."""
+
+    def __init__(self, *, options: dict[str, Any], age_seconds: float | None) -> None:
+        self.hass = SimpleNamespace()
+        self.config_entry = SimpleNamespace(
+            entry_id="entry-show-age", options=dict(options), runtime_data=None
+        )
+        self._age = age_seconds
+        self._snapshots: dict[str, list[dict[str, Any]]] = {}
+        self._row = {
+            "id": "show-age-device",
+            "device_id": "show-age-device",
+            "name": "Tracker",
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "accuracy": 5,
+        }
+        self._snapshots[TRACKER_SUBENTRY_KEY] = [self._row]
+
+    def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return lambda: None
+
+    def is_device_visible_in_subentry(self, key: str, device_id: str) -> bool:
+        return True
+
+    def is_device_present(self, device_id: str) -> bool:
+        return True
+
+    def get_device_location_data_for_subentry(
+        self, key: str | None, device_id: str
+    ) -> dict[str, Any] | None:
+        return self._row
+
+    def get_subentry_snapshot(
+        self, key: str | None = None, feature: str | None = None
+    ) -> list[dict[str, Any]]:
+        return list(self._snapshots.get(key or TRACKER_SUBENTRY_KEY, []))
+
+    def stable_subentry_identifier(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> str | None:
+        return key
+
+    def get_subentry_metadata(
+        self, *, key: str | None = None, feature: str | None = None
+    ) -> Any:
+        return SimpleNamespace(
+            config_subentry_id=key,
+            visible_device_ids=[],
+            enabled_device_ids=[],
+        )
+
+
+def _make_show_age_tracker(
+    coordinator: _ShowAgeCoordinatorStub, age_seconds: float | None
+) -> Any:
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
+    entity = device_tracker.GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "show-age-device", "name": "Tracker"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=TRACKER_SUBENTRY_KEY,
+    )
+    entity.hass = SimpleNamespace()
+    # Bypass stale-detection and force a deterministic age value.
+    entity._is_location_stale = lambda: False  # type: ignore[method-assign]
+    entity._get_location_age = lambda: age_seconds  # type: ignore[method-assign]
+    entity._get_location_status = lambda: "available"  # type: ignore[method-assign]
+    return entity
+
+
+def test_device_tracker_show_location_age_default_true() -> None:
+    """T4: with default options the attribute is published, rounded to 60s."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=125.0)
+    entity = _make_show_age_tracker(coordinator, age_seconds=125.0)
+
+    entity._sync_location_attrs()
+    attrs = entity._attr_extra_state_attributes
+
+    assert "location_age" in attrs, "default options must publish location_age"
+    # 125s rounds to nearest minute = 120s (round(125/60)=2 -> 120).
+    assert attrs["location_age"] == 120
+    assert isinstance(attrs["location_age"], int)
+
+
+def test_device_tracker_show_location_age_false_omits_attribute() -> None:
+    """T5: show_location_age=False must omit the attribute entirely."""
+
+    coordinator = _ShowAgeCoordinatorStub(
+        options={"show_location_age": False}, age_seconds=125.0
+    )
+    entity = _make_show_age_tracker(coordinator, age_seconds=125.0)
+
+    entity._sync_location_attrs()
+    attrs = entity._attr_extra_state_attributes
+
+    assert "location_age" not in attrs, (
+        "show_location_age=False must omit the attribute completely"
+    )
+    # last_seen / sensor.*_last_seen remain reachable via row data; not asserted here.
+
+
+def test_device_tracker_show_location_age_runtime_toggle() -> None:
+    """T6: flipping the option at runtime must drop the attribute on next sync."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=125.0)
+    entity = _make_show_age_tracker(coordinator, age_seconds=125.0)
+
+    entity._sync_location_attrs()
+    assert "location_age" in entity._attr_extra_state_attributes
+
+    # Mutate options as Home Assistant would on options-reload.
+    coordinator.config_entry.options["show_location_age"] = False
+
+    entity._sync_location_attrs()
+    assert "location_age" not in entity._attr_extra_state_attributes

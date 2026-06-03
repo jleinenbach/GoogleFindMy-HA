@@ -40,12 +40,14 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import EntityRecoveryManager, _extract_email_from_entry
+from . import EntityRecoveryManager, _extract_email_from_entry, _opt
 from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
+    DEFAULT_SHOW_LOCATION_AGE,
     DEFAULT_STALE_THRESHOLD,
     DOMAIN,
+    OPT_SHOW_LOCATION_AGE,
     OPT_STALE_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
@@ -831,6 +833,11 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
     _attr_attribution: str | None = None  # Set in __init__ with account email
+    # location_age changes on every fix; keep it out of recorder history
+    # (HA developer guidance, 2023-09 / Entity docs). Stationary devices still
+    # benefit from the show_location_age toggle and 60s rounding, but even
+    # mobile devices should not bloat the state_attributes table here.
+    _unrecorded_attributes = frozenset({"location_age"})
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
@@ -1142,8 +1149,24 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         attributes["google_device_id"] = self.device_id
 
         location_age = self._get_location_age()
-        if location_age is not None:
-            attributes["location_age"] = round(location_age)
+        # Use the _opt() helper so options-first lookups stay consistent with
+        # the rest of the integration and mypy --strict no longer flags the
+        # config_entry attribute access (Any | None has no attribute options).
+        show_location_age: bool = bool(
+            _opt(
+                self.coordinator.config_entry,
+                OPT_SHOW_LOCATION_AGE,
+                DEFAULT_SHOW_LOCATION_AGE,
+            )
+        )
+        if show_location_age and location_age is not None:
+            # Round to the nearest 1 minute (60 s) to reduce unnecessary
+            # database writes for stationary devices while staying close to
+            # the real value.
+            attributes["location_age"] = int(round(location_age / 60.0) * 60)
+        # When show_location_age is False the attribute is omitted entirely.
+        # Absolute timestamps remain available via the "last_seen" attribute
+        # and the sensor.*_last_seen entity.
         attributes["location_status"] = self._get_location_status()
 
         if stale:

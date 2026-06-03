@@ -542,3 +542,238 @@ def test_update_skips_devices_without_valid_id(
         "Skipping duplicate device entry for id=dev-1" in record.message
         for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for push_updated() merge semantics (PR #167 + F-9).
+# T1: push merges with self.data, T2: pushed device overwrites only itself,
+# T3: subentry index sees the merged_snapshot (F-9, prevents stale index).
+# ---------------------------------------------------------------------------
+
+
+def _prime_push_updated(
+    coordinator: GoogleFindMyCoordinator,
+) -> list[list[dict[str, Any]]]:
+    """Patch coordinator to capture snapshots published by push_updated()."""
+
+    captured: list[list[dict[str, Any]]] = []
+
+    def _capture(snapshot: list[dict[str, Any]]) -> None:
+        captured.append(snapshot)
+        coordinator.data = snapshot
+
+    coordinator.async_set_updated_data = _capture
+    coordinator._is_on_hass_loop = lambda: True
+    coordinator._async_build_device_snapshot_with_fallbacks = AsyncMock(
+        side_effect=lambda devices: devices
+    )
+    return captured
+
+
+def test_push_updated_merges_with_existing_data(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """F-3: push for dev-1 must keep dev-2 (and others) in published snapshot."""
+
+    now = time.time()
+    coordinator._device_location_data["dev-1"] = {
+        "device_id": "dev-1",
+        "name": "Pixel 9",
+        "latitude": 37.0,
+        "longitude": -122.0,
+        "accuracy": 5,
+        "last_updated": now,
+    }
+    coordinator._device_names["dev-1"] = "Pixel 9"
+    coordinator._device_names["dev-2"] = "iPhone 15"
+
+    # dev-2 already lives in self.data (the previous published snapshot).
+    coordinator.data = [
+        {
+            "device_id": "dev-2",
+            "name": "iPhone 15",
+            "latitude": 40.0,
+            "longitude": -74.0,
+            "accuracy": 8,
+            "last_updated": now - 5.0,
+        }
+    ]
+
+    captured = _prime_push_updated(coordinator)
+    coordinator.push_updated(["dev-1"])
+
+    assert captured, "push_updated should publish a snapshot"
+    snapshot = captured[-1]
+    ids = {row["device_id"] for row in snapshot}
+    assert ids == {"dev-1", "dev-2"}, (
+        f"merged snapshot must keep both devices; got {ids}"
+    )
+
+
+def test_push_updated_overwrites_pushed_device_only(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """F-3: pushed device record wins on collision; others stay byte-identical."""
+
+    now = time.time()
+    coordinator._device_location_data["dev-1"] = {
+        "device_id": "dev-1",
+        "name": "Pixel 9",
+        "latitude": 41.0,
+        "longitude": -100.0,
+        "accuracy": 3,
+        "last_updated": now,
+    }
+    coordinator._device_names["dev-1"] = "Pixel 9"
+    coordinator._device_names["dev-2"] = "iPhone 15"
+
+    stale_dev1 = {
+        "device_id": "dev-1",
+        "name": "Pixel 9",
+        "latitude": 37.0,
+        "longitude": -122.0,
+        "accuracy": 50,
+        "last_updated": now - 60.0,
+    }
+    untouched_dev2 = {
+        "device_id": "dev-2",
+        "name": "iPhone 15",
+        "latitude": 40.0,
+        "longitude": -74.0,
+        "accuracy": 8,
+        "last_updated": now - 5.0,
+    }
+    coordinator.data = [stale_dev1, untouched_dev2]
+
+    captured = _prime_push_updated(coordinator)
+    coordinator.push_updated(["dev-1"])
+
+    snapshot = captured[-1]
+    by_id = {row["device_id"]: row for row in snapshot}
+    assert by_id["dev-1"]["latitude"] == 41.0, "pushed value must win on collision"
+    assert by_id["dev-1"]["accuracy"] == 3
+    assert by_id["dev-2"] == untouched_dev2, (
+        "non-pushed devices must remain byte-identical"
+    )
+
+
+def test_push_updated_subentry_index_uses_merged_snapshot(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """F-9: _refresh_subentry_index must see the merged_snapshot (not None/stale)."""
+
+    now = time.time()
+    coordinator._device_location_data["dev-1"] = {
+        "device_id": "dev-1",
+        "name": "Pixel 9",
+        "latitude": 37.0,
+        "longitude": -122.0,
+        "accuracy": 5,
+        "last_updated": now,
+    }
+    coordinator._device_names["dev-1"] = "Pixel 9"
+    coordinator._device_names["dev-2"] = "iPhone 15"
+    coordinator.data = [
+        {
+            "device_id": "dev-2",
+            "name": "iPhone 15",
+            "latitude": 40.0,
+            "longitude": -74.0,
+            "accuracy": 8,
+            "last_updated": now - 5.0,
+        }
+    ]
+
+    captured_index_calls: list[Any] = []
+    original_refresh = coordinator._refresh_subentry_index
+
+    def _spy_refresh(
+        visible_devices: Any = None,
+        *,
+        skip_manager_update: bool = False,
+        skip_repair: bool = False,
+    ) -> None:
+        captured_index_calls.append(visible_devices)
+        original_refresh(
+            visible_devices,
+            skip_manager_update=skip_manager_update,
+            skip_repair=skip_repair,
+        )
+
+    coordinator._refresh_subentry_index = _spy_refresh  # type: ignore[method-assign]
+    _prime_push_updated(coordinator)
+    coordinator.push_updated(["dev-1"])
+
+    assert captured_index_calls, "push_updated must refresh the subentry index"
+    visible_arg = captured_index_calls[-1]
+    assert visible_arg is not None, "F-9: index must receive merged_snapshot, not None"
+    ids_seen = {
+        dev.get("device_id") or dev.get("id") for dev in visible_arg if isinstance(dev, dict)
+    }
+    assert ids_seen == {"dev-1", "dev-2"}, (
+        f"F-9: index must see both devices via merged_snapshot; got {ids_seen}"
+    )
+
+
+def test_push_updated_excludes_ignored_devices_from_merge(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """Codex-review regression: an ignored device already present in
+    self.data must NOT reappear in the merged push snapshot, otherwise the
+    user's ignore setting is silently defeated until a full poll.
+
+    See: codex-review on PR #172 / commit 7291389e2b.
+    """
+
+    now = time.time()
+    # dev-new is the actively pushed device.
+    coordinator._device_names["dev-new"] = "Active"
+    coordinator._device_location_data["dev-new"] = {
+        "device_id": "dev-new",
+        "name": "Active",
+        "latitude": 1.0,
+        "longitude": 2.0,
+        "accuracy": 5,
+        "last_updated": now,
+    }
+
+    # dev-old already lives in the previously published snapshot.
+    coordinator.data = [
+        {
+            "device_id": "dev-old",
+            "name": "Ignored",
+            "latitude": 9.0,
+            "longitude": 9.0,
+            "accuracy": 8,
+            "last_updated": now - 10.0,
+        },
+        {
+            "device_id": "dev-new",
+            "name": "Active",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "accuracy": 5,
+            "last_updated": now - 1.0,
+        },
+    ]
+
+    # User ignores dev-old at runtime; ids filter must apply on BOTH sides
+    # of the dict-union merge.
+    coordinator._get_ignored_set = lambda: {"dev-old"}
+
+    captured = _prime_push_updated(coordinator)
+    coordinator.push_updated(["dev-new"])
+
+    assert captured, "push_updated should publish a snapshot"
+    snapshot = captured[-1]
+    ids = {row["device_id"] for row in snapshot}
+    assert "dev-old" not in ids, (
+        f"ignored device must not reappear via old_devices merge; got {ids}"
+    )
+    assert ids == {"dev-new"}, (
+        f"merged snapshot must contain only the non-ignored push target; got {ids}"
+    )
