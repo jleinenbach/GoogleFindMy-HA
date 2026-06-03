@@ -16,6 +16,7 @@ import pytest
 from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _EntityRegistryStub:
@@ -80,7 +81,7 @@ def test_find_tracker_entity_entry_uses_fallback(
 
     coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coordinator.hass = SimpleNamespace()
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-42")
+    coordinator.config_entry = make_config_entry(entry_id="entry-42")
     coordinator.get_device_display_name = lambda device_id: f"Tracker {device_id}"
 
     entry = coordinator.find_tracker_entity_entry("tracker-42")

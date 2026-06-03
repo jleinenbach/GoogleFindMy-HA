@@ -42,6 +42,7 @@ from custom_components.googlefindmy.sensor import (
     STATS_DESCRIPTIONS,
     _subentry_type,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -305,7 +306,7 @@ class TestStatsSensorNativeValue:
             hass=_fake_hass(),
             stats=stats if stats is not None else {},
             last_update_success=True,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
         # We can't call __init__ directly (needs entity base), so mock it
         sensor = GoogleFindMyStatsSensor.__new__(GoogleFindMyStatsSensor)
@@ -1013,7 +1014,7 @@ class TestLastSeenValueConversion:
         coordinator = SimpleNamespace(
             hass=_fake_hass(),
             last_update_success=True,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
 
         def get_snapshot(key=None, *, feature=None):
@@ -1157,7 +1158,7 @@ class TestLastSeenAvailability:
         coordinator = SimpleNamespace(
             hass=_fake_hass(),
             last_update_success=True,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
 
         def get_snapshot(key=None, *, feature=None):
@@ -1245,7 +1246,7 @@ class TestSemanticLabelSensor:
         coordinator = SimpleNamespace(
             hass=_fake_hass(),
             last_update_success=True,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
 
         if no_getter:
@@ -1396,7 +1397,7 @@ class TestBLEBatterySensor:
         coordinator = SimpleNamespace(
             hass=sensor.hass,
             last_update_success=True,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
 
         def get_snapshot(key=None, *, feature=None):
@@ -1547,7 +1548,7 @@ class TestLastSeenAvailableFunctional:
         coordinator = SimpleNamespace(
             hass=_fake_hass(),
             last_update_success=coordinator_success,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
         coordinator.is_device_visible_in_subentry = lambda k, d: has_device
 
@@ -1636,7 +1637,7 @@ class TestBLEBatteryAvailableFunctional:
         coordinator = SimpleNamespace(
             hass=_fake_hass(),
             last_update_success=coordinator_success,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
         coordinator.is_device_visible_in_subentry = lambda k, d: has_device
 
@@ -1708,7 +1709,7 @@ class TestLastSeenExtraAttributes:
         coordinator = SimpleNamespace(
             hass=_fake_hass(),
             last_update_success=True,
-            config_entry=SimpleNamespace(entry_id="test_entry"),
+            config_entry=make_config_entry(entry_id="test_entry"),
         )
 
         def get_location_data(key, dev_id):

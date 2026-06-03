@@ -13,6 +13,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 def test_duplicate_devices_seed_only_once(
@@ -34,7 +35,7 @@ def test_duplicate_devices_seed_only_once(
             self._snapshot = list(devices)
             self._listeners: list[Callable[[], None]] = []
             self.hass = SimpleNamespace()
-            self.config_entry = SimpleNamespace(entry_id="entry-id")
+            self.config_entry = make_config_entry(entry_id="entry-id")
             self.stats: dict[str, int] = {}
             self._device_names: dict[str, str] = {}
             self._device_location_data: dict[str, Any] = {}

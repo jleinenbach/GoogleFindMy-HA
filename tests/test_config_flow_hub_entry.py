@@ -16,6 +16,7 @@ from custom_components.googlefindmy.const import (
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     ConfigEntriesFlowManagerStub,
@@ -69,7 +70,7 @@ async def test_hub_flow_creates_entry_when_requested(
 
     caplog.set_level(logging.INFO)
 
-    entry = SimpleNamespace(entry_id="entry-123", data={}, options={}, subentries={})
+    entry = make_config_entry(entry_id="entry-123", subentries={})
 
     class _ConfigEntriesManager(ConfigEntriesDomainUniqueIdLookupMixin):
         def __init__(self) -> None:
@@ -152,7 +153,7 @@ async def test_hub_subentry_flow_logs_and_delegates(
     )
 
     handler = object.__new__(config_flow.HubSubentryFlowHandler)
-    handler.config_entry = SimpleNamespace(entry_id="entry-1")  # type: ignore[attr-defined]
+    handler.config_entry = make_config_entry(entry_id="entry-1")  # type: ignore[attr-defined]
     handler.subentry = None  # type: ignore[attr-defined]
     handler.hass = SimpleNamespace()  # type: ignore[assignment]
 

@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from tests.helpers import compile_class_method_from_module
+from tests.helpers.config_entries_stub import make_config_entry
 
 pytestmark = pytest.mark.asyncio
 
@@ -223,7 +224,7 @@ async def test_blank_device_name_populates_buttons(
     class _StubCoordinator(button_module.GoogleFindMyCoordinator):
         def __init__(self, devices: list[dict[str, Any]]) -> None:
             self.hass = SimpleNamespace()
-            self.config_entry = SimpleNamespace(entry_id="entry-id")
+            self.config_entry = make_config_entry(entry_id="entry-id")
             self.data = devices
             self._listeners: list[Any] = []
 
@@ -312,7 +313,7 @@ async def test_locate_button_available_when_push_unready() -> None:
     class _CoordinatorStub:
         def __init__(self) -> None:
             self.hass = SimpleNamespace()
-            self.config_entry = SimpleNamespace(entry_id="entry-id")
+            self.config_entry = make_config_entry(entry_id="entry-id")
             self.data = [{"id": "device-1", "name": "Tracker"}]
             self._listeners: list[Any] = []
             self._is_polling = False
@@ -365,7 +366,7 @@ async def test_locate_button_unavailable_on_gate_error() -> None:
     class _CoordinatorStub:
         def __init__(self) -> None:
             self.hass = SimpleNamespace()
-            self.config_entry = SimpleNamespace(entry_id="entry-id")
+            self.config_entry = make_config_entry(entry_id="entry-id")
             self.data = [{"id": "device-1", "name": "Tracker"}]
             self._listeners: list[Any] = []
             self._is_polling = False

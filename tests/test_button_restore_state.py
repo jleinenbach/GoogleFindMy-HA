@@ -17,6 +17,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_SUBENTRY_KEY,
     TRACKER_SUBENTRY_KEY,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 @pytest.mark.asyncio
@@ -26,7 +27,7 @@ async def test_button_restores_last_pressed(monkeypatch: pytest.MonkeyPatch) -> 
     hass = SimpleNamespace(data={DOMAIN: {}}, services=SimpleNamespace(), loop=None)
     coordinator = SimpleNamespace(
         hass=hass,
-        config_entry=SimpleNamespace(entry_id="entry-id"),
+        config_entry=make_config_entry(entry_id="entry-id"),
         is_device_visible_in_subentry=lambda *_args: True,
         can_request_location=lambda _dev_id: True,
         async_request_refresh=AsyncMock(),
@@ -66,7 +67,7 @@ async def test_button_records_last_pressed_on_press() -> None:
     )
     coordinator = SimpleNamespace(
         hass=hass,
-        config_entry=SimpleNamespace(entry_id="entry-id"),
+        config_entry=make_config_entry(entry_id="entry-id"),
         is_device_visible_in_subentry=lambda *_args: True,
         can_play_sound=lambda _dev_id: True,
         async_request_refresh=AsyncMock(),

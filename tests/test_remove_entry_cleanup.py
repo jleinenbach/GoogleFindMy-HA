@@ -11,6 +11,7 @@ import pytest
 import custom_components.googlefindmy as integration
 from custom_components.googlefindmy import DOMAIN
 from custom_components.googlefindmy.const import OPT_DELETE_CACHES_ON_REMOVE
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _TokenCacheStub:
@@ -47,22 +48,11 @@ class _GoogleHomeFilterStub:
         self.shutdown_called = True
 
 
-class _EntryStub:
-    """Config entry stub used in removal tests."""
-
-    def __init__(self) -> None:
-        self.entry_id = "entry-remove"
-        self.data: dict[str, Any] = {}
-        self.options: dict[str, Any] = {}
-        self.title = "Find My Entry"
-        self.runtime_data: Any | None = None
-
-
 class _HassStub:
     """Home Assistant stub exposing the data layout used by async_remove_entry."""
 
     def __init__(
-        self, entry: _EntryStub, runtime_data: integration.RuntimeData
+        self, entry: SimpleNamespace, runtime_data: integration.RuntimeData
     ) -> None:
         self.data: dict[str, Any] = {
             DOMAIN: {
@@ -87,7 +77,7 @@ def _no_fcm_release(monkeypatch: pytest.MonkeyPatch) -> list[None]:
 
 
 def _setup_runtime(
-    entry: _EntryStub,
+    entry: SimpleNamespace,
 ) -> tuple[
     _CoordinatorStub, _TokenCacheStub, _GoogleHomeFilterStub, integration.RuntimeData
 ]:
@@ -116,7 +106,10 @@ def test_async_remove_entry_purges_store_and_creates_issue(
 
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-remove",
+        title="Find My Entry",
+    )
     coordinator, token_cache, google_home_filter, runtime_data = _setup_runtime(entry)
     hass = _HassStub(entry, runtime_data)
 
@@ -145,7 +138,10 @@ def test_async_remove_entry_respects_retention_option(
 
     monkeypatch.setattr(integration, "_unregister_instance", lambda _entry_id: None)
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-remove",
+        title="Find My Entry",
+    )
     entry.options[OPT_DELETE_CACHES_ON_REMOVE] = False
     coordinator, token_cache, google_home_filter, runtime_data = _setup_runtime(entry)
     hass = _HassStub(entry, runtime_data)
@@ -192,7 +188,10 @@ def test_async_remove_entry_fallback_store_remove(
 
     monkeypatch.setattr(integration, "Store", _StoreStub)
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-remove",
+        title="Find My Entry",
+    )
     coordinator = _CoordinatorStub()
     google_home_filter = _GoogleHomeFilterStub()
     runtime_data = integration.RuntimeData(

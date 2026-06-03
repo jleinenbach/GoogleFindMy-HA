@@ -10,6 +10,7 @@ import pytest
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator import identity as coordinator_identity
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _Recorder:
@@ -281,7 +282,7 @@ def test_coordinator_propagates_timestamps_to_identity(
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._last_device_list = []
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
@@ -342,7 +343,7 @@ def test_coordinator_persists_camelCase_identity_keys(
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._last_device_list = []
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
@@ -412,7 +413,7 @@ def test_coordinator_yields_encrypted_only_identities(
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._last_device_list = []
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
@@ -475,7 +476,7 @@ def test_coordinator_decrypts_registry_only_encrypted_identity_keys(
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._last_device_list = []
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
@@ -566,7 +567,7 @@ def test_coordinator_yields_identities_without_pair_date(
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._last_device_list = []
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
@@ -620,7 +621,7 @@ def test_active_device_identities_assigns_correct_timestamps_per_device(
         {"id": "device-2", "identity_key": b"\x02", "pair_date": 200},
     ]
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"
@@ -670,7 +671,7 @@ def test_active_device_identities_handles_missing_custom_fields(
         {"id": "device-1", "identity_key": b"\x01", "pair_date": 100}
     ]
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: getattr(
         device, "canonical_id", None
@@ -719,7 +720,7 @@ def test_active_device_identities_uses_cache_when_not_in_poll_list(
     coordinator._enabled_poll_device_ids = {"canonical/device-1"}
     coordinator._last_device_list = []
     coordinator.data = []
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-id", options={})
+    coordinator.config_entry = make_config_entry(entry_id="entry-id")
     coordinator.hass = SimpleNamespace(data={})
     coordinator._extract_our_identifier = lambda device: device.custom_fields.get(
         "canonical_id"

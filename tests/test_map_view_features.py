@@ -25,6 +25,7 @@ from custom_components.googlefindmy.const import (
     map_token_hex_digest,
     map_token_secret_seed,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _StubConfigEntries:
@@ -115,14 +116,6 @@ class _StubHass:
         return func(*args)
 
 
-class _StubEntry:
-    def __init__(self, entry_id: str, runtime_data: Any) -> None:
-        self.entry_id = entry_id
-        self.data: dict[str, Any] = {}
-        self.options: dict[str, Any] = {}
-        self.runtime_data = runtime_data
-
-
 def _install_history_stub(
     monkeypatch: pytest.MonkeyPatch,
     entity_id: str,
@@ -175,7 +168,7 @@ async def test_get_invalid_token_returns_unauthorized(
 ) -> None:
     """Return 401 when token does not match any entry."""
 
-    entry = _StubEntry("entry-id", runtime_data=None)
+    entry = make_config_entry(entry_id="entry-id", runtime_data=None)
     hass = _StubHass([entry])
     view = map_view.GoogleFindMyMapView(hass)
 
@@ -192,7 +185,7 @@ async def test_get_authorized_includes_leaflet(monkeypatch: pytest.MonkeyPatch) 
 
     device_id = "device123"
     coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Test Device"}])
-    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _StubHass([entry])
 
     def _resolve() -> type[Any]:
@@ -232,7 +225,7 @@ async def test_get_skips_foreign_registry_entries(
 
     device_id = "device456"
     coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Foreign Device"}])
-    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _StubHass([entry])
 
     def _resolve() -> type[Any]:
@@ -291,7 +284,7 @@ async def test_get_prefers_matching_entry_over_foreign_match(
 
     device_id = "device789"
     coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Scoped Device"}])
-    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _StubHass([entry])
 
     def _resolve() -> type[Any]:
@@ -343,7 +336,7 @@ async def test_registry_labels_fill_blank_coordinator_names(
 
     device_id = "device987"
     coordinator = SimpleNamespace(data=[{"id": device_id, "name": "   "}])
-    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _StubHass([entry])
 
     def _resolve() -> type[Any]:
@@ -389,7 +382,7 @@ async def test_missing_registry_and_coordinator_use_unknown(
 
     device_id = "device000"
     coordinator = SimpleNamespace(data=[])
-    entry = _StubEntry("entry-id", runtime_data=coordinator)
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _StubHass([entry])
 
     def _resolve() -> type[Any]:

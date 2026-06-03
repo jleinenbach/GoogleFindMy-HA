@@ -37,6 +37,47 @@ See the modern registry TypeError propagation reminder in
 when updating registry expectations so new coverage stays aligned with
 Home Assistant's current registry keyword surface.
 
+### Canonical config-entry stub: `make_config_entry`
+
+New tests **must** use
+`tests.helpers.config_entries_stub.make_config_entry(...)` instead of
+ad-hoc `SimpleNamespace(entry_id=..., data=..., options=...)` constructions.
+The factory guarantees that `data` and `options` are always plain dicts
+(never `None`), which is exactly the contract production helpers like
+`_opt()` and `entry.data.get(...)` rely on. Ad-hoc stubs that omit
+either field — or set them to `None` — are the structural cause of the
+`AttributeError` failures fixed defensively in PR #172.
+
+Use the full import path; do not re-export through
+`tests/helpers/__init__.py` (mirrors the convention for
+`install_config_entries_stubs`):
+
+```python
+from tests.helpers.config_entries_stub import make_config_entry
+
+entry = make_config_entry(
+    entry_id="test_entry",
+    data={"oauth_token": "abc"},
+    options={"poll_interval": 60},
+)
+```
+
+Field rules:
+
+- `entry_id`: explicit when the test asserts on the value; otherwise
+  auto-generated (`entry-test-<n>`, not deterministic across runs).
+- `data`/`options`: pass a dict literal; the factory copies it (in-place
+  mutation by the test does not leak into the caller).
+- Fields not in the factory signature (test-specific markers, exotic HA
+  attributes): pass via `**extra`, ideally with an inline comment
+  explaining why the field stays out of the canonical signature.
+- Methods (`async_on_unload`, `add_update_listener`, …) are intentionally
+  not part of the factory. Tests that need them attach them per-instance.
+
+Wave-based migration of the existing call sites lands in this branch as
+follow-up commits (waves 1–3); see the corresponding PR description for
+the rollout order.
+
 ## Package layout
 
 The test suite is a Python package (`tests/__init__.py`). Use
