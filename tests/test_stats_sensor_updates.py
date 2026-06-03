@@ -205,10 +205,20 @@ class _EntityRegistryStub:
         return self._entries.get((platform, domain, unique_id))
 
 
-def test_increment_stat_notifies_registered_stats_sensor(
+def test_increment_stat_does_not_notify_listeners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Stats increments must notify listeners so CoordinatorEntity state updates."""
+    """Stats increments must NOT call async_update_listeners (issue #151).
+
+    Statistics counters live in ``coordinator.stats``; they do not change the
+    device snapshot in ``coordinator.data``. Notifying listeners on every
+    increment caused a multiplicative refresh storm (up to 6 notifications per
+    FCM push, multiplied by N device_tracker + sensor entities per coordinator)
+    that saturated the Home Assistant WebSocket buffer
+    (``Reached 4096 pending messages``). The mutation and stat value must still
+    be applied so subsequent coordinator updates surface the new value; the
+    listener-fan-out is what must be avoided.
+    """
 
     loop = asyncio.new_event_loop()
 
@@ -240,12 +250,13 @@ def test_increment_stat_notifies_registered_stats_sensor(
         assert sensor.subentry_key == SERVICE_SUBENTRY_KEY
 
         async def _exercise() -> None:
-            notified = asyncio.Event()
+            notify_calls = 0
 
-            def _mark_notified() -> None:
-                notified.set()
+            def _count_notify() -> None:
+                nonlocal notify_calls
+                notify_calls += 1
 
-            sensor.async_write_ha_state = _mark_notified  # type: ignore[assignment]
+            monkeypatch.setattr(coordinator, "async_update_listeners", _count_notify)
 
             remove_listener = coordinator.async_add_listener(
                 sensor._handle_coordinator_update
@@ -253,7 +264,15 @@ def test_increment_stat_notifies_registered_stats_sensor(
             try:
                 assert sensor.native_value == 0
                 coordinator.increment_stat("background_updates")
-                await asyncio.wait_for(notified.wait(), timeout=0.1)
+                # Yield once so any wrongly scheduled call would run.
+                await asyncio.sleep(0)
+                assert notify_calls == 0, (
+                    "increment_stat must not fan out via async_update_listeners "
+                    "(issue #151)"
+                )
+                # Value is still mutated; the regular coordinator tick / any
+                # async_set_updated_data path surfaces it to the sensor.
+                assert coordinator.stats["background_updates"] == 1
                 assert sensor.native_value == 1
             finally:
                 remove_listener()
