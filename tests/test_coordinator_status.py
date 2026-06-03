@@ -716,3 +716,64 @@ def test_push_updated_subentry_index_uses_merged_snapshot(
     assert ids_seen == {"dev-1", "dev-2"}, (
         f"F-9: index must see both devices via merged_snapshot; got {ids_seen}"
     )
+
+
+def test_push_updated_excludes_ignored_devices_from_merge(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """Codex-review regression: an ignored device already present in
+    self.data must NOT reappear in the merged push snapshot, otherwise the
+    user's ignore setting is silently defeated until a full poll.
+
+    See: codex-review on PR #172 / commit 7291389e2b.
+    """
+
+    now = time.time()
+    # dev-new is the actively pushed device.
+    coordinator._device_names["dev-new"] = "Active"
+    coordinator._device_location_data["dev-new"] = {
+        "device_id": "dev-new",
+        "name": "Active",
+        "latitude": 1.0,
+        "longitude": 2.0,
+        "accuracy": 5,
+        "last_updated": now,
+    }
+
+    # dev-old already lives in the previously published snapshot.
+    coordinator.data = [
+        {
+            "device_id": "dev-old",
+            "name": "Ignored",
+            "latitude": 9.0,
+            "longitude": 9.0,
+            "accuracy": 8,
+            "last_updated": now - 10.0,
+        },
+        {
+            "device_id": "dev-new",
+            "name": "Active",
+            "latitude": 1.0,
+            "longitude": 2.0,
+            "accuracy": 5,
+            "last_updated": now - 1.0,
+        },
+    ]
+
+    # User ignores dev-old at runtime; ids filter must apply on BOTH sides
+    # of the dict-union merge.
+    coordinator._get_ignored_set = lambda: {"dev-old"}
+
+    captured = _prime_push_updated(coordinator)
+    coordinator.push_updated(["dev-new"])
+
+    assert captured, "push_updated should publish a snapshot"
+    snapshot = captured[-1]
+    ids = {row["device_id"] for row in snapshot}
+    assert "dev-old" not in ids, (
+        f"ignored device must not reappear via old_devices merge; got {ids}"
+    )
+    assert ids == {"dev-new"}, (
+        f"merged snapshot must contain only the non-ignored push target; got {ids}"
+    )
