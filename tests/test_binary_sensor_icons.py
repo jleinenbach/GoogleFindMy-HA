@@ -8,6 +8,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from tests.helpers.config_entries_stub import make_config_entry
+
 if "homeassistant.components.binary_sensor" not in sys.modules:
     binary_sensor_module = ModuleType("homeassistant.components.binary_sensor")
 
@@ -126,7 +128,7 @@ def test_auth_status_sensor_icon(event_state: bool, expected_icon: str) -> None:
     """Auth status sensor exposes state-specific icons for clarity."""
 
     coordinator = SimpleNamespace(api_status=None)
-    entry = SimpleNamespace(entry_id="entry-id")
+    entry = make_config_entry(entry_id="entry-id")
     sensor = GoogleFindMyAuthStatusSensor(
         coordinator,
         entry,
@@ -156,7 +158,7 @@ def test_auth_status_sensor_attributes_include_nova_snapshots() -> None:
             changed_at=1700000100.5,
         ),
     )
-    entry = SimpleNamespace(entry_id="entry-id")
+    entry = make_config_entry(entry_id="entry-id")
     sensor = GoogleFindMyAuthStatusSensor(
         coordinator,
         entry,
@@ -179,7 +181,7 @@ def test_auth_status_sensor_attributes_return_none_when_unavailable() -> None:
     """Missing status snapshots result in no extra attributes."""
 
     coordinator = SimpleNamespace(api_status=None, fcm_status=None)
-    entry = SimpleNamespace(entry_id="entry-id")
+    entry = make_config_entry(entry_id="entry-id")
     sensor = GoogleFindMyAuthStatusSensor(
         coordinator,
         entry,
@@ -195,7 +197,7 @@ def test_service_diagnostic_sensors_share_service_device_identifiers() -> None:
     """Service diagnostics attach the same identifier set to the hub device."""
 
     coordinator = SimpleNamespace(api_status=None, fcm_status=None)
-    entry = SimpleNamespace(entry_id="entry-id")
+    entry = make_config_entry(entry_id="entry-id")
     coordinator.config_entry = entry
     polling = GoogleFindMyPollingSensor(
         coordinator,
