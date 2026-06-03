@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.googlefindmy.const import DOMAIN
-from tests.helpers.config_entries_stub import make_config_entry
 from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
     _sync_get_last_gps_from_history,
 )
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _DummyState:
