@@ -441,7 +441,7 @@ jobs:
   ci-success:
     name: CI Success
     runs-on: ubuntu-latest
-    needs: [hassfest, hacs, lint, test]
+    needs: [hassfest, hacs, lint, test, translations]
     if: always()
     steps:
       - name: Check all jobs passed
@@ -450,7 +450,8 @@ jobs:
           if [[ "${{ needs.hassfest.result }}" != "success" ]] || \
              [[ "${{ needs.hacs.result }}" != "success" ]] || \
              [[ "${{ needs.lint.result }}" != "success" ]] || \
-             [[ "${{ needs.test.result }}" != "success" ]]; then
+             [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.translations.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             echo "passed=false" >> "$GITHUB_OUTPUT"
             exit 1
@@ -489,6 +490,12 @@ jobs:
               echo "| Tests | ✅ Pass |"
             else
               echo "| Tests | ❌ Fail |"
+            fi
+
+            if [ "${{ needs.translations.result }}" = "success" ]; then
+              echo "| Translations | ✅ Pass |"
+            else
+              echo "| Translations | ❌ Fail |"
             fi
 
             echo ""
