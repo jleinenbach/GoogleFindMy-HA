@@ -2644,7 +2644,10 @@ class ConfigFlow(
                 else:
                     loop = getattr(hass, "loop", None)
                     if loop is not None:
-                        loop.create_task(_reload_and_normalize())
+                        loop.create_task(
+                            _reload_and_normalize(),
+                            name=f"{DOMAIN}.reload_after_discovery_update",
+                        )
             else:
                 _normalize_tracking_lists()
 
@@ -3318,7 +3321,10 @@ class ConfigFlow(
 
                     loop = getattr(self.hass, "loop", None)
                     if loop is not None:
-                        task = loop.create_task(reload_result_inner)
+                        task = loop.create_task(
+                            reload_result_inner,
+                            name=f"{DOMAIN}.deferred_reload_after_reconfigure",
+                        )
                         if hasattr(task, "add_done_callback"):
                             task.add_done_callback(_log_task_result)
                         return
