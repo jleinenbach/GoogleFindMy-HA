@@ -1812,10 +1812,7 @@ def test_duplicate_account_issue_translated(monkeypatch: pytest.MonkeyPatch) -> 
         entries_placeholder = str(placeholders.get("entries", ""))
         assert existing_entry.entry_id in entries_placeholder
         assert legacy_duplicate.entry_id in entries_placeholder
-        # ``cause`` is no longer added as a placeholder: the
-        # ``duplicate_account_entries`` translation does not reference
-        # ``{cause}``, so emitting it would only be a dead placeholder.
-        assert "cause" not in placeholders
+        assert placeholders.get("cause") == "setup_duplicate"
 
         issue = recorded_issues[-1]
         assert issue["translation_key"] == "duplicate_account_entries"
