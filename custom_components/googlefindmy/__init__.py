@@ -4678,10 +4678,18 @@ def _primary_active_entry(entries: list[ConfigEntry]) -> ConfigEntry | None:
 
 
 def _opt(entry: ConfigEntry, key: str, default: Any) -> Any:
-    """Read a configuration value, preferring options over data."""
-    if key in entry.options:
-        return entry.options.get(key, default)
-    return entry.data.get(key, default)
+    """Read a configuration value, preferring options over data.
+
+    Defensive against partially-initialised ConfigEntry stubs (test mocks)
+    and rare HA-lifecycle edge-cases where ``options`` or ``data`` may be
+    absent. For fully-initialised entries this is semantically identical
+    to the previous strict implementation.
+    """
+    options = getattr(entry, "options", None) or {}
+    if key in options:
+        return options.get(key, default)
+    data = getattr(entry, "data", None) or {}
+    return data.get(key, default)
 
 
 def _effective_config(entry: ConfigEntry) -> dict[str, Any]:
