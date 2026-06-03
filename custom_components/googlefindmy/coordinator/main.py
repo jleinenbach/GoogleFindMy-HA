@@ -1150,9 +1150,11 @@ class GoogleFindMyCoordinator(
         if entry is None:
             return False
 
-        raw_mappings = entry.options.get(OPT_SEMANTIC_LOCATIONS)
+        options = getattr(entry, "options", None) or {}
+        raw_mappings = options.get(OPT_SEMANTIC_LOCATIONS)
         if not raw_mappings:
-            raw_mappings = entry.data.get(OPT_SEMANTIC_LOCATIONS)
+            data = getattr(entry, "data", None) or {}
+            raw_mappings = data.get(OPT_SEMANTIC_LOCATIONS)
         if not isinstance(raw_mappings, Mapping):
             return False
 
