@@ -15,6 +15,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
 )
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
+from tests.helpers.config_entries_stub import make_config_entry
 
 _MODULE = importlib.import_module("custom_components.googlefindmy")
 _async_acquire_shared_fcm = cast(
@@ -41,10 +42,6 @@ class _DummyCache:
 
     async def set(self, key: str, value: Any) -> None:
         self._data[key] = value
-
-
-class _DummyEntry(SimpleNamespace):
-    entry_id: str
 
 
 class _ReadyableReceiver(FcmReceiverHA):
@@ -83,8 +80,8 @@ class _DefaultAwareReceiver(_ReadyableReceiver):
 async def test_entry_scoped_receivers_use_entry_cache() -> None:
     hass = SimpleNamespace(data={DOMAIN: {}})
 
-    entry_a = _DummyEntry(entry_id="entry-a")
-    entry_b = _DummyEntry(entry_id="entry-b")
+    entry_a = make_config_entry(entry_id="entry-a")
+    entry_b = make_config_entry(entry_id="entry-b")
 
     creds_a = {"fcm": {"registration": {"token": "token-a"}}}
     creds_b = {"fcm": {"registration": {"token": "token-b"}}}
@@ -120,8 +117,8 @@ async def test_entry_scoped_receivers_use_entry_cache() -> None:
 async def test_acquire_new_entry_keeps_existing_receiver() -> None:
     hass = SimpleNamespace(data={DOMAIN: {}})
 
-    entry_a = _DummyEntry(entry_id="entry-a")
-    entry_b = _DummyEntry(entry_id="entry-b")
+    entry_a = make_config_entry(entry_id="entry-a")
+    entry_b = make_config_entry(entry_id="entry-b")
 
     creds_a = {"fcm": {"registration": {"token": "token-a"}}}
     creds_b = {"fcm": {"registration": {"token": "token-b"}}}
@@ -161,8 +158,8 @@ async def test_acquire_new_entry_keeps_existing_receiver() -> None:
 async def test_new_entry_ignores_legacy_alias_when_receivers_present() -> None:
     hass = SimpleNamespace(data={DOMAIN: {}})
 
-    entry_a = _DummyEntry(entry_id="entry-a")
-    entry_b = _DummyEntry(entry_id="entry-b")
+    entry_a = make_config_entry(entry_id="entry-a")
+    entry_b = make_config_entry(entry_id="entry-b")
 
     creds_a = {"fcm": {"registration": {"token": "token-a"}}}
     creds_b = {"fcm": {"registration": {"token": "token-b"}}}
@@ -201,7 +198,7 @@ async def test_new_entry_ignores_legacy_alias_when_receivers_present() -> None:
 async def test_legacy_fcm_receiver_alias_preserved() -> None:
     hass = SimpleNamespace(data={DOMAIN: {}})
 
-    entry = _DummyEntry(entry_id="entry-a")
+    entry = make_config_entry(entry_id="entry-a")
     creds = {"fcm": {"registration": {"token": "token-a"}}}
     cache = _DummyCache(entry.entry_id, creds)
 
@@ -288,7 +285,7 @@ def test_domain_provider_sets_default_entry_on_selected_receiver() -> None:
 
 
 async def _async_release(
-    receiver: FcmReceiverHA, hass: Any, entry: _DummyEntry
+    receiver: FcmReceiverHA, hass: Any, entry: SimpleNamespace
 ) -> None:
     receiver.request_stop()
     await _async_release_shared_fcm(hass, entry)

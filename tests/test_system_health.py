@@ -16,32 +16,15 @@ from custom_components.googlefindmy.const import (
     DATA_SECRET_BUNDLE,
     DOMAIN,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 EXPECTED_DEVICE_COUNT = 2
-
-
-class _FakeConfigEntry:
-    """Minimal ConfigEntry stub for system health tests."""
-
-    def __init__(self) -> None:
-        self.entry_id = "entry-test"
-        self.domain = DOMAIN
-        self.title = "Google Find My (user@example.com)"
-        self.data = {
-            CONF_GOOGLE_EMAIL: "user@example.com",
-            DATA_SECRET_BUNDLE: {"username": "user@example.com"},
-        }
-        self.options: dict[str, object] = {}
-        self.runtime_data = None
-        self.disabled_by = None
-        self.state = ConfigEntryState.LOADED
-        self.subentries: dict[str, Any] = {}
 
 
 class _FakeConfigEntriesManager:
     """Expose the integration config entry to the system health handler."""
 
-    def __init__(self, entry: _FakeConfigEntry) -> None:
+    def __init__(self, entry: SimpleNamespace) -> None:
         self._entries = [entry]
         self.setup_calls: list[str] = []
 
@@ -50,7 +33,7 @@ class _FakeConfigEntriesManager:
             return list(self._entries)
         return []
 
-    def async_get_entry(self, entry_id: str) -> _FakeConfigEntry | None:
+    def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
         if entry_id == self._entries[0].entry_id:
             return self._entries[0]
         return None
@@ -97,7 +80,17 @@ class _FakeHass:
     """Home Assistant core stub exposing data for the handler."""
 
     def __init__(self, coordinator: _FakeCoordinator) -> None:
-        entry = _FakeConfigEntry()
+        entry = make_config_entry(
+            entry_id="entry-test",
+            domain=DOMAIN,
+            title="Google Find My (user@example.com)",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                DATA_SECRET_BUNDLE: {"username": "user@example.com"},
+            },
+            state=ConfigEntryState.LOADED,
+            subentries={},
+        )
         self.config_entries = _FakeConfigEntriesManager(entry)
         self.data = {
             DOMAIN: {

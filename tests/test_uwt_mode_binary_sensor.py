@@ -13,6 +13,7 @@ from custom_components.googlefindmy.binary_sensor import (
 )
 from custom_components.googlefindmy.const import DATA_EID_RESOLVER, DOMAIN
 from custom_components.googlefindmy.eid_resolver import BLEBatteryState
+from tests.helpers.config_entries_stub import make_config_entry
 
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_ble_battery_sensor.py)
@@ -65,7 +66,7 @@ def _fake_coordinator(
 ) -> SimpleNamespace:
     """Create a minimal coordinator stub for sensor tests."""
     return SimpleNamespace(
-        config_entry=SimpleNamespace(entry_id=entry_id),
+        config_entry=make_config_entry(entry_id=entry_id),
         is_device_present=lambda did: present,
         is_device_visible_in_subentry=lambda key, did: visible,
         async_update_listeners=lambda: None,

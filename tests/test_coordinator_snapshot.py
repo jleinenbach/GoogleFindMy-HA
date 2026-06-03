@@ -16,6 +16,7 @@ from custom_components.googlefindmy.coordinator import (
     _sync_get_last_gps_from_history,
 )
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _DummyState:
@@ -92,7 +93,7 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     coordinator.allow_history_fallback = False
     coordinator._device_location_data = {}
     coordinator.location_poll_interval = 30
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
     result = asyncio.run(
         coordinator._async_build_device_snapshot_with_fallbacks(
@@ -143,7 +144,7 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
     coordinator.allow_history_fallback = False
     coordinator._device_location_data = {}
     coordinator.location_poll_interval = 30
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
     result = asyncio.run(
         coordinator._async_build_device_snapshot_with_fallbacks(
@@ -175,7 +176,7 @@ def test_snapshot_logs_formats_when_entity_missing(
     coordinator.allow_history_fallback = False
     coordinator._device_location_data = {}
     coordinator.location_poll_interval = 30
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
     caplog.set_level("DEBUG")
 

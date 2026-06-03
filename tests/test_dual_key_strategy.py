@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import custom_components.googlefindmy.coordinator as coordinator_module
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _StubDevice:
@@ -39,7 +38,7 @@ def _build_coordinator(monkeypatch):
         coordinator_module.GoogleFindMyCoordinator
     )
     coordinator.hass = _StubHass()
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = {"device-1"}
     coordinator._get_ignored_set = set
     coordinator._extract_our_identifier = lambda device: getattr(
