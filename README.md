@@ -183,6 +183,15 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 
 Third-party consumers should anchor on the `google_device_id` state attribute when associating Find My trackers with external data sources (for example, Bermuda BLE Trilogy listeners). MAC addresses rotate for privacy and are intentionally omitted from state; `google_device_id` is the stable, registry-aligned identifier that will not change across reboots. See [docs/Ephemeral_Identifier_Resolver_API.md](docs/Ephemeral_Identifier_Resolver_API.md#stable-device-identifier-state-api) for usage guidance and templating examples.
 
+### Local BLE presence via Bermuda
+
+The integration ships a bidirectional bridge to the [jleinenbach/bermuda](https://github.com/jleinenbach/bermuda) Bermuda BLE Trilateration fork. Two capabilities are available:
+
+- **EID Resolver API (always on).** Bermuda detects FMDN advertisements from your trackers locally and asks GoogleFindMy to map the ephemeral identifier to your `google_device_id`. The two integrations then share one Home Assistant device while keeping their own `device_tracker` entities, so live coordinates from your own BLE scanners and cloud coordinates from the Find Hub network coexist on the same tag.
+- **FMDN Finder uploads (opt-in, disabled by default).** When enabled via the `FEATURE_FMDN_FINDER_ENABLED` feature flag in `custom_components/googlefindmy/const.py`, Home Assistant contributes back to Google's Find Hub network: every stable area change observed by Bermuda is encrypted end-to-end and uploaded as a Finder report.
+
+Setup steps, troubleshooting, the device-matching contract (congealment via HA `device_id`, never via MAC or entity name), and the FMDN throttling rules are documented in [docs/BERMUDA_INTEGRATION.md](docs/BERMUDA_INTEGRATION.md).
+
 ## Configuration Options
 
 Accessible via the ⚙️ cogwheel button on the main Google Find My Device Integration page.
