@@ -25,6 +25,7 @@ from custom_components.googlefindmy.sensor import (
     GoogleFindMyStatsSensor,
 )
 from tests.helpers import drain_loop
+from tests.helpers.config_entries_stub import make_config_entry
 
 if "homeassistant.components.sensor" not in sys.modules:
     sensor_module = ModuleType("homeassistant.components.sensor")
@@ -173,14 +174,6 @@ class _StubHass:
         return self.loop.create_task(coro, name=name)
 
 
-class _StubConfigEntry:
-    """Minimal ConfigEntry-like stub with deterministic identifiers."""
-
-    def __init__(self) -> None:
-        self.entry_id = "entry-stats"
-        self.data = {CONF_GOOGLE_EMAIL: "user@example.com"}
-
-
 class _StubCache:
     """No-op cache implementation satisfying coordinator expectations."""
 
@@ -222,7 +215,10 @@ def test_increment_stat_notifies_registered_stats_sensor(
     try:
         hass = _StubHass(loop)
         coordinator = GoogleFindMyCoordinator(hass, cache=_StubCache())
-        coordinator.config_entry = _StubConfigEntry()
+        coordinator.config_entry = make_config_entry(
+            entry_id="entry-stats",
+            data={CONF_GOOGLE_EMAIL: "user@example.com"},
+        )
 
         # Prevent background tasks from interfering with the test cleanup.
         monkeypatch.setattr(
@@ -276,7 +272,10 @@ def test_increment_stat_persists_stats(monkeypatch: pytest.MonkeyPatch) -> None:
         hass = _StubHass(loop)
         cache = _StubCache()
         coordinator = GoogleFindMyCoordinator(hass, cache=cache)
-        coordinator.config_entry = _StubConfigEntry()
+        coordinator.config_entry = make_config_entry(
+            entry_id="entry-stats",
+            data={CONF_GOOGLE_EMAIL: "user@example.com"},
+        )
         coordinator._stats_debounce_seconds = 0
 
         # Ensure debounced writes run immediately without scheduling real tasks.
@@ -315,7 +314,10 @@ def test_history_fallback_increments_history_stat(
             cache=cache,
             allow_history_fallback=True,
         )
-        coordinator.config_entry = _StubConfigEntry()
+        coordinator.config_entry = make_config_entry(
+            entry_id="entry-stats",
+            data={CONF_GOOGLE_EMAIL: "user@example.com"},
+        )
 
         # Disable persistence side effects for deterministic assertions.
         monkeypatch.setattr(coordinator, "_schedule_stats_persist", lambda: None)
@@ -397,7 +399,10 @@ def test_stats_sensor_device_info_uses_service_identifiers() -> None:
     try:
         hass = _StubHass(loop)
         coordinator = GoogleFindMyCoordinator(hass, cache=_StubCache())
-        coordinator.config_entry = _StubConfigEntry()
+        coordinator.config_entry = make_config_entry(
+            entry_id="entry-stats",
+            data={CONF_GOOGLE_EMAIL: "user@example.com"},
+        )
         subentry_identifier = coordinator.stable_subentry_identifier(
             key=SERVICE_SUBENTRY_KEY
         )
@@ -435,7 +440,10 @@ def test_semantic_label_sensor_exposes_observations() -> None:
     try:
         hass = _StubHass(loop)
         coordinator = GoogleFindMyCoordinator(hass, cache=_StubCache())
-        coordinator.config_entry = _StubConfigEntry()
+        coordinator.config_entry = make_config_entry(
+            entry_id="entry-stats",
+            data={CONF_GOOGLE_EMAIL: "user@example.com"},
+        )
 
         subentry_identifier = coordinator.stable_subentry_identifier(
             key=SERVICE_SUBENTRY_KEY

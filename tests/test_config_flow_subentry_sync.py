@@ -41,6 +41,7 @@ from custom_components.googlefindmy.const import (
     TRACKER_SUBENTRY_KEY,
     service_device_identifier,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import (
     ConfigEntriesDomainUniqueIdLookupMixin,
     attach_config_entries_flow_manager,
@@ -62,7 +63,7 @@ def _stable_subentry_id(entry_id: str, key: str) -> str:
 class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
     """Stub mimicking Home Assistant's config entries manager."""
 
-    def __init__(self, entry: _EntryStub) -> None:
+    def __init__(self, entry: SimpleNamespace) -> None:
         self._entry = entry
         self.created: list[dict[str, Any]] = []
         self.updated: list[dict[str, Any]] = []
@@ -78,13 +79,13 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
 
     def async_entry_for_domain_unique_id(
         self, domain: str, unique_id: str
-    ) -> _EntryStub | None:
+    ) -> SimpleNamespace | None:
         return cast(
-            _EntryStub | None,
+            SimpleNamespace | None,
             super().async_entry_for_domain_unique_id(domain, unique_id),
         )
 
-    def async_get_entry(self, entry_id: str) -> _EntryStub | None:
+    def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
         if entry_id == self._entry.entry_id:
             return self._entry
         return None
@@ -99,7 +100,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
         self.setup_calls.append(entry_id)
         return True
 
-    def async_update_entry(self, entry: _EntryStub, **kwargs: Any) -> None:
+    def async_update_entry(self, entry: SimpleNamespace, **kwargs: Any) -> None:
         assert entry is self._entry
         payload = dict(kwargs)
         self.entry_updates.append(payload)
@@ -112,7 +113,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
 
     def async_create_subentry(
         self,
-        entry: _EntryStub,
+        entry: SimpleNamespace,
         *,
         data: dict[str, Any],
         title: str,
@@ -132,7 +133,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
         return self.async_add_subentry(entry, subentry)
 
     def async_add_subentry(
-        self, entry: _EntryStub, subentry: ConfigSubentry
+        self, entry: SimpleNamespace, subentry: ConfigSubentry
     ) -> ConfigSubentry:
         assert entry is self._entry
         if isinstance(subentry.unique_id, str):
@@ -158,7 +159,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
 
     def async_update_subentry(
         self,
-        entry: _EntryStub,
+        entry: SimpleNamespace,
         subentry: ConfigSubentry,
         *,
         data: dict[str, Any],
@@ -192,7 +193,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
         )
 
     async def async_remove_subentry(
-        self, entry: _EntryStub, *, subentry_id: str
+        self, entry: SimpleNamespace, *, subentry_id: str
     ) -> bool:
         assert entry is self._entry
         removed = self._entry.subentries.pop(subentry_id, None)
@@ -205,7 +206,7 @@ class _ConfigEntriesManagerStub(ConfigEntriesDomainUniqueIdLookupMixin):
 class _HassStub:
     """Home Assistant stub exposing config entry helpers to the flow."""
 
-    def __init__(self, entry: _EntryStub) -> None:
+    def __init__(self, entry: SimpleNamespace) -> None:
         self.config_entries = _ConfigEntriesManagerStub(entry)
         self.data: dict[str, Any] = {DOMAIN: {"entries": {entry.entry_id: entry}}}
 
@@ -213,20 +214,7 @@ class _HassStub:
         return asyncio.create_task(coro)
 
 
-class _EntryStub:
-    """Lightweight config entry stub with mutable subentries."""
-
-    def __init__(self) -> None:
-        self.entry_id = "entry-1"
-        self.title = "Find My"
-        self.data: dict[str, Any] = {}
-        self.options: dict[str, Any] = {}
-        self.subentries: dict[str, ConfigSubentry] = {}
-        self.runtime_data = SimpleNamespace()
-        self.version = 1
-
-
-def _build_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
+def _build_flow(entry: SimpleNamespace) -> config_flow.ConfigFlow:
     flow = config_flow.ConfigFlow()
     hass = _HassStub(entry)
     flow.hass = hass  # type: ignore[assignment]
@@ -251,7 +239,12 @@ def _build_flow(entry: _EntryStub) -> config_flow.ConfigFlow:
 async def test_device_selection_creates_feature_groups_with_flags() -> None:
     """Sync helper should create service and tracker subentries with expected flags."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     flow = _build_flow(entry)
     context_map = flow._ensure_subentry_context()
 
@@ -310,7 +303,12 @@ async def test_device_selection_creates_feature_groups_with_flags() -> None:
 async def test_subentry_manager_deduplicates_colliding_tracker_entries() -> None:
     """ConfigEntrySubEntryManager should remove duplicates before retrying updates."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     tracker_unique_id = f"{entry.entry_id}-{TRACKER_SUBENTRY_KEY}"
     canonical = ConfigSubentry(
         data=MappingProxyType(
@@ -378,7 +376,12 @@ async def test_subentry_manager_deduplicates_colliding_tracker_entries() -> None
 def test_subentry_manager_normalizes_group_keys_by_type() -> None:
     """Service/tracker subentries should use canonical group keys."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     service_subentry = ConfigSubentry(
         data=MappingProxyType(
             {
@@ -425,7 +428,12 @@ def test_subentry_manager_normalizes_group_keys_by_type() -> None:
 def test_reconfigure_context_prefers_canonical_subentry_keys() -> None:
     """Reconfigure context should seed IDs using canonical group keys."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     service_subentry = ConfigSubentry(
         data=MappingProxyType(
             {
@@ -469,7 +477,12 @@ def test_reconfigure_context_prefers_canonical_subentry_keys() -> None:
 async def test_device_selection_updates_existing_feature_group() -> None:
     """Sync helper should update an existing subentry with new feature flags."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     existing = ConfigSubentry(
         data=MappingProxyType(
             {
@@ -528,7 +541,12 @@ def test_service_device_binding_clears_stale_subentry(
 ) -> None:
     """Service device updates must clear stale config_subentry_id bindings."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     hass = SimpleNamespace()
 
     expected_identifiers = {service_device_identifier(entry.entry_id)}
@@ -575,7 +593,12 @@ def test_service_device_binding_sets_add_config_entry_id(
 ) -> None:
     """Service device binding must use add_config_entry_id when subentries exist."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.service_subentry_id = "service-subentry"
     hass = SimpleNamespace()
 
@@ -624,7 +647,12 @@ def test_service_device_binding_retries_with_legacy_keywords(
 ) -> None:
     """Direct binding calls should retry with legacy kwargs on TypeError."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.service_subentry_id = "service-subentry"
     hass = SimpleNamespace()
 
@@ -681,7 +709,12 @@ async def test_subentry_manager_adopts_existing_owner_on_repeated_collision(
 ) -> None:
     """Repeated unique_id collisions should adopt the existing owner subentry."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     shared_unique_id = f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
     owner = ConfigSubentry(
         data=MappingProxyType({"group_key": "service-legacy"}),
@@ -750,7 +783,12 @@ async def test_subentry_manager_adoption_missing_owner_raises(
 ) -> None:
     """Adoption should raise a HomeAssistantError when no owner exists."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     existing = ConfigSubentry(
         data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
         subentry_type=SUBENTRY_TYPE_SERVICE,
@@ -784,7 +822,12 @@ async def test_subentry_manager_adoption_missing_owner_raises(
 async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None:
     """Adopted subentries must not be removed via stale alias cleanup."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     shared_unique_id = f"{entry.entry_id}-{SERVICE_SUBENTRY_KEY}"
     owner = ConfigSubentry(
         data=MappingProxyType({"group_key": SERVICE_SUBENTRY_KEY}),
@@ -818,7 +861,12 @@ async def test_subentry_manager_preserves_adopted_owner_during_cleanup() -> None
 def test_supported_subentry_types_returns_empty_to_hide_ui() -> None:
     """Config flow should return empty dict to hide manual subentry UI buttons."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     mapping = config_flow.ConfigFlow.async_get_supported_subentry_types(entry)
 
     # Must return empty dict to hide "Add hub feature group" and
@@ -831,7 +879,12 @@ def test_supported_subentry_types_returns_empty_to_hide_ui() -> None:
 async def test_async_step_migrate_creates_subentries_and_moves_options() -> None:
     """Migration flow should consolidate options and sync feature subentries."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.version = 0
     entry.data = {
         CONF_GOOGLE_EMAIL: "Legacy@Example.com",
@@ -898,7 +951,12 @@ async def test_soft_migrate_data_to_options_tracks_option_keys(
 
     dynamic_option = "semantic_locations_v2"
     dynamic_value = {"home": "device-home"}
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data = {dynamic_option: dynamic_value}
 
     class _ConfigEntriesStub:
@@ -928,7 +986,12 @@ async def test_soft_migrate_data_to_options_tracks_option_keys(
 async def test_soft_migrate_data_to_options_copies_semantic_locations() -> None:
     """Soft migration should move semantic location mappings into options."""
 
-    entry = _EntryStub()
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     semantic_locations = {"home": {"lat": 1.0, "lon": 2.0}}
     entry.data = {OPT_SEMANTIC_LOCATIONS: semantic_locations}
 

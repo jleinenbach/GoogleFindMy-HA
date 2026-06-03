@@ -13,34 +13,25 @@ from custom_components.googlefindmy.const import (
     DEFAULT_SEMANTIC_DETECTION_RADIUS,
     OPT_SEMANTIC_LOCATIONS,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.config_flow import prepare_flow_hass_config_entries
-
-
-class _SemanticEntry:
-    """Minimal ConfigEntry stub for semantic location options flows."""
-
-    def __init__(self, *, options: dict[str, Any] | None = None) -> None:
-        self.entry_id = "entry-semantic"
-        self.title = "Semantic"
-        self.data: dict[str, Any] = {}
-        self.options: dict[str, Any] = dict(options or {})
 
 
 class _SemanticConfigEntries:
     """Record options updates and reloads for verification."""
 
-    def __init__(self, entry: _SemanticEntry) -> None:
+    def __init__(self, entry: SimpleNamespace) -> None:
         self._entry = entry
         self.updated_options: list[dict[str, Any]] = []
         self.reloaded: list[str] = []
 
-    def async_get_entry(self, entry_id: str) -> _SemanticEntry | None:
+    def async_get_entry(self, entry_id: str) -> SimpleNamespace | None:
         if entry_id == self._entry.entry_id:
             return self._entry
         return None
 
     def async_update_entry(
-        self, entry: _SemanticEntry, *, options: dict[str, Any] | None = None
+        self, entry: SimpleNamespace, *, options: dict[str, Any] | None = None
     ) -> None:
         assert entry is self._entry
         if options is not None:
@@ -71,7 +62,7 @@ class _FakeStates:
 class _HassStub:
     """Minimal Home Assistant stub for semantic options flows."""
 
-    def __init__(self, entry: _SemanticEntry, *, home_radius: float = 90.0) -> None:
+    def __init__(self, entry: SimpleNamespace, *, home_radius: float = 90.0) -> None:
         self.config_entries = _SemanticConfigEntries(entry)
         prepare_flow_hass_config_entries(
             self, lambda: self.config_entries, frame_module=frame
@@ -104,7 +95,9 @@ class _HassStub:
 async def test_semantic_locations_options_lifecycle() -> None:
     """Options flow should add, guard, and remove semantic locations."""
 
-    entry = _SemanticEntry(
+    entry = make_config_entry(
+        entry_id="entry-semantic",
+        title="Semantic",
         options={
             OPT_SEMANTIC_LOCATIONS: {
                 "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
@@ -187,7 +180,7 @@ async def test_semantic_locations_options_lifecycle() -> None:
 async def test_semantic_location_defaults_floor_accuracy() -> None:
     """Defaults should treat semantic detections as broad (>=50m) receivers."""
 
-    entry = _SemanticEntry()
+    entry = make_config_entry(entry_id="entry-semantic", title="Semantic")
     hass = _HassStub(entry, home_radius=10.0)
 
     flow = config_flow.OptionsFlowHandler()
@@ -216,7 +209,9 @@ async def test_semantic_location_defaults_floor_accuracy() -> None:
 async def test_semantic_location_edit_prefills_existing_values() -> None:
     """Editing should default to the stored semantic location coordinates."""
 
-    entry = _SemanticEntry(
+    entry = make_config_entry(
+        entry_id="entry-semantic",
+        title="Semantic",
         options={
             OPT_SEMANTIC_LOCATIONS: {
                 "Büro": {"latitude": 50.0, "longitude": 10.0, "accuracy": 7.0}
