@@ -180,6 +180,67 @@ def _placeholders_from_dict(node: ast.Dict) -> set[str] | None:
     return keys
 
 
+# Sentinel returned by the per-statement helpers when an assignment is
+# dynamic and the caller must give up on static resolution (return ``None``).
+# Distinguishing "drift" from "statement is irrelevant" (``None`` return)
+# lets the dispatcher stay flat and keeps the branch count well below the
+# Ruff PLR0912 threshold.
+_DRIFT_SENTINEL: object = object()
+
+
+def _apply_assign_to_keys(
+    stmt: ast.Assign, name: str, keys: set[str] | None
+) -> set[str] | object | None:
+    """Handle ``name = {...}`` or ``name["k"] = v`` for ``_trace_local_dict_keys``.
+
+    Returns a fresh ``set`` with the new keys, ``_DRIFT_SENTINEL`` if the
+    assignment is dynamic, or ``None`` if the statement is irrelevant
+    (e.g. assigns to a different variable).
+    """
+    target = stmt.targets[0]
+    if isinstance(target, ast.Name) and target.id == name:
+        if not isinstance(stmt.value, ast.Dict):
+            return _DRIFT_SENTINEL
+        dict_keys = _placeholders_from_dict(stmt.value)
+        if dict_keys is None:
+            return _DRIFT_SENTINEL
+        return set(dict_keys)
+    if (
+        isinstance(target, ast.Subscript)
+        and isinstance(target.value, ast.Name)
+        and target.value.id == name
+    ):
+        slice_node = target.slice
+        if not (
+            isinstance(slice_node, ast.Constant)
+            and isinstance(slice_node.value, str)
+        ):
+            return _DRIFT_SENTINEL
+        new_keys = set(keys) if keys is not None else set()
+        new_keys.add(slice_node.value)
+        return new_keys
+    return None
+
+
+def _apply_ann_assign_to_keys(
+    stmt: ast.AnnAssign, name: str
+) -> set[str] | object | None:
+    """Handle ``name: T = {...}`` for ``_trace_local_dict_keys``.
+
+    Returns a fresh ``set`` with the new keys, ``_DRIFT_SENTINEL`` if the
+    annotated assignment is dynamic, or ``None`` if the statement targets
+    a different name or is a bare declaration (``name: T``).
+    """
+    if stmt.target.id != name or stmt.value is None:
+        return None
+    if not isinstance(stmt.value, ast.Dict):
+        return _DRIFT_SENTINEL
+    dict_keys = _placeholders_from_dict(stmt.value)
+    if dict_keys is None:
+        return _DRIFT_SENTINEL
+    return set(dict_keys)
+
+
 def _trace_local_dict_keys(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef, name: str
 ) -> set[str] | None:
@@ -193,46 +254,16 @@ def _trace_local_dict_keys(
     """
     keys: set[str] | None = None
     for stmt in ast.walk(func_node):
-        # Plain assignment: ``name = ...`` or ``name["k"] = ...``
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-            target = stmt.targets[0]
-            if isinstance(target, ast.Name) and target.id == name:
-                if isinstance(stmt.value, ast.Dict):
-                    dict_keys = _placeholders_from_dict(stmt.value)
-                    if dict_keys is None:
-                        return None
-                    keys = set(dict_keys)
-                else:
-                    return None
-            elif (
-                isinstance(target, ast.Subscript)
-                and isinstance(target.value, ast.Name)
-                and target.value.id == name
-            ):
-                slice_node = target.slice
-                if isinstance(slice_node, ast.Constant) and isinstance(
-                    slice_node.value, str
-                ):
-                    if keys is None:
-                        keys = set()
-                    keys.add(slice_node.value)
-                else:
-                    return None
-        # Annotated assignment: ``name: T = {...}`` (single target, not a list)
+            result = _apply_assign_to_keys(stmt, name, keys)
         elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            if stmt.target.id != name:
-                continue
-            if stmt.value is None:
-                # ``name: T`` (declaration only) — no keys to trace, treat
-                # like a fresh empty assignment to keep collection going.
-                continue
-            if isinstance(stmt.value, ast.Dict):
-                dict_keys = _placeholders_from_dict(stmt.value)
-                if dict_keys is None:
-                    return None
-                keys = set(dict_keys)
-            else:
-                return None
+            result = _apply_ann_assign_to_keys(stmt, name)
+        else:
+            continue
+        if result is _DRIFT_SENTINEL:
+            return None
+        if result is not None:
+            keys = result  # type: ignore[assignment]
     return keys
 
 
