@@ -40,7 +40,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import EntityRecoveryManager, _extract_email_from_entry
+from . import EntityRecoveryManager, _extract_email_from_entry, _opt
 from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
@@ -1149,9 +1149,14 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         attributes["google_device_id"] = self.device_id
 
         location_age = self._get_location_age()
+        # Use the _opt() helper so options-first lookups stay consistent with
+        # the rest of the integration and mypy --strict no longer flags the
+        # config_entry attribute access (Any | None has no attribute options).
         show_location_age: bool = bool(
-            self.coordinator.config_entry.options.get(
-                OPT_SHOW_LOCATION_AGE, DEFAULT_SHOW_LOCATION_AGE
+            _opt(
+                self.coordinator.config_entry,
+                OPT_SHOW_LOCATION_AGE,
+                DEFAULT_SHOW_LOCATION_AGE,
             )
         )
         if show_location_age and location_age is not None:
