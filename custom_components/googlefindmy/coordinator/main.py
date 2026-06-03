@@ -1878,10 +1878,18 @@ class GoogleFindMyCoordinator(
         # Dict-union (Py3.9+) preserves insertion order of existing devices and
         # appends new device_ids at the end; on key collision the pushed value
         # wins (new_devices second operand).
+        # NOTE: filter ignored devices from the old snapshot too (mirrors the
+        # `ids` filter above), otherwise a device added to ignored_devices
+        # after it already appeared in self.data would be re-published via
+        # the merge until a full poll rebuilds the snapshot.
+        # getattr() guards against tests/lifecycle paths where `data` is not
+        # yet set by the DataUpdateCoordinator base class.
         old_devices = {
             d["device_id"]: d
-            for d in (self.data or [])
-            if isinstance(d, dict) and "device_id" in d
+            for d in (getattr(self, "data", None) or [])
+            if isinstance(d, dict)
+            and "device_id" in d
+            and d["device_id"] not in ignored
         }
         new_devices = {
             d["device_id"]: d
