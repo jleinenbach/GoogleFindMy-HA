@@ -13,15 +13,23 @@ It then compares each translation key against the corresponding
 ``issues.<key>.title`` / ``issues.<key>.description`` placeholders found
 in ``strings.json`` (the SSOT for translations).
 
-Two finding classes are reported with non-zero exit code:
+Finding classes:
 
-* ``DEAD``: code supplies a placeholder that no translation string uses.
-* ``MISSING``: translation references a placeholder that the code does
-  not supply (the literal ``{name}`` ends up visible in the UI).
+* ``MISSING`` (fatal): translation references a placeholder that the code
+  does not supply (the literal ``{name}`` ends up visible in the UI).
+* ``MISSING_TRANSLATION`` (fatal): code references a translation key that
+  has no entry in ``strings.json``.
+* ``DEAD`` (warning): code supplies a placeholder that no translation
+  string renders. This is informational only — HA Repairs forwards the
+  full ``translation_placeholders`` dict to the issue payload, so extra
+  keys beyond what the description renders are legitimate machine-readable
+  diagnostic metadata (for example the ``cause`` placeholder on
+  ``duplicate_account_entries``).
+* ``SKIPPED`` (warning): a translation key or placeholders argument could
+  not be statically resolved (dynamic dispatch).
 
-Calls whose translation key or placeholders cannot be statically resolved
-are reported as ``SKIPPED`` warnings without failing the run, so dynamic
-dispatch keeps working without silent gaps.
+Only ``MISSING`` / ``MISSING_TRANSLATION`` fail the run. ``--strict`` also
+fails on warnings.
 """
 
 from __future__ import annotations
@@ -345,7 +353,11 @@ def _scan_file(
         dead = sorted(code_keys - translation_keys)
         missing = sorted(translation_keys - code_keys)
         if dead:
-            scan.findings.append(
+            # DEAD placeholders are informational only. HA Repairs forwards the
+            # full ``translation_placeholders`` dict to the issue payload, so
+            # extra keys beyond what the description renders are legitimately
+            # used as machine-readable diagnostic metadata (e.g. ``cause``).
+            scan.skipped.append(
                 Finding(
                     kind="DEAD",
                     file=path,
