@@ -13,6 +13,15 @@ It then compares each translation key against the corresponding
 ``issues.<key>.title`` / ``issues.<key>.description`` placeholders found
 in ``strings.json`` (the SSOT for translations).
 
+In addition, every ``custom_components/googlefindmy/translations/*.json``
+locale file is validated against the same SSOT: each locale's
+``issues.<key>.title`` / ``issues.<key>.description`` may render a
+*subset* of the placeholders declared in ``strings.json`` for that key
+(translators are free to drop placeholders if the translated wording does
+not need them), but it must not introduce any *additional* placeholder
+that the call site cannot supply (which would surface in HA Repairs as a
+raw ``{placeholder}`` to non-English users; Codex feedback on PR #1069).
+
 Finding classes:
 
 * ``MISSING`` (fatal): translation references a placeholder that the code
@@ -24,6 +33,11 @@ Finding classes:
   the linter cannot detect placeholder drift for that call site, so it
   must fail the gate (else the symmetry check silently passes for any
   call using variable-built dicts; Codex feedback on PR #1069).
+* ``LOCALE_EXTRA`` (fatal): a ``translations/*.json`` locale file
+  references a placeholder for an issue key that does not exist in the
+  same key's ``strings.json`` template, so the call site cannot supply
+  it and HA Repairs would render the raw ``{placeholder}`` to users of
+  that locale (Codex feedback on PR #1069).
 * ``DEAD`` (warning): code supplies a placeholder that no translation
   string renders. This is informational only — HA Repairs forwards the
   full ``translation_placeholders`` dict to the issue payload, so extra
@@ -34,8 +48,8 @@ Finding classes:
   argument could not be statically resolved (e.g. parse errors on a
   newer Python syntax, unsupported AST nodes).
 
-``MISSING`` / ``MISSING_TRANSLATION`` / ``DRIFT_RISK`` fail the run.
-``--strict`` also fails on warnings.
+``MISSING`` / ``MISSING_TRANSLATION`` / ``DRIFT_RISK`` / ``LOCALE_EXTRA``
+fail the run. ``--strict`` also fails on warnings.
 """
 
 from __future__ import annotations
@@ -52,6 +66,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_DIR = ROOT / "custom_components" / "googlefindmy"
 STRINGS_PATH = COMPONENT_DIR / "strings.json"
+TRANSLATIONS_DIR = COMPONENT_DIR / "translations"
 PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
@@ -120,11 +135,20 @@ def _load_const_strings(const_path: Path) -> dict[str, str]:
     return out
 
 
-def _load_translations(strings_path: Path) -> dict[str, set[str]]:
-    """Return mapping ``issue_key -> placeholders`` from ``strings.json``."""
-    data = json.loads(strings_path.read_text(encoding="utf-8"))
-    issues = data.get("issues") or {}
+def _extract_issue_placeholders(data: object) -> dict[str, set[str]]:
+    """Return mapping ``issue_key -> placeholders`` from one parsed JSON tree.
+
+    Reads ``issues.<key>.title`` and ``issues.<key>.description``. Used by
+    both ``_load_translations`` (for ``strings.json``) and
+    ``_load_locale_placeholders`` (for each ``translations/*.json``) so the
+    extraction stays in sync between SSOT and locales.
+    """
+    issues = (
+        data.get("issues") if isinstance(data, dict) else None
+    ) or {}
     out: dict[str, set[str]] = {}
+    if not isinstance(issues, dict):
+        return out
     for key, payload in issues.items():
         text_parts: list[str] = []
         for field_name in ("title", "description"):
@@ -135,6 +159,41 @@ def _load_translations(strings_path: Path) -> dict[str, set[str]]:
         for text in text_parts:
             placeholders.update(PLACEHOLDER_RE.findall(text))
         out[key] = placeholders
+    return out
+
+
+def _load_translations(strings_path: Path) -> dict[str, set[str]]:
+    """Return mapping ``issue_key -> placeholders`` from ``strings.json``."""
+    data = json.loads(strings_path.read_text(encoding="utf-8"))
+    return _extract_issue_placeholders(data)
+
+
+def _load_locale_placeholders(
+    translations_dir: Path,
+) -> dict[Path, dict[str, set[str]]]:
+    """Return ``{locale_file: {issue_key: placeholders}}`` for all locales.
+
+    Each ``custom_components/googlefindmy/translations/*.json`` is parsed
+    and reduced to ``issues.<key>.title`` / ``issues.<key>.description``
+    placeholders. Used to detect ``LOCALE_EXTRA`` drift where a translator
+    introduces a placeholder that does not exist in the SSOT for the same
+    issue key (Codex feedback on PR #1069).
+
+    Returns an empty mapping if ``translations_dir`` is absent so callers
+    can degrade gracefully in stripped checkouts.
+    """
+    if not translations_dir.is_dir():
+        return {}
+    out: dict[Path, dict[str, set[str]]] = {}
+    for locale_file in sorted(translations_dir.glob("*.json")):
+        try:
+            data = json.loads(locale_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # A malformed locale file is reported by sync_translations.py /
+            # translation_key_check.py; we silently skip it here to avoid
+            # double-reporting and keep this checker focused on placeholders.
+            continue
+        out[locale_file] = _extract_issue_placeholders(data)
     return out
 
 
@@ -537,6 +596,31 @@ def main() -> int:
         scan = _scan_file(path, const_map, translations)
         total.findings.extend(scan.findings)
         total.skipped.extend(scan.skipped)
+
+    # LOCALE_EXTRA sweep: every translations/*.json must not introduce
+    # placeholders absent from strings.json for the same issue key — otherwise
+    # HA Repairs would surface raw ``{placeholder}`` text to non-English users
+    # because the call site cannot supply that name (Codex feedback on PR #1069).
+    for locale_file, locale_issues in _load_locale_placeholders(
+        TRANSLATIONS_DIR
+    ).items():
+        for key, locale_ph in locale_issues.items():
+            base_ph = translations.get(key, set())
+            extra = locale_ph - base_ph
+            if not extra:
+                continue
+            total.findings.append(
+                Finding(
+                    kind="LOCALE_EXTRA",
+                    file=locale_file,
+                    line=1,
+                    translation_key=key,
+                    detail=(
+                        f"extraneous placeholder(s) {sorted(extra)!r}"
+                        f" not declared in strings.json issues.{key}"
+                    ),
+                )
+            )
 
     if not total.findings and not total.skipped:
         print("translation_placeholder_check: 0 findings, 0 skipped — OK")
