@@ -707,13 +707,13 @@
       "title": "Colisão de ID exclusivo da entidade detectada",
       "description": "Algumas entidades de **{entry}** já usam o novo formato de ID exclusivo e entram em conflito com a migração.\n\n**Quantidade:** {count}\n**Exemplos:** {entities}\n\nPara resolver:\n1) Abra **Configurações → Dispositivos e Serviços → Entidades** e pesquise as entidades listadas.\n2) Remova ou renomeie as entidades em conflito ou exclua entradas abandonadas de outras integrações.\n3) Recarregue a integração (ou reinicie o Home Assistant). A migração tentará novamente automaticamente."
     },
-    "duplicate_account": {
-      "title": "Duplicar conta Google Find My",
-      "description": "O Home Assistant detectou várias entradas do Google Find My para a mesma conta ({email}). Apenas uma entrada pode permanecer ativa. Remova ou desative a entrada duplicada \"{entry_title}\" ou reautentique a conta pretendida. Causa: {cause}."
-    },
     "duplicate_account_entries": {
       "title": "Entradas de conta duplicadas detectadas",
       "description": "Esta conta do Google (**{email}**) já está configurada por outra entrada:\n\n{entries}\n\nDesative ou remova a entrada duplicada para que apenas uma entrada por conta permaneça ativa e, em seguida, recarregue a integração (ou reinicie o Home Assistant)."
+    },
+    "cache_purged": {
+      "title": "Authentication cache cleared",
+      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
     }
   },
   "exceptions": {
