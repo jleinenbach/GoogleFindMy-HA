@@ -707,13 +707,13 @@
       "title": "אותרה התנגשות מזהה ייחודי של ישות",
       "description": "ישויות מסוימות עבור **{entry}** משתמשות כבר בפורמט המזהה הייחודי החדש ומתנגשות עם ההעברה.\n\n**ספירה:** {count}\n**דוגמאות:** {entities}\n\nלפתרון:\n1) יש לפתוח **הגדרות → התקנים ושירותים → ישויות** ולחפש את הישויות הרשומות.\n2) יש להסיר או לשנות שם של ישויות מתנגשות, או למחוק רשומות נטושות משילובים אחרים.\n3) יש לטעון מחדש את השילוב (או להפעיל מחדש את Home Assistant). ההעברה תנסה שוב אוטומטית."
     },
-    "duplicate_account": {
-      "title": "חשבון Google Find My כפול",
-      "description": "Home Assistant אותר מספר רשומות Google Find My עבור אותו חשבון ({email}). רק רשומה אחת יכולה להישאר פעילה. יש להסיר או להשבית את הרשומה הכפולה ״{entry_title}״ או לאמת מחדש את החשבון המיועד. סיבה: {cause}."
-    },
     "duplicate_account_entries": {
       "title": "אותרו רשומות חשבון כפולות",
       "description": "חשבון Google זה (**{email}**) כבר מוגדר על ידי רשומה אחרת:\n\n{entries}\n\nיש להשבית או להסיר את הרשומה הכפולה כך שרק רשומה אחת לחשבון תישאר פעילה, ולאחר מכן לטעון מחדש את השילוב (או להפעיל מחדש את Home Assistant)."
+    },
+    "cache_purged": {
+      "title": "Authentication cache cleared",
+      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
     }
   },
   "exceptions": {

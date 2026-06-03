@@ -5705,8 +5705,6 @@ def _log_duplicate_and_raise_repair_issue(
         "email": normalized_email,
         "entries": _format_duplicate_entries(entry, conflicts),
     }
-    if cause:
-        placeholders["cause"] = cause
 
     issue_severity = getattr(ir, "IssueSeverity", None)
     if issue_severity is not None:
