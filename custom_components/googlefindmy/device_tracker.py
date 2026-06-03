@@ -833,6 +833,11 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     _attr_entity_registry_enabled_default = True
     _attr_translation_key = "device"
     _attr_attribution: str | None = None  # Set in __init__ with account email
+    # location_age changes on every fix; keep it out of recorder history
+    # (HA developer guidance, 2023-09 / Entity docs). Stationary devices still
+    # benefit from the show_location_age toggle and 60s rounding, but even
+    # mobile devices should not bloat the state_attributes table here.
+    _unrecorded_attributes = frozenset({"location_age"})
 
     # ---- Display-name policy (strip legacy prefixes, no new prefixes) ----
     @staticmethod
