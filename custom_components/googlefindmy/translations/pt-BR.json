@@ -7,22 +7,22 @@
   "config": {
     "step": {
       "user": {
-        "title": "Autenticação Encontre Meu Dispositivo do Google",
+        "title": "Autenticação do Google Encontrar Meu Dispositivo",
         "description": "Escolha seu método de autenticação. ",
         "data": {
           "auth_method": "Método de autenticação"
         }
       },
       "secrets_json": {
-        "title": "Método 1: GoogleFindMyTools secrets.json",
-        "description": "Execute GoogleFindMyTools (Chrome) para gerar tokens de autenticação e cole todo o conteúdo do arquivo Auth/secrets.json abaixo.",
+        "title": "Método 1: secrets.json do GoogleFindMyTools",
+        "description": "Execute o GoogleFindMyTools (Chrome) para gerar os tokens de autenticação, depois cole abaixo o conteúdo completo do arquivo Auth/secrets.json.",
         "data": {
           "secrets_json": "Conteúdo do arquivo secrets.json"
         }
       },
       "individual_tokens": {
-        "title": "Método 2: token OAuth individual",
-        "description": "Insira seu token OAuth e endereço de e-mail do Google obtidos em um processo de autenticação manual.",
+        "title": "Método 2: Token OAuth individual",
+        "description": "Insira seu token OAuth e o endereço de e-mail do Google obtidos por meio de um processo manual de autenticação.",
         "data": {
           "oauth_token": "Token OAuth",
           "google_email": "Endereço de e-mail do Google"
@@ -65,10 +65,10 @@
       }
     },
     "error": {
-      "auth_failed": "Falha na autenticação. ",
+      "auth_failed": "Falha na autenticação. Tente novamente.",
       "invalid_auth": "Autenticação inválida. ",
       "invalid_token": "Token/e-mail inválido fornecido ou campos obrigatórios ausentes.",
-      "invalid_json": "Formato JSON inválido no conteúdo secrets.json.",
+      "invalid_json": "Formato JSON inválido no conteúdo do secrets.json.",
       "no_devices": "Nenhum dispositivo encontrado. ",
       "cannot_connect": "Falha ao conectar-se à API do Google. ",
       "dependency_not_ready": "As dependências de integração necessárias estão faltando. ",
@@ -79,7 +79,7 @@
       "email_mismatch": "As credenciais fornecidas pertencem a uma conta Google diferente. "
     },
     "abort": {
-      "already_configured": "O Encontre Meu Dispositivo do Google já está configurado.",
+      "already_configured": "O Google Encontrar Meu Dispositivo já está configurado.",
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",
@@ -161,7 +161,7 @@
         "menu_options": {
           "credentials": "Atualizar credenciais",
           "settings": "Modificar configurações",
-          "visibility": "Visibilidade do dispositivo",
+          "visibility": "Visibilidade dos dispositivos",
           "semantic_locations": "Localizações semânticas",
           "repairs": "Reparos de subentrada"
         }
@@ -260,27 +260,27 @@
           "location_poll_interval": "Intervalo(s) de pesquisa de localização",
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
           "stale_threshold": "Limite de obsolescência (s)",
+          "show_location_age": "Mostrar atributo de idade da localização",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
           "delete_caches_on_remove": "Exclua caches ao remover entrada",
           "map_view_token_expiration": "Ativar a expiração do token de visualização do mapa",
           "contributor_mode": "Modo de contribuidor de localização",
-          "subentry": "Grupo de recursos",
-          "show_location_age": "Mostrar atributo de idade da localização"
+          "subentry": "Grupo de recursos"
         },
         "data_description": {
           "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Padrão: 1800 (30 minutos).",
+          "show_location_age": "Quando ativado (padrão), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Desative para eliminar todas as gravações de banco de dados para dispositivos estacionários. O atributo absoluto 'last_seen' e as entidades sensor.*_last_seen estão sempre disponíveis.",
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (todas as áreas por padrão para relatórios de crowdsourcing ou apenas áreas de alto tráfego).",
-          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos.",
-          "show_location_age": "Quando ativado (padrão), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Desative para eliminar todas as gravações de banco de dados para dispositivos estacionários. O atributo absoluto 'last_seen' e as entidades sensor.*_last_seen estão sempre disponíveis."
+          "subentry": "Armazene essas opções no grupo de recursos selecionado. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para exemplos."
         }
       },
       "visibility": {
         "title": "Visibilidade do dispositivo",
-        "description": "Restaure dispositivos anteriormente ignorados para torná-los visíveis novamente. ",
+        "description": "Restaure dispositivos anteriormente ignorados para torná-los visíveis novamente. Selecione um ou mais dispositivos para restaurar e salve.",
         "data": {
           "unignore_devices": "Dispositivos para restaurar",
           "subentry": "Grupo de recursos"
@@ -315,14 +315,14 @@
       }
     },
     "error": {
-      "invalid_json": "Formato JSON inválido no conteúdo secrets.json.",
+      "invalid_json": "Formato JSON inválido no conteúdo do secrets.json.",
       "invalid": "A validação falhou. ",
       "invalid_auth": "Autenticação inválida. ",
       "cannot_connect": "Falha ao conectar-se à API do Google.",
       "dependency_not_ready": "As dependências de integração necessárias estão faltando. ",
       "choose_one": "Forneça exatamente um método de credencial.",
       "required": "Este campo é obrigatório.",
-      "invalid_token": "Credenciais inválidas (token/e-mail). ",
+      "invalid_token": "Credenciais inválidas (token/e-mail). Verifique o formato e o conteúdo.",
       "duplicate_name": "O nome semântico já existe. Escolha um nome diferente.",
       "duplicate_semantic_location": "O nome semântico já existe. Escolha um nome diferente.",
       "unknown": "Ocorreu um erro inesperado.",
@@ -357,7 +357,7 @@
       "fields": {
         "device_id": {
           "name": "Dispositivo",
-          "description": "Selecione um dispositivo Encontre Meu Google (ou passe um ID canônico por meio das Ferramentas do Desenvolvedor)."
+          "description": "Selecione um dispositivo do Google Encontrar Meu Dispositivo (ou passe um ID canônico via Ferramentas de Desenvolvedor)."
         }
       }
     },
@@ -372,7 +372,7 @@
       }
     },
     "refresh_device_urls": {
-      "name": "Atualizar URLs de dispositivos",
+      "name": "Atualizar URLs dos dispositivos",
       "description": "Atualize os URLs de configuração do Google Find My devices para apontar para a visualização integrada do mapa.",
       "fields": {}
     },
@@ -674,7 +674,7 @@
         "name": "Atualizações pesquisadas"
       },
       "stat_crowd_sourced_updates": {
-        "name": "Atualizações coletivas"
+        "name": "Atualizações colaborativas"
       },
       "stat_history_fallback_used": {
         "name": "Uso de histórico (fallback)"

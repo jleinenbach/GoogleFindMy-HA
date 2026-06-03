@@ -1,0 +1,759 @@
+{
+  "device": {
+    "google_find_hub_service": {
+      "name": "שירות רכזת Google Find"
+    }
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "אימות Google Find My Device",
+        "description": "בחירת שיטת האימות שלך. שיטה 1 מומלצת אם ניתן להריץ את GoogleFindMyTools במחשב עם Chrome.",
+        "data": {
+          "auth_method": "שיטת אימות"
+        }
+      },
+      "secrets_json": {
+        "title": "שיטה 1: קובץ secrets.json של GoogleFindMyTools",
+        "description": "יש להריץ את GoogleFindMyTools (ב-Chrome) כדי לייצר טוקנים לאימות, ולאחר מכן להדביק כאן את התוכן המלא של הקובץ Auth/secrets.json.",
+        "data": {
+          "secrets_json": "תוכן קובץ secrets.json"
+        }
+      },
+      "individual_tokens": {
+        "title": "שיטה 2: טוקן OAuth בודד",
+        "description": "יש להזין את טוקן ה-OAuth וכתובת האימייל של Google שהושגו בתהליך אימות ידני.",
+        "data": {
+          "oauth_token": "טוקן OAuth",
+          "google_email": "כתובת אימייל Google"
+        }
+      },
+      "device_selection": {
+        "title": "בחירת התקנים ותדירות סריקה",
+        "description": "התקנים חדשים שנתגלו יופיעו כמושבתים וניתן יהיה להפעיל אותם בהגדרות המכשיר. הגדרת פרמטרי הסריקה הכלליים:\n• מרווח סריקת מיקום: כמה זמן בין מחזורי סריקה חדשים (60–3600 שניות)\n• עיכוב בין סריקות התקנים: עיכוב בין סריקת התקנים בודדים בתוך מחזור (1–60 שניות)",
+        "data": {
+          "location_poll_interval": "מרווח סריקת מיקום (שניות)",
+          "device_poll_delay": "עיכוב בין סריקות התקנים (שניות)",
+          "google_home_filter_enabled": "סינון התקני Google Home",
+          "google_home_filter_keywords": "מילות מפתח לסינון (מופרדות בפסיקים)",
+          "enable_stats_entities": "יצירת ישויות סטטיסטיקה",
+          "map_view_token_expiration": "אפשר תפוגת טוקן לתצוגת מפה"
+        }
+      },
+      "select_hub_for_visibility": {
+        "title": "בחירת רכזת",
+        "description": "יש לבחור איזו רכזת Google Find My לנהל לפני פתיחת חלון נראות ההתקנים.",
+        "data": {
+          "hub": "רכזת"
+        }
+      },
+      "reconfigure": {
+        "title": "הגדרה מחדש של Google Find My Device",
+        "description": "סקירת התצורה הנוכחית עבור **{email}**. ניתן להמשיך כדי לעדכן אישורים או להתאים את אפשרויות הסריקה."
+      },
+      "reauth_confirm": {
+        "title": "אימות מחדש",
+        "description": "האישורים שלך עבור **{email}** נראים לא תקינים או פגי תוקף. יש לספק אישורים חדשים למטה.\n\nניתן להדביק את התוכן המלא של קובץ **secrets.json** חדש **או** להזין **טוקן OAuth** חדש.\n\nהערה: כתובת האימייל של החשבון מקובעת לאימות מחדש זה ולא ניתן לשנות אותה כאן.",
+        "data": {
+          "secrets_json": "secrets.json חדש (תוכן מלא)",
+          "new_oauth_token": "טוקן OAuth חדש"
+        }
+      },
+      "migrate_complete": {
+        "title": "ההעברה הושלמה",
+        "description": "Google Find My Device עבור **{email}** הועבר למבנה קבוצות התכונות החדש. יש לסקור את ההתקנים ולטעון מחדש את השילוב אם ישויות כלשהן נשארות לא מקוונות."
+      }
+    },
+    "error": {
+      "auth_failed": "האימות נכשל. נא לנסות שוב.",
+      "invalid_auth": "אימות לא תקין. נא לספק טוקן חדש ו/או להיכנס שוב.",
+      "invalid_token": "טוקן/אימייל לא תקין או שחסרים שדות נדרשים.",
+      "invalid_json": "פורמט JSON לא תקין בתוכן secrets.json.",
+      "no_devices": "לא נמצאו התקנים. יש לוודא ששירות Find My Device מופעל בחשבון Google שלך.",
+      "cannot_connect": "נכשל החיבור אל API של Google. ייתכן שזה זמני - נא לנסות שוב מאוחר יותר.",
+      "dependency_not_ready": "תלויות נדרשות של השילוב חסרות. יש להתקין את דרישות Google Find My Device ולהפעיל מחדש את Home Assistant.",
+      "import_failed": "ייבוא של עוזר האימות נכשל. יש להתקין את דרישות Google Find My Device (Selenium + מנהל התקן Chrome) ולנסות שוב.",
+      "choose_one": "נא לספק שיטת אישורים אחת בלבד.",
+      "required": "שדה חובה.",
+      "unknown": "אירעה שגיאה בלתי צפויה.",
+      "email_mismatch": "האישורים שסופקו שייכים לחשבון Google אחר. כדי להוסיף את החשבון הזה, יש ליצור שילוב חדש; אימות מחדש לא יכול לשנות את החשבון של רשומה זו."
+    },
+    "abort": {
+      "already_configured": "Google Find My Device כבר מוגדר.",
+      "cannot_connect": "נכשל החיבור ל-Google Find My Device.",
+      "dependency_not_ready": "תלויות של Google Find My Device לא מותקנות. יש להתקין את הדרישות ולנסות שוב.",
+      "invalid_discovery_info": "מטען הגילוי לא היה תקין. יש לבדוק את האישורים ולנסות שוב.",
+      "reauth_successful": "אימות מחדש הצליח.",
+      "migration_successful": "ההעברה הושלמה.",
+      "migration_failed": "ההעברה נכשלה. נא להסיר את השילוב ולהוסיף אותו מחדש.",
+      "reconfigure_successful": "הגדרה מחדש הצליחה.",
+      "no_hubs_configured": "לא הוגדרו עדיין רכזות Google Find My."
+    },
+    "progress": {
+      "discovery_secrets_new": "Auth/secrets.json אותר עבור {email}",
+      "discovery_secrets_update": "אישורים חדשים אותרו עבור {email}"
+    }
+  },
+  "config_subentries": {
+    "hub": {
+      "title": "רכזת Google Find My Device",
+      "entry_type": "קבוצת תכונות רכזת",
+      "initiate_flow": {
+        "user": "הוספת קבוצת תכונות רכזת"
+      },
+      "step": {
+        "user": {
+          "title": "הוספת קבוצת תכונות רכזת",
+          "description": "יצירה או רענון של קבוצת תכונות הרכזת כדי ש-Home Assistant יוכל לחשוף שירותים משותפים עבור שילוב זה."
+        },
+        "reconfigure": {
+          "title": "עדכון קבוצת תכונות הרכזת",
+          "description": "רענון קבוצת תכונות הרכזת כדי להבטיח שמערך התכונות העדכני זמין."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "service": {
+      "title": "שירות רכזת Google Find",
+      "entry_type": "קבוצת תכונות שירות",
+      "initiate_flow": {
+        "user": "הוספת קבוצת תכונות שירות"
+      },
+      "step": {
+        "user": {
+          "title": "הוספת קבוצת תכונות שירות",
+          "description": "הקצאת קבוצת תכונות השירות כדי ש-Home Assistant יוכל לחשוף אבחון ושירותי עזר עבור חשבון זה."
+        },
+        "reconfigure": {
+          "title": "עדכון קבוצת תכונות השירות",
+          "description": "רענון קבוצת תכונות השירות כדי לסנכרן אבחון ושירותי עזר עם התצורה העדכנית."
+        }
+      },
+      "abort": {},
+      "error": {}
+    },
+    "core_tracking": {
+      "title": "התקני Google Find My",
+      "entry_type": "קבוצת תכונות התקנים",
+      "initiate_flow": {
+        "user": "הוספת קבוצת תכונות התקנים"
+      },
+      "step": {
+        "user": {
+          "title": "הוספת קבוצת תכונות התקנים",
+          "description": "יצירת קבוצת תכונות ההתקנים לניהול גששי Google Find My שאותרו עבור חשבון זה."
+        },
+        "reconfigure": {
+          "title": "עדכון קבוצת תכונות ההתקנים",
+          "description": "עדכון קבוצת תכונות ההתקנים כדי לרענן את נראות הגששים ומטא-נתונים."
+        }
+      },
+      "abort": {},
+      "error": {}
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "תצורה",
+        "description": "מה ברצונך להגדיר?",
+        "menu_options": {
+          "credentials": "עדכון אישורים",
+          "settings": "שינוי הגדרות",
+          "visibility": "נראות התקנים",
+          "semantic_locations": "מיקומים סמנטיים",
+          "repairs": "תיקוני תת-רשומות"
+        }
+      },
+      "semantic_locations_menu": {
+        "title": "מיקומים סמנטיים",
+        "description": "ניהול עקיפות של מיקומים סמנטיים. מיפויים קיימים:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "הוספת מיקום סמנטי",
+          "semantic_location_edit": "עריכת מיקום סמנטי",
+          "semantic_locations_delete": "מחיקת מיקום סמנטי"
+        }
+      },
+      "semantic_locations": {
+        "title": "מיקומים סמנטיים",
+        "description": "ניהול עקיפות של מיקומים סמנטיים. מיפויים קיימים:\n{semantic_locations}",
+        "menu_options": {
+          "semantic_locations_add": "הוספת מיקום סמנטי",
+          "semantic_locations_edit": "עריכת מיקום סמנטי",
+          "semantic_locations_delete": "מחיקת מיקום סמנטי"
+        }
+      },
+      "semantic_locations_add": {
+        "title": "הוספת מיקום סמנטי",
+        "description": "הגדרת עקיפת מיקום סמנטי באמצעות קואורדינטות ודיוק.",
+        "data": {
+          "semantic_name": "שם סמנטי",
+          "latitude": "קו רוחב",
+          "longitude": "קו אורך",
+          "accuracy": "רדיוס זיהוי (מ׳)"
+        },
+        "data_description": {
+          "accuracy": "משוער טווח החיבור של ההתקן (לדוגמה, 15–20 מ׳ עבור Bluetooth)."
+        }
+      },
+      "semantic_locations_edit": {
+        "title": "בחירת מיקום סמנטי",
+        "description": "יש לבחור מיקום סמנטי לעריכה.",
+        "data": {
+          "semantic_location": "מיקום סמנטי"
+        }
+      },
+      "semantic_location_edit": {
+        "title": "עריכת מיקום סמנטי",
+        "description": "עדכון הקואורדינטות והדיוק עבור המיקום הסמנטי שנבחר.",
+        "data": {
+          "semantic_name": "שם סמנטי",
+          "latitude": "קו רוחב",
+          "longitude": "קו אורך",
+          "accuracy": "רדיוס זיהוי (מ׳)"
+        },
+        "data_description": {
+          "accuracy": "משוער טווח החיבור של ההתקן (לדוגמה, 15–20 מ׳ עבור Bluetooth)."
+        }
+      },
+      "semantic_locations_edit_form": {
+        "title": "עריכת מיקום סמנטי",
+        "description": "עדכון הקואורדינטות והדיוק עבור המיקום הסמנטי שנבחר.",
+        "data": {
+          "semantic_name": "שם סמנטי",
+          "latitude": "קו רוחב",
+          "longitude": "קו אורך",
+          "accuracy": "רדיוס זיהוי (מ׳)"
+        },
+        "data_description": {
+          "accuracy": "משוער טווח החיבור של ההתקן (לדוגמה, 15–20 מ׳ עבור Bluetooth)."
+        }
+      },
+      "semantic_locations_delete": {
+        "title": "מחיקת מיקומים סמנטיים",
+        "description": "יש לבחור מיקומים סמנטיים למחיקה.",
+        "data": {
+          "semantic_locations": "מיקומים סמנטיים"
+        }
+      },
+      "credentials": {
+        "title": "עדכון אישורים (אופציונלי)",
+        "description": "עדכון אישורים מבלי לחשוף ערכים קיימים. יש לספק שיטה אחת בלבד:\n\n• ולהדביק את התוכן המלא של secrets.json חדש\n**או**\n• הזן טוקן OAuth חדש ואימייל Google.\n\nאם סופקו, האישורים יאומתו ויישמרו; השילוב יטען מחדש מבלי לשנות את שמות הישויות.",
+        "data": {
+          "secrets_json": "secrets.json חדש (תוכן מלא)",
+          "oauth_token": "טוקן OAuth חדש",
+          "google_email": "אימייל Google",
+          "new_secrets_json": "secrets.json חדש (תוכן מלא)",
+          "new_oauth_token": "טוקן OAuth חדש",
+          "new_google_email": "אימייל Google",
+          "subentry": "קבוצת תכונות"
+        },
+        "data_description": {
+          "subentry": "החלת עדכוני האישורים על קבוצת התכונות שנבחרה. יש לעיין במדריך [תת-רשומות וקבוצות תכונות]({subentries_docs_url}) לפרטי תהליך העבודה."
+        }
+      },
+      "settings": {
+        "title": "אפשרויות",
+        "description": "התאמת הגדרות מיקום:\n• מרווח סריקת מיקום: כמה זמן בין סריקות מיקום (60–3600 שניות)\n• עיכוב בין סריקות התקנים: עיכוב בין סריקות התקנים (1–60 שניות)\n• דיוק מינימלי: התעלמות ממיקומים עם דיוק גרוע יותר מערך זה (25–500 מטרים)\n• סף תנועה: תנועה מינימלית הנדרשת לעדכון מיקום (10–200 מטרים)\n\nסינון Google Home:\n• הפעל כדי לשייך זיהויים מהתקני Google Home לאזור הבית\n• תמיכה בהתאמה חלקית במילות מפתח (מופרדות בפסיקים)\n• דוגמה: “nest” יתאים ל-“Kitchen Nest Mini”",
+        "data": {
+          "location_poll_interval": "מרווח סריקת מיקום (שניות)",
+          "device_poll_delay": "עיכוב בין סריקות מכשירים (שניות)",
+          "stale_threshold": "סף מיושנות (שניות)",
+          "show_location_age": "הצגת תכונת גיל מיקום",
+          "google_home_filter_enabled": "סינון התקני Google Home",
+          "google_home_filter_keywords": "מילות מפתח לסינון (מופרדות בפסיקים)",
+          "enable_stats_entities": "יצירת ישויות סטטיסטיקה",
+          "delete_caches_on_remove": "מחיקת מטמונים בעת הסרת הרשומה",
+          "map_view_token_expiration": "אפשר תפוגת טוקן לתצוגת מפה",
+          "contributor_mode": "מצב תרומת מיקומים",
+          "subentry": "קבוצת תכונות"
+        },
+        "data_description": {
+          "stale_threshold": "לאחר מספר שניות זה ללא עדכון מיקום, מצב הגשש הופך ל'לא ידוע'. ניתן להשתמש בישות 'מיקום אחרון' כדי לראות תמיד את המיקום הידוע האחרון. ברירת מחדל: 1800 (30 דקות).",
+          "show_location_age": "כאשר מופעל (ברירת מחדל), תכונת 'location_age' (מעוגלת לדקה אחת) מתווספת לכל ישות גשש. השבתה מבטלת את כל הכתיבות למסד הנתונים עבור התקנים נייחים. תכונת 'last_seen' המוחלטת וישויות sensor.*_last_seen תמיד זמינות.",
+          "delete_caches_on_remove": "הסרת טוקנים מאוחסנים ומטא-נתונים של התקנים בעת מחיקת רשומה זו.",
+          "map_view_token_expiration": "כאשר מופעל, טוקני תצוגת מפה פגים לאחר שבוע. כאשר מושבת (ברירת מחדל), הטוקנים לא פגים.",
+          "contributor_mode": "יש לבחור כיצד ההתקן שלך תורם לרשת של Google (כל האזורים כברירת מחדל לדיווח מקור-קהל, או רק אזורים בעלי תנועה גבוהה).",
+          "subentry": "אחסון אפשרויות אלה בקבוצת התכונות שנבחרה. יש לעיין ב[תת-רשומות וקבוצות תכונות]({subentries_docs_url}) לדוגמאות."
+        }
+      },
+      "visibility": {
+        "title": "נראות התקנים",
+        "description": "שחזור התקנים שבעבר הוסתרו כדי להפוך אותם לנראים שוב. יש לבחור התקן אחד או יותר לשחזור ולשמור.",
+        "data": {
+          "unignore_devices": "התקנים לשחזור",
+          "subentry": "קבוצת תכונות"
+        },
+        "data_description": {
+          "subentry": "התקנים משוחזרים מצטרפים לקבוצת התכונות שתבחר. יש לעיין ב[תת-רשומות וקבוצות תכונות]({subentries_docs_url}) להנחיות שיוך."
+        }
+      },
+      "repairs": {
+        "title": "תיקוני תת-רשומות",
+        "description": "יש לבחור פעולת תיקון עבור קבוצות התכונות שלך.",
+        "menu_options": {
+          "repairs_move": "העברת התקנים",
+          "repairs_delete": "מחיקת תת-רשומה"
+        }
+      },
+      "repairs_move": {
+        "title": "העברת התקנים בין תת-רשומות",
+        "description": "העברת התקנים לקבוצת התכונות שנבחרה. התקנים שהוסרו מקבוצות אחרות ימשיכו להופיע בקבוצה שנבחרה.",
+        "data": {
+          "target_subentry": "קבוצת תכונות יעד",
+          "device_ids": "התקנים לשיוך"
+        }
+      },
+      "repairs_delete": {
+        "title": "מחיקת תת-רשומה",
+        "description": "מחיקת קבוצת תכונות והעברת ההתקנים שלה לקבוצה אחרת.",
+        "data": {
+          "delete_subentry": "תת-רשומה למחיקה",
+          "fallback_subentry": "קבוצת תכונות גיבוי"
+        }
+      }
+    },
+    "error": {
+      "invalid_json": "פורמט JSON לא תקין בתוכן secrets.json.",
+      "invalid": "האימות נכשל. אנא בדוק את הקלט שלך.",
+      "invalid_auth": "אימות לא תקין. נא לספק טוקן חדש ו/או להיכנס שוב.",
+      "cannot_connect": "נכשל החיבור ל-API של Google.",
+      "dependency_not_ready": "תלויות נדרשות של השילוב חסרות. יש להתקין את דרישות Google Find My Device ולהפעיל מחדש את Home Assistant.",
+      "choose_one": "נא לספק שיטת אישורים אחת בלבד.",
+      "required": "שדה זה נדרש.",
+      "invalid_token": "אישורים לא תקינים (טוקן/אימייל). נא לבדוק פורמט ותוכן.",
+      "duplicate_name": "השם הסמנטי כבר קיים. יש לבחור שם אחר.",
+      "duplicate_semantic_location": "השם הסמנטי כבר קיים. יש לבחור שם אחר.",
+      "unknown": "אירעה שגיאה בלתי צפויה.",
+      "invalid_subentry": "יש לבחור קבוצת תכונות תקינה."
+    },
+    "abort": {
+      "reconfigure_successful": "הגדרה מחדש הצליחה.",
+      "no_ignored_devices": "אין התקנים מוסתרים לשחזור.",
+      "no_semantic_locations": "לא מוגדרים מיקומים סמנטיים.",
+      "repairs_no_subentries": "אין תת-רשומות לתיקון.",
+      "repair_no_devices": "יש לבחור לפחות התקן אחד להעברה.",
+      "subentry_move_success": "התקנים שוייכו ל-**{subentry}** ({count} עודכנו).",
+      "subentry_delete_success": "**{subentry}** נמחקה ו-{count} התקנים הועברו ל-**{fallback}**.",
+      "subentry_delete_invalid": "נדרשת קבוצת תכונות שנייה לפני מחיקת אחת.",
+      "subentry_remove_failed": "מחיקת קבוצת התכונות שנבחרה נכשלה. נא לנסות שוב."
+    }
+  },
+  "services": {
+    "locate_device": {
+      "name": "איתור התקן",
+      "description": "קבלת המיקום הנוכחי של התקן Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "התקן",
+          "description": "בחירת התקן Google Find My (או העבר ID קנוני דרך כלי המפתחים)."
+        }
+      }
+    },
+    "play_sound": {
+      "name": "השמעת צליל",
+      "description": "השמע צליל על התקן Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "התקן",
+          "description": "בחירת התקן Google Find My (או העבר ID קנוני דרך כלי המפתחים)."
+        }
+      }
+    },
+    "stop_sound": {
+      "name": "עצור צליל",
+      "description": "עצור את הצליל על התקן Google Find My.",
+      "fields": {
+        "device_id": {
+          "name": "התקן",
+          "description": "בחירת התקן Google Find My (או העבר ID קנוני דרך כלי המפתחים)."
+        }
+      }
+    },
+    "refresh_device_urls": {
+      "name": "רענון כתובות התקנים",
+      "description": "רענון כתובות התצורה של התקני Google Find My כך שיפנו לתצוגת המפה המשולבת.",
+      "fields": {}
+    },
+    "rebuild_device_registry": {
+      "name": "בניית רישום ההתקנים מחדש",
+      "description": "תחזוקה: בנייה מחדש של קישורי רישום ההתקנים עבור רכזות Google Find My והסרת התקני גשש המקושרים בטעות לרשומה ההורה.",
+      "fields": {}
+    },
+    "locate_external": {
+      "name": "איתור התקן (חיצוני)",
+      "description": "איתור התקן באמצעות עוזר חיצוני; מאציל לפעולת האיתור הרגילה.",
+      "fields": {
+        "device_id": {
+          "name": "התקן",
+          "description": "בחירת התקן Google Find My (או העברת ID קנוני דרך כלי המפתחים)."
+        },
+        "device_name": {
+          "name": "שם ההתקן (אופציונלי)",
+          "description": "שם ידידותי אופציונלי לרישום ביומן."
+        }
+      }
+    },
+    "rebuild_registry": {
+      "name": "בנייה מחדש / העברת רישום",
+      "description": "תחזוקה: הרצת העברה רכה של נתונים→אפשרויות או בנייה מחדש ישויות/התקנים עבור שילוב זה.",
+      "fields": {
+        "mode": {
+          "name": "מצב",
+          "description": "בחירת 'בנייה מחדש' כדי להסיר ישויות/התקנים ולטעון מחדש; 'העברה' רק מחיל מחדש את ההעברה הרכה של נתונים→אפשרויות."
+        },
+        "device_ids": {
+          "name": "התקנים (אופציונלי)",
+          "description": "הגבלת הפעולה להתקנים ספציפיים. יש להשאיר ריק כדי לפנות לכל התקני Google Find My."
+        }
+      }
+    }
+  },
+  "entity": {
+    "button": {
+      "play_sound": {
+        "name": "השמעת צליל"
+      },
+      "stop_sound": {
+        "name": "הפסקת צליל"
+      },
+      "locate_device": {
+        "name": "איתור כעת"
+      },
+      "reset_statistics": {
+        "name": "איפוס סטטיסטיקות"
+      },
+      "regenerate_fcm_token": {
+        "name": "יצירה מחדש של טוקן FCM",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "תקופת המתנה (שניות)"
+          },
+          "cooldown_remaining": {
+            "name": "המתנה שנותרה (שניות)"
+          }
+        }
+      },
+      "regenerate_adm_token": {
+        "name": "יצירה מחדש של טוקן ADM",
+        "state_attributes": {
+          "cooldown_seconds": {
+            "name": "תקופת המתנה (שניות)"
+          },
+          "cooldown_remaining": {
+            "name": "המתנה שנותרה (שניות)"
+          }
+        }
+      }
+    },
+    "binary_sensor": {
+      "polling": {
+        "name": "סריקה פעילה"
+      },
+      "connectivity": {
+        "name": "מצב חיבור",
+        "state_attributes": {
+          "last_poll_result": {
+            "name": "תוצאת סריקה אחרונה"
+          },
+          "consecutive_timeouts": {
+            "name": "פסקי זמן רצופים"
+          },
+          "fcm_connected_at": {
+            "name": "FCM התחבר ב"
+          }
+        }
+      },
+      "uwt_mode": {
+        "name": "מצב מעקב לא רצוי",
+        "state_attributes": {
+          "last_ble_observation": {
+            "name": "תצפית BLE אחרונה"
+          },
+          "google_device_id": {
+            "name": "מזהה התקן Google"
+          }
+        }
+      },
+      "nova_auth_status": {
+        "name": "מצב אימות Nova API",
+        "state_attributes": {
+          "nova_api_status": {
+            "name": "מצב Nova API"
+          },
+          "nova_api_status_reason": {
+            "name": "סיבה למצב Nova API"
+          },
+          "nova_api_status_changed_at": {
+            "name": "מצב Nova API שונה ב"
+          },
+          "nova_fcm_status": {
+            "name": "מצב Nova FCM"
+          },
+          "nova_fcm_status_reason": {
+            "name": "סיבה למצב Nova FCM"
+          },
+          "nova_fcm_status_changed_at": {
+            "name": "מצב Nova FCM שונה ב"
+          }
+        }
+      }
+    },
+    "device_tracker": {
+      "device": {
+        "state_attributes": {
+          "device_name": {
+            "name": "שם ההתקן"
+          },
+          "device_id": {
+            "name": "מזהה ההתקן"
+          },
+          "status": {
+            "name": "מצב"
+          },
+          "semantic_name": {
+            "name": "תווית סמנטית"
+          },
+          "battery_level": {
+            "name": "רמת סוללה"
+          },
+          "last_seen": {
+            "name": "נראה לאחרונה (מדווח)"
+          },
+          "last_seen_utc": {
+            "name": "נראה לאחרונה (UTC)"
+          },
+          "source_label": {
+            "name": "תווית מקור"
+          },
+          "source_rank": {
+            "name": "דירוג מקור"
+          },
+          "is_own_report": {
+            "name": "דיווח התקן עצמי"
+          },
+          "latitude": {
+            "name": "קו רוחב"
+          },
+          "longitude": {
+            "name": "קו אורך"
+          },
+          "accuracy_m": {
+            "name": "דיוק (מ׳)"
+          },
+          "altitude_m": {
+            "name": "גובה (מ׳)"
+          },
+          "location_age": {
+            "name": "גיל המיקום (שניות)"
+          },
+          "location_status": {
+            "name": "מצב המיקום"
+          },
+          "last_latitude": {
+            "name": "קו רוחב ידוע אחרון"
+          },
+          "last_longitude": {
+            "name": "קו אורך ידוע אחרון"
+          }
+        }
+      },
+      "last_location": {
+        "name": "מיקום אחרון",
+        "state_attributes": {
+          "device_name": {
+            "name": "שם ההתקן"
+          },
+          "device_id": {
+            "name": "מזהה ההתקן"
+          },
+          "status": {
+            "name": "מצב"
+          },
+          "semantic_name": {
+            "name": "תווית סמנטית"
+          },
+          "battery_level": {
+            "name": "רמת סוללה"
+          },
+          "last_seen": {
+            "name": "נראה לאחרונה (מדווח)"
+          },
+          "last_seen_utc": {
+            "name": "נראה לאחרונה (UTC)"
+          },
+          "source_label": {
+            "name": "תווית מקור"
+          },
+          "source_rank": {
+            "name": "דירוג מקור"
+          },
+          "is_own_report": {
+            "name": "דיווח התקן עצמי"
+          },
+          "latitude": {
+            "name": "קו רוחב"
+          },
+          "longitude": {
+            "name": "קו אורך"
+          },
+          "accuracy_m": {
+            "name": "דיוק (מ׳)"
+          },
+          "altitude_m": {
+            "name": "גובה (מ׳)"
+          },
+          "location_age": {
+            "name": "גיל המיקום (שניות)"
+          },
+          "location_status": {
+            "name": "מצב המיקום"
+          }
+        }
+      }
+    },
+    "sensor": {
+      "ble_battery": {
+        "name": "סוללת BLE"
+      },
+      "last_seen": {
+        "name": "נראה לאחרונה",
+        "state_attributes": {
+          "device_name": {
+            "name": "שם ההתקן"
+          },
+          "device_id": {
+            "name": "מזהה ההתקן"
+          },
+          "status": {
+            "name": "מצב"
+          },
+          "semantic_name": {
+            "name": "תווית סמנטית"
+          },
+          "battery_level": {
+            "name": "רמת סוללה"
+          },
+          "last_seen": {
+            "name": "נראה לאחרונה (מדווח)"
+          },
+          "last_seen_utc": {
+            "name": "נראה לאחרונה (UTC)"
+          },
+          "source_label": {
+            "name": "תווית מקור"
+          },
+          "source_rank": {
+            "name": "דירוג מקור"
+          },
+          "is_own_report": {
+            "name": "דיווח התקן עצמי"
+          },
+          "latitude": {
+            "name": "קו רוחב"
+          },
+          "longitude": {
+            "name": "קו אורך"
+          },
+          "accuracy_m": {
+            "name": "דיוק (מ׳)"
+          },
+          "altitude_m": {
+            "name": "גובה (מ׳)"
+          }
+        }
+      },
+      "semantic_labels": {
+        "name": "תוויות סמנטיות"
+      },
+      "stat_background_updates": {
+        "name": "עדכונים ברקע"
+      },
+      "stat_polled_updates": {
+        "name": "עדכונים מסריקה פעילה"
+      },
+      "stat_crowd_sourced_updates": {
+        "name": "עדכונים ממקורות קהל"
+      },
+      "stat_history_fallback_used": {
+        "name": "חזרה להיסטוריה"
+      },
+      "stat_timeouts": {
+        "name": "פסקי זמן"
+      },
+      "stat_invalid_coords": {
+        "name": "קואורדינטות לא תקינות"
+      },
+      "stat_fused_updates": {
+        "name": "עדכוני מיקום משולבים"
+      }
+    }
+  },
+  "issues": {
+    "auth_expired": {
+      "title": "נדרש אימות מחדש",
+      "description": "האימות עבור Google Find My Device לא תקין או פג תוקף עבור רשומה זו.\n\n**רשומה:** {entry_title}\n**חשבון:** {email}\n\nיש לבחור **הגדרה מחדש** בכרטיסיית השילוב כדי להיכנס שוב. אם שינית לאחרונה את סיסמת Google שלך או ביטלת טוקנים, יש לאמת מחדש כאן כדי לשחזר את הפונקציונליות.\n\n**טיפ:** Google עשויה לבטל טוקנים כאשר בקשות מגיעות מכתובת IP או אזור שונים מאלה שבהם הטוקן נוצר (לדוגמה, טוקן שנוצר במחשב נייד אך נעשה בו שימוש משרת או VPS במדינה אחרת). יש ליצור את `secrets.json` באותה רשת שבה Home Assistant פועל, או להשתמש באותה כתובת IP ציבורית."
+    },
+    "fcm_connection_stuck": {
+      "title": "חיבור Push FCM נכשל",
+      "description": "החיבור הרקעי ל-Google חסום.\n\n1. האם **TCP Port 5228** יוצא מותר בחומת האש שלך?\n2. אם הרשת תקינה, יש לנסות ליצור מחדש את `secrets.json` (ייתכן שהאישורים פוצלו/בוטלו)."
+    },
+    "multiple_config_entries": {
+      "title": "אותרו מספר רשומות תצורה",
+      "description": "Google Find My Device תומך כעת במספר רשומות תצורה, אחת לכל חשבון Google. אם כל רשומה מיועדת לחשבון אחר, אין צורך בפעולה. כאשר אותו חשבון נוסף פעמיים, Home Assistant יוצר בעיית תיקון **רשומות חשבון כפולות** עבור הרשומה החדשה כך שניתן להסיר או להפעיל מחדש את הנכונה."
+    },
+    "unique_id_collision": {
+      "title": "אותרה התנגשות מזהה ייחודי של ישות",
+      "description": "ישויות מסוימות עבור **{entry}** משתמשות כבר בפורמט המזהה הייחודי החדש ומתנגשות עם ההעברה.\n\n**ספירה:** {count}\n**דוגמאות:** {entities}\n\nלפתרון:\n1) יש לפתוח **הגדרות → התקנים ושירותים → ישויות** ולחפש את הישויות הרשומות.\n2) יש להסיר או לשנות שם של ישויות מתנגשות, או למחוק רשומות נטושות משילובים אחרים.\n3) יש לטעון מחדש את השילוב (או להפעיל מחדש את Home Assistant). ההעברה תנסה שוב אוטומטית."
+    },
+    "duplicate_account": {
+      "title": "חשבון Google Find My כפול",
+      "description": "Home Assistant אותר מספר רשומות Google Find My עבור אותו חשבון ({email}). רק רשומה אחת יכולה להישאר פעילה. יש להסיר או להשבית את הרשומה הכפולה ״{entry_title}״ או לאמת מחדש את החשבון המיועד. סיבה: {cause}."
+    },
+    "duplicate_account_entries": {
+      "title": "אותרו רשומות חשבון כפולות",
+      "description": "חשבון Google זה (**{email}**) כבר מוגדר על ידי רשומה אחרת:\n\n{entries}\n\nיש להשבית או להסיר את הרשומה הכפולה כך שרק רשומה אחת לחשבון תישאר פעילה, ולאחר מכן לטעון מחדש את השילוב (או להפעיל מחדש את Home Assistant)."
+    }
+  },
+  "exceptions": {
+    "device_not_found": {
+      "message": "ההתקן {device_id} לא נמצא או אינו חלק משילוב זה."
+    },
+    "no_active_entry": {
+      "message": "אין רשומת Google Find My Device פעילה זמינה. רשומות פעילות: {active_count}/{total_count}. יש להפעיל אחת מהרשומות המוגדרות ({entries}) או להוסיף חשבון חדש, ולנסות שוב."
+    },
+    "locate_failed": {
+      "message": "איתור ההתקן {device_id} נכשל: {error}"
+    },
+    "play_sound_failed": {
+      "message": "השמעת צליל על {device_id} נכשלה: {error}"
+    },
+    "stop_sound_failed": {
+      "message": "עצירת הצליל על {device_id} נכשלה: {error}"
+    },
+    "missing_token_cache": {
+      "message": "מטמון הטוקן חסר. יש לספק TokenCache ייעודי לרשומה (לדוגמה, entry.runtime_data.token_cache)."
+    },
+    "missing_namespace": {
+      "message": "מרחב שמות חסר. יש להעביר את מרחב השמות הייעודי לרשומה או את מזהה ה-ConfigEntry כדי לשמור על בידוד של מטא-נתונים מאוחסנים."
+    }
+  },
+  "system_health": {
+    "info": {
+      "integration_version": "גרסת השילוב",
+      "loaded_entries": "רשומות שנטענו",
+      "entries": "רשומות תצורה",
+      "fcm": "מקלט FCM",
+      "fcm_lock_contention_count": "ספירת תחרות נעילת FCM"
+    }
+  },
+  "selector": {
+    "contributor_mode": {
+      "options": {
+        "high_traffic": "אזורים בעלי תנועה גבוהה בלבד",
+        "in_all_areas": "כל האזורים (מקור-קהל)"
+      }
+    }
+  }
+}

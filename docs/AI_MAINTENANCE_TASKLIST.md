@@ -17,6 +17,8 @@ Standing assignment for the AI: apply these checks alongside the Platinum rules 
 - **Strike:** Search Python code for hardcoded strings in `async_create_entry(title=...)` or `abort(reason=...)`.
 - **Directive:** Every user-facing string must use a `translation_key`.
 - **Extended Check:** For every new key in `strings.json`, ensure matching keys exist in `translations/en.json` (and ideally `translations/de.json`).
+- **Locale parity gate (MUST):** Before committing any change to `translations/*.json`, run `python script/sync_translations.py` (it backfills missing entries from `strings.json`, including **empty container dicts** such as `abort: {}`, `error: {}`, and `fields: {}`). Then verify with `python script/translation_key_check.py` — every locale must report `OK`. The key check counts every mapping path, so omitting an empty container counts as a missing key and breaks the locale coverage gate.
+- **Anti-pattern (do not):** Author a custom coverage script that compares leaf strings against `translations/en.json`. The single source of truth is `strings.json`, and `en.json` itself can carry pre-existing drift against it.
 
 ### 4. Performance & Blocking I/O Guard
 - **Directive:** Scan new code for synchronous file operations (`open()`, `json.load()`, `shutil`) or network calls (`requests`, `urllib`) inside `async def` functions.
