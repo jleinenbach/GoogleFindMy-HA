@@ -205,6 +205,7 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
 | `stale_threshold` | 1800 | seconds | After this many seconds (default: 30 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
+| `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
 
 ### Google Home filter behavior
 
@@ -281,6 +282,7 @@ The integration provides a couple of Home Assistant Actions for use with automat
 
 ## Data updates and background behavior
 
+- **Snapshot merge semantics:** Push updates from the FCM listener are merged into the coordinator snapshot rather than replacing it. Devices that were not part of a push event keep their previous metadata, which prevents transient gaps in the device tracker registry between full poll cycles. The subentry-device index is rebuilt from the merged snapshot.
 - **Coordinator-driven updates:** Location and metadata are refreshed through Home Assistant's [`DataUpdateCoordinator`](https://developers.home-assistant.io/docs/integration_fetching_data/) with a default 300-second polling interval.  Staggered per-device delays keep API calls within Google's rate limits.
 - **Manual refresh:** Call the `googlefindmy.locate_device` action to request fresh data outside the scheduled polling cycle.  The integration debounces requests to avoid repeated queries that would exceed the appropriate polling guidance.
 - **Repair flows:** When authentication expires or Google invalidates API tokens, the integration raises a [Home Assistant repair issue](https://developers.home-assistant.io/docs/core/platform/repairs/) that guides you through reauthentication without removing the config entry.
