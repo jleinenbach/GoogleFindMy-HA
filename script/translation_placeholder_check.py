@@ -19,17 +19,23 @@ Finding classes:
   does not supply (the literal ``{name}`` ends up visible in the UI).
 * ``MISSING_TRANSLATION`` (fatal): code references a translation key that
   has no entry in ``strings.json``.
+* ``DRIFT_RISK`` (fatal): ``translation_placeholders=<variable>`` where the
+  variable's literal-string keys cannot be traced statically. This means
+  the linter cannot detect placeholder drift for that call site, so it
+  must fail the gate (else the symmetry check silently passes for any
+  call using variable-built dicts; Codex feedback on PR #1069).
 * ``DEAD`` (warning): code supplies a placeholder that no translation
   string renders. This is informational only — HA Repairs forwards the
   full ``translation_placeholders`` dict to the issue payload, so extra
   keys beyond what the description renders are legitimate machine-readable
   diagnostic metadata (for example the ``cause`` placeholder on
   ``duplicate_account_entries``).
-* ``SKIPPED`` (warning): a translation key or placeholders argument could
-  not be statically resolved (dynamic dispatch).
+* ``SKIPPED`` (warning): a translation key or non-variable placeholders
+  argument could not be statically resolved (e.g. parse errors on a
+  newer Python syntax, unsupported AST nodes).
 
-Only ``MISSING`` / ``MISSING_TRANSLATION`` fail the run. ``--strict`` also
-fails on warnings.
+``MISSING`` / ``MISSING_TRANSLATION`` / ``DRIFT_RISK`` fail the run.
+``--strict`` also fails on warnings.
 """
 
 from __future__ import annotations
@@ -179,12 +185,15 @@ def _trace_local_dict_keys(
 ) -> set[str] | None:
     """Walk a function body and trace the literal-string keys of ``name``.
 
-    Supports ``name = {...}`` initialisation and ``name["k"] = v`` updates.
-    Returns ``None`` when an assignment is dynamic (e.g. ``**rest``,
-    non-string subscript, ``name = func()``).
+    Supports plain (``name = {...}``) and annotated
+    (``name: dict[str, Any] = {...}``) initialisation as well as
+    ``name["k"] = v`` updates. Returns ``None`` when any assignment is
+    dynamic (``**rest``, non-string subscript, ``name = func()``,
+    annotated assignment without value).
     """
     keys: set[str] | None = None
     for stmt in ast.walk(func_node):
+        # Plain assignment: ``name = ...`` or ``name["k"] = ...``
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
             target = stmt.targets[0]
             if isinstance(target, ast.Name) and target.id == name:
@@ -209,6 +218,21 @@ def _trace_local_dict_keys(
                     keys.add(slice_node.value)
                 else:
                     return None
+        # Annotated assignment: ``name: T = {...}`` (single target, not a list)
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            if stmt.target.id != name:
+                continue
+            if stmt.value is None:
+                # ``name: T`` (declaration only) — no keys to trace, treat
+                # like a fresh empty assignment to keep collection going.
+                continue
+            if isinstance(stmt.value, ast.Dict):
+                dict_keys = _placeholders_from_dict(stmt.value)
+                if dict_keys is None:
+                    return None
+                keys = set(dict_keys)
+            else:
+                return None
     return keys
 
 
@@ -328,15 +352,30 @@ def _scan_file(
             kwargs.get("translation_placeholders"), tree, call
         )
         if code_keys is None:
-            scan.skipped.append(
-                Finding(
-                    kind="SKIPPED",
-                    file=path,
-                    line=call.lineno,
-                    translation_key=key,
-                    detail=skip_reason or "translation_placeholders dynamic",
+            # A failed variable resolution means the linter cannot detect
+            # placeholder drift for this call — escalate to DRIFT_RISK
+            # (fatal). Other dynamic constructs (parse errors, unsupported
+            # AST nodes) stay informational SKIPPED.
+            if skip_reason and skip_reason.startswith("variable "):
+                scan.findings.append(
+                    Finding(
+                        kind="DRIFT_RISK",
+                        file=path,
+                        line=call.lineno,
+                        translation_key=key,
+                        detail=skip_reason,
+                    )
                 )
-            )
+            else:
+                scan.skipped.append(
+                    Finding(
+                        kind="SKIPPED",
+                        file=path,
+                        line=call.lineno,
+                        translation_key=key,
+                        detail=skip_reason or "translation_placeholders dynamic",
+                    )
+                )
             continue
         translation_keys = translations.get(key)
         if translation_keys is None:
