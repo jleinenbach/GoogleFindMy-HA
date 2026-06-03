@@ -11,9 +11,14 @@ Two independent capabilities are described:
    asks GoogleFindMy to map them to the trackers you already own. This path is
    read-only on the Find My side and is always available.
 2. **FMDN Finder uploads** — When Bermuda decides that a tracker has moved to a
-   new area, GoogleFindMy can push that semantic location to Google's Find Hub
-   network as if your Home Assistant were a regular Finder. This path is
-   opt-in and disabled by default.
+   new area, GoogleFindMy is wired up to push that semantic location to
+   Google's Find Hub network as if your Home Assistant were a regular Finder.
+   This path is **experimental and currently blocked in code**: the listener
+   and debounce pipeline run, but every upload attempt short-circuits because
+   the FMDN endpoint requires DroidGuard attestation, which Home Assistant
+   cannot produce. See
+   [FMDN_UPLOAD_LIMITATION.md](FMDN_UPLOAD_LIMITATION.md) for protocol
+   details.
 
 > [!NOTE]
 > The Bermuda integration on the other side must be the
@@ -32,7 +37,7 @@ without contacting Google. Combining both sides gives you:
 | Live coordinates while at home (no cloud roundtrip) | Bermuda |
 | Coordinates while away (Find Hub network) | GoogleFindMy |
 | Stable Home Assistant device that survives entity rename / MAC rotation | GoogleFindMy (`google_device_id`) |
-| Optional contribution of your scanners back into Find Hub | GoogleFindMy FMDN Finder |
+| Optional contribution of your scanners back into Find Hub | GoogleFindMy FMDN Finder (blocked today, see Capability 2) |
 
 ## Architecture
 
@@ -52,7 +57,8 @@ without contacting Google. Combining both sides gives you:
    └───────────────┬───────────────┘                └─────────────┬──────────────┘
                    │ area change                                  ▲
                    │ (state attribute "area")                     │ FMDN upload
-                   ▼                                              │ (semantic location)
+                   ▼                                              │ (blocked today,
+                                                                  │  DroidGuard)
    ┌───────────────────────────────┐                              │
    │  EVENT_STATE_CHANGED listener │ ─────────────────────────────┘
    │  fmdn_finder/bermuda_listener │
@@ -66,9 +72,14 @@ Key implementation pointers (1.7.0-5):
   service to other integrations.
 - `custom_components/googlefindmy/fmdn_finder/bermuda_listener.py` — Subscribes
   to `EVENT_STATE_CHANGED` on `device_tracker.*_bermuda_tracker*`, debounces
-  area changes for 30 s, and triggers an FMDN upload.
+  area changes for 30 s, and asks the uploader to send an FMDN report.
 - `custom_components/googlefindmy/fmdn_finder/location_uploader.py` and
-  `google_uploader.py` — Encrypt and send the semantic location to Google.
+  `google_uploader.py` — Encrypt the semantic location and prepare it for the
+  FMDN endpoint. The network upload itself is gated by
+  `FMDN_UPLOAD_ENABLED = False` and currently returns early because
+  DroidGuard attestation is unavailable (see
+  [Capability 2](#capability-2--fmdn-finder-uploads-experimental-currently-blocked)
+  and [FMDN_UPLOAD_LIMITATION.md](FMDN_UPLOAD_LIMITATION.md)).
 - `custom_components/googlefindmy/const.py` — `FEATURE_FMDN_FINDER_ENABLED`
   feature flag (default `False`).
 
@@ -114,7 +125,18 @@ for the internal cache pipeline.
 No user action is needed beyond installing both integrations and pairing your
 trackers. Bermuda discovers GoogleFindMy automatically.
 
-## Capability 2 — FMDN Finder uploads (opt-in)
+## Capability 2 — FMDN Finder uploads (experimental, currently blocked)
+
+> [!IMPORTANT]
+> The upload path to Google's FMDN backend is **hard-disabled in code**
+> (`FMDN_UPLOAD_ENABLED = False` in
+> `custom_components/googlefindmy/fmdn_finder/google_uploader.py`) because
+> it requires a valid **DroidGuard attestation token** that Home Assistant
+> cannot produce. Setting `FEATURE_FMDN_FINDER_ENABLED = True` wires up the
+> Bermuda listener and the debounce/throttle pipeline, but every upload
+> attempt returns early without contacting Google. See
+> [FMDN_UPLOAD_LIMITATION.md](FMDN_UPLOAD_LIMITATION.md) for the protocol
+> background and what would be needed to unblock the upload path.
 
 When `FEATURE_FMDN_FINDER_ENABLED = True`, GoogleFindMy registers an event
 listener that:
@@ -124,19 +146,24 @@ listener that:
    stable, suppressing flapping.
 3. Enforces a 60-second minimum interval per device
    (`MIN_UPLOAD_INTERVAL_SECONDS`) to respect FMDN throttling.
-4. Encrypts the semantic location end-to-end and uploads a Finder report to
-   Google's FMDN backend on your behalf.
+4. Prepares an end-to-end encrypted Finder report and hands it to the
+   uploader. The uploader currently short-circuits and logs that the upload
+   is disabled (DroidGuard attestation unavailable); no traffic reaches
+   Google.
 
-**Privacy posture.** Uploaded reports are end-to-end encrypted with your
-account keys; only the device owner can decrypt them. Your Home Assistant then
-acts like any other Finder phone in the Find Hub crowd. The feature is
-off by default precisely because contributing as a Finder is a deliberate
-choice, not a side effect of installing the integration.
+**Privacy posture.** The end-to-end encryption design intentionally allows
+only the device owner to decrypt Finder reports, so once the upload path is
+ever unblocked, your Home Assistant would behave like any other Finder phone
+in the Find Hub crowd. The feature is off by default precisely because
+contributing as a Finder is a deliberate choice, not a side effect of
+installing the integration.
 
-### Enabling FMDN Finder
+### Enabling the FMDN Finder pipeline (listener only)
 
-The feature flag is currently a compile-time constant. To enable it on
-1.7.0-5:
+The feature flag is currently a compile-time constant. Setting it on
+1.7.0-5 enables the Bermuda listener and the debounce/throttle pipeline,
+which is useful for development and log validation, but it does **not**
+publish anything to Google as long as the upload guard stays disabled:
 
 1. Edit `custom_components/googlefindmy/const.py`:
    ```python
@@ -146,11 +173,15 @@ The feature flag is currently a compile-time constant. To enable it on
 3. Watch the log for the line
    `Setting up FMDN Finder integration` followed by
    `FMDN Finder setup complete`.
-4. Trigger an area change in Bermuda (move a tag between two known areas) and
-   confirm an upload entry appears in the GoogleFindMy log section.
+4. Trigger an area change in Bermuda (move a tag between two known areas)
+   and confirm a log line of the form
+   `FMDN Finder upload is disabled (requires DroidGuard attestation)`. That
+   confirms the listener and debounce stages are healthy.
 
-A future release may promote this to a runtime option in the config flow. Until
-then, treat enabling FMDN Finder as a power-user opt-in.
+A future release may promote this to a runtime option in the config flow
+**once a viable upload path exists**. Until then, treat enabling
+`FEATURE_FMDN_FINDER_ENABLED` as a developer-facing opt-in for the listener
+pipeline, not as a way to contribute to Google's Find Hub network.
 
 ## Setup checklist
 
@@ -162,15 +193,18 @@ then, treat enabling FMDN Finder as a power-user opt-in.
    `bluetooth_proxy:`, Shelly Pro, Pi with a working `hci0`, etc.).
 4. Reload both integrations after pairing. The same physical tag should appear
    as **one** HA device with **two** `device_tracker` entities.
-5. (Optional) Flip `FEATURE_FMDN_FINDER_ENABLED` to `True` to contribute area
-   updates back to Google's Find Hub network.
+5. (Developers only) Flip `FEATURE_FMDN_FINDER_ENABLED` to `True` to wire up
+   the Bermuda listener and the debounce/throttle pipeline. Contribution to
+   Google's Find Hub network is currently blocked in code (DroidGuard
+   attestation unavailable); see
+   [Capability 2 — FMDN Finder uploads](#capability-2--fmdn-finder-uploads-experimental-currently-blocked).
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Resolution |
 | :------ | :----------- | :--------- |
 | Bermuda entity appears as a separate HA device next to GoogleFindMy. | Pairing happened before the EID resolver had populated the cache, so Bermuda could not congeal. | Reload Bermuda, or in stubborn cases manually merge the two devices via Settings → Devices → "merge". |
-| No FMDN upload log entry after enabling the feature. | The feature flag is still `False` in `const.py`, or no Bermuda area change has stabilized for 30 s. | Re-check the flag; trigger a clear area transition (e.g. move tag from `Office` to `Hallway`). |
+| No `FMDN Finder upload is disabled` log entry after enabling the feature. | Either `FEATURE_FMDN_FINDER_ENABLED` is still `False` in `const.py`, or no Bermuda area change has stabilized for 30 s. | Re-check the flag and the Bermuda entity state; trigger a clear area transition (e.g. move tag from `Office` to `Hallway`). Note: the listener never produces a *successful* upload entry today — the uploader short-circuits because DroidGuard attestation is unavailable. See [FMDN_UPLOAD_LIMITATION.md](FMDN_UPLOAD_LIMITATION.md). |
 | EID resolver returns no match. | Identity keys not yet computed for the device, or the device is in a fresh-pair state. | Wait for the next coordinator refresh cycle (`location_poll_interval`, default 300 s) and try again. |
 | Multiple Google devices match one EID. | Account contains duplicate paired trackers (e.g. test entries). | Resolve duplicates in the Find Hub app on your phone first. |
 
