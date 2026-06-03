@@ -74,9 +74,9 @@ Field rules:
 - Methods (`async_on_unload`, `add_update_listener`, …) are intentionally
   not part of the factory. Tests that need them attach them per-instance.
 
-Wave-based migration of existing call sites is tracked in
-`/app/memory/plans/active/PLAN_CANONICAL_CONFIG_ENTRY_STUB.md` (Commit 12
-in PR #172's follow-up).
+Wave-based migration of the existing call sites lands in this branch as
+follow-up commits (waves 1–3); see the corresponding PR description for
+the rollout order.
 
 ## Package layout
 
