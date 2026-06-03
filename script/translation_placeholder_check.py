@@ -66,8 +66,14 @@ class Finding:
     detail: str
 
     def format_for_github(self) -> str:
-        """Render this finding as a GitHub Actions annotation line."""
-        level = "warning" if self.kind == "SKIPPED" else "error"
+        """Render this finding as a GitHub Actions annotation line.
+
+        ``SKIPPED`` and ``DEAD`` are non-fatal informational findings and
+        render as ``::warning`` so they do not obscure real ``MISSING`` /
+        ``MISSING_TRANSLATION`` / ``DRIFT_RISK`` errors in Actions logs
+        (Codex feedback on PR #1069).
+        """
+        level = "warning" if self.kind in ("SKIPPED", "DEAD") else "error"
         rel = self.file.relative_to(ROOT)
         return (
             f"::{level} file={rel},line={self.line},"
