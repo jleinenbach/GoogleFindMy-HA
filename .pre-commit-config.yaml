@@ -77,6 +77,13 @@ repos:
         pass_filenames: false
         always_run: true
 
+      - id: translation-placeholder-check
+        name: Ensure issue translation placeholders match code
+        entry: python script/translation_placeholder_check.py
+        language: python
+        pass_filenames: false
+        always_run: true
+
       - id: clean-pycache
         name: Remove Python cache artifacts
         entry: python script/clean_pycache.py

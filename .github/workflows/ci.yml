@@ -155,6 +155,61 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  translations:
+    name: Translations validation
+    runs-on: ubuntu-latest
+    needs: hassfest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run translations sync check
+        id: translations_sync
+        run: python script/sync_translations.py --check
+
+      - name: Run translation key coverage check
+        id: translation_keys
+        run: python script/translation_key_check.py
+
+      - name: Run translation placeholder symmetry check
+        id: translation_placeholders
+        run: python script/translation_placeholder_check.py --github
+
+      - name: Write translations summary
+        if: always()
+        run: |
+          {
+            echo "## Translations Validation"
+            echo ""
+            if [ "${{ steps.translations_sync.outcome }}" = "success" ] \
+              && [ "${{ steps.translation_keys.outcome }}" = "success" ] \
+              && [ "${{ steps.translation_placeholders.outcome }}" = "success" ]; then
+              echo "✅ **All translation gates passed**"
+              echo ""
+              echo "* ``sync_translations.py --check`` (locales aligned with strings.json)"
+              echo "* ``translation_key_check.py`` (no missing keys per locale)"
+              echo "* ``translation_placeholder_check.py`` (issue placeholders match code)"
+            else
+              echo "❌ **Translation drift detected**"
+              echo ""
+              echo "| Gate | Result |"
+              echo "| --- | --- |"
+              echo "| sync_translations | ${{ steps.translations_sync.outcome }} |"
+              echo "| translation_keys | ${{ steps.translation_keys.outcome }} |"
+              echo "| translation_placeholders | ${{ steps.translation_placeholders.outcome }} |"
+              echo ""
+              echo "See the failing step above for the affected keys."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     name: Lint (${{ matrix.check }})
     runs-on: ubuntu-latest
