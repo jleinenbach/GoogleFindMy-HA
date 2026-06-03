@@ -14,10 +14,12 @@ import asyncio
 import inspect
 from collections.abc import Mapping
 from itertools import count
-from types import MappingProxyType, ModuleType
+from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import Any
 
-__all__ = ["install_config_entries_stubs"]
+__all__ = ["install_config_entries_stubs", "make_config_entry"]
+
+_ENTRY_COUNTER = count(1)
 
 
 def install_config_entries_stubs(target: ModuleType) -> None:
@@ -306,3 +308,57 @@ def install_config_entries_stubs(target: ModuleType) -> None:
     target.OptionsFlowWithReload = OptionsFlowWithReload
     target.UNDEFINED = _UndefinedType()
     target.HANDLERS = handlers
+
+
+def make_config_entry(
+    *,
+    entry_id: str | None = None,
+    domain: str = "googlefindmy",
+    data: Mapping[str, Any] | None = None,
+    options: Mapping[str, Any] | None = None,
+    runtime_data: Any = None,
+    title: str = "Test Account",
+    unique_id: str | None = None,
+    state: str = "loaded",
+    version: int = 1,
+    minor_version: int = 0,
+    source: str = "user",
+    pref_disable_new_entities: bool = False,
+    pref_disable_polling: bool = False,
+    disabled_by: str | None = None,
+    **extra: Any,
+) -> SimpleNamespace:
+    """Canonical config-entry stub for tests.
+
+    Always sets ``data`` and ``options`` as plain dicts so production helpers
+    like ``_opt()`` and ``entry.data.get(...)`` work without additional
+    defensive code in callers. Extra keyword arguments are attached verbatim,
+    matching ad-hoc ``SimpleNamespace`` patterns previously scattered across
+    the test tree.
+
+    Mirrors the surface tests actually use; not the full HA ``ConfigEntry``
+    contract. Mock methods (``async_on_unload``, ``add_update_listener``)
+    are intentionally NOT included; add them per-test if needed.
+
+    ``_ENTRY_COUNTER`` is module-level state. pytest-xdist workers each import
+    the module fresh, so IDs are worker-isolated but not deterministic across
+    test runs. Tests that assert on ``entry_id`` MUST pass ``entry_id=...``
+    explicitly.
+    """
+    return SimpleNamespace(
+        entry_id=entry_id or f"entry-test-{next(_ENTRY_COUNTER)}",
+        domain=domain,
+        data=dict(data or {}),
+        options=dict(options or {}),
+        runtime_data=runtime_data,
+        title=title,
+        unique_id=unique_id,
+        state=state,
+        version=version,
+        minor_version=minor_version,
+        source=source,
+        pref_disable_new_entities=pref_disable_new_entities,
+        pref_disable_polling=pref_disable_polling,
+        disabled_by=disabled_by,
+        **extra,
+    )
