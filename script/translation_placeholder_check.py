@@ -247,19 +247,72 @@ def _apply_ann_assign_to_keys(
     return set(dict_keys)
 
 
+class _ScopedDictAssignmentCollector(ast.NodeVisitor):
+    """Collect ``Assign``/``AnnAssign`` statements visible at a call site.
+
+    "Visible" means: in the enclosing function's scope (not in a nested
+    function/class/lambda) AND on a line strictly before ``call_line``.
+    The empty ``visit_FunctionDef`` / ``visit_AsyncFunctionDef`` /
+    ``visit_ClassDef`` / ``visit_Lambda`` methods stop descent into nested
+    scopes (without those overrides, the default ``generic_visit`` would
+    recurse and count assignments in unrelated nested functions — Codex
+    feedback on PR #1069).
+    """
+
+    def __init__(self, call_line: int) -> None:
+        self.call_line = call_line
+        self.assignments: list[ast.Assign | ast.AnnAssign] = []
+
+    # Stop descent into nested scopes — they cannot rebind names in the
+    # outer scope that the Repairs call uses.
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: D401
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: D401
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: D401
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:  # noqa: D401
+        return
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if node.lineno < self.call_line:
+            self.assignments.append(node)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.lineno < self.call_line:
+            self.assignments.append(node)
+        self.generic_visit(node)
+
+
 def _trace_local_dict_keys(
-    func_node: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    call_node: ast.Call,
 ) -> set[str] | None:
-    """Walk a function body and trace the literal-string keys of ``name``.
+    """Trace the literal-string keys of ``name`` visible at ``call_node``.
 
     Supports plain (``name = {...}``) and annotated
     (``name: dict[str, Any] = {...}``) initialisation as well as
-    ``name["k"] = v`` updates. Returns ``None`` when any assignment is
-    dynamic (``**rest``, non-string subscript, ``name = func()``,
-    annotated assignment without value).
+    ``name["k"] = v`` updates. Only considers assignments that
+
+    * execute strictly before ``call_node`` (order-aware) and
+    * live in the enclosing function's scope, not in nested
+      function/class/lambda bodies (scope-aware).
+
+    Returns ``None`` when any qualifying assignment is dynamic
+    (``**rest``, non-string subscript, ``name = func()``,
+    annotated assignment without value). Statements on the call's own
+    line are excluded (rare multi-statement-per-line edge case).
     """
+    collector = _ScopedDictAssignmentCollector(call_node.lineno)
+    for stmt in func_node.body:
+        collector.visit(stmt)
     keys: set[str] | None = None
-    for stmt in ast.walk(func_node):
+    for stmt in collector.assignments:
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
             result = _apply_assign_to_keys(stmt, name, keys)
         elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
@@ -308,7 +361,7 @@ def _resolve_name_reference(
     func = _enclosing_function(tree, call_node)
     if func is None:
         return None, f"variable '{node.id}' used at module scope"
-    keys = _trace_local_dict_keys(func, node.id)
+    keys = _trace_local_dict_keys(func, node.id, call_node)
     if keys is None:
         return None, f"variable '{node.id}' could not be statically resolved"
     return keys, None
