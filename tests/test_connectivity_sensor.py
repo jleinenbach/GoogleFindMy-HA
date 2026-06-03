@@ -8,6 +8,7 @@ import pytest
 
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.binary_sensor import GoogleFindMyConnectivitySensor
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 def _build_sensor(coordinator: Any) -> GoogleFindMyConnectivitySensor:
@@ -33,7 +34,7 @@ def test_connectivity_sensor_tracks_push_and_attributes() -> None:
         last_poll_result="failed",
         is_fcm_connected=True,
         fcm_status=SimpleNamespace(changed_at=1_650_000_000.0),
-        config_entry=SimpleNamespace(entry_id="entry"),
+        config_entry=make_config_entry(entry_id="entry"),
     )
 
     sensor = _build_sensor(coordinator)
@@ -68,7 +69,7 @@ async def test_health_changes_notify_coordinators(
 
             notifications.append(True)
 
-    coordinator = _Coordinator(config_entry=SimpleNamespace(entry_id="entry-a"))
+    coordinator = _Coordinator(config_entry=make_config_entry(entry_id="entry-a"))
     receiver.register_coordinator(coordinator)
 
     receiver._update_entry_health("entry-a", True)

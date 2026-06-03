@@ -10,6 +10,7 @@ import custom_components.googlefindmy.coordinator as coordinator_module
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations as decrypt_module,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _StatusEnum:
@@ -38,7 +39,7 @@ def _build_coordinator(
         coordinator_module.GoogleFindMyCoordinator
     )
     coordinator.hass = SimpleNamespace(async_create_task=lambda coro: coro, data={})
-    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
     coordinator._enabled_poll_device_ids = set()
     coordinator._get_ignored_set = set
     coordinator.data = []

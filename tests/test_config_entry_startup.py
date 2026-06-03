@@ -4,12 +4,12 @@ import asyncio
 import functools
 import importlib
 from collections.abc import Callable
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.test_hass_data_layout import _prepare_async_setup_entry_harness
 
 
@@ -116,7 +116,7 @@ async def test_coordinator_first_refresh_fallback(
 
     class _Harness(coordinator_module.GoogleFindMyCoordinator):
         def __init__(self) -> None:
-            self.config_entry = SimpleNamespace(entry_id="entry-test")
+            self.config_entry = make_config_entry(entry_id="entry-test")
 
         async def async_refresh(self) -> None:  # type: ignore[override]
             called.append(None)
