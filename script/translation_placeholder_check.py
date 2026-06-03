@@ -91,7 +91,11 @@ def _load_const_strings(const_path: Path) -> dict[str, str]:
             value = node.value
         if not targets or value is None:
             continue
-        if isinstance(targets[0], ast.Name) and isinstance(value, ast.Constant) and isinstance(value.value, str):
+        if (
+            isinstance(targets[0], ast.Name)
+            and isinstance(value, ast.Constant)
+            and isinstance(value.value, str)
+        ):
             out[targets[0].id] = value.value
     return out
 
@@ -162,7 +166,9 @@ def _placeholders_from_dict(node: ast.Dict) -> set[str] | None:
     return keys
 
 
-def _trace_local_dict_keys(func_node: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> set[str] | None:
+def _trace_local_dict_keys(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef, name: str
+) -> set[str] | None:
     """Walk a function body and trace the literal-string keys of ``name``.
 
     Supports ``name = {...}`` initialisation and ``name["k"] = v`` updates.
@@ -181,9 +187,15 @@ def _trace_local_dict_keys(func_node: ast.FunctionDef | ast.AsyncFunctionDef, na
                     keys = set(dict_keys)
                 else:
                     return None
-            elif isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == name:
+            elif (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+            ):
                 slice_node = target.slice
-                if isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str):
+                if isinstance(slice_node, ast.Constant) and isinstance(
+                    slice_node.value, str
+                ):
                     if keys is None:
                         keys = set()
                     keys.add(slice_node.value)
@@ -192,7 +204,9 @@ def _trace_local_dict_keys(func_node: ast.FunctionDef | ast.AsyncFunctionDef, na
     return keys
 
 
-def _enclosing_function(tree: ast.Module, call_node: ast.Call) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+def _enclosing_function(
+    tree: ast.Module, call_node: ast.Call
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
     """Return the nearest enclosing function for ``call_node``."""
     parents: dict[int, ast.AST] = {}
     for parent in ast.walk(tree):
@@ -208,6 +222,29 @@ def _enclosing_function(tree: ast.Module, call_node: ast.Call) -> ast.FunctionDe
         current = parent
 
 
+def _resolve_dict_literal(node: ast.Dict) -> tuple[set[str] | None, str | None]:
+    """Branch of ``_resolve_placeholders`` handling literal-dict arguments."""
+    keys = _placeholders_from_dict(node)
+    if keys is None:
+        return None, "dynamic dict literal (**unpack or non-string key)"
+    return keys, None
+
+
+def _resolve_name_reference(
+    node: ast.Name,
+    tree: ast.Module,
+    call_node: ast.Call,
+) -> tuple[set[str] | None, str | None]:
+    """Branch of ``_resolve_placeholders`` handling variable references."""
+    func = _enclosing_function(tree, call_node)
+    if func is None:
+        return None, f"variable '{node.id}' used at module scope"
+    keys = _trace_local_dict_keys(func, node.id)
+    if keys is None:
+        return None, f"variable '{node.id}' could not be statically resolved"
+    return keys, None
+
+
 def _resolve_placeholders(
     node: ast.expr | None,
     tree: ast.Module,
@@ -221,22 +258,15 @@ def _resolve_placeholders(
     if node is None:
         return set(), None
     if isinstance(node, ast.Dict):
-        keys = _placeholders_from_dict(node)
-        if keys is None:
-            return None, "dynamic dict literal (**unpack or non-string key)"
-        return keys, None
+        return _resolve_dict_literal(node)
     if isinstance(node, ast.Name):
-        func = _enclosing_function(tree, call_node)
-        if func is None:
-            return None, f"variable '{node.id}' used at module scope"
-        keys = _trace_local_dict_keys(func, node.id)
-        if keys is None:
-            return None, f"variable '{node.id}' could not be statically resolved"
-        return keys, None
+        return _resolve_name_reference(node, tree, call_node)
     return None, f"unsupported placeholders expression: {type(node).__name__}"
 
 
-def _scan_file(path: Path, const_map: dict[str, str], translations: dict[str, set[str]]) -> FileScan:
+def _scan_file(
+    path: Path, const_map: dict[str, str], translations: dict[str, set[str]]
+) -> FileScan:
     """Scan a single Python file."""
     scan = FileScan()
     source = path.read_text(encoding="utf-8")
@@ -286,7 +316,9 @@ def _scan_file(path: Path, const_map: dict[str, str], translations: dict[str, se
                 )
             )
             continue
-        code_keys, skip_reason = _resolve_placeholders(kwargs.get("translation_placeholders"), tree, call)
+        code_keys, skip_reason = _resolve_placeholders(
+            kwargs.get("translation_placeholders"), tree, call
+        )
         if code_keys is None:
             scan.skipped.append(
                 Finding(
@@ -370,15 +402,23 @@ def main() -> int:
         return 0
 
     for f in total.findings:
-        line = f.format_for_github() if args.github else (
-            f"[{f.kind}] {f.file.relative_to(ROOT)}:{f.line}: "
-            f"{f.translation_key}: {f.detail}"
+        line = (
+            f.format_for_github()
+            if args.github
+            else (
+                f"[{f.kind}] {f.file.relative_to(ROOT)}:{f.line}: "
+                f"{f.translation_key}: {f.detail}"
+            )
         )
         print(line)
     for f in total.skipped:
-        line = f.format_for_github() if args.github else (
-            f"[SKIPPED] {f.file.relative_to(ROOT)}:{f.line}: "
-            f"{f.translation_key}: {f.detail}"
+        line = (
+            f.format_for_github()
+            if args.github
+            else (
+                f"[SKIPPED] {f.file.relative_to(ROOT)}:{f.line}: "
+                f"{f.translation_key}: {f.detail}"
+            )
         )
         print(line)
 
