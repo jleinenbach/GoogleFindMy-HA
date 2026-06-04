@@ -1,3 +1,4 @@
+# tests/test_coordinator_helpers_subentry.py
 """Branch-Coverage tests for ``coordinator.helpers.subentry``.
 
 The 8 helpers in :mod:`custom_components.googlefindmy.coordinator.helpers.subentry`
@@ -102,9 +103,25 @@ class TestNormalizeEpochSeconds:
         """Branch: empty stripped string collapses to ``None`` before ``float``."""
         assert normalize_epoch_seconds(value) is None
 
-    @pytest.mark.parametrize("value", [None, "abc", "1.2.3", object(), b"123"])
+    @pytest.mark.parametrize(
+        "value",
+        [
+            None,
+            "abc",
+            "1.2.3",
+            object(),
+            b"123",
+            bytearray(b"123"),
+            memoryview(b"123"),
+        ],
+    )
     def test_unparseable_returns_none(self, value):
-        """Branch: ``float()`` raises ``TypeError``/``ValueError`` -> ``None``."""
+        """Branch: non-string / byte-like / non-numeric -> ``None``.
+
+        ``float(b"123")`` is legal Python but semantically wrong here: callers
+        must decode raw bytes before passing them in. The byte-like guard makes
+        that contract explicit instead of silently coercing ASCII payloads.
+        """
         assert normalize_epoch_seconds(value) is None
 
     def test_non_finite_returns_none(self):

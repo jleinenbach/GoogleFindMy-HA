@@ -1,3 +1,4 @@
+# tests/test_coordinator_helpers_registry.py
 """Branch-Coverage tests for ``coordinator.helpers.registry``.
 
 The 16 public helpers in
