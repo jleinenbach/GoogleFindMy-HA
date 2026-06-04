@@ -339,6 +339,10 @@ omit = [
 [tool.coverage.report]
 show_missing = false
 skip_covered = true
+# Sprint baseline: measured 64 % on scoped integration source (PR #1071).
+# Target remains >= 95 % per quality-scale rule test-coverage; this floor
+# only prevents regressions while incremental test expansion lands.
+fail_under = 60
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

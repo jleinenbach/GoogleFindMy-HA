@@ -137,10 +137,17 @@ rules:
         - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_reauth_confirm"
         - "tests/test_reauth_manual_token.py:test_manual_reauth_clears_cached_aas_and_mints_new_token"
     - id: test-coverage
-      status: done
+      # Tier-downgrade: scoped coverage on custom_components/googlefindmy
+      # measured 64 % (PR #1071); Platinum requires >= 95 %. A sprint floor
+      # of 60 % is wired (pyproject.toml fail_under, ci.yml --cov-fail-under,
+      # tests/test_platinum_compliance.py::test_coverage_threshold_enforced)
+      # and will be raised stepwise (60 -> 65 -> 75 -> 85 -> 90 -> 95) as
+      # tests expand. Revert to `done` once the 95 % floor lands.
+      status: todo
       evidence:
-        - "pyproject.toml:[tool.coverage.run]"
-        - "tests/test_platinum_compliance.py:test_quality_scale_declares_platinum_status"
+        - "pyproject.toml:[tool.coverage.report]:fail_under"
+        - ".github/workflows/ci.yml:--cov-fail-under"
+        - "tests/test_platinum_compliance.py:test_coverage_threshold_enforced"
 
   gold:
     - id: devices

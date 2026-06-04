@@ -55,12 +55,35 @@ def fixture_quality_scale_text(integration_root: Path) -> str:
 
 
 def test_quality_scale_declares_platinum_status(quality_scale_text: str) -> None:
-    """The quality scale document must pin the platinum tier with completed rules."""
+    """The quality scale document must pin the platinum tier with completed rules.
+
+    Exception: ``test-coverage`` is held at ``todo`` while scoped integration
+    coverage climbs toward the 95 % Platinum floor (sprint baseline 60 %,
+    measured 64 %). See ``test_coverage_threshold_enforced`` for the wired
+    gate. Every other rule must remain ``done``.
+    """
 
     assert "tier: platinum" in quality_scale_text
     statuses = re.findall(r"status:\s+(\w+)", quality_scale_text)
     assert statuses, "quality_scale.yaml should declare rule statuses"
-    assert set(statuses) == {"done"}
+    assert set(statuses) <= {"done", "todo"}, (
+        "Only 'done' and 'todo' are allowed as rule statuses"
+    )
+    todo_count = statuses.count("todo")
+    assert todo_count == 1, (
+        "Exactly one rule ('test-coverage') is expected at 'todo' during the "
+        f"coverage sprint; found {todo_count}"
+    )
+    # Anchor: the single 'todo' must be 'test-coverage'.
+    test_coverage_block = re.search(
+        r"- id: test-coverage\b[\s\S]*?status:\s+(\w+)", quality_scale_text
+    )
+    assert test_coverage_block is not None, (
+        "quality_scale.yaml must declare a 'test-coverage' rule"
+    )
+    assert test_coverage_block.group(1) == "todo", (
+        "test-coverage must be at 'todo' until scoped coverage reaches 95 %"
+    )
     assert "id: runtime-data" in quality_scale_text
     assert "id: repair-issues" in quality_scale_text
 
@@ -155,4 +178,71 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
     assert not missing_files, (
         "The following evidence files listed in quality_scale.yaml do not exist:\n"
         + "\n".join(sorted(set(missing_files)))
+    )
+
+
+# Sprint baseline for the test-coverage quality-scale rule.
+# Real coverage on scoped integration source was 64 % (CI run on b9ca59cd).
+# The Platinum target remains >= 95 %; this floor only prevents regression
+# while incremental test expansion lands. Raise as the sprint phase-gates
+# advance (60 -> 65 -> 75 -> 85 -> 90 -> 95).
+COVERAGE_SPRINT_FLOOR = 60
+COVERAGE_PLATINUM_TARGET = 95
+
+
+def test_coverage_threshold_enforced() -> None:
+    """Sprint floor for quality-scale rule ``test-coverage`` must be wired.
+
+    Two orthogonal gates must declare a numeric coverage floor of at least
+    ``COVERAGE_SPRINT_FLOOR``:
+
+    * ``pyproject.toml`` ``[tool.coverage.report] fail_under`` (engine side)
+    * ``.github/workflows/ci.yml`` ``--cov-fail-under`` (CI side)
+
+    Both must NOT exceed ``COVERAGE_PLATINUM_TARGET`` either, so a future
+    drift cannot silently re-introduce a 95 % gate above the actual baseline
+    and break CI on an unrelated PR. Empirical enforcement happens at CI
+    runtime via the pytest flag; this test only verifies the wiring.
+    """
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - py<3.11 path
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    repo_root = Path(__file__).resolve().parent.parent
+    pyproject_data = tomllib.loads(
+        (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    ci_text = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    coverage_report = (
+        pyproject_data.get("tool", {}).get("coverage", {}).get("report", {})
+    )
+    fail_under = coverage_report.get("fail_under")
+    assert fail_under is not None, (
+        "pyproject.toml [tool.coverage.report] is missing fail_under "
+        "(required by quality-scale rule test-coverage)"
+    )
+    assert COVERAGE_SPRINT_FLOOR <= int(fail_under) <= COVERAGE_PLATINUM_TARGET, (
+        f"pyproject.toml fail_under must be within "
+        f"[{COVERAGE_SPRINT_FLOOR}, {COVERAGE_PLATINUM_TARGET}] "
+        f"(current sprint floor; raise as test expansion lands)"
+    )
+
+    ci_match = re.search(r"--cov-fail-under=(\d+)", ci_text)
+    assert ci_match, (
+        ".github/workflows/ci.yml is missing --cov-fail-under flag in the "
+        "pytest invocation (required as a CI-side gate)"
+    )
+    ci_floor = int(ci_match.group(1))
+    assert COVERAGE_SPRINT_FLOOR <= ci_floor <= COVERAGE_PLATINUM_TARGET, (
+        f"CI --cov-fail-under must be within "
+        f"[{COVERAGE_SPRINT_FLOOR}, {COVERAGE_PLATINUM_TARGET}]"
+    )
+    assert ci_floor == int(fail_under), (
+        "pyproject.toml fail_under and CI --cov-fail-under must agree "
+        "(both gates must enforce the same sprint floor)"
     )
