@@ -83,10 +83,14 @@ class Finding:
     def format_for_github(self) -> str:
         """Render this finding as a GitHub Actions annotation line.
 
-        ``SKIPPED`` and ``DEAD`` are non-fatal informational findings and
-        render as ``::warning`` so they do not obscure real ``MISSING`` /
-        ``MISSING_TRANSLATION`` / ``DRIFT_RISK`` errors in Actions logs
-        (Codex feedback on PR #1069).
+        Only fatal kinds (``MISSING`` / ``MISSING_TRANSLATION`` /
+        ``DRIFT_RISK`` / ``LOCALE_EXTRA``) reach this method via ``main()``
+        when ``--github`` is active. Non-fatal ``SKIPPED`` / ``DEAD``
+        findings are rendered as plain stdout lines instead, because
+        Actions annotations suggest required action and would obscure the
+        non-blocking informational nature of diagnostic-only placeholders
+        (continuation of PR #1069 feedback: avoid noise that looks like a
+        failure on green runs).
         """
         level = "warning" if self.kind in ("SKIPPED", "DEAD") else "error"
         rel = self.file.relative_to(ROOT)
@@ -637,15 +641,18 @@ def main() -> int:
         )
         print(line)
     for f in total.skipped:
-        line = (
-            f.format_for_github()
-            if args.github
-            else (
-                f"[SKIPPED] {f.file.relative_to(ROOT)}:{f.line}: "
-                f"{f.translation_key}: {f.detail}"
-            )
+        # SKIPPED / DEAD are non-fatal informational findings. They are
+        # rendered as plain stdout lines (not GitHub Actions annotations)
+        # even when ``--github`` is active. Annotations imply user action
+        # is required; SKIPPED / DEAD are diagnostic-only (the latter
+        # documents intentional machine-readable placeholders like the
+        # ``cause`` key on ``duplicate_account_entries``). They stay
+        # visible in step logs for forensics but no longer surface as
+        # warning annotations on the PR.
+        print(
+            f"[{f.kind}] {f.file.relative_to(ROOT)}:{f.line}: "
+            f"{f.translation_key}: {f.detail}"
         )
-        print(line)
 
     print(
         f"\ntranslation_placeholder_check: "
