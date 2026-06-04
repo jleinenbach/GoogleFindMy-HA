@@ -102,7 +102,9 @@ def make_hass_stub(*, with_setdefault_error: bool = False) -> MagicMock:
     ``hass.data.setdefault`` raises.
     """
 
-    hass = MagicMock(spec_set=[])  # spec_set prevents attribute leakage
+    # spec_set whitelists the two attributes the mixin actually reads on hass.
+    # An empty list would have blocked every assignment below (AttributeError).
+    hass = MagicMock(spec_set=["data", "config_entries"])
     hass.data = {} if not with_setdefault_error else _RaisingDict()
     hass.config_entries = MagicMock()
     hass.config_entries.async_get_entry = MagicMock(return_value=None)

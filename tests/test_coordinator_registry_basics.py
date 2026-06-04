@@ -64,10 +64,18 @@ class TestRedactText:
     def test_none_returns_empty(self, coord: RegistryStub) -> None:
         assert coord._redact_text(None) == ""
 
-    @pytest.mark.parametrize("value", ["", "   ", "\t"])
-    def test_falsy_returns_empty(self, coord: RegistryStub, value: str) -> None:
-        # `not value` short-circuits on empty strings before len() is evaluated.
-        assert coord._redact_text(value) == ""
+    def test_empty_string_returns_empty(self, coord: RegistryStub) -> None:
+        # `not value` short-circuits on the empty string (falsy);
+        # whitespace-only strings are truthy and pass through unchanged.
+        assert coord._redact_text("") == ""
+
+    @pytest.mark.parametrize("value", ["   ", "\t"])
+    def test_whitespace_is_truthy_and_passes_through(
+        self, coord: RegistryStub, value: str
+    ) -> None:
+        # Documents the current contract: only Python-falsy values short-circuit.
+        # Whitespace strings are returned verbatim (no .strip() in production).
+        assert coord._redact_text(value) == value
 
     def test_short_returns_identity(self, coord: RegistryStub) -> None:
         assert coord._redact_text("hello") == "hello"
