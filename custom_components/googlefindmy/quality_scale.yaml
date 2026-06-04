@@ -127,7 +127,10 @@ rules:
     - id: parallel-updates
       status: done
       evidence:
-        - "custom_components/googlefindmy/entity.py:GoogleFindMyEntity._attr_should_poll"
+        - "custom_components/googlefindmy/binary_sensor.py:PARALLEL_UPDATES"
+        - "custom_components/googlefindmy/button.py:PARALLEL_UPDATES"
+        - "custom_components/googlefindmy/device_tracker.py:PARALLEL_UPDATES"
+        - "custom_components/googlefindmy/sensor.py:PARALLEL_UPDATES"
     - id: reauthentication-flow
       status: done
       evidence:
