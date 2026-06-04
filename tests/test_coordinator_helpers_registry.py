@@ -45,7 +45,6 @@ from custom_components.googlefindmy.coordinator.helpers.registry import (
     should_defer_service_subentry,
 )
 
-
 _DOMAIN = "googlefindmy"
 _SVC_PREFIX = SERVICE_DEVICE_IDENTIFIER_PREFIX  # e.g. "service:"
 _LEGACY_SVC = LEGACY_SERVICE_IDENTIFIER

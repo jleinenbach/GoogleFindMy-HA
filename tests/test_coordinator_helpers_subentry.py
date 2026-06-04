@@ -12,9 +12,7 @@ exercises so a failing test points at the spec line, not the implementation.
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
 
@@ -28,7 +26,6 @@ from custom_components.googlefindmy.coordinator.helpers.subentry import (
     parse_last_seen_timestamp,
     sanitize_subentry_identifier,
 )
-
 
 # ---------------------------------------------------------------------------
 # sanitize_subentry_identifier — 3 branches (str/non-str, empty, normal)
