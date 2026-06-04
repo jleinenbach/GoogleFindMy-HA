@@ -19,7 +19,7 @@
   "loggers": [
     "custom_components.googlefindmy"
   ],
-  "quality_scale": "platinum",
+  "quality_scale": "bronze",
   "requirements": [
     "aiohttp>=3.11.8",
     "beautifulsoup4>=4.12.3",

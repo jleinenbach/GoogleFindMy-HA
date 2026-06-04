@@ -1,5 +1,11 @@
 # tests/test_platinum_compliance.py
-"""Automated compliance checks for the Platinum quality level."""
+"""Automated compliance checks for the declared HA quality-scale tier.
+
+The file name and the historical constant ``COVERAGE_PLATINUM_TARGET`` are
+kept for git-blame continuity and to mark Platinum as the long-term target;
+the currently declared tier is Bronze during the coverage sprint (see
+``test_quality_scale_declares_bronze_status``).
+"""
 
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
 
 def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
-    """Manifest must advertise the required metadata for a Platinum integration."""
+    """Manifest must advertise the required metadata for the declared tier (Bronze during the coverage sprint; Platinum is the long-term target)."""
 
     required_keys = {
         "domain",
@@ -39,7 +45,7 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     assert manifest["integration_type"] == "hub"
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["version"] == INTEGRATION_VERSION
-    assert manifest["quality_scale"] == "platinum"
+    assert manifest["quality_scale"] == "bronze"
     assert "recorder" in manifest.get("after_dependencies", [])
     assert "http" in manifest.get("dependencies", [])
     assert "custom_components.googlefindmy" in manifest.get("loggers", [])
@@ -54,16 +60,20 @@ def fixture_quality_scale_text(integration_root: Path) -> str:
     return (integration_root / "quality_scale.yaml").read_text(encoding="utf-8")
 
 
-def test_quality_scale_declares_platinum_status(quality_scale_text: str) -> None:
-    """The quality scale document must pin the platinum tier with completed rules.
+def test_quality_scale_declares_bronze_status(quality_scale_text: str) -> None:
+    """The quality scale document must pin the bronze tier during the coverage sprint.
 
-    Exception: ``test-coverage`` is held at ``todo`` while scoped integration
-    coverage climbs toward the 95 % Platinum floor (sprint baseline 60 %,
-    measured 64 %). See ``test_coverage_threshold_enforced`` for the wired
-    gate. Every other rule must remain ``done``.
+    Tier downshift rationale (Codex-Review 2026-06-04, Commit 7dab5450):
+    HA Quality Scale demands that every rule of the declared tier and all
+    lower tiers be ``done`` with no exceptions. ``test-coverage`` (a Silver
+    rule, >=95 %) is held at ``todo`` during the coverage sprint
+    (measured 64 %, sprint floor 60 %), so the declared tier must be Bronze.
+    Once scoped coverage reaches ``COVERAGE_PLATINUM_TARGET`` (95 %),
+    ``test-coverage`` flips to ``done`` and the tier is hiked back via the
+    phase plan in ``PLAN_CI_WARNINGS_NODE24_PLACEHOLDER.md``.
     """
 
-    assert "tier: platinum" in quality_scale_text
+    assert "tier: bronze" in quality_scale_text
     statuses = re.findall(r"status:\s+(\w+)", quality_scale_text)
     assert statuses, "quality_scale.yaml should declare rule statuses"
     assert set(statuses) <= {"done", "todo"}, (
