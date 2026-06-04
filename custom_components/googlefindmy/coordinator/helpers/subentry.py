@@ -80,6 +80,14 @@ def normalize_epoch_seconds(value: Any) -> int | None:
     Returns:
         Epoch seconds as int, or None if conversion fails.
     """
+    # Reject byte-like inputs explicitly. ``float(b"123")`` would otherwise
+    # silently succeed for ASCII-numeric bytes while raising on arbitrary
+    # payloads, producing an inconsistent contract for callers that pass raw
+    # network/cache data without decoding (parse-don't-validate; defends the
+    # invariant the docstring already implies).
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return None
+
     if isinstance(value, str):
         value = value.strip()
         if not value:
