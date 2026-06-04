@@ -2285,7 +2285,7 @@ class RuntimeData:
         return self.token_cache
 
 
-type MyConfigEntry = ConfigEntry
+type MyConfigEntry = ConfigEntry[RuntimeData]
 
 
 SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal["_subentry_forward_helper_logs"] = (
