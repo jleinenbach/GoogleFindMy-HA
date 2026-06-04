@@ -1,5 +1,11 @@
 # tests/test_platinum_compliance.py
-"""Automated compliance checks for the Platinum quality level."""
+"""Automated compliance checks for the declared HA quality-scale tier.
+
+The file name and the historical constant ``COVERAGE_PLATINUM_TARGET`` are
+kept for git-blame continuity and to mark Platinum as the long-term target;
+the currently declared tier is Bronze during the coverage sprint (see
+``test_quality_scale_declares_bronze_status``).
+"""
 
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
 
 def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
-    """Manifest must advertise the required metadata for a Platinum integration."""
+    """Manifest must advertise the required metadata for the declared tier (Bronze during the coverage sprint; Platinum is the long-term target)."""
 
     required_keys = {
         "domain",
@@ -39,7 +45,7 @@ def test_manifest_declares_expected_keys(manifest: dict[str, object]) -> None:
     assert manifest["integration_type"] == "hub"
     assert manifest["iot_class"] == "cloud_polling"
     assert manifest["version"] == INTEGRATION_VERSION
-    assert manifest["quality_scale"] == "platinum"
+    assert manifest["quality_scale"] == "bronze"
     assert "recorder" in manifest.get("after_dependencies", [])
     assert "http" in manifest.get("dependencies", [])
     assert "custom_components.googlefindmy" in manifest.get("loggers", [])
@@ -54,13 +60,40 @@ def fixture_quality_scale_text(integration_root: Path) -> str:
     return (integration_root / "quality_scale.yaml").read_text(encoding="utf-8")
 
 
-def test_quality_scale_declares_platinum_status(quality_scale_text: str) -> None:
-    """The quality scale document must pin the platinum tier with completed rules."""
+def test_quality_scale_declares_bronze_status(quality_scale_text: str) -> None:
+    """The quality scale document must pin the bronze tier during the coverage sprint.
 
-    assert "tier: platinum" in quality_scale_text
+    Tier downshift rationale (Codex-Review 2026-06-04, Commit 7dab5450):
+    HA Quality Scale demands that every rule of the declared tier and all
+    lower tiers be ``done`` with no exceptions. ``test-coverage`` (a Silver
+    rule, >=95 %) is held at ``todo`` during the coverage sprint
+    (measured 64 %, sprint floor 60 %), so the declared tier must be Bronze.
+    Once scoped coverage reaches ``COVERAGE_PLATINUM_TARGET`` (95 %),
+    ``test-coverage`` flips to ``done`` and the tier is hiked back via the
+    phase plan in ``PLAN_CI_WARNINGS_NODE24_PLACEHOLDER.md``.
+    """
+
+    assert "tier: bronze" in quality_scale_text
     statuses = re.findall(r"status:\s+(\w+)", quality_scale_text)
     assert statuses, "quality_scale.yaml should declare rule statuses"
-    assert set(statuses) == {"done"}
+    assert set(statuses) <= {"done", "todo"}, (
+        "Only 'done' and 'todo' are allowed as rule statuses"
+    )
+    todo_count = statuses.count("todo")
+    assert todo_count == 1, (
+        "Exactly one rule ('test-coverage') is expected at 'todo' during the "
+        f"coverage sprint; found {todo_count}"
+    )
+    # Anchor: the single 'todo' must be 'test-coverage'.
+    test_coverage_block = re.search(
+        r"- id: test-coverage\b[\s\S]*?status:\s+(\w+)", quality_scale_text
+    )
+    assert test_coverage_block is not None, (
+        "quality_scale.yaml must declare a 'test-coverage' rule"
+    )
+    assert test_coverage_block.group(1) == "todo", (
+        "test-coverage must be at 'todo' until scoped coverage reaches 95 %"
+    )
     assert "id: runtime-data" in quality_scale_text
     assert "id: repair-issues" in quality_scale_text
 
@@ -155,4 +188,71 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
     assert not missing_files, (
         "The following evidence files listed in quality_scale.yaml do not exist:\n"
         + "\n".join(sorted(set(missing_files)))
+    )
+
+
+# Sprint baseline for the test-coverage quality-scale rule.
+# Real coverage on scoped integration source was 64 % (CI run on b9ca59cd).
+# The Platinum target remains >= 95 %; this floor only prevents regression
+# while incremental test expansion lands. Raise as the sprint phase-gates
+# advance (60 -> 65 -> 75 -> 85 -> 90 -> 95).
+COVERAGE_SPRINT_FLOOR = 60
+COVERAGE_PLATINUM_TARGET = 95
+
+
+def test_coverage_threshold_enforced() -> None:
+    """Sprint floor for quality-scale rule ``test-coverage`` must be wired.
+
+    Two orthogonal gates must declare a numeric coverage floor of at least
+    ``COVERAGE_SPRINT_FLOOR``:
+
+    * ``pyproject.toml`` ``[tool.coverage.report] fail_under`` (engine side)
+    * ``.github/workflows/ci.yml`` ``--cov-fail-under`` (CI side)
+
+    Both must NOT exceed ``COVERAGE_PLATINUM_TARGET`` either, so a future
+    drift cannot silently re-introduce a 95 % gate above the actual baseline
+    and break CI on an unrelated PR. Empirical enforcement happens at CI
+    runtime via the pytest flag; this test only verifies the wiring.
+    """
+
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # pragma: no cover - py<3.11 path
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    repo_root = Path(__file__).resolve().parent.parent
+    pyproject_data = tomllib.loads(
+        (repo_root / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    ci_text = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    coverage_report = (
+        pyproject_data.get("tool", {}).get("coverage", {}).get("report", {})
+    )
+    fail_under = coverage_report.get("fail_under")
+    assert fail_under is not None, (
+        "pyproject.toml [tool.coverage.report] is missing fail_under "
+        "(required by quality-scale rule test-coverage)"
+    )
+    assert COVERAGE_SPRINT_FLOOR <= int(fail_under) <= COVERAGE_PLATINUM_TARGET, (
+        f"pyproject.toml fail_under must be within "
+        f"[{COVERAGE_SPRINT_FLOOR}, {COVERAGE_PLATINUM_TARGET}] "
+        f"(current sprint floor; raise as test expansion lands)"
+    )
+
+    ci_match = re.search(r"--cov-fail-under=(\d+)", ci_text)
+    assert ci_match, (
+        ".github/workflows/ci.yml is missing --cov-fail-under flag in the "
+        "pytest invocation (required as a CI-side gate)"
+    )
+    ci_floor = int(ci_match.group(1))
+    assert COVERAGE_SPRINT_FLOOR <= ci_floor <= COVERAGE_PLATINUM_TARGET, (
+        f"CI --cov-fail-under must be within "
+        f"[{COVERAGE_SPRINT_FLOOR}, {COVERAGE_PLATINUM_TARGET}]"
+    )
+    assert ci_floor == int(fail_under), (
+        "pyproject.toml fail_under and CI --cov-fail-under must agree "
+        "(both gates must enforce the same sprint floor)"
     )

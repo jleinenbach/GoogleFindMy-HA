@@ -3,8 +3,18 @@
 # https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/
 # Evidence entries use the format "path.py:symbol" (or "tests/test_module.py:test_case")
 # so future updates can jump straight to the implementation or regression test.
+#
+# Tier downshift (Codex-Review 2026-06-04, Commit 7dab5450):
+# HA Quality Scale requires ALL rules of the declared tier and ALL lower
+# tiers to be `done` with no exceptions. `test-coverage` is a Silver rule
+# (>=95 % scoped coverage); during the coverage sprint it is held at `todo`
+# (measured 64 %, sprint floor 60 %). Because Silver is therefore not
+# fulfilled, the declared tier must be Bronze until scoped coverage reaches
+# 95 % and `test-coverage` flips to `done`.
+# Phase-tier-hike plan: see PLAN_CI_WARNINGS_NODE24_PLACEHOLDER.md
+# (Bronze now -> Silver at >=95 % -> Gold-audit -> Platinum-audit).
 
-tier: platinum
+tier: bronze
 
 # Replace with the upstream maintainer handle from which your fork originated.
 owner: "@BSkando"
@@ -137,10 +147,17 @@ rules:
         - "custom_components/googlefindmy/config_flow.py:ConfigFlow.async_step_reauth_confirm"
         - "tests/test_reauth_manual_token.py:test_manual_reauth_clears_cached_aas_and_mints_new_token"
     - id: test-coverage
-      status: done
+      # Tier-downgrade: scoped coverage on custom_components/googlefindmy
+      # measured 64 % (PR #1071); Platinum requires >= 95 %. A sprint floor
+      # of 60 % is wired (pyproject.toml fail_under, ci.yml --cov-fail-under,
+      # tests/test_platinum_compliance.py::test_coverage_threshold_enforced)
+      # and will be raised stepwise (60 -> 65 -> 75 -> 85 -> 90 -> 95) as
+      # tests expand. Revert to `done` once the 95 % floor lands.
+      status: todo
       evidence:
-        - "pyproject.toml:[tool.coverage.run]"
-        - "tests/test_platinum_compliance.py:test_quality_scale_declares_platinum_status"
+        - "pyproject.toml:[tool.coverage.report]:fail_under"
+        - ".github/workflows/ci.yml:--cov-fail-under"
+        - "tests/test_platinum_compliance.py:test_coverage_threshold_enforced"
 
   gold:
     - id: devices
