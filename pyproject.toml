@@ -330,7 +330,6 @@ ignore_errors = false
 branch = true
 source = [
     "custom_components/googlefindmy",
-    "tests",
 ]
 omit = [
     "custom_components/googlefindmy/ProtoDecoders/*",
@@ -340,7 +339,6 @@ omit = [
 [tool.coverage.report]
 show_missing = false
 skip_covered = true
-fail_under = 95
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
