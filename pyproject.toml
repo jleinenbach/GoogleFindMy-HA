@@ -340,6 +340,7 @@ omit = [
 [tool.coverage.report]
 show_missing = false
 skip_covered = true
+fail_under = 95
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
