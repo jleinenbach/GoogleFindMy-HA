@@ -74,9 +74,11 @@ class MainCoordinatorStub(GoogleFindMyCoordinator):
         self._setup_started_at: float | None = None
         self._setup_completed_at: float | None = None
 
-        # Auth state
-        self._auth_failure_active: bool = False
-        self._auth_failure_reason: str | None = None
+        # Auth state (mirror production attribute names from
+        # ``GoogleFindMyCoordinator.__init__`` so the ``auth_error_active``
+        # property and any helper that reads ``_auth_error_message`` work).
+        self._auth_error_active: bool = False
+        self._auth_error_message: str | None = None
 
         # Force-refresh state
         self._force_device_list_refresh: bool = False

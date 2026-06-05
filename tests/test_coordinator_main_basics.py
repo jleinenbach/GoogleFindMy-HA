@@ -10,7 +10,8 @@ scope; they land in Phase 4 with HA-loop test methodology.
 from __future__ import annotations
 
 import math
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -220,32 +221,44 @@ class TestRecorderHistoryProxy:
     def test_load_caches_module_after_first_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        fake_module = MagicMock()
+        # ``_RecorderHistoryProxy._load`` executes
+        # ``from homeassistant.components.recorder import history as history_module``.
+        # That statement resolves through ``sys.modules``, so the test must
+        # replace the module entries there rather than ``setattr`` on the
+        # parent package (which only retargets the attribute lookup, not the
+        # cached import path used by ``from ... import history``).
+        fake_history = ModuleType("homeassistant.components.recorder.history")
+        fake_recorder = ModuleType("homeassistant.components.recorder")
+        fake_recorder.history = fake_history  # type: ignore[attr-defined]
         monkeypatch.setitem(
-            __import__("sys").modules,
-            "homeassistant.components.recorder",
-            MagicMock(),
+            sys.modules, "homeassistant.components.recorder", fake_recorder
         )
-        # Inject the history sub-module the proxy imports from
-        monkeypatch.setattr(
-            "homeassistant.components.recorder",
-            type("Stub", (), {"history": fake_module})(),
-            raising=False,
+        monkeypatch.setitem(
+            sys.modules,
+            "homeassistant.components.recorder.history",
+            fake_history,
         )
 
         proxy = _RecorderHistoryProxy()
         first = proxy._load()
         second = proxy._load()
 
+        assert first is fake_history
         assert first is second
 
     def test_get_recorder_imports_lazily(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ``get_recorder`` runs
+        # ``from homeassistant.components.recorder import get_instance as ...``;
+        # the lookup goes through ``sys.modules["homeassistant.components.recorder"]``.
+        # ``monkeypatch.setattr("homeassistant.components.recorder", ...)`` only
+        # rebinds the ``recorder`` attribute on the parent package and leaves
+        # the conftest stub in ``sys.modules`` in place, so we replace the
+        # cached module instead.
         sentinel = object()
-        fake_recorder = type("Recorder", (), {"get_instance": lambda h: sentinel})()
-        monkeypatch.setattr(
-            "homeassistant.components.recorder",
-            fake_recorder,
-            raising=False,
+        fake_recorder = ModuleType("homeassistant.components.recorder")
+        fake_recorder.get_instance = lambda hass: sentinel  # type: ignore[attr-defined]
+        monkeypatch.setitem(
+            sys.modules, "homeassistant.components.recorder", fake_recorder
         )
 
         result = get_recorder(MagicMock())
@@ -846,6 +859,6 @@ class TestAuthErrorActive:
         assert coord.auth_error_active is False
 
     def test_reflects_private_flag(self, coord: MainCoordinatorStub) -> None:
-        coord._auth_failure_active = True
+        coord._auth_error_active = True
 
         assert coord.auth_error_active is True
