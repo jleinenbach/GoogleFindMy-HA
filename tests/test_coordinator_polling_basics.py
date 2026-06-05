@@ -186,21 +186,19 @@ class TestIsOnHassLoop:
         # No event loop is running in this sync test → RuntimeError → False.
         assert coord._is_on_hass_loop() is False
 
-    def test_returns_true_when_running_loop_matches(self) -> None:
-        async def _check() -> bool:
-            loop = asyncio.get_running_loop()
-            stub = PollingStub(hass=make_hass_stub(loop=loop))
-            return stub._is_on_hass_loop()
+    async def test_returns_true_when_running_loop_matches(self) -> None:
+        # ``asyncio_mode = "auto"`` (pyproject.toml) supplies the running loop;
+        # avoid ``asyncio.run()`` here so the architecture guard
+        # (tests/test_guard_asyncio_run_antipattern.py) stays satisfied.
+        loop = asyncio.get_running_loop()
+        stub = PollingStub(hass=make_hass_stub(loop=loop))
+        assert stub._is_on_hass_loop() is True
 
-        assert asyncio.run(_check()) is True
-
-    def test_returns_false_when_running_loop_differs(self) -> None:
-        async def _check() -> bool:
-            # hass.loop is a MagicMock (different identity from running loop).
-            stub = PollingStub(hass=make_hass_stub())
-            return stub._is_on_hass_loop()
-
-        assert asyncio.run(_check()) is False
+    async def test_returns_false_when_running_loop_differs(self) -> None:
+        # hass.loop is a MagicMock (different identity from the running loop),
+        # so the equality check returns ``False`` even on the HA loop thread.
+        stub = PollingStub(hass=make_hass_stub())
+        assert stub._is_on_hass_loop() is False
 
 
 # ---------------------------------------------------------------------------
