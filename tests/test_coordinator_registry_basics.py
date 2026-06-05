@@ -25,6 +25,7 @@ from custom_components.googlefindmy.const import (
     SERVICE_DEVICE_IDENTIFIER_PREFIX,
 )
 from custom_components.googlefindmy.coordinator import registry as registry_mod
+from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.registry_mixin_stub import (
     RegistryStub,
     _DevRegStub,
@@ -41,7 +42,7 @@ from tests.helpers.registry_mixin_stub import (
 def coord() -> RegistryStub:
     """Return a default :class:`RegistryStub` bound to a synthetic config entry."""
 
-    entry = SimpleNamespace(entry_id="entry-xyz")
+    entry = make_config_entry(entry_id="entry-xyz")
     return RegistryStub(hass=make_hass_stub(), config_entry=entry)
 
 
