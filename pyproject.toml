@@ -339,11 +339,11 @@ omit = [
 [tool.coverage.report]
 show_missing = false
 skip_covered = true
-# Sprint baseline: measured 63.59 % after PR #1072 registry/subentry helpers
-# (was 60 in PR #1071 with 64 % headroom). Target remains >= 95 % per
+# Sprint baseline: measured 64.09 % after Phase 2 (#1073/#1074/#1075:
+# registry+identity+polling mixin branch-coverage). Target remains >= 95 % per
 # quality-scale rule test-coverage; this floor only prevents regressions
-# while incremental test expansion lands (60 -> 63 -> 70 -> 80 -> 90 -> 95).
-fail_under = 63
+# while incremental test expansion lands (60 -> 63 -> 64 -> 70 -> 80 -> 90 -> 95).
+fail_under = 64
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
