@@ -155,13 +155,15 @@ class TestCreateAuthIssue:
     def test_empty_title_falls_back_to_entry_id(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The factory builds a default title; here we override it to None so the
-        # ``entry.title or entry.entry_id`` fallback branch is exercised.
+        # Build the entry with the factory's strict-typed default title, then
+        # override ``entry.title`` to ``None`` after construction so the
+        # ``entry.title or entry.entry_id`` fallback branch is exercised
+        # without breaking ``make_config_entry``'s ``title: str`` signature.
         entry = make_config_entry(
             entry_id="entry-abc",
-            title=None,
             data={CONF_GOOGLE_EMAIL: "x@y"},
         )
+        entry.title = None  # Override: exercises fallback branch for empty title
         stub = IdentityStub(hass=make_hass_stub(), config_entry=entry)
         captured: dict[str, Any] = {}
         monkeypatch.setattr(
@@ -475,9 +477,9 @@ class TestResetResolverOffset:
         device = SimpleNamespace(id="reg-123")
         monkeypatch.setattr(dr, "async_get", lambda hass: _FakeDeviceReg(device))
         reset_calls: list[str] = []
-        resolver = SimpleNamespace(
-            reset_device_offset=lambda registry_id: reset_calls.append(registry_id)
-        )
+        # Pass ``list.append`` directly (no wrapping lambda) to satisfy
+        # Ruff PLW0108 (unnecessary-lambda) under the repo's PL selector.
+        resolver = SimpleNamespace(reset_device_offset=reset_calls.append)
         coord.hass.data = {DOMAIN: {DATA_EID_RESOLVER: resolver}}
         coord._reset_resolver_offset("dev-1")
         assert reset_calls == ["reg-123"]
