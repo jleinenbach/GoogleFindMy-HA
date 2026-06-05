@@ -1,3 +1,4 @@
+# tests/test_api_basics.py
 """Basics coverage for :mod:`custom_components.googlefindmy.api` (Phase 4 AP-I).
 
 Risk-priority follows Aniche RV-G3: methods whose failure mode silently corrupts
@@ -195,10 +196,15 @@ class TestBuildCanRingIndexBasics:
     def test_uses_canonical_id_and_skips_unknown(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Empirie: api.py:Z290-Z315 (_infer_can_ring_slot) — returns None ONLY when
+        # neither `can_ring`/`canRing` nor a `capabilities` key is present. An empty
+        # list/dict for `capabilities` still triggers the membership check, yielding
+        # False (a valid bool), so such a row IS recorded in the index. To test the
+        # skip-unknown path we must omit the `capabilities` key entirely.
         rows = [
             {"canonicalId": "A", "can_ring": True},
             {"id": "B", "can_ring": False},
-            {"device_id": "C", "capabilities": []},
+            {"device_id": "C"},  # no can_ring / canRing / capabilities → verdict None
             {"id": "", "can_ring": True},
         ]
         monkeypatch.setattr(
@@ -634,13 +640,33 @@ class TestFcmTokenForActionBasics:
         api = GoogleFindMyAPI(cache=StubCache(entry_id="e"))
         assert api._get_fcm_token_for_action() is None
 
-    def test_cache_entry_id_exception_falls_back_to_namespace(
+    def test_cache_entry_id_exception_falls_back_to_legacy_call(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        receiver = FakeReceiver(token="ns-token-1234567")
+        # Empirie: api.py:Z624-Z638 (_namespace) wraps BOTH getattr calls in a single
+        # try/except Exception. When entry_id raises, the whole function returns None
+        # — the namespace attribute is NEVER reached. _get_fcm_token_for_action then
+        # passes None to the provider, which falls through to the legacy receiver
+        # call (no args). Author's mental model (entry_id raises → namespace used) is
+        # wrong; the defensive wrapper short-circuits BOTH attribute reads.
+        receiver = FakeReceiver(token="legacy-token-1234567")
         calls = install_receiver_provider(monkeypatch, receiver)
         cache = RaisingCache()
-        cache.namespace = "ns-via-fallback"  # type: ignore[attr-defined]
+        cache.namespace = "never-reached-because-entry_id-raises"  # type: ignore[attr-defined]
+        api = GoogleFindMyAPI(cache=cache)
+        assert api._get_fcm_token_for_action() == "legacy-token-1234567"
+        assert calls and calls[0] == (None,)
+
+    def test_namespace_fallback_used_when_entry_id_is_none(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Empirie: api.py:Z624-Z638 (_namespace) — when getattr(cache, "entry_id")
+        # returns None WITHOUT raising, the `or getattr(cache, "namespace", None)`
+        # branch is reached and resolves to "ns-via-fallback". The provider is then
+        # called entry-scoped with that resolved namespace.
+        receiver = FakeReceiver(token="ns-token-1234567")
+        calls = install_receiver_provider(monkeypatch, receiver)
+        cache = StubCache(entry_id=None, namespace="ns-via-fallback")
         api = GoogleFindMyAPI(cache=cache)
         assert api._get_fcm_token_for_action() == "ns-token-1234567"
         assert calls and calls[0] == ("ns-via-fallback",)
