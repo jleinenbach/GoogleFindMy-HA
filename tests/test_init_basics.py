@@ -42,6 +42,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 
 from custom_components.googlefindmy import (
     ConfigEntrySubentryDefinition,
@@ -137,13 +138,13 @@ class TestComputeEntityScoreBasics:
             (
                 "my_key",
                 None,
-                init_module.STATE_UNAVAILABLE,
+                STATE_UNAVAILABLE,
                 7,
             ),  # state unavailable strips +3
             (
                 "my_key",
                 None,
-                init_module.STATE_UNKNOWN,
+                STATE_UNKNOWN,
                 7,
             ),  # state unknown strips +3
             ("my_key", "user", "off", 7),  # disabled strips +3
