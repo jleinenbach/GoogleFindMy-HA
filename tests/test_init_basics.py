@@ -45,10 +45,31 @@ import pytest
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 
 from custom_components.googlefindmy import (
+    _DEFAULT_SUBENTRY_IDENTIFIER,
     ConfigEntrySubentryDefinition,
     RuntimeData,
+    _ButtonUniqueIdParts,
+    _compute_entity_score,
+    _default_button_subentry_identifier,
+    _entry_creation_timestamp,
+    _entry_schema_score,
+    _feature_name_from_platform,
+    _get_fcm_refcount,
+    _get_fcm_refcounts,
+    _get_nova_refcount,
+    _get_retry_attempts,
+    _get_retry_handles,
+    _iter_tracker_identifier_candidates,
+    _normalize_device_identifier,
+    _normalize_legacy_button_remainder,
+    _parse_button_unique_id,
+    _pick_canonical_entity_entry,
+    _runtime_data,
+    _set_fcm_refcount,
+    _set_nova_refcount,
+    _subentry_entry_id,
+    _sync_receiver_default_entry,
 )
-from custom_components.googlefindmy import __init__ as init_module
 from custom_components.googlefindmy.const import (
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
@@ -165,7 +186,7 @@ class TestComputeEntityScoreBasics:
         states = {"sensor.foo": _make_state(state_value)} if state_value else {}
         hass = _make_hass(states)
 
-        assert init_module._compute_entity_score(hass, entity) == expected
+        assert _compute_entity_score(hass, entity) == expected
 
     def test_missing_state_object_does_not_credit_state_points(self) -> None:
         """A state lookup miss must not award the +3 active-state points."""
@@ -174,7 +195,7 @@ class TestComputeEntityScoreBasics:
         hass = _make_hass({})  # no state recorded
 
         # translation_key (+4) + enabled (+3) + no state ⇒ 7
-        assert init_module._compute_entity_score(hass, entity) == 7
+        assert _compute_entity_score(hass, entity) == 7
 
 
 class TestPickCanonicalEntityEntryBasics:
@@ -185,14 +206,14 @@ class TestPickCanonicalEntityEntryBasics:
         second = _make_entity("sensor.b")
         hass = _make_hass({})
 
-        assert init_module._pick_canonical_entity_entry(hass, [first, second]) is first
+        assert _pick_canonical_entity_entry(hass, [first, second]) is first
 
     def test_prefers_higher_score(self) -> None:
         weaker = _make_entity("sensor.weak", disabled_by="user")
         stronger = _make_entity("sensor.strong", translation_key="k", disabled_by=None)
         hass = _make_hass({"sensor.strong": _make_state("on")})
 
-        canonical = init_module._pick_canonical_entity_entry(
+        canonical = _pick_canonical_entity_entry(
             hass, [weaker, stronger]
         )
 
@@ -202,7 +223,7 @@ class TestPickCanonicalEntityEntryBasics:
         only = _make_entity("sensor.only", translation_key="k")
         hass = _make_hass({})
 
-        assert init_module._pick_canonical_entity_entry(hass, [only]) is only
+        assert _pick_canonical_entity_entry(hass, [only]) is only
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +237,7 @@ class TestEntrySchemaScoreBasics:
     def test_empty_entry_scores_zero(self) -> None:
         entry = _make_entry(data={}, options={})
 
-        assert init_module._entry_schema_score(entry) == 0
+        assert _entry_schema_score(entry) == 0
 
     def test_mapping_bundle_scores_five(self) -> None:
         entry = _make_entry(
@@ -225,7 +246,7 @@ class TestEntrySchemaScoreBasics:
         )
 
         # bundle is Mapping ⇒ +5; no auth/oauth/aas ⇒ total 5
-        assert init_module._entry_schema_score(entry) == 5
+        assert _entry_schema_score(entry) == 5
 
     def test_non_mapping_bundle_scores_two(self) -> None:
         entry = _make_entry(
@@ -234,7 +255,7 @@ class TestEntrySchemaScoreBasics:
         )
 
         # bundle not Mapping but truthy ⇒ +2
-        assert init_module._entry_schema_score(entry) == 2
+        assert _entry_schema_score(entry) == 2
 
     def test_auth_oauth_aas_all_add(self) -> None:
         entry = _make_entry(
@@ -247,7 +268,7 @@ class TestEntrySchemaScoreBasics:
         )
 
         # +2 (auth) +1 (oauth) +1 (aas) ⇒ 4
-        assert init_module._entry_schema_score(entry) == 4
+        assert _entry_schema_score(entry) == 4
 
     def test_options_length_is_added_separately(self) -> None:
         entry = _make_entry(
@@ -257,7 +278,7 @@ class TestEntrySchemaScoreBasics:
 
         # options-Mapping container scans through all 5 checks (zero), then
         # len(entry.options) ⇒ 3 is added at the end
-        assert init_module._entry_schema_score(entry) == 3
+        assert _entry_schema_score(entry) == 3
 
     def test_non_mapping_data_is_skipped(self) -> None:
         """Non-Mapping ``entry.data`` must short-circuit without errors."""
@@ -266,7 +287,7 @@ class TestEntrySchemaScoreBasics:
 
         # Only ``len(entry.options) == 0`` remains. Production source line 768
         # short-circuits the non-Mapping container with ``continue``.
-        assert init_module._entry_schema_score(entry) == 0
+        assert _entry_schema_score(entry) == 0
 
 
 class TestEntryCreationTimestampBasics:
@@ -277,18 +298,18 @@ class TestEntryCreationTimestampBasics:
         updated = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
         entry = _make_entry(created_at=created, updated_at=updated)
 
-        assert init_module._entry_creation_timestamp(entry) == created.timestamp()
+        assert _entry_creation_timestamp(entry) == created.timestamp()
 
     def test_falls_back_to_updated_at_when_created_missing(self) -> None:
         updated = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
         entry = _make_entry(created_at=None, updated_at=updated)
 
-        assert init_module._entry_creation_timestamp(entry) == updated.timestamp()
+        assert _entry_creation_timestamp(entry) == updated.timestamp()
 
     def test_returns_inf_when_no_timestamp_available(self) -> None:
         entry = _make_entry(created_at=None, updated_at=None)
 
-        assert init_module._entry_creation_timestamp(entry) == float("inf")
+        assert _entry_creation_timestamp(entry) == float("inf")
 
     def test_non_datetime_falls_back_to_updated_at(self) -> None:
         """A string ``created_at`` triggers the ``updated_at`` fallback path."""
@@ -296,7 +317,7 @@ class TestEntryCreationTimestampBasics:
         updated = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
         entry = SimpleNamespace(created_at="2026-01-01", updated_at=updated)
 
-        assert init_module._entry_creation_timestamp(entry) == updated.timestamp()
+        assert _entry_creation_timestamp(entry) == updated.timestamp()
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +331,7 @@ class TestFeatureNameFromPlatformBasics:
     def test_enum_with_string_value_returns_value(self) -> None:
         platform = SimpleNamespace(value="sensor")
 
-        assert init_module._feature_name_from_platform(platform) == "sensor"
+        assert _feature_name_from_platform(platform) == "sensor"
 
     def test_strips_dotted_prefix_when_value_missing(self) -> None:
         class _Stub:
@@ -320,14 +341,14 @@ class TestFeatureNameFromPlatformBasics:
         # No ``.value`` attribute (slots not used here, no fallback string).
         platform = _Stub()
 
-        assert init_module._feature_name_from_platform(platform) == "sensor"
+        assert _feature_name_from_platform(platform) == "sensor"
 
     def test_lowercases_plain_str_repr(self) -> None:
         class _Stub:
             def __str__(self) -> str:
                 return "SENSOR"
 
-        assert init_module._feature_name_from_platform(_Stub()) == "sensor"
+        assert _feature_name_from_platform(_Stub()) == "sensor"
 
     def test_non_string_value_is_ignored(self) -> None:
         """A non-string ``.value`` must fall through to the ``__str__`` path."""
@@ -340,7 +361,7 @@ class TestFeatureNameFromPlatformBasics:
 
         # Value is int, so the first branch is skipped; ``str()`` yields the
         # dotted form that gets split.
-        assert init_module._feature_name_from_platform(_Stub()) == "button"
+        assert _feature_name_from_platform(_Stub()) == "button"
 
 
 class TestSubentryEntryIdBasics:
@@ -349,66 +370,66 @@ class TestSubentryEntryIdBasics:
     def test_returns_subentry_id_when_present(self) -> None:
         subentry = SimpleNamespace(subentry_id="sub-1", entry_id="entry-1")
 
-        assert init_module._subentry_entry_id(subentry) == "sub-1"
+        assert _subentry_entry_id(subentry) == "sub-1"
 
     def test_falls_back_to_entry_id(self) -> None:
         subentry = SimpleNamespace(subentry_id=None, entry_id="entry-1")
 
-        assert init_module._subentry_entry_id(subentry) == "entry-1"
+        assert _subentry_entry_id(subentry) == "entry-1"
 
     def test_returns_none_when_both_missing(self) -> None:
         subentry = SimpleNamespace(subentry_id=None, entry_id=None)
 
-        assert init_module._subentry_entry_id(subentry) is None
+        assert _subentry_entry_id(subentry) is None
 
     def test_empty_string_is_rejected(self) -> None:
         """Empty strings must not satisfy the truthiness guard."""
 
         subentry = SimpleNamespace(subentry_id="", entry_id="")
 
-        assert init_module._subentry_entry_id(subentry) is None
+        assert _subentry_entry_id(subentry) is None
 
     def test_non_string_subentry_id_falls_through(self) -> None:
         """``isinstance(str)`` check forces the fallback when type mismatches."""
 
         subentry = SimpleNamespace(subentry_id=42, entry_id="entry-1")
 
-        assert init_module._subentry_entry_id(subentry) == "entry-1"
+        assert _subentry_entry_id(subentry) == "entry-1"
 
 
 class TestDefaultButtonSubentryIdentifierBasics:
     """``_default_button_subentry_identifier`` checks button → device_tracker → default."""
 
     def test_returns_button_identifier_when_present(self) -> None:
-        result = init_module._default_button_subentry_identifier(
+        result = _default_button_subentry_identifier(
             {"button": "btn-id", "device_tracker": "tracker-id"}
         )
 
         assert result == "btn-id"
 
     def test_falls_back_to_device_tracker(self) -> None:
-        result = init_module._default_button_subentry_identifier(
+        result = _default_button_subentry_identifier(
             {"device_tracker": "tracker-id"}
         )
 
         assert result == "tracker-id"
 
     def test_returns_module_default_when_both_missing(self) -> None:
-        result = init_module._default_button_subentry_identifier({})
+        result = _default_button_subentry_identifier({})
 
-        assert result == init_module._DEFAULT_SUBENTRY_IDENTIFIER
+        assert result == _DEFAULT_SUBENTRY_IDENTIFIER
         assert result == "core_tracking"  # empirisch: __init__.py Z. 4951
 
     def test_skips_non_string_identifier(self) -> None:
         """Non-string identifiers must not satisfy the truthy/type guard."""
 
-        result = init_module._default_button_subentry_identifier(
+        result = _default_button_subentry_identifier(
             {"button": 0, "device_tracker": ""}
         )
 
         # Both candidates fail the ``isinstance(str) and identifier`` guard, so
         # the module-default fires.
-        assert result == init_module._DEFAULT_SUBENTRY_IDENTIFIER
+        assert result == _DEFAULT_SUBENTRY_IDENTIFIER
 
 
 # ---------------------------------------------------------------------------
@@ -432,20 +453,20 @@ class TestRuntimeDataAccessorBasics:
         runtime = self._make_runtime()
         entry = SimpleNamespace(runtime_data=runtime)
 
-        assert init_module._runtime_data(entry) is runtime
+        assert _runtime_data(entry) is runtime
 
     def test_runtime_data_asserts_on_wrong_type(self) -> None:
         entry = SimpleNamespace(runtime_data="not a RuntimeData")
 
         with pytest.raises(AssertionError):
-            init_module._runtime_data(entry)
+            _runtime_data(entry)
 
     def test_get_retry_attempts_returns_runtime_field(self) -> None:
         runtime = self._make_runtime()
         runtime.subentry_retry_attempts["sub-1"] = {"forward": 2}
         entry = SimpleNamespace(runtime_data=runtime)
 
-        attempts = init_module._get_retry_attempts(entry)
+        attempts = _get_retry_attempts(entry)
 
         assert attempts is runtime.subentry_retry_attempts
         assert attempts["sub-1"]["forward"] == 2
@@ -456,7 +477,7 @@ class TestRuntimeDataAccessorBasics:
         runtime.subentry_retry_handles["sub-1"] = handle
         entry = SimpleNamespace(runtime_data=runtime)
 
-        handles = init_module._get_retry_handles(entry)
+        handles = _get_retry_handles(entry)
 
         assert handles is runtime.subentry_retry_handles
         assert handles["sub-1"] is handle
@@ -479,7 +500,7 @@ class TestFcmRefcountsBasics:
             }
         }
 
-        refcounts = init_module._get_fcm_refcounts(bucket)  # type: ignore[arg-type]
+        refcounts = _get_fcm_refcounts(bucket)  # type: ignore[arg-type]
 
         # Production source line 3083 keeps only str→int pairs.
         assert refcounts == {"good": 3}
@@ -489,7 +510,7 @@ class TestFcmRefcountsBasics:
     def test_get_fcm_refcounts_creates_dict_when_missing(self) -> None:
         bucket: dict[str, Any] = {}
 
-        refcounts = init_module._get_fcm_refcounts(bucket)  # type: ignore[arg-type]
+        refcounts = _get_fcm_refcounts(bucket)  # type: ignore[arg-type]
 
         assert refcounts == {}
         assert bucket["fcm_refcounts"] is refcounts
@@ -497,17 +518,17 @@ class TestFcmRefcountsBasics:
     def test_get_fcm_refcount_returns_value_for_existing_entry(self) -> None:
         bucket: dict[str, Any] = {"fcm_refcounts": {"entry-1": 7}}
 
-        assert init_module._get_fcm_refcount(bucket, "entry-1") == 7  # type: ignore[arg-type]
+        assert _get_fcm_refcount(bucket, "entry-1") == 7  # type: ignore[arg-type]
 
     def test_get_fcm_refcount_returns_zero_for_unknown_entry(self) -> None:
         bucket: dict[str, Any] = {"fcm_refcounts": {"entry-1": 7}}
 
-        assert init_module._get_fcm_refcount(bucket, "entry-2") == 0  # type: ignore[arg-type]
+        assert _get_fcm_refcount(bucket, "entry-2") == 0  # type: ignore[arg-type]
 
     def test_set_fcm_refcount_writes_and_mirrors_default(self) -> None:
         bucket: dict[str, Any] = {}
 
-        init_module._set_fcm_refcount(bucket, "default", 4)  # type: ignore[arg-type]
+        _set_fcm_refcount(bucket, "default", 4)  # type: ignore[arg-type]
 
         assert bucket["fcm_refcounts"]["default"] == 4
         # default-entry must mirror to legacy ``fcm_refcount`` key (line 3105)
@@ -516,7 +537,7 @@ class TestFcmRefcountsBasics:
     def test_set_fcm_refcount_does_not_touch_legacy_for_non_default(self) -> None:
         bucket: dict[str, Any] = {}
 
-        init_module._set_fcm_refcount(bucket, "entry-x", 9)  # type: ignore[arg-type]
+        _set_fcm_refcount(bucket, "entry-x", 9)  # type: ignore[arg-type]
 
         assert bucket["fcm_refcounts"]["entry-x"] == 9
         assert "fcm_refcount" not in bucket
@@ -528,22 +549,22 @@ class TestNovaRefcountBasics:
     def test_get_returns_stored_int(self) -> None:
         bucket: dict[str, Any] = {"nova_refcount": 5}
 
-        assert init_module._get_nova_refcount(bucket) == 5  # type: ignore[arg-type]
+        assert _get_nova_refcount(bucket) == 5  # type: ignore[arg-type]
 
     def test_get_returns_zero_when_missing(self) -> None:
-        assert init_module._get_nova_refcount({}) == 0  # type: ignore[arg-type]
+        assert _get_nova_refcount({}) == 0  # type: ignore[arg-type]
 
     def test_get_returns_zero_when_value_is_not_int(self) -> None:
         """A corrupt non-int stored value must not crash the helper."""
 
         bucket: dict[str, Any] = {"nova_refcount": "not-an-int"}
 
-        assert init_module._get_nova_refcount(bucket) == 0  # type: ignore[arg-type]
+        assert _get_nova_refcount(bucket) == 0  # type: ignore[arg-type]
 
     def test_set_persists_value(self) -> None:
         bucket: dict[str, Any] = {}
 
-        init_module._set_nova_refcount(bucket, 3)  # type: ignore[arg-type]
+        _set_nova_refcount(bucket, 3)  # type: ignore[arg-type]
 
         assert bucket["nova_refcount"] == 3
 
@@ -555,14 +576,14 @@ class TestSyncReceiverDefaultEntryBasics:
         setter = MagicMock()
         receiver = SimpleNamespace(set_default_entry_id=setter)
 
-        init_module._sync_receiver_default_entry(receiver, "entry-1")
+        _sync_receiver_default_entry(receiver, "entry-1")
 
         setter.assert_called_once_with("entry-1")
 
     def test_falls_back_to_setattr_when_setter_missing(self) -> None:
         receiver = SimpleNamespace()
 
-        init_module._sync_receiver_default_entry(receiver, "entry-2")
+        _sync_receiver_default_entry(receiver, "entry-2")
 
         assert receiver.default_entry_id == "entry-2"
 
@@ -570,7 +591,7 @@ class TestSyncReceiverDefaultEntryBasics:
         setter = MagicMock()
         receiver = SimpleNamespace(set_default_entry_id=setter)
 
-        init_module._sync_receiver_default_entry(receiver, None)
+        _sync_receiver_default_entry(receiver, None)
 
         setter.assert_not_called()
         assert not hasattr(receiver, "default_entry_id")
@@ -581,7 +602,7 @@ class TestSyncReceiverDefaultEntryBasics:
         setter = MagicMock(side_effect=RuntimeError("boom"))
         receiver = SimpleNamespace(set_default_entry_id=setter)
 
-        init_module._sync_receiver_default_entry(receiver, "entry-x")
+        _sync_receiver_default_entry(receiver, "entry-x")
 
         # Fallback path (line 3138-3141) writes the attribute despite the
         # setter failure.
@@ -597,13 +618,13 @@ class TestNormalizeDeviceIdentifierBasics:
     """``_normalize_device_identifier`` strips entry/subentry prefixes from device IDs."""
 
     def test_empty_identifier_returns_unchanged(self) -> None:
-        assert init_module._normalize_device_identifier(SimpleNamespace(), "") == ""
+        assert _normalize_device_identifier(SimpleNamespace(), "") == ""
 
     def test_identifier_without_colon_passes_through(self) -> None:
         device = SimpleNamespace(config_entries=set())
 
         assert (
-            init_module._normalize_device_identifier(device, "integration_entry-1")
+            _normalize_device_identifier(device, "integration_entry-1")
             == "integration_entry-1"
         )
 
@@ -611,7 +632,7 @@ class TestNormalizeDeviceIdentifierBasics:
         device = SimpleNamespace(config_entries={"entry-1"})
 
         assert (
-            init_module._normalize_device_identifier(
+            _normalize_device_identifier(
                 device, "entry-1:sub-1:google-device-7"
             )
             == "google-device-7"
@@ -623,7 +644,7 @@ class TestNormalizeDeviceIdentifierBasics:
         device = SimpleNamespace(config_entries=set())
 
         assert (
-            init_module._normalize_device_identifier(device, "foo:bar:baz") == "baz"
+            _normalize_device_identifier(device, "foo:bar:baz") == "baz"
         )
 
     def test_trailing_empty_segment_falls_back_to_ident(self) -> None:
@@ -631,7 +652,7 @@ class TestNormalizeDeviceIdentifierBasics:
 
         device = SimpleNamespace(config_entries=set())
 
-        result = init_module._normalize_device_identifier(device, "foo:")
+        result = _normalize_device_identifier(device, "foo:")
 
         # ``last or ident`` (production line 3258) returns the original.
         assert result == "foo:"
@@ -646,7 +667,7 @@ class TestNormalizeLegacyButtonRemainderBasics:
     """``_normalize_legacy_button_remainder`` strips legacy ``tracker_`` prefixes."""
 
     def test_no_action_suffix_returns_remainder_unchanged(self) -> None:
-        result = init_module._normalize_legacy_button_remainder(
+        result = _normalize_legacy_button_remainder(
             "tracker_devicexlocate",
             identifier="core_tracking",
             suffixes=("play_sound", "stop_sound", "locate_device"),
@@ -656,7 +677,7 @@ class TestNormalizeLegacyButtonRemainderBasics:
         assert result == "tracker_devicexlocate"
 
     def test_strips_legacy_tracker_prefix_when_action_matches(self) -> None:
-        result = init_module._normalize_legacy_button_remainder(
+        result = _normalize_legacy_button_remainder(
             "tracker_device123play_sound",
             identifier="core_tracking",
             suffixes=("play_sound",),
@@ -666,7 +687,7 @@ class TestNormalizeLegacyButtonRemainderBasics:
         assert result == "device123play_sound"
 
     def test_keeps_remainder_when_payload_already_identifier_prefixed(self) -> None:
-        result = init_module._normalize_legacy_button_remainder(
+        result = _normalize_legacy_button_remainder(
             "core_tracking_device123play_sound",
             identifier="core_tracking",
             suffixes=("play_sound",),
@@ -678,7 +699,7 @@ class TestNormalizeLegacyButtonRemainderBasics:
     def test_legacy_prefix_with_empty_remainder_falls_through(self) -> None:
         """Trimming to empty must NOT strip the legacy prefix."""
 
-        result = init_module._normalize_legacy_button_remainder(
+        result = _normalize_legacy_button_remainder(
             "tracker_play_sound",
             identifier="core_tracking",
             suffixes=("play_sound",),
@@ -698,7 +719,7 @@ class TestParseButtonUniqueIdBasics:
 
     def test_returns_none_for_empty_unique_id(self) -> None:
         assert (
-            init_module._parse_button_unique_id(
+            _parse_button_unique_id(
                 "", self._entry(), {}, "core_tracking"
             )
             is None
@@ -706,7 +727,7 @@ class TestParseButtonUniqueIdBasics:
 
     def test_returns_none_for_non_string_unique_id(self) -> None:
         assert (
-            init_module._parse_button_unique_id(
+            _parse_button_unique_id(
                 42,  # type: ignore[arg-type]
                 self._entry(),
                 {},
@@ -720,7 +741,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = f"{DOMAIN}_entry-1:sub-7:device-A_play_sound"
 
-        parts = init_module._parse_button_unique_id(
+        parts = _parse_button_unique_id(
             unique, self._entry(), {}, "core_tracking"
         )
 
@@ -735,7 +756,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = f"{DOMAIN}_entry-1_device-B_play_sound"
 
-        parts = init_module._parse_button_unique_id(
+        parts = _parse_button_unique_id(
             unique, self._entry(), {}, fallback_subentry_id="core_tracking"
         )
 
@@ -750,7 +771,7 @@ class TestParseButtonUniqueIdBasics:
         unique = f"{DOMAIN}_entry-1_sub-known_device-Z_play_sound"
         subentry_map = {"button": "sub-known"}
 
-        parts = init_module._parse_button_unique_id(
+        parts = _parse_button_unique_id(
             unique, self._entry(), subentry_map, "core_tracking"
         )
 
@@ -763,7 +784,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = f"{DOMAIN}_other-entry:sub-1:device_play_sound"
 
-        result = init_module._parse_button_unique_id(
+        result = _parse_button_unique_id(
             unique, self._entry(), {}, "core_tracking"
         )
 
@@ -774,7 +795,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = "entry-1_device-X_custom"  # ``custom`` is not in suffix tuple
 
-        parts = init_module._parse_button_unique_id(
+        parts = _parse_button_unique_id(
             unique, self._entry(), {}, "core_tracking"
         )
 
@@ -785,7 +806,7 @@ class TestParseButtonUniqueIdBasics:
     def test_returns_none_for_unparseable_unique_id(self) -> None:
         """Single-token unique IDs without underscore must fail cleanly."""
 
-        result = init_module._parse_button_unique_id(
+        result = _parse_button_unique_id(
             "lonely-token", self._entry(), {}, "core_tracking"
         )
 
@@ -796,7 +817,7 @@ class TestParseButtonUniqueIdBasics:
 
         entry = SimpleNamespace(entry_id="")
 
-        result = init_module._parse_button_unique_id(
+        result = _parse_button_unique_id(
             f"{DOMAIN}_entry-1_device_play_sound",
             entry,
             {},
@@ -810,14 +831,14 @@ class TestIterTrackerIdentifierCandidatesBasics:
     """``_iter_tracker_identifier_candidates`` yields three layered registry lookups."""
 
     def test_returns_three_layered_candidates(self) -> None:
-        parts = init_module._ButtonUniqueIdParts(
+        parts = _ButtonUniqueIdParts(
             entry_id="entry-1",
             subentry_id="sub-7",
             google_device_id="device-A",
             action="play_sound",
         )
 
-        candidates = init_module._iter_tracker_identifier_candidates(parts)
+        candidates = _iter_tracker_identifier_candidates(parts)
 
         assert candidates == (
             (DOMAIN, "entry-1:sub-7:device-A"),
