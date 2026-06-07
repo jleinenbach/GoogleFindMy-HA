@@ -124,9 +124,19 @@ def _install_supervisor_mocks(
     ensure_iter = iter(ensure_clients)
 
     async def _ensure(entry_id: str, cache):  # noqa: ARG001
+        # Codex Iter-7 (PR #1086): modelling exhaustion as ``None`` mirrors
+        # production's ``if not pc`` path, which is designed to back off and
+        # retry **forever**. The non-cap tests (long-run reset,
+        # re-registration, entry-B independence, 30s boundary) all rely on
+        # natural supervisor completion after the configured client list is
+        # exhausted, so we MUST stop the supervisor explicitly here instead
+        # of falling into the retry-forever branch (CA-TEST-TERMINATION-001).
         try:
             return next(ensure_iter)
         except StopIteration:
+            stop_evt = receiver._stop_evts.get(entry_id)
+            if stop_evt is not None:
+                stop_evt.set()
             return None
 
     monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
