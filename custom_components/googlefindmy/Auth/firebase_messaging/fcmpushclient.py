@@ -445,10 +445,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         private_value = keys_section.get("private")
         secret_value = keys_section.get("secret")
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
-            raise ValueError("Invalid key values in credential payload")
+            raise ValueError("Credentials contain invalid key values")
 
-        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"=" * (-len(private_value) % 4))
-        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4))
+        try:
+            der_data = urlsafe_b64decode(
+                private_value.encode("ascii") + b"=" * (-len(private_value) % 4)
+            )
+            secret = urlsafe_b64decode(
+                secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4)
+            )
+        except binascii.Error as cred_decode_err:
+            raise ValueError(
+                "Credentials key material failed base64 decode; re-registration required"
+            ) from cred_decode_err
         privkey = load_der_private_key(der_data, password=None)
         decrypted = http_decrypt(
             raw_data,
@@ -743,6 +752,58 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
         return connected
 
+    async def _ack_or_disconnect(self, persistent_id: str | None) -> bool:
+        """Best-effort selective-ACK for a poison message.
+
+        Returns ``True`` to continue the worker loop; ``False`` if the writer
+        half is dead and the supervisor should reconnect (caller breaks).
+        """
+        if not persistent_id:
+            return True
+        try:
+            await self._send_selective_ack(persistent_id)
+            return True
+        except (OSError, ssl.SSLError, ConnectionError):
+            return False
+
+    async def _process_one_inbound_message(self, msg: MessageProto) -> bool:
+        """Run ``_handle_message`` with poison-message defense.
+
+        Defense 1 (CA-CASCADING-FAILURE-001): per-message decode failures
+        (``binascii.Error`` padding faults under Python 3.14 strict mode,
+        ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
+        ``ValueError`` from header parsing) are acknowledged and skipped
+        instead of crashing the worker loop. Credential-material errors
+        (markers starting with ``"Credentials "``) propagate so the
+        supervisor surfaces them via STOPPED state.
+
+        Returns ``True`` to continue the loop, ``False`` to break (writer
+        half-dead during ack).
+        """
+        try:
+            await self._handle_message(msg)
+            return True
+        except ValueError as decrypt_err:
+            if str(decrypt_err).startswith("Credentials "):
+                raise
+            persistent_id = getattr(msg, "persistent_id", None)
+            self._log_warn_with_limit(
+                "Skipping FCM message that failed to decrypt "
+                "(persistent_id=%s): %s",
+                persistent_id,
+                decrypt_err,
+            )
+            return await self._ack_or_disconnect(persistent_id)
+        except (binascii.Error, RuntimeError) as decrypt_err:
+            persistent_id = getattr(msg, "persistent_id", None)
+            self._log_warn_with_limit(
+                "Skipping FCM message that failed to decrypt "
+                "(persistent_id=%s): %s",
+                persistent_id,
+                decrypt_err,
+            )
+            return await self._ack_or_disconnect(persistent_id)
+
     async def _listen(self) -> None:
         """Listens for push notifications until an error or stop() occurs."""
         try:
@@ -761,75 +822,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             while self.do_listen:
                 try:
                     if msg := await self._receive_msg():
-                        try:
-                            await self._handle_message(msg)
-                        except ValueError as decrypt_err:
-                            # Defense 1 (CA-CASCADING-FAILURE-001):
-                            # Legitimate credential/key configuration errors
-                            # must propagate so the supervisor surfaces them
-                            # via the STOPPED state (not silently swallowed).
-                            err_text = str(decrypt_err)
-                            if (
-                                "Credentials missing FCM key material"
-                                in err_text
-                                or "Invalid key values" in err_text
-                            ):
-                                raise
-                            persistent_id = getattr(
-                                msg, "persistent_id", None
-                            )
-                            self._log_warn_with_limit(
-                                "Skipping FCM message that failed to decrypt "
-                                "(persistent_id=%s): %s",
-                                persistent_id,
-                                decrypt_err,
-                            )
-                            if persistent_id:
-                                try:
-                                    await self._send_selective_ack(
-                                        persistent_id
-                                    )
-                                except (
-                                    OSError,
-                                    ssl.SSLError,
-                                    ConnectionError,
-                                ):
-                                    # Writer half-dead -> let the outer
-                                    # catch handle a clean shutdown.
-                                    self.do_listen = False
-                                    break
-                            continue
-                        except (binascii.Error, RuntimeError) as decrypt_err:
-                            # Defense 1 (CA-CASCADING-FAILURE-001):
-                            # base64 padding faults (binascii.Error, hot under
-                            # Python 3.14 strict mode) and missing-key lookups
-                            # raised from ``_app_data_by_key`` are per-message
-                            # decode failures. Acknowledge and skip instead of
-                            # crashing the worker loop, which previously
-                            # cascaded into a supervisor restart storm and an
-                            # OOM crash on Home Assistant Core 2026.6.x.
-                            persistent_id = getattr(
-                                msg, "persistent_id", None
-                            )
-                            self._log_warn_with_limit(
-                                "Skipping FCM message that failed to decrypt "
-                                "(persistent_id=%s): %s",
-                                persistent_id,
-                                decrypt_err,
-                            )
-                            if persistent_id:
-                                try:
-                                    await self._send_selective_ack(
-                                        persistent_id
-                                    )
-                                except (
-                                    OSError,
-                                    ssl.SSLError,
-                                    ConnectionError,
-                                ):
-                                    self.do_listen = False
-                                    break
-                            continue
+                        if not await self._process_one_inbound_message(msg):
+                            self.do_listen = False
+                            break
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart

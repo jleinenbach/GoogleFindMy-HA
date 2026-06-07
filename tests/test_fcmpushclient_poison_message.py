@@ -6,8 +6,9 @@ Verifies that ``FcmPushClient._listen`` survives per-message decode failures
 ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic ``ValueError``
 decode errors) by skipping the offending message with a selective-ack instead
 of crashing the worker loop. Also verifies the cred-error propagation contract:
-``ValueError`` whose message contains "Credentials missing FCM key material"
-or "Invalid key values" is re-raised so the supervisor surfaces it via STOPPED.
+``ValueError`` whose message starts with the ``"Credentials "`` prefix
+(credential material is missing, structurally invalid, or fails base64 decode)
+is re-raised so the supervisor surfaces it via STOPPED.
 
 The Aggregate-Anti-Cascading-Invariant test runs 100 poison messages followed
 by one valid sentinel and proves Defense 1 prevents the supervisor-restart
@@ -15,13 +16,12 @@ cascade reported on Home Assistant Core 2026.6.x.
 """
 from __future__ import annotations
 
-import asyncio
 import binascii
 import logging
 import ssl
+from collections.abc import Iterator
 from types import SimpleNamespace
-from typing import Iterator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -33,7 +33,6 @@ from tests.helpers.fcm_poison_stub import (
     make_poison_data_message,
     make_valid_data_message,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test helpers

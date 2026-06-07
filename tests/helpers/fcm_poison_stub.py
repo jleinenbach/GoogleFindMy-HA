@@ -17,8 +17,9 @@ test instrumentation fields (``_loop_iteration_count``, ``_last_handled_id``,
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import AsyncMock
 
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import (
@@ -100,4 +101,8 @@ class FcmPushClientSlim:
 
     # Bind the real production _listen unbound function to this slim instance.
     # When invoked via ``self._listen()`` it resolves ``self`` to the stub.
+    # Defense 1 was extracted into two helpers (_process_one_inbound_message,
+    # _ack_or_disconnect); bind both so the unbound _listen can reach them.
     _listen = FcmPushClient._listen  # type: ignore[assignment]
+    _process_one_inbound_message = FcmPushClient._process_one_inbound_message  # type: ignore[assignment]
+    _ack_or_disconnect = FcmPushClient._ack_or_disconnect  # type: ignore[assignment]
