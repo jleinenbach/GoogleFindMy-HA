@@ -302,7 +302,16 @@ class FcmReceiverHA:
     def _clear_fatal_error_for_entry(
         self, entry_id: str, *, reason: str | None = None
     ) -> None:
-        """Clear any latched fatal registration error for a config entry."""
+        """Clear any latched fatal registration error for a config entry.
+
+        Also removes the Defense 2 short-run-crash-loop repair issue from the
+        Home Assistant Issue Registry. The fatal-error map and the Issue
+        Registry entry are a CREATE/DELETE pair: any recovery path that clears
+        the in-memory latch must also delete the user-visible UI artefact, or
+        the Repairs panel keeps a stale non-fixable error after the underlying
+        condition is gone (e.g. user re-registers credentials and FCM starts
+        successfully again).
+        """
 
         removed = False
         if entry_id in self._fatal_errors:
@@ -318,6 +327,18 @@ class FcmReceiverHA:
 
         if removed:
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
+
+        if self._hass is not None:
+            try:
+                ir.async_delete_issue(
+                    self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
+                )
+            except Exception:  # noqa: BLE001 - best-effort UI cleanup
+                _LOGGER.debug(
+                    "[entry=%s] Failed to delete short-run repair issue",
+                    entry_id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
@@ -1052,6 +1073,19 @@ class FcmReceiverHA:
                         if callable(observe):
                             try:
                                 observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        # Mirror the counter reset in the Issue Registry: if
+                        # the cap had previously fired on a prior supervisor
+                        # incarnation, a healthy run is the user-visible
+                        # signal that the condition is gone.
+                        if self._hass is not None:
+                            try:
+                                ir.async_delete_issue(
+                                    self._hass,
+                                    DOMAIN,
+                                    f"fcm_short_run_crash_loop_{entry_id}",
+                                )
                             except Exception:  # noqa: BLE001
                                 pass
 

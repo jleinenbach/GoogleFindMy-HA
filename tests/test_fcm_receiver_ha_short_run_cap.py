@@ -51,10 +51,22 @@ class _SupervisorPushClientStub:
     """Lightweight ``FcmPushClient`` substitute for supervisor-loop tests.
 
     Mirrors only the surface the supervisor reads/writes (``start``, ``stop``,
-    ``run_state``, ``do_listen``, ``_observe_counter``). Each ``start()`` call
-    can optionally trigger a clock jump (to simulate the elapsed wall time of
-    the run before STOPPED), and ``run_state`` defaults to STOPPED so the
-    monitor loop exits on the first iteration.
+    ``run_state``, ``do_listen``, ``_observe_counter``).
+
+    Two clock-injection hooks model the supervisor's snapshot boundary
+    correctly:
+
+    * ``jump_on_start`` advances the clock inside ``start()`` BEFORE the
+      supervisor takes the ``entry_start`` snapshot (Z. 960). It models
+      pre-monitor elapsed time and does NOT influence ``run_duration``.
+    * ``jump_on_run_state_read`` advances the clock on the first
+      ``pc.run_state`` access INSIDE the monitor loop (Z. 964), which is
+      AFTER the ``entry_start`` snapshot. It is the only correct way to
+      inject elapsed-run time that ``run_duration = time.monotonic() -
+      entry_start`` actually observes. Use this for boundary math.
+
+    ``run_state`` defaults to ``None`` so the monitor loop exits on the
+    first iteration (``state is None`` break path).
     """
 
     def __init__(
@@ -62,14 +74,28 @@ class _SupervisorPushClientStub:
         *,
         clock: _MonoClock | None = None,
         jump_on_start: float = 0.0,
+        jump_on_run_state_read: float = 0.0,
     ) -> None:
         self.clock = clock
         self.jump_on_start = jump_on_start
+        self.jump_on_run_state_read = jump_on_run_state_read
         self.do_listen = True
-        self.run_state = None  # forces ``state is None`` break path
         self.start_calls = 0
         self.stop_calls = 0
         self._observed_short_run_counter: int | None = None
+        self._run_state_reads = 0
+
+    @property
+    def run_state(self):  # noqa: D401 - mirror attribute access
+        self._run_state_reads += 1
+        if (
+            self._run_state_reads == 1
+            and self.clock is not None
+            and self.jump_on_run_state_read
+        ):
+            self.clock.jump(self.jump_on_run_state_read)
+        # Implicit ``None`` return forces the ``state is None`` break path
+        # in the supervisor monitor loop (Z. 984-989).
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -419,13 +445,21 @@ async def test_long_run_boundary_exactly_30s_does_not_count_as_short(
     receiver = FcmReceiverHA()
     receiver.attach_hass(SimpleNamespace())
 
-    clock = _MonoClock(step=0.001)
-    # A single client that jumps exactly the threshold on start(): the
-    # supervisor's ``run_duration = time.monotonic() - entry_start`` then
-    # equals 30.0 (the very small additional ``step`` reads in between
-    # are also captured by the jump because the snapshot happens AFTER
-    # ``start()`` returned).
-    stub = _SupervisorPushClientStub(clock=clock, jump_on_start=30.0)
+    # Frozen clock (``step=0.0``): every ``time.monotonic()`` call returns
+    # the same value unless ``.jump(seconds)`` is invoked. This is the only
+    # way to drive ``run_duration`` to *exactly* 30.0 — any auto-increment
+    # would push the read at Z. 1008 past the boundary by a few ``step``s
+    # and let an off-by-one bug (`<=` instead of `<`) hide inside the noise.
+    clock = _MonoClock(step=0.0)
+
+    # Critical ordering (Codex Iter-5 finding):
+    # ``jump_on_start`` would fire BEFORE the supervisor records
+    # ``entry_start = time.monotonic()`` (Z. 960), so the jump is baked
+    # into the snapshot and ``run_duration`` ends up ~0s. Instead, hook
+    # the jump on the first ``pc.run_state`` read (Z. 964), which is the
+    # first clock-observable event INSIDE the monitor loop, AFTER the
+    # snapshot. Then ``time.monotonic() - entry_start == 30.0`` exactly.
+    stub = _SupervisorPushClientStub(clock=clock, jump_on_run_state_read=30.0)
     _install_supervisor_mocks(
         monkeypatch, receiver, clock=clock, ensure_clients=[stub]
     )
@@ -435,6 +469,8 @@ async def test_long_run_boundary_exactly_30s_does_not_count_as_short(
     await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
 
     # The else-branch was hit (counter reset to 0), not the short-run branch.
+    # If `<` ever drifts to `<=`, ``run_duration == 30.0`` falls into the
+    # short-run path and ``_observed_short_run_counter`` becomes 1.
     assert stub._observed_short_run_counter == 0, (
         f"Boundary 30.0s was counted as short — `<` drifted to `<=`? "
         f"Counter={stub._observed_short_run_counter}"
