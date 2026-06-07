@@ -105,6 +105,42 @@ class CredentialDecryptionError(ValueError):
     """
 
 
+def _safe_urlsafe_b64decode(value: str | bytes) -> bytes:
+    """Decode URL-safe base64 leniently (Python 3.14 compatibility shim).
+
+    Strips ASCII whitespace and re-appends ``=`` padding before delegating
+    to :func:`base64.urlsafe_b64decode`. Python 3.14 switched
+    ``binascii.a2b_base64`` to ``strict_mode=True`` by default, which
+    rejects payloads containing newlines, stray whitespace, or missing
+    padding -- exactly the conditions the wild FCM stream produces. This
+    helper restores the pre-3.14 lenient behaviour locally without altering
+    the global decoder state.
+
+    Defense layer 3 of the three-defense hotfix for the
+    ``fcmpushclient`` poison-message cascade (CA-CASCADING-FAILURE-001).
+    Defense 1 wraps credential-decode errors as
+    :class:`CredentialDecryptionError`; defense 2 caps the supervisor
+    restart loop. This helper closes the root cause: dirty base64 input
+    that the Python 3.14 strict decoder rejects unconditionally.
+
+    Raises ``binascii.Error`` only when the payload remains undecodable
+    after whitespace removal and padding normalisation. Raises
+    ``UnicodeError`` when ``str`` input contains non-ASCII characters
+    (``str.encode("ascii")`` fails before normalisation runs); callers in
+    a credential-decode path must catch both.
+    """
+    if isinstance(value, str):
+        raw = value.encode("ascii")
+    else:
+        raw = bytes(value)
+    # str.split() / bytes.split() with no args collapses every flavour of
+    # ASCII whitespace (space, tab, newline, CR, vtab, formfeed) -- this
+    # is exactly the set Python 3.14 strict mode now rejects.
+    stripped = b"".join(raw.split())
+    padded = stripped + b"=" * (-len(stripped) % 4)
+    return urlsafe_b64decode(padded)
+
+
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
     HeartbeatPing: 0,
@@ -454,8 +490,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
-        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii") + b"=" * (-len(crypto_key_str) % 4))
-        salt = urlsafe_b64decode(salt_str.encode("ascii") + b"=" * (-len(salt_str) % 4))
+        # Header decode (crypto-key / salt) -- per-message surface.
+        # Failures here are per-message poison, not credential corruption:
+        # they fall through to the listener's poison-message defense
+        # (selective-ACK + skip) without going through the credential
+        # try-block below.
+        crypto_key = _safe_urlsafe_b64decode(crypto_key_str)
+        salt = _safe_urlsafe_b64decode(salt_str)
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
@@ -469,12 +510,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
 
         try:
-            der_data = urlsafe_b64decode(
-                private_value.encode("ascii") + b"=" * (-len(private_value) % 4)
-            )
-            secret = urlsafe_b64decode(
-                secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4)
-            )
+            der_data = _safe_urlsafe_b64decode(private_value)
+            secret = _safe_urlsafe_b64decode(secret_value)
         except (binascii.Error, UnicodeError) as cred_decode_err:
             # binascii.Error: corrupt base64 payload.
             # UnicodeError (covers UnicodeEncodeError/UnicodeDecodeError):
