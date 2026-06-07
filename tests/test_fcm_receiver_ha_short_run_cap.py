@@ -244,11 +244,17 @@ async def test_long_run_resets_closure_counter(
 
     clock = _MonoClock(step=0.001)
     # Build 19 clients: short, short, ..., LONG at index 9, short, short, ...
+    # The LONG run must use ``jump_on_run_state_read`` (not ``jump_on_start``)
+    # so the 60s elapse AFTER the supervisor captures ``entry_start`` at
+    # Z. 960; otherwise the jump is consumed by the snapshot itself and
+    # ``run_duration`` collapses to ~0, making this run count as short.
     clients = []
     for idx in range(19):
         if idx == 9:
             clients.append(
-                _SupervisorPushClientStub(clock=clock, jump_on_start=60.0)
+                _SupervisorPushClientStub(
+                    clock=clock, jump_on_run_state_read=60.0
+                )
             )
         else:
             clients.append(_SupervisorPushClientStub(clock=clock))
@@ -329,8 +335,12 @@ async def test_per_entry_supervisors_independent(
     # Entry A: 10 short runs (will trip the cap).
     clients_a = [_SupervisorPushClientStub(clock=clock_a) for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)]
     # Entry B: 5 healthy long runs (well above threshold).
+    # ``jump_on_run_state_read`` (not ``jump_on_start``) is required so the
+    # 60s elapse AFTER ``entry_start`` snapshot at Z. 960 and actually mark
+    # each run as a long run; otherwise the test passes only by accident
+    # because 5 short runs also stay below the cap of 10.
     clients_b = [
-        _SupervisorPushClientStub(clock=clock_b, jump_on_start=60.0)
+        _SupervisorPushClientStub(clock=clock_b, jump_on_run_state_read=60.0)
         for _ in range(5)
     ]
 
