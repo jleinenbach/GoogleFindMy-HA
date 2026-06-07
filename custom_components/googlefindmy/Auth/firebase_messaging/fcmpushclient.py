@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import json
 import logging
 import random
@@ -760,7 +761,75 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             while self.do_listen:
                 try:
                     if msg := await self._receive_msg():
-                        await self._handle_message(msg)
+                        try:
+                            await self._handle_message(msg)
+                        except ValueError as decrypt_err:
+                            # Defense 1 (CA-CASCADING-FAILURE-001):
+                            # Legitimate credential/key configuration errors
+                            # must propagate so the supervisor surfaces them
+                            # via the STOPPED state (not silently swallowed).
+                            err_text = str(decrypt_err)
+                            if (
+                                "Credentials missing FCM key material"
+                                in err_text
+                                or "Invalid key values" in err_text
+                            ):
+                                raise
+                            persistent_id = getattr(
+                                msg, "persistent_id", None
+                            )
+                            self._log_warn_with_limit(
+                                "Skipping FCM message that failed to decrypt "
+                                "(persistent_id=%s): %s",
+                                persistent_id,
+                                decrypt_err,
+                            )
+                            if persistent_id:
+                                try:
+                                    await self._send_selective_ack(
+                                        persistent_id
+                                    )
+                                except (
+                                    OSError,
+                                    ssl.SSLError,
+                                    ConnectionError,
+                                ):
+                                    # Writer half-dead -> let the outer
+                                    # catch handle a clean shutdown.
+                                    self.do_listen = False
+                                    break
+                            continue
+                        except (binascii.Error, RuntimeError) as decrypt_err:
+                            # Defense 1 (CA-CASCADING-FAILURE-001):
+                            # base64 padding faults (binascii.Error, hot under
+                            # Python 3.14 strict mode) and missing-key lookups
+                            # raised from ``_app_data_by_key`` are per-message
+                            # decode failures. Acknowledge and skip instead of
+                            # crashing the worker loop, which previously
+                            # cascaded into a supervisor restart storm and an
+                            # OOM crash on Home Assistant Core 2026.6.x.
+                            persistent_id = getattr(
+                                msg, "persistent_id", None
+                            )
+                            self._log_warn_with_limit(
+                                "Skipping FCM message that failed to decrypt "
+                                "(persistent_id=%s): %s",
+                                persistent_id,
+                                decrypt_err,
+                            )
+                            if persistent_id:
+                                try:
+                                    await self._send_selective_ack(
+                                        persistent_id
+                                    )
+                                except (
+                                    OSError,
+                                    ssl.SSLError,
+                                    ConnectionError,
+                                ):
+                                    self.do_listen = False
+                                    break
+                            continue
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart
