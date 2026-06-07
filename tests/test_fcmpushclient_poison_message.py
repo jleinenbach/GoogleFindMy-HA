@@ -6,9 +6,10 @@ Verifies that ``FcmPushClient._listen`` survives per-message decode failures
 ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic ``ValueError``
 decode errors) by skipping the offending message with a selective-ack instead
 of crashing the worker loop. Also verifies the cred-error propagation contract:
-``ValueError`` whose message starts with the ``"Credentials "`` prefix
-(credential material is missing, structurally invalid, or fails base64 decode)
-is re-raised so the supervisor surfaces it via STOPPED.
+``CredentialDecryptionError`` (credential material is missing, structurally
+invalid, fails base64 decode, or fails DER private-key parse) is re-raised so
+the supervisor surfaces it via STOPPED. Plain ``ValueError`` without that type
+is treated as per-message poison (selective-ACK + skip).
 
 The Aggregate-Anti-Cascading-Invariant test runs 100 poison messages followed
 by one valid sentinel and proves Defense 1 prevents the supervisor-restart
@@ -26,6 +27,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import (
+    CredentialDecryptionError,
     FcmPushClientRunState,
 )
 from tests.helpers.fcm_poison_stub import (
@@ -296,16 +298,21 @@ async def test_connection_error_during_selective_ack_falls_through(
 
 
 @pytest.mark.asyncio
-async def test_legitimate_cred_value_error_propagates_to_outer_catch(
+async def test_credential_decryption_error_propagates_to_outer_catch(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Cred/key-material errors must NOT be swallowed by Defense 1."""
+    """Cred/key-material errors must NOT be swallowed by Defense 1.
+
+    CredentialDecryptionError (typed exception) propagates past the
+    per-message ValueError catch. This is the iter-3 contract: the
+    discriminator is the exception TYPE, not a string-prefix marker.
+    """
     caplog.set_level(logging.DEBUG)
     client = FcmPushClientSlim()
     msg = make_poison_data_message("poison-010", kind="value")
     client._receive_msg = _stream_messages(client, [msg])
     client._handle_message = _make_handle_side_effect(
-        [ValueError("Credentials missing FCM key material")]
+        [CredentialDecryptionError("Credentials missing FCM key material")]
     )
 
     await client._listen()
@@ -317,6 +324,39 @@ async def test_legitimate_cred_value_error_propagates_to_outer_catch(
     assert client._send_selective_ack.await_count == 0
     # Worker reaches its terminal state via the finally block.
     assert client.run_state == FcmPushClientRunState.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_unmarked_value_error_is_treated_as_per_message_poison(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Plain ValueError without CredentialDecryptionError type = per-message poison.
+
+    Regression for the iter-2 stealth-drop class (CA-CRED-VS-MSG-DECRYPT-001
+    iter-3): under the old string-prefix marker discipline a plain ValueError
+    from upstream libraries (e.g. cryptography.load_der_private_key raising
+    "Could not deserialize key data") would silently drop EVERY incoming
+    message while the listener stayed "healthy". After the iter-3 fix the
+    discriminator is the exception TYPE: untyped ValueError is treated as
+    per-message poison (ACK + skip), only CredentialDecryptionError escalates.
+    """
+    caplog.set_level(logging.WARNING)
+    client = FcmPushClientSlim()
+    msg = make_poison_data_message("poison-011", kind="value")
+    client._receive_msg = _stream_messages(client, [msg])
+    client._handle_message = _make_handle_side_effect(
+        [ValueError("Could not deserialize key data (the data may be in an "
+                    "incorrect format, the provided password may be incorrect, "
+                    "it may be encrypted with an unsupported algorithm, or it "
+                    "may be an unsupported key type)")]
+    )
+
+    await client._listen()
+
+    # Per-message-poison path: outer catch NOT hit, ACK sent, worker keeps running
+    # until the stream end (do_listen=False from _stream_messages).
+    assert not _outer_catch_was_hit(caplog)
+    client._send_selective_ack.assert_awaited_once_with("poison-011")
 
 
 # ---------------------------------------------------------------------------

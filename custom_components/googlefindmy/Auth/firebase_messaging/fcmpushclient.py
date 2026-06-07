@@ -86,6 +86,25 @@ _logger = logging.getLogger(__name__)
 
 _LEGACY_MCS_PROTOCOL_VERSION = 38
 
+
+class CredentialDecryptionError(ValueError):
+    """Raised when stored FCM credential material cannot be decoded or parsed.
+
+    Subclass of ``ValueError`` for backward-compatibility with external
+    callers that catch broad ``ValueError``. Internal code (notably the
+    listener loop's poison-message defense) discriminates this type via
+    ``isinstance`` to distinguish per-message decode failures (which are
+    safely ACKed and skipped) from credential-corruption failures (which
+    must surface to the supervisor for re-registration).
+
+    Why a typed exception instead of a string-prefix marker: external
+    libraries such as ``cryptography`` and ``http_ece`` raise plain
+    ``ValueError`` without our markers; a ``str.startswith`` catch loses
+    them and silently treats credential corruption as per-message poison.
+    See CA-CRED-VS-MSG-DECRYPT-001 iter-3 lesson.
+    """
+
+
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
     HeartbeatPing: 0,
@@ -440,12 +459,14 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
-            raise ValueError("Credentials missing FCM key material")
+            raise CredentialDecryptionError("Credentials missing FCM key material")
 
         private_value = keys_section.get("private")
         secret_value = keys_section.get("secret")
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
-            raise ValueError("Credentials contain invalid key values")
+            raise CredentialDecryptionError(
+                "Credentials contain invalid key values"
+            )
 
         try:
             der_data = urlsafe_b64decode(
@@ -455,10 +476,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4)
             )
         except binascii.Error as cred_decode_err:
-            raise ValueError(
+            raise CredentialDecryptionError(
                 "Credentials key material failed base64 decode; re-registration required"
             ) from cred_decode_err
-        privkey = load_der_private_key(der_data, password=None)
+        try:
+            privkey = load_der_private_key(der_data, password=None)
+        except Exception as der_err:
+            # cryptography raises plain ValueError (corrupt DER), TypeError
+            # (wrong type), or UnsupportedAlgorithm — all permanent and all
+            # requiring re-registration. Broad catch is intentional: the
+            # only successful path is a valid DER private key.
+            raise CredentialDecryptionError(
+                "Credentials key material failed DER private-key parse; re-registration required"
+            ) from der_err
         decrypted = http_decrypt(
             raw_data,
             salt=salt,
@@ -774,8 +804,8 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
         ``ValueError`` from header parsing) are acknowledged and skipped
         instead of crashing the worker loop. Credential-material errors
-        (markers starting with ``"Credentials "``) propagate so the
-        supervisor surfaces them via STOPPED state.
+        (``CredentialDecryptionError``) propagate so the supervisor
+        surfaces them via STOPPED state and prompts re-registration.
 
         Returns ``True`` to continue the loop, ``False`` to break (writer
         half-dead during ack).
@@ -783,9 +813,11 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         try:
             await self._handle_message(msg)
             return True
+        except CredentialDecryptionError:
+            # Credential corruption is permanent; let the supervisor see it
+            # instead of silently ACKing every message that follows.
+            raise
         except ValueError as decrypt_err:
-            if str(decrypt_err).startswith("Credentials "):
-                raise
             persistent_id = getattr(msg, "persistent_id", None)
             self._log_warn_with_limit(
                 "Skipping FCM message that failed to decrypt "
