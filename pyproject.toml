@@ -339,11 +339,14 @@ omit = [
 [tool.coverage.report]
 show_missing = false
 skip_covered = true
-# Sprint baseline: measured 64.09 % after Phase 2 (#1073/#1074/#1075:
-# registry+identity+polling mixin branch-coverage). Target remains >= 95 % per
-# quality-scale rule test-coverage; this floor only prevents regressions
-# while incremental test expansion lands (60 -> 63 -> 64 -> 70 -> 80 -> 90 -> 95).
-fail_under = 64
+# Sprint baseline: measured 66.53 % after Phase 4 AP-J/AP-I/AP-L/AP-K
+# (#1079/#1080/#1081/#1082: coordinator/polling + api + config_flow + __init__
+# basics coverage). Target remains >= 95 % per quality-scale rule test-coverage;
+# this floor only prevents regressions while incremental test expansion lands
+# (60 -> 63 -> 64 -> 66 -> 70 -> 80 -> 90 -> 95). Bump bundles Phase-3 AP-LS1
+# and AP-LS2 (never executed) with Phase-4 AP-LS3 into one honest stairstep,
+# floor = empirical CI coverage minus 0.5 PP safety margin.
+fail_under = 66
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

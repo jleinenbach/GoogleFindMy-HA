@@ -414,7 +414,7 @@ jobs:
           PYTHONPATH: .
         run: |
           set -o pipefail
-          poetry run pytest -q --cov --cov-report=xml --cov-report=term --cov-fail-under=64 2>&1 | tee pytest_output.log
+          poetry run pytest -q --cov --cov-report=xml --cov-report=term --cov-fail-under=66 2>&1 | tee pytest_output.log
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

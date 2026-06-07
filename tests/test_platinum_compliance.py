@@ -192,10 +192,11 @@ def test_quality_scale_evidence_existence(integration_root: Path) -> None:
 
 
 # Sprint baseline for the test-coverage quality-scale rule.
-# Real coverage on scoped integration source was 64 % (CI run on b9ca59cd).
+# Real coverage on scoped integration source was 66.53 % after Phase 4
+# AP-J/AP-I/AP-L/AP-K (#1079/#1080/#1081/#1082).
 # The Platinum target remains >= 95 %; this floor only prevents regression
 # while incremental test expansion lands. Raise as the sprint phase-gates
-# advance (60 -> 65 -> 75 -> 85 -> 90 -> 95).
+# advance (60 -> 66 -> 70 -> 80 -> 90 -> 95).
 COVERAGE_SPRINT_FLOOR = 60
 COVERAGE_PLATINUM_TARGET = 95
 
