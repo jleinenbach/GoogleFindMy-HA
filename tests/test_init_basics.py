@@ -1,7 +1,7 @@
 # tests/test_init_basics.py
 """Basics coverage for :mod:`custom_components.googlefindmy.__init__` (Phase 4 AP-K).
 
-Hebel-Analyse (CA-COV-HEBEL-001): ``__init__.py`` is the largest module in the
+Leverage rationale (CA-COV-HEBEL-001): ``__init__.py`` is the largest module in the
 codebase (~4266 statements, 63 % baseline). Sixteen pure-function helpers are
 currently completely untested. They split into five families, all of which are
 risk-prioritized per Aniche RV-G3 because they execute on every config-entry
