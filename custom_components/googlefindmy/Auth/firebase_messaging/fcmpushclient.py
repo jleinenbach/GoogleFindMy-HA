@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import json
 import logging
 import random
@@ -84,6 +85,25 @@ http_decrypt: Callable[..., bytes] = http_ece.decrypt
 _logger = logging.getLogger(__name__)
 
 _LEGACY_MCS_PROTOCOL_VERSION = 38
+
+
+class CredentialDecryptionError(ValueError):
+    """Raised when stored FCM credential material cannot be decoded or parsed.
+
+    Subclass of ``ValueError`` for backward-compatibility with external
+    callers that catch broad ``ValueError``. Internal code (notably the
+    listener loop's poison-message defense) discriminates this type via
+    ``isinstance`` to distinguish per-message decode failures (which are
+    safely ACKed and skipped) from credential-corruption failures (which
+    must surface to the supervisor for re-registration).
+
+    Why a typed exception instead of a string-prefix marker: external
+    libraries such as ``cryptography`` and ``http_ece`` raise plain
+    ``ValueError`` without our markers; a ``str.startswith`` catch loses
+    them and silently treats credential corruption as per-message poison.
+    See CA-CRED-VS-MSG-DECRYPT-001 iter-3 lesson.
+    """
+
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -439,16 +459,41 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
-            raise ValueError("Credentials missing FCM key material")
+            raise CredentialDecryptionError("Credentials missing FCM key material")
 
         private_value = keys_section.get("private")
         secret_value = keys_section.get("secret")
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
-            raise ValueError("Invalid key values in credential payload")
+            raise CredentialDecryptionError(
+                "Credentials contain invalid key values"
+            )
 
-        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"=" * (-len(private_value) % 4))
-        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4))
-        privkey = load_der_private_key(der_data, password=None)
+        try:
+            der_data = urlsafe_b64decode(
+                private_value.encode("ascii") + b"=" * (-len(private_value) % 4)
+            )
+            secret = urlsafe_b64decode(
+                secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4)
+            )
+        except (binascii.Error, UnicodeError) as cred_decode_err:
+            # binascii.Error: corrupt base64 payload.
+            # UnicodeError (covers UnicodeEncodeError/UnicodeDecodeError):
+            # non-ASCII bytes in cached keys.private/keys.secret; .encode("ascii")
+            # raises before urlsafe_b64decode is reached. Both are permanent
+            # credential-corruption faults, not per-message poison.
+            raise CredentialDecryptionError(
+                "Credentials key material failed base64 decode; re-registration required"
+            ) from cred_decode_err
+        try:
+            privkey = load_der_private_key(der_data, password=None)
+        except Exception as der_err:
+            # cryptography raises plain ValueError (corrupt DER), TypeError
+            # (wrong type), or UnsupportedAlgorithm — all permanent and all
+            # requiring re-registration. Broad catch is intentional: the
+            # only successful path is a valid DER private key.
+            raise CredentialDecryptionError(
+                "Credentials key material failed DER private-key parse; re-registration required"
+            ) from der_err
         decrypted = http_decrypt(
             raw_data,
             salt=salt,
@@ -742,6 +787,60 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
         return connected
 
+    async def _ack_or_disconnect(self, persistent_id: str | None) -> bool:
+        """Best-effort selective-ACK for a poison message.
+
+        Returns ``True`` to continue the worker loop; ``False`` if the writer
+        half is dead and the supervisor should reconnect (caller breaks).
+        """
+        if not persistent_id:
+            return True
+        try:
+            await self._send_selective_ack(persistent_id)
+            return True
+        except (OSError, ssl.SSLError, ConnectionError):
+            return False
+
+    async def _process_one_inbound_message(self, msg: MessageProto) -> bool:
+        """Run ``_handle_message`` with poison-message defense.
+
+        Defense 1 (CA-CASCADING-FAILURE-001): per-message decode failures
+        (``binascii.Error`` padding faults under Python 3.14 strict mode,
+        ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
+        ``ValueError`` from header parsing) are acknowledged and skipped
+        instead of crashing the worker loop. Credential-material errors
+        (``CredentialDecryptionError``) propagate so the supervisor
+        surfaces them via STOPPED state and prompts re-registration.
+
+        Returns ``True`` to continue the loop, ``False`` to break (writer
+        half-dead during ack).
+        """
+        try:
+            await self._handle_message(msg)
+            return True
+        except CredentialDecryptionError:
+            # Credential corruption is permanent; let the supervisor see it
+            # instead of silently ACKing every message that follows.
+            raise
+        except ValueError as decrypt_err:
+            persistent_id = getattr(msg, "persistent_id", None)
+            self._log_warn_with_limit(
+                "Skipping FCM message that failed to decrypt "
+                "(persistent_id=%s): %s",
+                persistent_id,
+                decrypt_err,
+            )
+            return await self._ack_or_disconnect(persistent_id)
+        except (binascii.Error, RuntimeError) as decrypt_err:
+            persistent_id = getattr(msg, "persistent_id", None)
+            self._log_warn_with_limit(
+                "Skipping FCM message that failed to decrypt "
+                "(persistent_id=%s): %s",
+                persistent_id,
+                decrypt_err,
+            )
+            return await self._ack_or_disconnect(persistent_id)
+
     async def _listen(self) -> None:
         """Listens for push notifications until an error or stop() occurs."""
         try:
@@ -760,7 +859,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             while self.do_listen:
                 try:
                     if msg := await self._receive_msg():
-                        await self._handle_message(msg)
+                        if not await self._process_one_inbound_message(msg):
+                            self.do_listen = False
+                            break
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart
