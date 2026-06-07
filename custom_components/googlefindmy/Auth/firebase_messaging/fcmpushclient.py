@@ -475,7 +475,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             secret = urlsafe_b64decode(
                 secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4)
             )
-        except binascii.Error as cred_decode_err:
+        except (binascii.Error, UnicodeError) as cred_decode_err:
+            # binascii.Error: corrupt base64 payload.
+            # UnicodeError (covers UnicodeEncodeError/UnicodeDecodeError):
+            # non-ASCII bytes in cached keys.private/keys.secret; .encode("ascii")
+            # raises before urlsafe_b64decode is reached. Both are permanent
+            # credential-corruption faults, not per-message poison.
             raise CredentialDecryptionError(
                 "Credentials key material failed base64 decode; re-registration required"
             ) from cred_decode_err

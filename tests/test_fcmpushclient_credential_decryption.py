@@ -78,6 +78,56 @@ def test_non_base64_key_material_raises_typed_error() -> None:
     assert exc_info.value.__cause__ is not None
 
 
+def test_non_ascii_in_private_key_raises_typed_error() -> None:
+    """``keys.private`` with non-ASCII bytes -> CredentialDecryptionError.
+
+    THIS IS THE ITER-4 CODEX REGRESSION (commit ae70dccc90). ``.encode("ascii")``
+    on a corrupted cached key value raises ``UnicodeEncodeError`` BEFORE
+    ``urlsafe_b64decode`` is reached. ``UnicodeEncodeError`` is a subclass of
+    ``ValueError`` but NOT of ``binascii.Error``, so the iter-3 catch
+    ``except binascii.Error`` let it through, the listener loop's per-message
+    ValueError handler swallowed it, and every push was selective-ACKed and
+    silently dropped instead of surfacing a credential fault. The iter-4 fix
+    widens the catch to ``(binascii.Error, UnicodeError)``.
+    """
+    credentials: dict[str, object] = {
+        "keys": {
+            "private": "☃snowman",  # non-ASCII -> UnicodeEncodeError on .encode("ascii")
+            "secret": _b64(b"valid-secret-bytes-16b"),
+        },
+    }
+    with pytest.raises(
+        CredentialDecryptionError, match="failed base64 decode"
+    ) as exc_info:
+        FcmPushClient._decrypt_raw_data(
+            credentials, _b64(b"k"), _b64(b"s"), b"raw"
+        )
+    # __cause__ preserves the underlying UnicodeEncodeError for diagnostics.
+    assert exc_info.value.__cause__ is not None
+    assert isinstance(exc_info.value.__cause__, UnicodeError)
+
+
+def test_non_ascii_in_secret_raises_typed_error() -> None:
+    """``keys.secret`` with non-ASCII bytes -> CredentialDecryptionError.
+
+    Mirror of the iter-4 regression for the secret field: both cred encodes
+    run inside the same try-block, so the same widened catch must apply.
+    """
+    credentials: dict[str, object] = {
+        "keys": {
+            "private": _b64(b"\xde\xad\xbe\xef" * 16),
+            "secret": "café",  # non-ASCII -> UnicodeEncodeError
+        },
+    }
+    with pytest.raises(
+        CredentialDecryptionError, match="failed base64 decode"
+    ) as exc_info:
+        FcmPushClient._decrypt_raw_data(
+            credentials, _b64(b"k"), _b64(b"s"), b"raw"
+        )
+    assert isinstance(exc_info.value.__cause__, UnicodeError)
+
+
 def test_corrupted_der_private_key_raises_typed_error() -> None:
     """Valid base64 but invalid DER content -> CredentialDecryptionError.
 
