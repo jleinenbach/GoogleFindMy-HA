@@ -167,6 +167,13 @@ _MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
 _BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
 _MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
 _MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
+# Defense 2: supervisor-level crash cap as a bulkhead around the inner-loop
+# poison-message filter (``fcmpushclient._listen`` Defense 1+3). When the FCM
+# client connects but loses the run-loop within ``_SHORT_RUN_THRESHOLD_S``
+# repeatedly, a persistent poison condition is suspected and the supervisor
+# stops looping to prevent unbounded retry pressure on Google + log spam.
+_MAX_CONSECUTIVE_SHORT_RUNS = 10
+_SHORT_RUN_THRESHOLD_S = 30.0  # strictly < 30s between pc.start() and STOPPED = short run
 _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
 
@@ -756,6 +763,12 @@ class FcmReceiverHA:
                     return False
 
             backoff = 1.0
+            # Defense 2: per-supervisor closure state for the short-run
+            # crash cap. Kept closure-local (not on ``self``) so a
+            # re-registration that cancels this supervisor and spawns a
+            # new one cannot inherit a stale counter (CA-Audit B1).
+            short_run_counter: int = 0
+            entry_start: float = 0.0
             try:
                 while not stop_evt.is_set():
                     pc = await self._ensure_client_for_entry(entry_id, cache)
@@ -919,6 +932,12 @@ class FcmReceiverHA:
                             "[entry=%s] FCM client failed to start: %s", entry_id, err
                         )
 
+                    # Defense 2 snapshot: timestamp the entry into the
+                    # monitor loop. A start-failure-immediate-exit is still
+                    # counted, because the body below breaks out and runs
+                    # the short-run check with ``run_duration ~= 0``.
+                    entry_start = time.monotonic()
+
                     while not stop_evt.is_set():
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
                         state = getattr(pc, "run_state", None)
@@ -978,6 +997,63 @@ class FcmReceiverHA:
                                 monotonic_now - last_activity,
                             )
                             break
+
+                    # Defense 2: short-run crash cap. Counts consecutive
+                    # monitor exits with ``run_duration <
+                    # _SHORT_RUN_THRESHOLD_S``. After
+                    # ``_MAX_CONSECUTIVE_SHORT_RUNS`` such runs, surface a
+                    # non-fixable repair issue and stop the loop. The
+                    # comparison is strictly ``<`` (a 30.0s run counts as
+                    # healthy and resets the counter).
+                    run_duration = time.monotonic() - entry_start
+                    if run_duration < _SHORT_RUN_THRESHOLD_S:
+                        short_run_counter += 1
+                        # Test hook: expose the closure counter to stubs
+                        # without leaking it onto ``self``.
+                        observe = getattr(pc, "_observe_counter", None)
+                        if callable(observe):
+                            try:
+                                observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if short_run_counter >= _MAX_CONSECUTIVE_SHORT_RUNS:
+                            message = (
+                                f"FCM short-run crash loop: "
+                                f"{_MAX_CONSECUTIVE_SHORT_RUNS} consecutive "
+                                f"runs ended within "
+                                f"{_SHORT_RUN_THRESHOLD_S:.0f}s "
+                                f"(persistent poison message suspected)"
+                            )
+                            _LOGGER.error("[entry=%s] %s", entry_id, message)
+                            self._fatal_errors[entry_id] = message
+                            if self._hass:
+                                ir.async_create_issue(
+                                    self._hass,
+                                    DOMAIN,
+                                    f"fcm_short_run_crash_loop_{entry_id}",
+                                    is_fixable=False,
+                                    severity=ir.IssueSeverity.ERROR,
+                                    translation_key="fcm_short_run_crash_loop",
+                                )
+                            # Cleanup the client before breaking out so
+                            # the loop exit doesn't leave a half-stopped pc.
+                            try:
+                                await pc.stop()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            finally:
+                                async with self._lock:
+                                    self.pcs.pop(entry_id, None)
+                                self._update_entry_health(entry_id, False)
+                            break
+                    else:
+                        short_run_counter = 0  # healthy run resets the counter
+                        observe = getattr(pc, "_observe_counter", None)
+                        if callable(observe):
+                            try:
+                                observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
 
                     # Cleanup before restart
                     try:
