@@ -1030,10 +1030,20 @@ class FcmReceiverHA:
                         )
 
                     # Defense 2 snapshot: timestamp the entry into the
-                    # monitor loop. A start-failure-immediate-exit is still
-                    # counted, because the body below breaks out and runs
-                    # the short-run check with ``run_duration ~= 0``.
+                    # monitor loop.
+                    #
+                    # Iter-11 (Codex follow-up): per-run latch tracking
+                    # whether the client ever reached a connected/listening
+                    # state. The cap is meant to detect a poison-message
+                    # crash loop (client connects, decodes, dies, repeat),
+                    # NOT ordinary connectivity outages where ``_listen()``
+                    # exhausts its 5 connection retries (~15-20s) without
+                    # ever reaching ``STARTED``. Without this gate, a normal
+                    # MCS-unreachable / Google outage would cap the
+                    # supervisor after 10 brief connection-failure runs and
+                    # permanently disable FCM push until reload.
                     entry_start = time.monotonic()
+                    became_started = False
 
                     while not stop_evt.is_set():
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
@@ -1044,6 +1054,14 @@ class FcmReceiverHA:
                             entry_id, pc, monotonic_now
                         )
                         stale_after = max(self._activity_stale_after_s, 0.0)
+                        # Iter-11: track ``became_started`` symmetrically to
+                        # the health probe (same fallback for libraries that
+                        # do not expose a ``run_state`` enum).
+                        if FcmPushClientRunState is None:
+                            if do_listen:
+                                became_started = True
+                        elif state == FcmPushClientRunState.STARTED:
+                            became_started = True
                         healthy = (
                             (
                                 FcmPushClientRunState is None
@@ -1097,13 +1115,32 @@ class FcmReceiverHA:
 
                     # Defense 2: short-run crash cap. Counts consecutive
                     # monitor exits with ``run_duration <
-                    # _SHORT_RUN_THRESHOLD_S``. After
+                    # _SHORT_RUN_THRESHOLD_S`` THAT ALSO reached
+                    # ``STARTED`` at least once during the run. After
                     # ``_MAX_CONSECUTIVE_SHORT_RUNS`` such runs, surface a
                     # non-fixable repair issue and stop the loop. The
                     # comparison is strictly ``<`` (a 30.0s run counts as
                     # healthy and resets the counter).
+                    #
+                    # Iter-11 (Codex follow-up): the ``became_started`` gate
+                    # ensures the cap is specific to the poison-message
+                    # scenario (client connects, decodes, dies, repeat) and
+                    # excludes pre-start connection/login failures. A burst
+                    # of MCS-unreachable failures (5 retries x ~3-4s each)
+                    # would otherwise be counted as short-run crashes and
+                    # permanently disable FCM push after one ordinary
+                    # network outage. Pre-start failures leave the counter
+                    # AND the latch UNTOUCHED so that (a) a poison-message
+                    # cascade interleaved with outages still accumulates
+                    # correctly, and (b) a long pre-start hang does not
+                    # falsely clear a real cap latch (no healthy proof).
                     run_duration = time.monotonic() - entry_start
-                    if run_duration < _SHORT_RUN_THRESHOLD_S:
+                    if not became_started:
+                        # Pre-start failure (no connected/listening state
+                        # observed during this run). Do NOT touch the
+                        # short-run counter or the cap latch.
+                        pass
+                    elif run_duration < _SHORT_RUN_THRESHOLD_S:
                         short_run_counter += 1
                         # Test hook: expose the closure counter to stubs
                         # without leaking it onto ``self``.

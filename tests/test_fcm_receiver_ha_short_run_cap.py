@@ -65,8 +65,16 @@ class _SupervisorPushClientStub:
       inject elapsed-run time that ``run_duration = time.monotonic() -
       entry_start`` actually observes. Use this for boundary math.
 
-    ``run_state`` defaults to ``None`` so the monitor loop exits on the
-    first iteration (``state is None`` break path).
+    Iter-11 ``become_started``: defaults to ``True`` so the first
+    ``run_state`` read returns ``FcmPushClientRunState.STARTED`` (setting
+    the supervisor's per-run ``became_started`` latch) and the second
+    read returns ``None`` (forcing the ``state is None`` break path on
+    the next iteration with ``last_activity is None``). This mirrors the
+    poison-message scenario the cap is designed to catch: client
+    connects, decodes, dies, repeat. Set ``become_started=False`` to
+    model a pre-start failure (MCS unreachable / login failed) where the
+    client NEVER reaches ``STARTED`` and the cap MUST NOT advance the
+    counter.
     """
 
     def __init__(
@@ -75,10 +83,12 @@ class _SupervisorPushClientStub:
         clock: _MonoClock | None = None,
         jump_on_start: float = 0.0,
         jump_on_run_state_read: float = 0.0,
+        become_started: bool = True,
     ) -> None:
         self.clock = clock
         self.jump_on_start = jump_on_start
         self.jump_on_run_state_read = jump_on_run_state_read
+        self.become_started = become_started
         self.do_listen = True
         self.start_calls = 0
         self.stop_calls = 0
@@ -94,8 +104,18 @@ class _SupervisorPushClientStub:
             and self.jump_on_run_state_read
         ):
             self.clock.jump(self.jump_on_run_state_read)
+        if self.become_started and self._run_state_reads == 1:
+            from custom_components.googlefindmy.Auth.firebase_messaging import (
+                FcmPushClientRunState,
+            )
+
+            return FcmPushClientRunState.STARTED
         # Implicit ``None`` return forces the ``state is None`` break path
-        # in the supervisor monitor loop (Z. 984-989).
+        # in the supervisor monitor loop on the next iteration. With
+        # ``become_started=True`` this also gives ``last_activity is
+        # None`` break exactly one iteration AFTER ``STARTED`` was
+        # observed, which is the poison-message run shape (client
+        # connects, no message processed, restart).
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -986,4 +1006,181 @@ async def test_cap_fire_pops_stop_evt_for_legitimate_restart(
         "Stale stop event lingers in _stop_evts after cap-fire; a "
         "legitimate restart would short-circuit because setdefault would "
         "reuse the already-set event."
+    )
+
+
+# --------------------------------------------------------------------------
+# Iter-11: Defense-Specificity (pre-start failures excluded from cap)
+# --------------------------------------------------------------------------
+# Pins the ``became_started`` per-run latch contract:
+# - Pre-start failures (MCS unreachable / login failed, client never
+#   reaches STARTED) MUST NOT advance the short-run counter and MUST
+#   NOT clear an existing cap latch.
+# - Real poison-message short-runs (became_started=True + run<30s) MUST
+#   still advance the counter as before. The cap stays specific to the
+#   scenario it was designed for.
+# - A mixed cascade (poison-message runs interleaved with transient
+#   outages) still accumulates correctly: the outages are no-ops, the
+#   poison-message runs add up to the cap at iteration N+M_short.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_start_failure_does_not_advance_cap_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """15 pre-start failures (no STARTED reached) must NOT fire the cap.
+
+    Models the Codex iter-11 scenario: an ordinary network/Google outage
+    where ``_listen()`` exhausts its 5 connection retries (~15-20s) and
+    the client never reaches ``STARTED``. Before the gate, 10 such
+    bursts would have permanently capped the supervisor and disabled
+    FCM push until reload.
+    """
+    entry_id = "entry-pre-start"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    # 15 stubs that NEVER set become_started -> run_state stays None on
+    # every read -> ``became_started`` stays False in the supervisor.
+    clients = [
+        _SupervisorPushClientStub(clock=clock, become_started=False)
+        for _ in range(15)
+    ]
+    register_mock = _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    create_issue, _delete_issue = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # The supervisor only terminates when the helper exhausts the client
+    # list (StopIteration -> stop_evt.set()). We MUST see all 15 registration
+    # attempts -- none was prematurely cut off by a cap fire.
+    assert register_mock.await_count == 15, (
+        f"Pre-start failures advanced the cap counter and terminated "
+        f"early -- expected 15 attempts, got {register_mock.await_count}"
+    )
+    assert create_issue.call_count == 0, (
+        "Cap repair issue was created from pre-start failures; the "
+        "``became_started`` gate is broken."
+    )
+    assert entry_id not in receiver._fatal_errors
+    assert entry_id not in receiver._short_run_cap_latched
+
+
+@pytest.mark.asyncio
+async def test_mixed_burst_only_counts_real_short_runs_toward_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """5 real short-runs + 3 pre-start failures + 5 real short-runs -> cap fires at 10 real.
+
+    Pins the "counter unchanged across pre-start failures" semantics: a
+    poison-message cascade interleaved with outages must still
+    accumulate correctly. The outages are no-ops, the real short-runs
+    accumulate 5+5=10 and the cap fires on the 10th REAL short-run.
+    """
+    entry_id = "entry-mixed"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    clients: list[_SupervisorPushClientStub] = []
+    # 5 real poison-message-style short-runs (became_started=True, run<30s)
+    for _ in range(5):
+        clients.append(_SupervisorPushClientStub(clock=clock))
+    # 3 transient outages (become_started=False) -- must be ignored by the cap
+    for _ in range(3):
+        clients.append(
+            _SupervisorPushClientStub(clock=clock, become_started=False)
+        )
+    # 5 more real short-runs -- together with the first 5 these are the 10
+    # consecutive REAL short-runs that fire the cap.
+    for _ in range(5):
+        clients.append(_SupervisorPushClientStub(clock=clock))
+    # Extra clients beyond the cap-fire would expose "loop kept going".
+    for _ in range(3):
+        clients.append(_SupervisorPushClientStub(clock=clock))
+
+    register_mock = _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    create_issue, _delete_issue = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # Cap fires after the 13th client (5 real + 3 outage + 5th real = 13).
+    # Anything beyond 13 indicates the cap miscounted or did not terminate.
+    assert register_mock.await_count == 13, (
+        f"Mixed burst miscounted -- expected 13 client attempts "
+        f"(5 real + 3 outage + 5 real, cap on the 13th), got "
+        f"{register_mock.await_count}"
+    )
+    assert create_issue.call_count == 1
+    assert entry_id in receiver._short_run_cap_latched
+    assert receiver._fatal_errors[entry_id].startswith("FCM short-run crash loop")
+
+
+@pytest.mark.asyncio
+async def test_long_pre_start_does_not_release_cap_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Long-running pre-start failure (run>=30s) does NOT clear the cap latch.
+
+    Models a slow-to-fail connection attempt that hangs in pre-start for
+    more than 30s. Before the gate, the supervisor would have hit the
+    ``else`` branch (long run) and released the cap latch + Repairs UI
+    issue without ever proving the listener can stay up. The
+    ``became_started`` gate makes this a no-op so the latch remains.
+    """
+    entry_id = "entry-long-prestart"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    # Pre-seed the latch as if a prior cap-fire was still active. This
+    # mirrors the production state right after iter-9 termination but
+    # before any healthy run has cleared it.
+    receiver._short_run_cap_latched.add(entry_id)
+    receiver._fatal_errors[entry_id] = (
+        "FCM short-run crash loop: 10 consecutive runs ended within 30s "
+        "(persistent poison message suspected)"
+    )
+
+    clock = _MonoClock(step=0.0)
+    # become_started=False AND a 60s jump after the snapshot. Without the
+    # gate, the supervisor would see run_duration >= 30s and hit the
+    # ``else`` branch, releasing the latch.
+    stub = _SupervisorPushClientStub(
+        clock=clock, jump_on_run_state_read=60.0, become_started=False
+    )
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=[stub]
+    )
+    _create_issue, delete_issue = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # Latch survives the long pre-start (no healthy proof was observed).
+    assert entry_id in receiver._short_run_cap_latched, (
+        "Long pre-start failure cleared the cap latch without ever "
+        "proving a healthy run -- gate is broken."
+    )
+    assert entry_id in receiver._fatal_errors
+    assert receiver._fatal_errors[entry_id].startswith("FCM short-run crash loop")
+    # Repairs UI issue for the short-run cap was NOT deleted by the long
+    # pre-start. (The supervisor may issue unrelated ``fcm_stuck`` delete
+    # calls after a successful registration; we filter on the specific
+    # ``fcm_short_run_crash_loop_*`` key.)
+    cap_issue_key = f"fcm_short_run_crash_loop_{entry_id}"
+    cap_deletes = [
+        call for call in delete_issue.call_args_list
+        if len(call.args) >= 3 and call.args[2] == cap_issue_key
+    ]
+    assert cap_deletes == [], (
+        f"Long pre-start deleted the cap Repairs issue without a healthy "
+        f"run; cap_deletes={cap_deletes}"
     )
