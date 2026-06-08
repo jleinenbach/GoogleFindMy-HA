@@ -415,7 +415,7 @@ def test_gcm_register_raises_on_persistent_401(
     assert exc_info.value.status == 401
 
 
-def test_gcm_register_non_fatal_status_returns_none_not_raises(
+async def test_gcm_register_non_fatal_status_returns_none_not_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Negative contract: persistent non-fatal HTTP status (500) drains the
@@ -444,14 +444,14 @@ def test_gcm_register_non_fatal_status_returns_none_not_raises(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(
-        register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=8
     )
 
     assert result is None
 
 
-def test_gcm_register_mixed_status_caches_last_fatal_only(
+async def test_gcm_register_mixed_status_caches_last_fatal_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache discipline: when a fatal response (401) sits among non-fatal
@@ -490,14 +490,14 @@ def test_gcm_register_mixed_status_caches_last_fatal_only(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+        await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=8
         )
 
     assert exc_info.value.status == 401
 
 
-def test_gcm_register_classifier_independent_of_logger_output(
+async def test_gcm_register_classifier_independent_of_logger_output(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -550,10 +550,8 @@ def test_gcm_register_classifier_independent_of_logger_output(
 
     with caplog.at_level(logging.WARNING):
         with pytest.raises(FcmRegisterHTTPError) as exc_info:
-            asyncio.run(
-                register.gcm_register(
-                    {"androidId": 1, "securityToken": 2}, retries=8
-                )
+            await register.gcm_register(
+                {"androidId": 1, "securityToken": 2}, retries=8
             )
 
     assert exc_info.value.status == 404
