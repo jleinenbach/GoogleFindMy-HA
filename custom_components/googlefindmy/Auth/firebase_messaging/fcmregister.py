@@ -418,6 +418,19 @@ class FcmRegister:
         }
 
         last_error: str | Exception | None = None
+        # Numeric status cache reflecting the LATEST response classification
+        # (last-wins semantics, mirrors the pre-existing ``last_error``
+        # update discipline). Each response site re-assigns this cache —
+        # either to the fatal HTTP status code or back to ``None`` —
+        # so a transient followup never inherits a stale fatal latch from
+        # an earlier attempt. Decouples the post-loop classifier from the
+        # logger string format and eliminates connascence-of-convention
+        # between the ``last_error`` template and the ``status=`` substring
+        # marker. Symmetric Set/Clear at every alternative branch is the
+        # contract — see the four response sites below; each one re-assigns
+        # ``last_fatal_status`` so the cache never carries a stale value
+        # from a previous attempt.
+        last_fatal_status: int | None = None
         attempt = 1
 
         while attempt <= retries:
@@ -445,6 +458,10 @@ class FcmRegister:
                     status = resp.status
             except Exception as exc:  # network or aiohttp failure
                 last_error = exc
+                # Network/aiohttp exception has no HTTP status to classify;
+                # the latest attempt is transient by definition, so clear
+                # any earlier fatal-status latch (Set/Clear symmetry).
+                last_fatal_status = None
                 _logger.warning(
                     "GCM register request failed via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
@@ -463,6 +480,11 @@ class FcmRegister:
             if status == HTTPStatus.NOT_FOUND or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                # Last-wins: cache reflects THIS response, not a stale
+                # earlier fatal. Non-fatal HTML responses clear the latch.
+                last_fatal_status = (
+                    int(status) if int(status) in _FATAL_HTTP_STATUSES else None
+                )
                 _logger.warning(
                     "GCM register 404/HTML via /c2dm/register3 (attempt %d/%d, status=%s)",
                     attempt,
@@ -501,6 +523,16 @@ class FcmRegister:
 
             if error_code:
                 last_error = f"Error={error_code}"
+                # Last-wins classification by HTTP STATUS (SSOT), not by
+                # the presence of a structured ``Error=...`` body. The
+                # server CAN return a structured error body with a fatal
+                # HTTP status (401/404) — in that case the response is
+                # still HTTP-fatal regardless of the body content. The
+                # body shape is orthogonal to the auth/endpoint
+                # classification used by the caller.
+                last_fatal_status = (
+                    int(status) if int(status) in _FATAL_HTTP_STATUSES else None
+                )
                 if error_code == "PHONE_REGISTRATION_ERROR":
                     # Transient error — just retry with the same sender.
                     # Upstream GoogleFindMyTools treats this as transient and
@@ -525,6 +557,13 @@ class FcmRegister:
                 if html_like:
                     snippet += " [html]"
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                # Last-wins: cache reflects THIS response, not a stale
+                # earlier fatal. Non-fatal statuses (e.g. 5xx) clear the
+                # latch so a final transient response is not escalated
+                # through the dedicated auth/endpoint recovery path.
+                last_fatal_status = (
+                    int(status) if int(status) in _FATAL_HTTP_STATUSES else None
+                )
                 _logger.warning(
                     "GCM register unexpected response via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
@@ -548,16 +587,22 @@ class FcmRegister:
         # via _invalidate_fcm_tokens) or the endpoint retry budget (404)
         # instead of treating it as a transient runtime error. Mirrors
         # _FATAL_HTTP_STATUSES used by gcm_check_in, fcm_install,
-        # fcm_register, and fcm_refresh_install_token.
-        if isinstance(last_error, str):
-            for fatal_status in _FATAL_HTTP_STATUSES:
-                marker = f"status={int(fatal_status)}"
-                if marker in last_error:
-                    raise FcmRegisterHTTPError(
-                        f"GCM register fatal status {int(fatal_status)} "
-                        f"(persisted after {retries} attempts)",
-                        status=int(fatal_status),
-                    )
+        # fcm_register, and fcm_refresh_install_token. The classifier reads
+        # the numeric ``last_fatal_status`` cache, which uses LAST-WINS
+        # semantics — every response site re-assigns it (to the fatal
+        # status code or to ``None``) so the value reflects the FINAL
+        # attempt, not the first fatal seen. A transient followup
+        # therefore clears an earlier fatal latch, mirroring the original
+        # final-``last_error`` behaviour and preventing escalation of
+        # ordinary transient failures through the auth/endpoint path.
+        # NOT a substring of ``last_error`` — this keeps the defense
+        # robust against future log-format refactors.
+        if last_fatal_status is not None:
+            raise FcmRegisterHTTPError(
+                f"GCM register fatal status {last_fatal_status} "
+                f"(persisted after {retries} attempts)",
+                status=last_fatal_status,
+            )
         return None
 
     # ---------------------------------------------------------------------
