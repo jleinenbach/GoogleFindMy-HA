@@ -338,22 +338,52 @@ class FcmReceiverHA:
 
         Defense 2 iter-8 (Codex second finding): a successful FCM
         re-registration is NOT a recovery proof for the short-run crash cap.
-        While ``_short_run_cap_latched`` contains *entry_id* this method is a
-        no-op (the cap latch and the Repairs UI artefact persist), so users
-        keep seeing the fatal state until a real healthy supervisor run
-        (>= _SHORT_RUN_THRESHOLD_S) drops the latch from the monitor loop.
-        Hard-reset callers (entry unregister, test cleanup, integration
-        teardown) must opt in with ``force=True``.
+        While ``_short_run_cap_latched`` contains *entry_id* this method must
+        protect the cap state (latched fatal message + Repairs UI artefact)
+        from being silently cleared, so users keep seeing the fatal state
+        until a real healthy supervisor run (>= _SHORT_RUN_THRESHOLD_S) drops
+        the latch from the monitor loop. Hard-reset callers (entry unregister,
+        test cleanup, integration teardown) must opt in with ``force=True``.
+
+        Defense 2 iter-10 (Codex follow-up): the latch guard is intentionally
+        narrow. It is a no-op ONLY when the currently stored fatal IS the
+        cap-related message (``FCM short-run crash loop: ...``). Non-cap fatal
+        errors (e.g. a terminal 401/404 from a subsequent re-registration that
+        overwrote ``_fatal_errors[entry_id]``) must clear normally so a
+        credentials recovery is not blocked by an unrelated latch. The cap
+        latch, any cap-related fatal it still protects, and the Repairs UI
+        artefact remain in place in that case; only the unrelated fatal is
+        dropped.
         """
 
+        cap_message_prefix = "FCM short-run crash loop:"
+
         if not force and entry_id in self._short_run_cap_latched:
+            current_fatal = self._fatal_errors.get(entry_id)
+            # No fatal stored, or the stored fatal IS the cap message:
+            # preserve everything (latch, message, Repairs UI artefact).
+            if current_fatal is None or current_fatal.startswith(cap_message_prefix):
+                _LOGGER.debug(
+                    "[entry=%s] Skipping fatal-error clear; short-run cap latch "
+                    "active (reason=%s). Latch will be released by a healthy "
+                    "supervisor run.",
+                    entry_id,
+                    reason or "unspecified",
+                )
+                return
+
+            # Non-cap fatal stored while the cap latch is active. Clear the
+            # unrelated fatal but KEEP the cap latch and Repairs UI artefact
+            # intact, so the user-visible cap warning is not silently
+            # invalidated by an unrelated recovery path.
             _LOGGER.debug(
-                "[entry=%s] Skipping fatal-error clear; short-run cap latch "
-                "active (reason=%s). Latch will be released by a healthy "
-                "supervisor run.",
+                "[entry=%s] Cap latch active; clearing non-cap fatal "
+                "(reason=%s) while preserving cap latch and repair issue",
                 entry_id,
                 reason or "unspecified",
             )
+            self._fatal_errors.pop(entry_id, None)
+            self._fatal_error = next(iter(self._fatal_errors.values()), None)
             return
 
         if force:

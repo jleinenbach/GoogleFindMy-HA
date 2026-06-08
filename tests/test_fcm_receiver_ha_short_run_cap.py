@@ -587,6 +587,123 @@ async def test_cap_latch_survives_registration_success_path(
     assert receiver._fatal_errors[entry_id] == pre_message
 
 
+# --------------------------------------------------------------------------
+# Defense 2 iter-10: cap-latch guard granularity (Codex follow-up finding)
+# --------------------------------------------------------------------------
+#
+# Codex objected that the iter-8 latch guard was unconditional and blocked
+# every later ``_clear_fatal_error_for_entry`` call while the latch was set.
+# Scenario: the cap fires, then the user reloads or re-registers; the new
+# registration hits a terminal 401/404 and overwrites ``_fatal_errors[entry_id]``
+# with a non-cap message; a credentials recovery later tries to clear that
+# fatal but is blocked by the latch guard, so the coordinator keeps seeing
+# the stale auth-fatal even after the underlying problem is fixed.
+#
+# CA-GUARD-GRANULARITY-001: the latch guard is now SELECTIVE:
+#
+#   * Latch active AND stored fatal IS the cap message
+#     -> full no-op (cap state + Repairs UI artefact preserved).
+#   * Latch active AND stored fatal is a NON-cap message
+#     -> clear the non-cap fatal, but keep the latch and the Repairs UI
+#        artefact (cap warning stays visible until a healthy run releases it).
+#   * Latch active AND no fatal stored
+#     -> full no-op (treat as cap-only state).
+#   * Latch not active OR force=True
+#     -> normal clear-all path (unchanged).
+
+
+def test_clear_clears_non_cap_fatal_while_cap_latched() -> None:
+    """Non-cap fatals must clear normally even while the cap latch is active.
+
+    Defense 2 iter-10 (Codex follow-up): the iter-8 guard was too broad and
+    blocked every clear-call, so a terminal 401/404 written into
+    ``_fatal_errors`` by a re-registration attempt after cap-fire could never
+    be dropped by a subsequent credentials recovery. The guard now blocks
+    only when the stored fatal IS the cap message; non-cap fatals are
+    dropped while latch and Repairs UI artefact stay in place.
+    """
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    # Cap is latched (set by an earlier cap-fire); a subsequent
+    # re-registration then overwrote the fatal map with a non-cap auth error.
+    receiver._short_run_cap_latched.add("entry-mixed")
+    receiver._fatal_errors["entry-mixed"] = (
+        "FCM registration failed: HTTP 401 Unauthorized"
+    )
+    receiver._fatal_error = "FCM registration failed: HTTP 401 Unauthorized"
+
+    # Credentials recovery path: ``_register_for_fcm_entry`` calls this after
+    # a new successful registration. The non-cap fatal MUST clear so the
+    # coordinator does not see a stale auth-fatal.
+    receiver._clear_fatal_error_for_entry(
+        "entry-mixed", reason="Credentials updated for entry"
+    )
+
+    # Non-cap fatal cleared.
+    assert "entry-mixed" not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    # Cap latch SURVIVES: only a real healthy supervisor run may drop it.
+    assert "entry-mixed" in receiver._short_run_cap_latched
+
+
+def test_clear_preserves_repair_issue_when_clearing_non_cap_fatal() -> None:
+    """Clearing a non-cap fatal while latched must not delete the Repairs issue.
+
+    The Repairs UI artefact (``fcm_short_run_crash_loop_<entry_id>``) is the
+    user-visible cap warning. Dropping it during an unrelated credentials
+    recovery would invalidate the cap warning before the listener proves the
+    poison message is gone (the very failure mode iter-8 pinned).
+    """
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    deleted_issues: list[tuple[str, str]] = []
+
+    def fake_async_delete_issue(hass, domain: str, issue_id: str) -> None:
+        deleted_issues.append((domain, issue_id))
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(
+            fcm_receiver_ha.ir, "async_delete_issue", fake_async_delete_issue
+        )
+
+        receiver._short_run_cap_latched.add("entry-keep-issue")
+        receiver._fatal_errors["entry-keep-issue"] = (
+            "FCM registration failed: HTTP 404 Not Found"
+        )
+        receiver._fatal_error = "FCM registration failed: HTTP 404 Not Found"
+
+        receiver._clear_fatal_error_for_entry(
+            "entry-keep-issue", reason="Credentials updated for entry"
+        )
+    finally:
+        monkey.undo()
+
+    # Non-cap fatal cleared but the Repairs UI artefact must remain (no
+    # ``async_delete_issue`` call for the cap issue id).
+    assert "entry-keep-issue" not in receiver._fatal_errors
+    assert deleted_issues == []
+    assert "entry-keep-issue" in receiver._short_run_cap_latched
+
+
+def test_clear_no_stored_fatal_while_latched_is_full_noop() -> None:
+    """Latch active and no fatal stored: full no-op, latch survives."""
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    receiver._short_run_cap_latched.add("entry-no-fatal")
+    # No entry in ``_fatal_errors``.
+
+    receiver._clear_fatal_error_for_entry(
+        "entry-no-fatal", reason="Registration succeeded"
+    )
+
+    assert "entry-no-fatal" in receiver._short_run_cap_latched
+    assert "entry-no-fatal" not in receiver._fatal_errors
+
+
 @pytest.mark.asyncio
 async def test_healthy_run_releases_cap_latch_and_fatal_state(
     monkeypatch: pytest.MonkeyPatch,
