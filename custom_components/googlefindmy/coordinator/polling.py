@@ -155,6 +155,7 @@ class PollingOperations(_MixinBase):
     _fcm_status_changed_at: float | None
     _force_device_list_reason: str | None
     _short_retry_cancel: Callable[[], None] | None
+    _fcm_error_count: int
     _fcm_last_error: str | None
     _last_transient_auth_error: str | None
     _is_polling: bool
