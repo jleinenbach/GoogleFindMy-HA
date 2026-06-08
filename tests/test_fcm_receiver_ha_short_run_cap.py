@@ -744,3 +744,129 @@ def test_translation_key_present_in_all_locales(integration_root: Path) -> None:
     assert descriptions["strings.json"] == descriptions["en.json"], (
         "strings.json description must mirror en.json"
     )
+
+
+# --------------------------------------------------------------------------
+# Defense 2 iter-9 (Codex PR #1086 follow-up):
+# Cap-fire must TERMINATE the supervisor; the inner-loop ``break`` alone
+# falls through to the per-iteration restart block and keeps spawning fresh
+# FCM clients (retry pressure + log spam continue indefinitely despite the
+# cap latch). See CA-DEFENSE-TERMINATION-001.
+#
+# These tests deliberately do NOT rely on the helper's
+# StopIteration->stop_evt.set() emergency brake (CA-TEST-TERMINATION-001):
+# they install their own ``_ensure_client_for_entry`` mock that fails the
+# test the moment the supervisor calls it AFTER the cap should have fired.
+# That isolates the production-side termination contract from the test-helper
+# safety net.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cap_fire_terminates_outer_loop_without_helper_safety_net(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cap-fire must stop the supervisor in production, not via the test helper.
+
+    Codex iter-9 (PR #1086): ``break`` after the cap fires only exits the
+    inner monitor loop; the outer ``while not stop_evt.is_set()`` keeps
+    spinning and ``_ensure_client_for_entry`` is called for an 11th client.
+    The production fix sets ``stop_evt`` and pops ``_stop_evts[entry_id]``
+    inside the cap-fire branch, so the outer loop exits before any further
+    ensure call.
+    """
+    entry_id = "entry-cap-terminates"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS + 5)
+    ]
+    ensure_iter = iter(clients)
+    ensure_call_count = 0
+
+    async def _ensure(entry_id_inner: str, cache):  # noqa: ARG001
+        # NOTE: no StopIteration->stop_evt.set() escape hatch here. If the
+        # production cap fails to terminate the supervisor, this returns the
+        # 11th client and we explicitly fail the test below.
+        nonlocal ensure_call_count
+        ensure_call_count += 1
+        return next(ensure_iter)
+
+    monkeypatch.setattr(fcm_receiver_ha.time, "monotonic", clock)
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
+    register_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(receiver, "_register_for_fcm_entry", register_mock)
+    monkeypatch.setattr(fcm_receiver_ha.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        fcm_receiver_ha.random, "uniform", lambda *_a, **_kw: 0.0
+    )
+
+    real_wait_for = asyncio.wait_for
+
+    async def _instant_wait_for(fut, *, timeout=None):
+        if timeout is not None and timeout > 0:
+            coro_name = getattr(fut, "__name__", "") or getattr(
+                getattr(fut, "cr_code", None), "co_name", ""
+            )
+            if coro_name == "wait":
+                if asyncio.iscoroutine(fut):
+                    fut.close()
+                raise TimeoutError
+        return await real_wait_for(fut, timeout=timeout)
+
+    monkeypatch.setattr(fcm_receiver_ha.asyncio, "wait_for", _instant_wait_for)
+    _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # Production-side termination contract: exactly _MAX ensure calls.
+    # An 11th call would mean the outer loop kept running after cap-fire.
+    assert ensure_call_count == _MAX_CONSECUTIVE_SHORT_RUNS, (
+        f"Supervisor kept spinning after cap-fire: ensure was called "
+        f"{ensure_call_count} times (expected {_MAX_CONSECUTIVE_SHORT_RUNS}). "
+        f"Defense 2 cap is a paper tiger."
+    )
+    assert receiver.supervisors[entry_id].done()
+    assert entry_id in receiver._short_run_cap_latched
+
+
+@pytest.mark.asyncio
+async def test_cap_fire_pops_stop_evt_for_legitimate_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After cap-fire, ``_stop_evts[entry_id]`` is gone so a reload restarts cleanly.
+
+    The cap-fire branch calls ``stop_evt.set()`` AND
+    ``self._stop_evts.pop(entry_id, None)``. Without the pop, the next
+    legitimate restart via ``_start_supervisor_for_entry`` would reuse the
+    already-set event through ``setdefault`` and the new supervisor would
+    terminate immediately.
+    """
+    entry_id = "entry-cap-pop"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # After cap-fire the stop event has been consumed AND removed so that a
+    # legitimate ``_register_for_fcm_entry`` or reload constructs a fresh one.
+    assert entry_id not in receiver._stop_evts, (
+        "Stale stop event lingers in _stop_evts after cap-fire; a "
+        "legitimate restart would short-circuit because setdefault would "
+        "reuse the already-set event."
+    )

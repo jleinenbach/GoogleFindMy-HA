@@ -1119,6 +1119,22 @@ class FcmReceiverHA:
                                 async with self._lock:
                                     self.pcs.pop(entry_id, None)
                                 self._update_entry_health(entry_id, False)
+                            # Defense 2 iter-9 (Codex follow-up): the cap is
+                            # a TERMINAL state for this supervisor. ``break``
+                            # alone only exits the inner monitor loop and
+                            # falls through to the per-iteration restart
+                            # block (``if not stop_evt.is_set(): ...
+                            # _nudge_sleep(delay)``), which would spawn a
+                            # fresh FCM client and continue the retry
+                            # pressure / log spam the cap is meant to stop.
+                            # Set the stop event so the outer ``while not
+                            # stop_evt.is_set()`` exits, and pop the entry
+                            # from ``_stop_evts`` so a legitimate
+                            # re-registration / reload (which constructs a
+                            # fresh event via ``setdefault``) is not
+                            # short-circuited by the now-consumed event.
+                            stop_evt.set()
+                            self._stop_evts.pop(entry_id, None)
                             break
                     else:
                         short_run_counter = 0  # healthy run resets the counter
