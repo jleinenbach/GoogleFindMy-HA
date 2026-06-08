@@ -160,6 +160,44 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# Iter-12 (Codex follow-up): the short-run crash cap needs to know
+# whether the FCM client ever reached ``FcmPushClientRunState.STARTED``
+# during a run, even when the entire CREATED -> STARTED -> CRASH
+# lifecycle happens between two monitor polls (``FCM_MONITOR_INTERVAL_S``
+# >= 0.5s). Sampling alone is too coarse for the very poison-message
+# loop the cap is meant to stop. A subclass with a ``__setattr__`` hook
+# latches ``_has_been_started`` the moment the vendored library assigns
+# ``run_state = STARTED`` -- independent of any polling cadence and
+# without modifying the vendored library itself. See
+# CA-DEFENSE-OBSERVABILITY-001.
+if HAVE_FCM_PUSH_CLIENT and FcmPushClientRunState is not None:
+
+    class _ObservableFcmPushClient(FcmPushClient):  # type: ignore[misc, valid-type]
+        """FcmPushClient subclass with a run_state observer latch."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Seed the latch before super().__init__ so any attribute
+            # assignment performed by the parent's constructor still
+            # routes through our ``__setattr__`` without raising.
+            object.__setattr__(self, "_has_been_started", False)
+            super().__init__(*args, **kwargs)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            super().__setattr__(name, value)
+            if (
+                name == "run_state"
+                and FcmPushClientRunState is not None
+                and value == FcmPushClientRunState.STARTED
+            ):
+                # ``object.__setattr__`` to avoid recursion through this hook.
+                object.__setattr__(self, "_has_been_started", True)
+
+    _FcmPushClientFactory: type[Any] = _ObservableFcmPushClient
+else:  # pragma: no cover - exercised only when the vendored library is absent
+    _FcmPushClientFactory = FcmPushClient
+
+
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
@@ -813,7 +851,7 @@ class FcmReceiverHA:
                     "CredentialsUpdatedCallable[MutableJSONMapping]",
                     _on_creds_updated_entry,
                 )
-                pc = FcmPushClient(
+                pc = _FcmPushClientFactory(
                     lambda payload,
                     persistent_id,
                     context,
@@ -1062,6 +1100,19 @@ class FcmReceiverHA:
                                 became_started = True
                         elif state == FcmPushClientRunState.STARTED:
                             became_started = True
+                        # Iter-12 (Codex follow-up): sampling-gap defense.
+                        # When the full lifecycle ``CREATED -> STARTED ->
+                        # CRASH`` happens between two monitor polls (>=0.5s),
+                        # this loop reads STOPPED/!do_listen and ``became_started``
+                        # would remain false. The vendored client's
+                        # ``__setattr__`` hook latches ``_has_been_started``
+                        # the moment the library assigns ``run_state =
+                        # STARTED``, independent of polling cadence; mirror
+                        # that observation here so the cap branch correctly
+                        # classifies micro-window poison-message crashes.
+                        became_started = became_started or bool(
+                            getattr(pc, "_has_been_started", False)
+                        )
                         healthy = (
                             (
                                 FcmPushClientRunState is None

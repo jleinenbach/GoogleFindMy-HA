@@ -84,11 +84,26 @@ class _SupervisorPushClientStub:
         jump_on_start: float = 0.0,
         jump_on_run_state_read: float = 0.0,
         become_started: bool = True,
+        has_been_started: bool | None = None,
     ) -> None:
         self.clock = clock
         self.jump_on_start = jump_on_start
         self.jump_on_run_state_read = jump_on_run_state_read
         self.become_started = become_started
+        # Iter-12 ``has_been_started``: mirrors the production subclass'
+        # ``_has_been_started`` latch which is set by the vendored
+        # library the moment ``run_state = STARTED`` is assigned,
+        # independent of polling cadence. Default mirrors
+        # ``become_started`` so existing tests behave as before; pass
+        # explicitly to model the micro-window crash scenario
+        # (``become_started=False, has_been_started=True``: client
+        # reached STARTED and crashed before the first monitor poll)
+        # or a true pre-start failure
+        # (``become_started=False, has_been_started=False``: client
+        # never reached STARTED at all).
+        if has_been_started is None:
+            has_been_started = become_started
+        self._has_been_started = has_been_started
         self.do_listen = True
         self.start_calls = 0
         self.stop_calls = 0
@@ -1184,3 +1199,175 @@ async def test_long_pre_start_does_not_release_cap_latch(
         f"Long pre-start deleted the cap Repairs issue without a healthy "
         f"run; cap_deletes={cap_deletes}"
     )
+
+
+# --------------------------------------------------------------------------
+# Iter-12 (Codex follow-up): sampling-gap defense
+#
+# When the full lifecycle CREATED -> STARTED -> CRASH happens between two
+# monitor polls (>=0.5s), the supervisor's monitor loop NEVER reads
+# ``state == STARTED`` and ``became_started`` would remain false. The
+# vendored ``_ObservableFcmPushClient`` subclass latches
+# ``_has_been_started`` via a ``__setattr__`` hook the moment the library
+# assigns ``run_state = STARTED`` -- independent of polling cadence.
+# The supervisor's cap branch consults this latch before deciding whether
+# a short run advances the counter. (CA-DEFENSE-OBSERVABILITY-001)
+# --------------------------------------------------------------------------
+
+
+def test_observable_subclass_latches_started_transition() -> None:
+    """The ``__setattr__`` hook latches ``_has_been_started`` on STARTED.
+
+    Unit-tests the observer mechanic in isolation: bypass the library
+    ``__init__`` and only exercise the attribute hook. The latch is
+    monotonic (set on STARTED, never cleared) and ignores non-STARTED
+    state assignments.
+    """
+    pc_cls = fcm_receiver_ha._FcmPushClientFactory
+    if pc_cls is fcm_receiver_ha.FcmPushClient:
+        pytest.skip("Vendored library not available; subclass not active")
+
+    from custom_components.googlefindmy.Auth.firebase_messaging import (
+        FcmPushClientRunState,
+    )
+
+    # Bypass library ``__init__`` -- we only exercise the ``__setattr__``
+    # hook. Seed the latch the same way the subclass' ``__init__`` does.
+    pc = pc_cls.__new__(pc_cls)
+    object.__setattr__(pc, "_has_been_started", False)
+
+    # Non-STARTED transitions do NOT set the latch.
+    pc.run_state = FcmPushClientRunState.CREATED
+    assert pc._has_been_started is False
+    pc.run_state = FcmPushClientRunState.STARTING_LOGIN
+    assert pc._has_been_started is False
+
+    # STARTED sets the latch.
+    pc.run_state = FcmPushClientRunState.STARTED
+    assert pc._has_been_started is True
+
+    # Latch is monotonic -- subsequent non-STARTED transitions do NOT
+    # clear it (the cap needs evidence the client was EVER started, not
+    # whether it is started right now).
+    pc.run_state = FcmPushClientRunState.STOPPING
+    assert pc._has_been_started is True
+    pc.run_state = FcmPushClientRunState.STOPPED
+    assert pc._has_been_started is True
+
+
+@pytest.mark.asyncio
+async def test_micro_window_crash_advances_cap_via_observable_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Micro-window CREATED -> STARTED -> CRASH between polls still counts.
+
+    Models the exact scenario the cap is meant to detect: the client
+    connects, decodes a poison message, and crashes before the supervisor's
+    first ``await asyncio.sleep(FCM_MONITOR_INTERVAL_S)`` sample. The
+    monitor loop reads STOPPED/!do_listen and ``became_started`` would
+    remain false WITHOUT the subclass latch. The latch
+    (``_has_been_started=True``, set by the vendored ``__setattr__`` hook
+    during ``pc.start()``) lets the cap correctly classify the run as a
+    short crash and advance the counter. 10 such micro-window crashes
+    fire the cap.
+    """
+    entry_id = "entry-micro-window"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    # become_started=False: the monitor loop never reads ``run_state ==
+    # STARTED`` (state read returns None on the first call, forcing the
+    # ``state is None`` break path immediately).
+    # has_been_started=True: the subclass latch was set during the
+    # library's CREATED -> STARTED transition that completed BEFORE the
+    # first monitor poll.
+    clients = [
+        _SupervisorPushClientStub(
+            clock=clock, become_started=False, has_been_started=True
+        )
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
+    register_mock = _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    create_issue, _delete_issue = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # Cap fired despite the supervisor monitor loop never reading STARTED.
+    assert register_mock.await_count == _MAX_CONSECUTIVE_SHORT_RUNS, (
+        f"Expected exactly {_MAX_CONSECUTIVE_SHORT_RUNS} register calls "
+        f"(one per micro-window crash); got {register_mock.await_count}. "
+        f"Without the subclass latch, became_started=False would keep the "
+        f"cap from firing and the supervisor would retry indefinitely."
+    )
+    assert create_issue.call_count == 1
+    cap_issue_call = create_issue.call_args
+    assert cap_issue_call.args[2] == f"fcm_short_run_crash_loop_{entry_id}"
+    assert entry_id in receiver._short_run_cap_latched
+    assert receiver._fatal_errors[entry_id].startswith(
+        "FCM short-run crash loop"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mixed_burst_micro_window_and_pre_start_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-start failures interleaved with micro-window crashes count only the latter.
+
+    Cascade: 5 micro-window crashes (has_been_started=True) + 3 true
+    pre-start failures (has_been_started=False) + 5 micro-window crashes.
+    The cap MUST fire at exactly 10 cumulative micro-window crashes
+    (counter reaches threshold on the 13th supervisor pass). Pre-start
+    failures leave the counter AND the latch UNTOUCHED. This pins the
+    orthogonality of the sampling-gap defense to the pre-start-failure
+    gate from iter-11 (CA-DEFENSE-SPECIFICITY-001).
+    """
+    entry_id = "entry-mixed-burst"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    cascade = (
+        [
+            _SupervisorPushClientStub(
+                clock=clock, become_started=False, has_been_started=True
+            )
+            for _ in range(5)
+        ]
+        + [
+            _SupervisorPushClientStub(
+                clock=clock, become_started=False, has_been_started=False
+            )
+            for _ in range(3)
+        ]
+        + [
+            _SupervisorPushClientStub(
+                clock=clock, become_started=False, has_been_started=True
+            )
+            for _ in range(5)
+        ]
+    )
+    register_mock = _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=cascade
+    )
+    create_issue, _delete_issue = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # Cap fired on the 13th iteration (5 + 3 + 5 = 13 stubs total, cap
+    # advances on micro-window crashes only).
+    assert register_mock.await_count == 13, (
+        f"Expected 13 register calls (5 + 3 + 5 cascade); got "
+        f"{register_mock.await_count}. Pre-start failures must NOT count "
+        f"toward the cap (iter-11), but real micro-window crashes MUST "
+        f"(iter-12)."
+    )
+    assert create_issue.call_count == 1
+    cap_issue_call = create_issue.call_args
+    assert cap_issue_call.args[2] == f"fcm_short_run_crash_loop_{entry_id}"
+    assert entry_id in receiver._short_run_cap_latched
