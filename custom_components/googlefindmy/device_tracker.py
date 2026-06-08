@@ -28,7 +28,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.device_tracker import SourceType
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_GPS_ACCURACY,
@@ -69,6 +68,9 @@ from .entity import (
 from .ha_typing import RestoreEntity, TrackerEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
+
+# Read-only mirror of coordinator state; no I/O performed per-entity.
+PARALLEL_UPDATES = 0
 
 
 @dataclass
@@ -825,7 +827,6 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
     # Convention: trackers represent the device itself; the entity name
     # inherits from the device name via has_entity_name=True.
     _attr_has_entity_name = True
-    _attr_source_type = SourceType.GPS
     _attr_entity_category: EntityCategory | None = (
         None  # ensure tracker is not diagnostic
     )

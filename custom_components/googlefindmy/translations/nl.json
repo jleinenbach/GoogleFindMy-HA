@@ -707,13 +707,13 @@
       "title": "Entiteit unieke ID-botsing gedetecteerd",
       "description": "Sommige entiteiten voor **{entry}** gebruiken al het nieuwe unieke ID-formaat en conflicteren met de migratie.\n\n**Aantal:** {count}\n**Voorbeelden:** {entities}\n\nOm op te lossen:\n1) Open **Instellingen → Apparaten & Services → Entiteiten** en zoek naar de vermelde entiteiten.\n2) Verwijder of hernoem conflicterende entiteiten, of verwijder verlaten items van andere integraties.\n3) Herlaad de integratie (of herstart Home Assistant). De migratie zal automatisch opnieuw proberen."
     },
-    "duplicate_account": {
-      "title": "Dubbel Google Find My-account",
-      "description": "Home Assistant heeft meerdere Google Find My-items gedetecteerd voor hetzelfde account ({email}). Er kan slechts één item actief blijven. Verwijder of schakel het dubbele item \"{entry_title}\" uit of herauthenticeer het bedoelde account. Oorzaak: {cause}."
-    },
     "duplicate_account_entries": {
       "title": "Dubbele accountitems gedetecteerd",
       "description": "Dit Google-account (**{email}**) is al geconfigureerd door een ander item:\n\n{entries}\n\nSchakel het dubbele item uit of verwijder het zodat er slechts één item per account actief blijft, en herlaad vervolgens de integratie (of herstart Home Assistant)."
+    },
+    "cache_purged": {
+      "title": "Authentication cache cleared",
+      "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
     }
   },
   "exceptions": {

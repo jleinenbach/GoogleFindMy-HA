@@ -97,10 +97,13 @@ class IdentityOperations(_MixinBase):
                 self.hass,
                 DOMAIN,
                 issue_id,
-                is_fixable=True,
+                is_fixable=False,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=ISSUE_AUTH_EXPIRED_KEY,
-                translation_placeholders={"email": email},
+                translation_placeholders={
+                    "email": email,
+                    "entry_title": entry.title or entry.entry_id,
+                },
             )
         except Exception as err:
             _LOGGER.debug("Failed to create Repairs issue: %s", err)

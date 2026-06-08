@@ -76,6 +76,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Read-only mirror of coordinator state; no I/O performed per-entity.
+PARALLEL_UPDATES = 0
+
 CONNECTIVITY_DEVICE_CLASS = getattr(BinarySensorDeviceClass, "CONNECTIVITY", None)
 
 

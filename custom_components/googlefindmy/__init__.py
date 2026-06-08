@@ -2285,7 +2285,7 @@ class RuntimeData:
         return self.token_cache
 
 
-type MyConfigEntry = ConfigEntry
+type MyConfigEntry = ConfigEntry[RuntimeData]
 
 
 SUBENTRY_FORWARD_HELPER_LOG_KEY: Literal["_subentry_forward_helper_logs"] = (
@@ -5704,9 +5704,8 @@ def _log_duplicate_and_raise_repair_issue(
     placeholders: dict[str, Any] = {
         "email": normalized_email,
         "entries": _format_duplicate_entries(entry, conflicts),
+        "cause": cause,
     }
-    if cause:
-        placeholders["cause"] = cause
 
     issue_severity = getattr(ir, "IssueSeverity", None)
     if issue_severity is not None:

@@ -1682,7 +1682,23 @@ class GoogleFindMyCoordinator(
             self._run_on_hass_loop(_do_schedule)
 
     def _increment_stat_on_loop(self, stat_name: str) -> None:
-        """Increment a statistic on the HA loop and schedule persistence."""
+        """Increment a statistic on the HA loop and schedule persistence.
+
+        NOTE (Issue #151): This method intentionally does NOT call
+        ``async_update_listeners()``. Statistics counters live in
+        ``self.stats`` and do not change ``self.data`` (the device snapshot
+        list that entities react to). Notifying listeners on every stat
+        increment caused a multiplicative entity-refresh storm: each FCM
+        push triggered up to six ``async_update_listeners()`` calls
+        (one per stat increment in ``update_device_cache`` plus one
+        per crowd-source record), and each notification re-wrote the
+        state of every ``device_tracker`` and sensor entity. With
+        ~15 trackers and active FCM crowd-sourced reporting this saturated
+        the Home Assistant WebSocket buffer (``4096 pending messages``)
+        within seconds. Stats sensors are still refreshed by the regular
+        coordinator tick (``UPDATE_INTERVAL``) and any real data-changing
+        path (``push_updated`` / ``async_set_updated_data``).
+        """
         if stat_name in self.stats:
             before = self.stats[stat_name]
             self.stats[stat_name] = before + 1
@@ -1693,10 +1709,6 @@ class GoogleFindMyCoordinator(
                 self.stats[stat_name],
             )
             self._schedule_stats_persist()
-            try:
-                self.async_update_listeners()
-            except Exception as err:
-                _LOGGER.debug("Stats listener notification failed: %s", err)
         else:
             _LOGGER.warning(
                 "Tried to increment unknown stat '%s'; available=%s",
@@ -1908,8 +1920,7 @@ class GoogleFindMyCoordinator(
         self._store_subentry_snapshots(merged_snapshot)
         self.async_set_updated_data(merged_snapshot)
         _LOGGER.debug(
-            "Pushed snapshot for %d device(s) via push_updated() "
-            "(merged total: %d)",
+            "Pushed snapshot for %d device(s) via push_updated() (merged total: %d)",
             len(snapshot),
             len(merged_snapshot),
         )

@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.0-5"
+version = "1.7.0-6"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -330,7 +330,6 @@ ignore_errors = false
 branch = true
 source = [
     "custom_components/googlefindmy",
-    "tests",
 ]
 omit = [
     "custom_components/googlefindmy/ProtoDecoders/*",
@@ -340,6 +339,11 @@ omit = [
 [tool.coverage.report]
 show_missing = false
 skip_covered = true
+# Sprint baseline: measured 63.59 % after PR #1072 registry/subentry helpers
+# (was 60 in PR #1071 with 64 % headroom). Target remains >= 95 % per
+# quality-scale rule test-coverage; this floor only prevents regressions
+# while incremental test expansion lands (60 -> 63 -> 70 -> 80 -> 90 -> 95).
+fail_under = 63
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

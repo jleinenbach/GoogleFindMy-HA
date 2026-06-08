@@ -67,6 +67,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Read-only mirror of coordinator state; no I/O performed per-entity.
+PARALLEL_UPDATES = 0
+
 
 class _Scope(NamedTuple):
     """Resolved subentry scope for entity creation."""

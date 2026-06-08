@@ -73,6 +73,9 @@ from .util_services import register_entity_service
 
 _LOGGER = logging.getLogger(__name__)
 
+# Buttons trigger coordinator actions (refresh, FCM restart); serialize them.
+PARALLEL_UPDATES = 1
+
 
 class _TrackerScope(NamedTuple):
     """Resolved tracker subentry scope for entity creation."""
