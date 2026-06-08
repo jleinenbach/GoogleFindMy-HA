@@ -523,11 +523,16 @@ class FcmRegister:
 
             if error_code:
                 last_error = f"Error={error_code}"
-                # Server returned a structured ``Error=...`` body (status
-                # typically 200 OK); the response is a protocol-level
-                # transient error, not an HTTP-fatal denial. Clear any
-                # stale fatal latch from an earlier attempt.
-                last_fatal_status = None
+                # Last-wins classification by HTTP STATUS (SSOT), not by
+                # the presence of a structured ``Error=...`` body. The
+                # server CAN return a structured error body with a fatal
+                # HTTP status (401/404) — in that case the response is
+                # still HTTP-fatal regardless of the body content. The
+                # body shape is orthogonal to the auth/endpoint
+                # classification used by the caller.
+                last_fatal_status = (
+                    int(status) if int(status) in _FATAL_HTTP_STATUSES else None
+                )
                 if error_code == "PHONE_REGISTRATION_ERROR":
                     # Transient error — just retry with the same sender.
                     # Upstream GoogleFindMyTools treats this as transient and
