@@ -21,6 +21,15 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
 
+# Module-scope asyncio marker so the fallback runner in
+# ``tests/conftest.py::pytest_pyfunc_call`` (which only executes coroutine
+# tests carrying the ``asyncio`` marker when ``pytest-asyncio`` is absent)
+# also exercises the new ``async def`` regression coverage below. The
+# real CI installs ``pytest-asyncio`` in ``auto`` mode (pyproject.toml),
+# but third-party environments without it must not silently skip these
+# tests. See ``tests/AGENTS.md`` §"Async tests".
+pytestmark = pytest.mark.asyncio
+
 
 @dataclass
 class _FakeResponse:
