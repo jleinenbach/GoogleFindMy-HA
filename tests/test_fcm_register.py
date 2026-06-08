@@ -413,3 +413,150 @@ def test_gcm_register_raises_on_persistent_401(
         )
 
     assert exc_info.value.status == 401
+
+
+def test_gcm_register_non_fatal_status_returns_none_not_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative contract: persistent non-fatal HTTP status (500) drains the
+    retry budget but must NOT raise FcmRegisterHTTPError — the caller must
+    keep treating it as a transient RuntimeError so the regular retry path
+    runs instead of the dedicated auth/endpoint budget. Pins that the
+    numeric fatal-status cache stays ``None`` for codes outside
+    ``_FATAL_HTTP_STATUSES``.
+    """
+    responses = [
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = asyncio.run(
+        register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+    )
+
+    assert result is None
+
+
+def test_gcm_register_mixed_status_caches_last_fatal_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache discipline: when a fatal response (401) sits among non-fatal
+    ones (500), the numeric cache must end up pinned to the fatal code so
+    the post-loop classifier raises with the right status. A subsequent
+    non-fatal response must not clear the cached fatal code.
+    """
+    responses: list[_FakeResponse] = []
+    # 3 transient failures, one persistent auth denial, then 4 more
+    # transient failures — the fatal status must survive the trailing
+    # non-fatal noise.
+    responses.extend(
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(3)
+    )
+    responses.append(
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+    )
+    responses.extend(
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(4)
+    )
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        asyncio.run(
+            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
+        )
+
+    assert exc_info.value.status == 401
+
+
+def test_gcm_register_classifier_independent_of_logger_output(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wire-contract guard against regression on substring-based
+    classification: even when every ``_logger.warning/info/error`` call in
+    the fcmregister module is silenced, ``gcm_register`` must still raise
+    ``FcmRegisterHTTPError`` for a persistent fatal status. This pins that
+    the defense reads the numeric status cache, not a marker substring of
+    the logger output. If a future refactor reroutes classification through
+    the log string, this test fails — because the silenced logger no longer
+    produces a ``status=N`` substring while the cache still does.
+    """
+    from custom_components.googlefindmy.Auth.firebase_messaging import fcmregister
+
+    class _NullLogger:
+        """Pyno-op stand-in for the module-level logger."""
+
+        def debug(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def info(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def warning(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def error(self, *_a: object, **_kw: object) -> None:
+            return None
+
+    monkeypatch.setattr(fcmregister, "_logger", _NullLogger())
+
+    responses = [
+        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(FcmRegisterHTTPError) as exc_info:
+            asyncio.run(
+                register.gcm_register(
+                    {"androidId": 1, "securityToken": 2}, retries=8
+                )
+            )
+
+    assert exc_info.value.status == 404
+    # Defense is independent of logger output: the silenced logger
+    # captured nothing, yet the classifier still surfaced the fatal.
+    assert "status=404" not in caplog.text

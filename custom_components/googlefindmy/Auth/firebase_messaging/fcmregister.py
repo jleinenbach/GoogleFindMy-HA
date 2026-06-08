@@ -418,6 +418,11 @@ class FcmRegister:
         }
 
         last_error: str | Exception | None = None
+        # Numeric status cache (set at each fatal-status response site)
+        # decouples the post-loop classifier from the logger string format —
+        # eliminates connascence-of-convention between the
+        # ``last_error`` message template and the ``status=`` substring marker.
+        last_fatal_status: int | None = None
         attempt = 1
 
         while attempt <= retries:
@@ -463,6 +468,8 @@ class FcmRegister:
             if status == HTTPStatus.NOT_FOUND or html_like:
                 snippet = response_text[:200]
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                if int(status) in _FATAL_HTTP_STATUSES:
+                    last_fatal_status = int(status)
                 _logger.warning(
                     "GCM register 404/HTML via /c2dm/register3 (attempt %d/%d, status=%s)",
                     attempt,
@@ -525,6 +532,8 @@ class FcmRegister:
                 if html_like:
                     snippet += " [html]"
                 last_error = f"Unexpected register response (status={status}, ctype={content_type}): {snippet}"
+                if int(status) in _FATAL_HTTP_STATUSES:
+                    last_fatal_status = int(status)
                 _logger.warning(
                     "GCM register unexpected response via /c2dm/register3 (attempt %d/%d): %s",
                     attempt,
@@ -548,16 +557,16 @@ class FcmRegister:
         # via _invalidate_fcm_tokens) or the endpoint retry budget (404)
         # instead of treating it as a transient runtime error. Mirrors
         # _FATAL_HTTP_STATUSES used by gcm_check_in, fcm_install,
-        # fcm_register, and fcm_refresh_install_token.
-        if isinstance(last_error, str):
-            for fatal_status in _FATAL_HTTP_STATUSES:
-                marker = f"status={int(fatal_status)}"
-                if marker in last_error:
-                    raise FcmRegisterHTTPError(
-                        f"GCM register fatal status {int(fatal_status)} "
-                        f"(persisted after {retries} attempts)",
-                        status=int(fatal_status),
-                    )
+        # fcm_register, and fcm_refresh_install_token. The classifier reads
+        # the numeric ``last_fatal_status`` cache populated at each fatal
+        # response site, NOT a substring of ``last_error`` — this keeps the
+        # defense robust against future log-format refactors.
+        if last_fatal_status is not None:
+            raise FcmRegisterHTTPError(
+                f"GCM register fatal status {last_fatal_status} "
+                f"(persisted after {retries} attempts)",
+                status=last_fatal_status,
+            )
         return None
 
     # ---------------------------------------------------------------------
