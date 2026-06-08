@@ -413,3 +413,403 @@ def test_gcm_register_raises_on_persistent_401(
         )
 
     assert exc_info.value.status == 401
+
+
+async def test_gcm_register_non_fatal_status_returns_none_not_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative contract: persistent non-fatal HTTP status (500) drains the
+    retry budget but must NOT raise FcmRegisterHTTPError — the caller must
+    keep treating it as a transient RuntimeError so the regular retry path
+    runs instead of the dedicated auth/endpoint budget. Pins that the
+    numeric fatal-status cache stays ``None`` for codes outside
+    ``_FATAL_HTTP_STATUSES``.
+    """
+    responses = [
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=8
+    )
+
+    assert result is None
+
+
+async def test_gcm_register_fatal_followed_by_transient_clears_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Last-wins cache discipline: when a fatal response (401) is followed
+    by transient ones (500), the FINAL attempt's status determines the
+    classification. The trailing transient attempts must clear the stale
+    fatal latch so the caller continues to treat the failure as a transient
+    runtime error (regular retry path), not as an auth denial (which would
+    trigger token invalidation via ``_invalidate_fcm_tokens``).
+
+    Regression for Codex PR #1087 review on commit 559afde82f: previous
+    behaviour stored the first fatal status and kept it across non-fatal
+    follow-ups, escalating ordinary transient failures through the wrong
+    recovery path. Mirrors the pre-existing ``last_error`` last-wins
+    update discipline.
+    """
+    responses: list[_FakeResponse] = []
+    # 3 transient failures, one auth denial, then 4 more transient
+    # failures — the FINAL response is transient, so the cached fatal
+    # latch must have been cleared by the time the retry budget is
+    # exhausted.
+    responses.extend(
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(3)
+    )
+    responses.append(
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+    )
+    responses.extend(
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(4)
+    )
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=8
+    )
+
+    # No raise: trailing transients cleared the stale fatal latch.
+    assert result is None
+
+
+async def test_gcm_register_transient_followed_by_fatal_raises_final_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Last-wins, other direction: when transient failures (500) are
+    followed by a persistent fatal (401), the FINAL status wins and
+    surfaces as ``FcmRegisterHTTPError(status=401)``. Pins that the
+    last-wins clear path does not accidentally suppress a real terminal
+    fatal at the end of the retry budget.
+    """
+    responses: list[_FakeResponse] = []
+    responses.extend(
+        _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
+        for _ in range(3)
+    )
+    responses.extend(
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+        for _ in range(5)
+    )
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=8
+        )
+
+    assert exc_info.value.status == 401
+
+
+async def test_gcm_register_fatal_followed_by_error_code_clears_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Last-wins by HTTP STATUS (SSOT) across response branches: a fatal
+    HTTP status (401) followed by structured GCM error bodies with a
+    NON-FATAL HTTP status (200, ``Error=PHONE_REGISTRATION_ERROR``) must
+    clear the cached fatal because the final attempt's HTTP status is
+    not in ``_FATAL_HTTP_STATUSES``. Pins that the error_code branch
+    resets the latch when the HTTP status is non-fatal (this is the
+    common case where the server replies 200 with a protocol-level
+    error body).
+    """
+    responses: list[_FakeResponse] = []
+    responses.append(
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+    )
+    responses.extend(
+        _FakeResponse(
+            200,
+            "Error=PHONE_REGISTRATION_ERROR",
+            {"Content-Type": "text/plain"},
+        )
+        for _ in range(7)
+    )
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=8
+    )
+
+    # No raise: error_code branch cleared the stale fatal latch.
+    assert result is None
+
+
+async def test_gcm_register_error_code_with_fatal_status_preserves_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Last-wins by HTTP STATUS (SSOT) — the structured ``Error=...``
+    body branch must NOT clear the fatal latch when the HTTP status
+    itself is fatal (401/404). The server can return a structured error
+    body together with an HTTP-fatal status; the body shape is
+    orthogonal to the auth/endpoint classification used by the caller.
+
+    Regression for Codex iter-2 finding on PR #1087, commit 7a89e2e321:
+        "When /c2dm/register3 returns a structured Error=... body with
+        an HTTP 401/404 status on the final retry, this branch
+        unconditionally clears last_fatal_status, so gcm_register falls
+        through and returns None instead of raising FcmRegisterHTTPError."
+    """
+    responses = [
+        _FakeResponse(
+            401,
+            "Error=PHONE_REGISTRATION_ERROR",
+            {"Content-Type": "text/plain"},
+        )
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=8
+        )
+
+    assert exc_info.value.status == 401
+
+
+async def test_gcm_register_transient_then_fatal_error_code_status_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Last-wins by HTTP STATUS: a transient 5xx response followed by a
+    final error-code body with a fatal HTTP status (401) must still
+    classify as fatal via the error_code branch. Pins that the
+    error_code branch promotes the latch back to fatal when the HTTP
+    status warrants it (the inverse of
+    test_gcm_register_fatal_followed_by_error_code_clears_latch).
+
+    Note: 404 is handled by the dedicated 404/HTML branch BEFORE the
+    error_code branch ever sees the body, so 401 is the relevant fatal
+    status for testing the error_code branch in isolation.
+    """
+    responses: list[_FakeResponse] = []
+    responses.extend(
+        _FakeResponse(503, "Server busy", {"Content-Type": "text/plain"})
+        for _ in range(7)
+    )
+    responses.append(
+        _FakeResponse(
+            401,
+            "Error=PHONE_REGISTRATION_ERROR",
+            {"Content-Type": "text/plain"},
+        )
+    )
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with pytest.raises(FcmRegisterHTTPError) as exc_info:
+        await register.gcm_register(
+            {"androidId": 1, "securityToken": 2}, retries=8
+        )
+
+    assert exc_info.value.status == 401
+
+
+async def test_gcm_register_fatal_followed_by_exception_clears_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Last-wins applies across the network-exception branch: a fatal
+    HTTP status (401) followed by network failures must clear the cached
+    fatal because the network-exception branch carries no HTTP status
+    and is transient by definition. Pins that an aiohttp/network
+    exception resets the latch even though it never sees a status code.
+    """
+
+    class _ExceptionThenResponseSession:
+        """Returns one fatal response then raises ``OSError`` for the
+        remaining attempts (mirrors a network drop after one bad reply).
+        """
+
+        def __init__(self, first_response: _FakeResponse) -> None:
+            self._first = first_response
+            self._first_served = False
+            self.calls: list[dict[str, Any]] = []
+
+        def post(
+            self,
+            *,
+            url: str,
+            headers: dict[str, str],
+            data: dict[str, Any],
+            timeout: Any,
+        ) -> _FakeResponse:
+            self.calls.append(
+                {"url": url, "data": dict(data), "headers": dict(headers)}
+            )
+            if not self._first_served:
+                self._first_served = True
+                return self._first
+            raise OSError("simulated network failure")
+
+    session = _ExceptionThenResponseSession(
+        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
+    )
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=8
+    )
+
+    # No raise: exception branch cleared the stale fatal latch.
+    assert result is None
+    # All eight attempts were made (1 response + 7 exceptions).
+    assert len(session.calls) == 8
+
+
+async def test_gcm_register_classifier_independent_of_logger_output(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Wire-contract guard against regression on substring-based
+    classification: even when every ``_logger.warning/info/error`` call in
+    the fcmregister module is silenced, ``gcm_register`` must still raise
+    ``FcmRegisterHTTPError`` for a persistent fatal status. This pins that
+    the defense reads the numeric status cache, not a marker substring of
+    the logger output. If a future refactor reroutes classification through
+    the log string, this test fails — because the silenced logger no longer
+    produces a ``status=N`` substring while the cache still does.
+    """
+    from custom_components.googlefindmy.Auth.firebase_messaging import fcmregister
+
+    class _NullLogger:
+        """Pyno-op stand-in for the module-level logger."""
+
+        def debug(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def info(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def warning(self, *_a: object, **_kw: object) -> None:
+            return None
+
+        def error(self, *_a: object, **_kw: object) -> None:
+            return None
+
+    monkeypatch.setattr(fcmregister, "_logger", _NullLogger())
+
+    responses = [
+        _FakeResponse(404, "<!doctype html>not found", {"Content-Type": "text/html"})
+        for _ in range(8)
+    ]
+    session = _FakeSession(responses)
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    register = FcmRegister(config, http_client_session=session)
+
+    async def fast_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(FcmRegisterHTTPError) as exc_info:
+            await register.gcm_register(
+                {"androidId": 1, "securityToken": 2}, retries=8
+            )
+
+    assert exc_info.value.status == 404
+    # Defense is independent of logger output: the silenced logger
+    # captured nothing, yet the classifier still surfaced the fatal.
+    assert "status=404" not in caplog.text
