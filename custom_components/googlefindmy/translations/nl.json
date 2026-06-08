@@ -714,6 +714,10 @@
     "cache_purged": {
       "title": "Authentication cache cleared",
       "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+    },
+    "fcm_short_run_crash_loop": {
+      "title": "FCM Push crash-lus gedetecteerd",
+      "description": "De FCM push-client verbreekt herhaaldelijk binnen enkele seconden na het verbinden de verbinding (short-run crash-lus). Dit wordt meestal veroorzaakt door een aanhoudende beschadigde melding in de inkomende wachtrij die niet kan worden gedecodeerd.\n\n1. Laad de integratie opnieuw om de looptijdstatus te wissen.\n2. Als het probleem terugkeert, regenereer je `secrets.json` (Google kan de inloggegevens hebben gerouleerd)."
     }
   },
   "exceptions": {
