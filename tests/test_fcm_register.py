@@ -21,14 +21,15 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
 
-# Module-scope asyncio marker so the fallback runner in
-# ``tests/conftest.py::pytest_pyfunc_call`` (which only executes coroutine
-# tests carrying the ``asyncio`` marker when ``pytest-asyncio`` is absent)
-# also exercises the new ``async def`` regression coverage below. The
-# real CI installs ``pytest-asyncio`` in ``auto`` mode (pyproject.toml),
-# but third-party environments without it must not silently skip these
-# tests. See ``tests/AGENTS.md`` §"Async tests".
-pytestmark = pytest.mark.asyncio
+# Coroutine regression tests below carry an explicit ``@pytest.mark.asyncio``
+# decorator so the fallback runner in ``tests/conftest.py::pytest_pyfunc_call``
+# (which only executes coroutine tests carrying the ``asyncio`` marker when
+# ``pytest-asyncio`` is absent) picks them up in third-party environments
+# without ``pytest-asyncio`` installed. Real CI installs ``pytest-asyncio`` in
+# ``auto`` mode (pyproject.toml), where the decorator is idempotent. A
+# module-level ``pytestmark`` was rejected because it would annotate the
+# synchronous tests in this file as ``asyncio``, which produces pytest-asyncio
+# warnings under ``auto`` mode. See ``tests/AGENTS.md`` §"Async tests".
 
 
 @dataclass
@@ -424,6 +425,7 @@ def test_gcm_register_raises_on_persistent_401(
     assert exc_info.value.status == 401
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_non_fatal_status_returns_none_not_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -460,6 +462,7 @@ async def test_gcm_register_non_fatal_status_returns_none_not_raises(
     assert result is None
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_fatal_followed_by_transient_clears_latch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -515,6 +518,7 @@ async def test_gcm_register_fatal_followed_by_transient_clears_latch(
     assert result is None
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_transient_followed_by_fatal_raises_final_status(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -556,6 +560,7 @@ async def test_gcm_register_transient_followed_by_fatal_raises_final_status(
     assert exc_info.value.status == 401
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_fatal_followed_by_error_code_clears_latch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -603,6 +608,7 @@ async def test_gcm_register_fatal_followed_by_error_code_clears_latch(
     assert result is None
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_error_code_with_fatal_status_preserves_latch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -649,6 +655,7 @@ async def test_gcm_register_error_code_with_fatal_status_preserves_latch(
     assert exc_info.value.status == 401
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_transient_then_fatal_error_code_status_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -698,6 +705,7 @@ async def test_gcm_register_transient_then_fatal_error_code_status_raises(
     assert exc_info.value.status == 401
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_fatal_followed_by_exception_clears_latch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -761,6 +769,7 @@ async def test_gcm_register_fatal_followed_by_exception_clears_latch(
     assert len(session.calls) == 8
 
 
+@pytest.mark.asyncio
 async def test_gcm_register_classifier_independent_of_logger_output(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
