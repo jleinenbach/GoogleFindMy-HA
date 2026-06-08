@@ -172,9 +172,18 @@ _LOGGER = logging.getLogger(__name__)
 # without modifying the vendored library itself. See
 # CA-DEFENSE-OBSERVABILITY-001.
 if HAVE_FCM_PUSH_CLIENT and FcmPushClientRunState is not None:
+    # Snapshot of the original class for runtime identity comparison.
+    # Tests substitute the module-level ``FcmPushClient`` symbol via
+    # monkeypatch (the documented seam) to inject test doubles; the
+    # factory below honours that substitution by class identity, not by
+    # subclass relation. See CA-SUBCLASS-IDENTITY-001.
+    _OriginalFcmPushClient: type[Any] | None = FcmPushClient
 
-    class _ObservableFcmPushClient(FcmPushClient):  # type: ignore[misc, valid-type]
-        """FcmPushClient subclass with a run_state observer latch."""
+    class _ObservableFcmPushClient(FcmPushClient[Any]):
+        """FcmPushClient subclass with a run_state observer latch.
+
+        See CA-DEFENSE-OBSERVABILITY-001.
+        """
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             # Seed the latch before super().__init__ so any attribute
@@ -193,9 +202,40 @@ if HAVE_FCM_PUSH_CLIENT and FcmPushClientRunState is not None:
                 # ``object.__setattr__`` to avoid recursion through this hook.
                 object.__setattr__(self, "_has_been_started", True)
 
-    _FcmPushClientFactory: type[Any] = _ObservableFcmPushClient
+    _ObservableFcmPushClientCls: type[Any] | None = _ObservableFcmPushClient
 else:  # pragma: no cover - exercised only when the vendored library is absent
-    _FcmPushClientFactory = FcmPushClient
+    _OriginalFcmPushClient = None
+    _ObservableFcmPushClientCls = None
+
+
+def _FcmPushClientFactory(*args: Any, **kwargs: Any) -> FcmPushClient[Any]:
+    """Construct an FCM client at call time, honouring test substitutions.
+
+    Production: prefers the ``_ObservableFcmPushClient`` subclass so the
+    short-run crash cap can observe ``run_state -> STARTED`` transitions
+    that happen between monitor polls (CA-DEFENSE-OBSERVABILITY-001).
+
+    Tests: when the module-level ``FcmPushClient`` symbol has been
+    monkeypatched away from the original class (the documented test
+    seam), the factory instantiates the patched class DIRECTLY rather
+    than the production subclass. This preserves ``isinstance`` identity
+    for test doubles (CA-SUBCLASS-IDENTITY-001) instead of returning a
+    subclass that diverges from the patched symbol.
+    """
+
+    current = globals().get("FcmPushClient")
+    if (
+        _ObservableFcmPushClientCls is not None
+        and _OriginalFcmPushClient is not None
+        and current is _OriginalFcmPushClient
+    ):
+        return cast(
+            "FcmPushClient[Any]",
+            _ObservableFcmPushClientCls(*args, **kwargs),
+        )
+    if current is None:  # pragma: no cover - vendored library missing
+        raise RuntimeError("FcmPushClient is not available")
+    return cast("FcmPushClient[Any]", current(*args, **kwargs))
 
 
 type JSONDict = dict[str, Any]

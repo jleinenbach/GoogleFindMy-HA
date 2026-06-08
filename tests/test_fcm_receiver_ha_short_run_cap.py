@@ -1223,8 +1223,8 @@ def test_observable_subclass_latches_started_transition() -> None:
     monotonic (set on STARTED, never cleared) and ignores non-STARTED
     state assignments.
     """
-    pc_cls = fcm_receiver_ha._FcmPushClientFactory
-    if pc_cls is fcm_receiver_ha.FcmPushClient:
+    pc_cls = fcm_receiver_ha._ObservableFcmPushClientCls
+    if pc_cls is None:
         pytest.skip("Vendored library not available; subclass not active")
 
     from custom_components.googlefindmy.Auth.firebase_messaging import (
@@ -1371,3 +1371,104 @@ async def test_mixed_burst_micro_window_and_pre_start_failures(
     cap_issue_call = create_issue.call_args
     assert cap_issue_call.args[2] == f"fcm_short_run_crash_loop_{entry_id}"
     assert entry_id in receiver._short_run_cap_latched
+
+
+# --------------------------------------------------------------------------
+# CI follow-up (PR #1086 iter-13): Class-Identity substitution defense
+#
+# Iter-12 added _ObservableFcmPushClient as a subclass of FcmPushClient. The
+# production factory must construct that subclass. Tests, however, may
+# substitute the module-level FcmPushClient symbol via monkeypatch (the
+# documented seam) to inject test doubles -- e.g. test_receiver_reuses_
+# hass_managed_session in tests/test_fcm_receiver_guard.py asserts
+# ``isinstance(created, DummyPushClient)``. A factory that always returns
+# the production subclass would break isinstance identity against the
+# patched symbol because the subclass inherits from the ORIGINAL class,
+# not from the patched one. The factory therefore checks at CALL TIME
+# whether the module symbol still points at the snapshot of the original
+# class, and instantiates the patched class directly when not.
+# (CA-SUBCLASS-IDENTITY-001)
+# --------------------------------------------------------------------------
+
+
+def test_factory_uses_observable_subclass_in_production() -> None:
+    """When the FcmPushClient symbol is untouched the factory returns the subclass.
+
+    Pins the production path: the runtime check
+    ``current is _OriginalFcmPushClient`` is true, so the factory MUST
+    instantiate ``_ObservableFcmPushClient`` (not the plain library class).
+    """
+    if fcm_receiver_ha._ObservableFcmPushClientCls is None:
+        pytest.skip("Vendored library not available; subclass not active")
+
+    from custom_components.googlefindmy.Auth.firebase_messaging import (
+        FcmPushClientConfig,
+        FcmRegisterConfig,
+    )
+
+    config = FcmPushClientConfig()
+    register_cfg = FcmRegisterConfig(
+        project_id="p",
+        app_id="a",
+        api_key="k",
+        messaging_sender_id="s",
+    )
+
+    async def _noop_cb(*_args: object, **_kw: object) -> None:
+        return None
+
+    pc = fcm_receiver_ha._FcmPushClientFactory(
+        _noop_cb,
+        register_cfg,
+        {},
+        _noop_cb,
+        config=config,
+    )
+
+    assert isinstance(pc, fcm_receiver_ha._ObservableFcmPushClientCls)
+    # Latch was seeded before super().__init__ so it is observable here.
+    assert pc._has_been_started is False
+
+
+def test_factory_honours_monkeypatched_fcm_push_client_symbol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Substituting FcmPushClient via monkeypatch is the documented seam.
+
+    Regression pin for CA-SUBCLASS-IDENTITY-001: when tests patch the
+    module-level ``FcmPushClient`` symbol to inject a test double, the
+    factory MUST instantiate the patched class DIRECTLY -- not a subclass
+    of the original library class. Otherwise ``isinstance`` assertions on
+    the patched symbol (as used by tests in tests/test_fcm_receiver_guard
+    .py) fail because the production subclass diverges from the patched
+    class hierarchy.
+    """
+
+    captured: dict[str, object] = {}
+
+    class _PatchedClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        fcm_receiver_ha,
+        "FcmPushClient",
+        _PatchedClient,
+    )
+
+    pc = fcm_receiver_ha._FcmPushClientFactory(
+        "callback",
+        "config",
+        {"creds": True},
+        "creds_cb",
+        http_client_session="session",
+    )
+
+    # The factory honoured the patch: identity matches the patched class,
+    # not the production subclass and not the original library class.
+    assert isinstance(pc, _PatchedClient)
+    if fcm_receiver_ha._ObservableFcmPushClientCls is not None:
+        assert not isinstance(pc, fcm_receiver_ha._ObservableFcmPushClientCls)
+    assert captured["args"][0] == "callback"
+    assert captured["kwargs"]["http_client_session"] == "session"
