@@ -739,6 +739,117 @@ def test_clear_no_stored_fatal_while_latched_is_full_noop() -> None:
     assert "entry-no-fatal" not in receiver._fatal_errors
 
 
+# --------------------------------------------------------------------------
+# Iter-16 regression: latch-restoration on pass-through clear
+# (Codex 8cfd5b25 follow-up)
+# --------------------------------------------------------------------------
+#
+# Pinning contract for ``_short_run_cap_messages``:
+#   * Populated by the real cap-fire branch in ``_supervisor`` (snapshot of
+#     the user-visible cap message).
+#   * Restored into ``_fatal_errors[entry_id]`` by the pass-through clear
+#     branch in ``_clear_fatal_error_for_entry`` so the per-entry fatal
+#     stays visible to the coordinator/diag binary sensor across non-cap
+#     overwrites.
+#   * Dropped in lockstep with the latch in the two release paths:
+#       (a) ``force=True`` teardown
+#       (b) healthy-run cleanup branch in ``_supervisor``
+#
+# These are unit-tests of the helper contract (no supervisor loop).
+
+
+def test_iter16_pass_through_restores_cap_message_from_snapshot() -> None:
+    """Pass-through clear must restore the cap-fire snapshot.
+
+    Iter-16 (Codex follow-up on commit 8cfd5b25): without restoration the
+    coordinator and the diagnostic binary sensor lose visibility of the
+    cap-fatal state during the recovery/retry window even though
+    ``_short_run_cap_latched`` is still set.
+    """
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    cap_message = (
+        "FCM short-run crash loop: 10 consecutive runs ended within 30s "
+        "(persistent poison message suspected)"
+    )
+
+    # Simulate the state right after a cap fire + a later non-cap fatal
+    # overwriting the per-entry fatal map slot.
+    receiver._short_run_cap_latched.add("entry-restore")
+    receiver._short_run_cap_messages["entry-restore"] = cap_message
+    receiver._fatal_errors["entry-restore"] = (
+        "FCM registration failed: HTTP 401 Unauthorized"
+    )
+    receiver._fatal_error = "FCM registration failed: HTTP 401 Unauthorized"
+
+    receiver._clear_fatal_error_for_entry(
+        "entry-restore", reason="Credentials updated for entry"
+    )
+
+    # The non-cap fatal is gone, the cap snapshot is restored, the latch
+    # and the snapshot cache survive (only a healthy run or force=True may
+    # drop them).
+    assert receiver._fatal_errors["entry-restore"] == cap_message
+    assert receiver._fatal_error == cap_message
+    assert "entry-restore" in receiver._short_run_cap_latched
+    assert receiver._short_run_cap_messages["entry-restore"] == cap_message
+
+
+def test_iter16_force_true_clear_drops_cap_message_snapshot() -> None:
+    """A force=True teardown must also drop the cap-fire snapshot."""
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    receiver._short_run_cap_latched.add("entry-force")
+    receiver._short_run_cap_messages["entry-force"] = (
+        "FCM short-run crash loop: ..."
+    )
+    receiver._fatal_errors["entry-force"] = (
+        "FCM short-run crash loop: ..."
+    )
+    receiver._fatal_error = "FCM short-run crash loop: ..."
+
+    receiver._clear_fatal_error_for_entry(
+        "entry-force", reason="Unload", force=True
+    )
+
+    assert "entry-force" not in receiver._short_run_cap_latched
+    assert "entry-force" not in receiver._short_run_cap_messages
+    assert "entry-force" not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+
+
+def test_iter16_pass_through_with_empty_snapshot_falls_back_to_iter10() -> None:
+    """When no snapshot was captured the iter-10 behaviour must survive.
+
+    Edge case: a stale latch is set manually (test harness) or the snapshot
+    was already dropped while the latch remained. The pass-through clear
+    must NOT fabricate a cap message - it simply clears the non-cap fatal
+    and lets the latch keep blocking future cap-fatal clears.
+    """
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    receiver._short_run_cap_latched.add("entry-empty-snapshot")
+    # NO entry in ``_short_run_cap_messages`` for this entry_id.
+    receiver._fatal_errors["entry-empty-snapshot"] = (
+        "FCM registration failed: HTTP 401 Unauthorized"
+    )
+    receiver._fatal_error = "FCM registration failed: HTTP 401 Unauthorized"
+
+    receiver._clear_fatal_error_for_entry(
+        "entry-empty-snapshot", reason="Credentials updated for entry"
+    )
+
+    # Iter-10 contract: non-cap fatal cleared, latch survives, no
+    # restoration because nothing was snapshotted.
+    assert "entry-empty-snapshot" not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    assert "entry-empty-snapshot" in receiver._short_run_cap_latched
+    assert "entry-empty-snapshot" not in receiver._short_run_cap_messages
+
+
 @pytest.mark.asyncio
 async def test_healthy_run_releases_cap_latch_and_fatal_state(
     monkeypatch: pytest.MonkeyPatch,
@@ -785,6 +896,10 @@ async def test_healthy_run_releases_cap_latch_and_fatal_state(
     assert entry_id not in receiver._short_run_cap_latched
     assert entry_id not in receiver._fatal_errors
     assert receiver._fatal_error is None
+    # Iter-16: the healthy-run cleanup branch must also retire the
+    # cap-fire snapshot so a later non-cap fatal cannot accidentally
+    # restore a stale cap message.
+    assert entry_id not in receiver._short_run_cap_messages
     # The Repairs issue is deleted at least once on the healthy path.
     delete_calls_for_entry = [
         call

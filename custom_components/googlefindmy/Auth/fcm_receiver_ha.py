@@ -412,6 +412,16 @@ class FcmReceiverHA:
         # see no visible fatal state in between (Codex defense-2 iter-8
         # second finding).
         self._short_run_cap_latched: set[str] = set()
+        # Defense 2 iter-16 (Codex follow-up): persistent snapshot of the
+        # cap-fire message per entry. Populated when the cap fires and used
+        # by ``_clear_fatal_error_for_entry`` to restore the cap fatal after
+        # a non-cap fatal (e.g. a terminal 401/404 from a subsequent
+        # re-registration) was cleared. Cleared in the same two places that
+        # release the latch: the healthy-run cleanup branch and any
+        # ``force=True`` teardown. This keeps the per-entry fatal visible to
+        # the coordinator and the diagnostic binary sensor for the entire
+        # latch lifetime, even across non-cap fatal overwrites.
+        self._short_run_cap_messages: dict[str, str] = {}
 
     def _clear_fatal_error_for_entry(
         self,
@@ -470,6 +480,14 @@ class FcmReceiverHA:
             # unrelated fatal but KEEP the cap latch and Repairs UI artefact
             # intact, so the user-visible cap warning is not silently
             # invalidated by an unrelated recovery path.
+            #
+            # Defense 2 iter-16 (Codex follow-up): the per-entry cap-fire
+            # message snapshot (``_short_run_cap_messages``) must be
+            # re-written into ``_fatal_errors`` so the coordinator and the
+            # diagnostic binary sensor continue to see the cap-fatal state
+            # during the recovery/retry window. Otherwise the latch would
+            # silently invalidate the per-entry fatal even though the
+            # in-memory latch and the Repairs UI artefact remain set.
             _LOGGER.debug(
                 "[entry=%s] Cap latch active; clearing non-cap fatal "
                 "(reason=%s) while preserving cap latch and repair issue",
@@ -477,11 +495,18 @@ class FcmReceiverHA:
                 reason or "unspecified",
             )
             self._fatal_errors.pop(entry_id, None)
+            cap_message = self._short_run_cap_messages.get(entry_id)
+            if cap_message is not None:
+                self._fatal_errors[entry_id] = cap_message
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
             return
 
         if force:
             self._short_run_cap_latched.discard(entry_id)
+            # Iter-16: drop the cap-fire snapshot in lockstep with the latch
+            # so a forced teardown also retires the message that the
+            # pass-through branch would otherwise restore.
+            self._short_run_cap_messages.pop(entry_id, None)
 
         removed = False
         if entry_id in self._fatal_errors:
@@ -1274,6 +1299,13 @@ class FcmReceiverHA:
                             # before a real healthy supervisor run proves the
                             # poison message is gone).
                             self._short_run_cap_latched.add(entry_id)
+                            # Iter-16 (Codex follow-up): snapshot the
+                            # cap-fire message so the pass-through clear
+                            # branch in ``_clear_fatal_error_for_entry`` can
+                            # restore it after a non-cap fatal overwrote
+                            # ``_fatal_errors[entry_id]``. Released in the
+                            # same two places that release the latch.
+                            self._short_run_cap_messages[entry_id] = message
                             if self._hass:
                                 ir.async_create_issue(
                                     self._hass,
@@ -1337,6 +1369,11 @@ class FcmReceiverHA:
                         cap_was_latched = entry_id in self._short_run_cap_latched
                         if cap_was_latched:
                             self._short_run_cap_latched.discard(entry_id)
+                            # Iter-16: a healthy run is also the moment to
+                            # retire the cap-fire snapshot so the
+                            # pass-through clear branch cannot re-introduce
+                            # it after the latch is gone.
+                            self._short_run_cap_messages.pop(entry_id, None)
                             cap_message = self._fatal_errors.get(entry_id)
                             if cap_message and cap_message.startswith(
                                 CRASH_LOOP_FATAL_PREFIX
