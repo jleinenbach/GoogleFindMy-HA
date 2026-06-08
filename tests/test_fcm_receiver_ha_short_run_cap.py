@@ -437,16 +437,211 @@ async def test_fatal_retry_counts_orthogonal_to_short_run_path(
     assert receiver._fatal_retry_counts.get(counter_key, 0) >= 1
 
 
-def test_unload_clears_fatal_errors() -> None:
-    """`_clear_fatal_error_for_entry` (called from unload) removes the latched key."""
+def test_unload_clears_fatal_errors_via_force() -> None:
+    """`_clear_fatal_error_for_entry(force=True)` (unload path) releases the latch.
+
+    Defense 2 iter-8: the unregister path must clear the cap latch alongside
+    the fatal-error map because the entry itself goes away. Without ``force``
+    the clear-path is a no-op while the latch is set (Codex second finding).
+    """
     receiver = FcmReceiverHA()
     receiver._fatal_errors["entry-unload"] = "FCM short-run crash loop: ..."
     receiver._fatal_error = "FCM short-run crash loop: ..."
+    receiver._short_run_cap_latched.add("entry-unload")
 
-    receiver._clear_fatal_error_for_entry("entry-unload", reason="Entry unregistered")
+    receiver._clear_fatal_error_for_entry(
+        "entry-unload", reason="Entry unregistered", force=True
+    )
 
     assert "entry-unload" not in receiver._fatal_errors
+    assert "entry-unload" not in receiver._short_run_cap_latched
     assert receiver._fatal_error is None
+
+
+# --------------------------------------------------------------------------
+# Defense 2 iter-8: cap-latch lifecycle (Codex second finding)
+# --------------------------------------------------------------------------
+#
+# Codex objected that the cap state lives in the same ``_fatal_errors`` map
+# that ``_register_for_fcm_entry`` unconditionally clears after a successful
+# registration. Registration is NOT a recovery proof for a poison-message
+# crash loop: only a real healthy supervisor run (>= 30s) shows that the
+# poisoned notification is gone. The tests below pin the new lifecycle
+# contract (CA-STATE-LIFECYCLE-ASYMMETRY-001):
+#
+#   * ``_short_run_cap_latched`` is set at cap-fire time alongside the
+#     ``_fatal_errors`` entry and the Repairs issue.
+#   * ``_clear_fatal_error_for_entry`` is a no-op while the latch is set
+#     (unless ``force=True`` is passed, which only the unregister path does).
+#   * Only the healthy-run branch of the supervisor loop releases the latch,
+#     pops the cap-related ``_fatal_errors`` entry, and re-derives the
+#     aggregate ``_fatal_error``.
+
+
+def test_clear_fatal_error_is_noop_while_cap_latched() -> None:
+    """Registration-success paths cannot drop the latch (Codex iter-8 finding 2)."""
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    receiver._fatal_errors["entry-latched"] = "FCM short-run crash loop: ..."
+    receiver._fatal_error = "FCM short-run crash loop: ..."
+    receiver._short_run_cap_latched.add("entry-latched")
+
+    # ``force`` defaults to ``False``: this is the path that
+    # ``_register_for_fcm_entry`` and the credential-update handler take.
+    receiver._clear_fatal_error_for_entry(
+        "entry-latched", reason="Registration succeeded"
+    )
+
+    # Nothing changed: the latch, the fatal-error map, and the aggregate
+    # all survive because the registration did not prove a healthy run.
+    assert "entry-latched" in receiver._short_run_cap_latched
+    assert receiver._fatal_errors["entry-latched"].startswith(
+        "FCM short-run crash loop"
+    )
+    assert receiver._fatal_error == "FCM short-run crash loop: ..."
+
+
+def test_clear_without_latch_still_clears_fatal_errors() -> None:
+    """Without an active cap latch, the clear-path behaves idempotently."""
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    receiver._fatal_errors["entry-clean"] = "FCM auth failed ..."
+    receiver._fatal_error = "FCM auth failed ..."
+
+    receiver._clear_fatal_error_for_entry(
+        "entry-clean", reason="Registration succeeded"
+    )
+
+    assert "entry-clean" not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+
+
+@pytest.mark.asyncio
+async def test_cap_fire_sets_short_run_cap_latched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cap-fire installs the latch alongside the fatal-error map and the issue."""
+    entry_id = "entry-cap-latch"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    create_issue, _ = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert create_issue.call_count == 1
+    assert entry_id in receiver._short_run_cap_latched
+    assert receiver._fatal_errors[entry_id].startswith("FCM short-run crash loop")
+
+
+@pytest.mark.asyncio
+async def test_cap_latch_survives_registration_success_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A simulated registration-success path cannot drop the latch.
+
+    Defense 2 iter-8 (Codex second finding): without the latch, a reload or
+    credential update after cap-fire would clear the fatal-error map and the
+    Repairs issue before the supervisor proved the poison message is gone,
+    leaving the user blind during the next 10-run burst.
+    """
+    entry_id = "entry-survive"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert entry_id in receiver._short_run_cap_latched
+    pre_message = receiver._fatal_errors[entry_id]
+
+    # Simulate ``_register_for_fcm_entry`` success path (Z. 1260) and the
+    # credential-update path (Z. 2069). Neither must release the latch.
+    receiver._clear_fatal_error_for_entry(
+        entry_id, reason="Registration succeeded"
+    )
+    receiver._clear_fatal_error_for_entry(
+        entry_id, reason="Credentials updated for entry"
+    )
+
+    assert entry_id in receiver._short_run_cap_latched
+    assert receiver._fatal_errors[entry_id] == pre_message
+
+
+@pytest.mark.asyncio
+async def test_healthy_run_releases_cap_latch_and_fatal_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy run (>= 30s) clears the latch, the fatal map entry, and the issue."""
+    entry_id = "entry-recover"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)
+    # 10 short runs trip the cap; one healthy run afterwards must release it.
+    # The healthy run is modelled as a long supervisor pass (jump after the
+    # ``entry_start`` snapshot via ``jump_on_run_state_read``).
+    short_clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
+    healthy_client = _SupervisorPushClientStub(
+        clock=clock, jump_on_run_state_read=60.0
+    )
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock,
+        ensure_clients=[*short_clients, healthy_client],
+    )
+    create_issue, delete_issue = _install_ir_capture(monkeypatch)
+
+    # Phase 1: 10 short runs trip the cap and stop the supervisor.
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert create_issue.call_count == 1
+    assert entry_id in receiver._short_run_cap_latched
+    assert receiver._fatal_errors[entry_id].startswith("FCM short-run crash loop")
+
+    # Phase 2: simulate a reload (fresh stop_evt + fresh supervisor task).
+    receiver._stop_evts.pop(entry_id, None)
+    receiver.supervisors.pop(entry_id, None)
+
+    # The healthy run drops the latch from inside the supervisor loop's
+    # else branch (counter reset path).
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert entry_id not in receiver._short_run_cap_latched
+    assert entry_id not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    # The Repairs issue is deleted at least once on the healthy path.
+    delete_calls_for_entry = [
+        call
+        for call in delete_issue.call_args_list
+        if call.args[2] == f"fcm_short_run_crash_loop_{entry_id}"
+    ]
+    assert delete_calls_for_entry, (
+        "expected a delete_issue call for the short-run crash loop key"
+    )
 
 
 # --------------------------------------------------------------------------

@@ -299,8 +299,32 @@ class FcmReceiverHA:
         # Per-entry nudge events: allows coordinator to wake up a sleeping supervisor
         self._retry_nudge_evts: dict[str, asyncio.Event] = {}
 
+        # Defense 2 iter-8: persistent short-run cap latch.
+        #
+        # When the cap fires the entry is in a *poison-message crash loop*
+        # that only a real healthy supervisor run (>= _SHORT_RUN_THRESHOLD_S)
+        # can prove gone. A successful FCM re-registration alone is NOT a
+        # proof: registration only contacts the GCM endpoint, it does not
+        # show that the subsequent listener stays up long enough to drain
+        # the poisoned notification.
+        #
+        # The latch is therefore set together with the user-visible repair
+        # issue at cap-fire time and is the *only* thing that gates whether
+        # ``_clear_fatal_error_for_entry`` (which gets called from every
+        # registration-success path) is allowed to drop the fatal-error map
+        # entry and the Repairs UI artefact. Without this latch, any reload
+        # or credential update would clear the cap-related fatal state, the
+        # supervisor would start a fresh 10-run burst, and the user would
+        # see no visible fatal state in between (Codex defense-2 iter-8
+        # second finding).
+        self._short_run_cap_latched: set[str] = set()
+
     def _clear_fatal_error_for_entry(
-        self, entry_id: str, *, reason: str | None = None
+        self,
+        entry_id: str,
+        *,
+        reason: str | None = None,
+        force: bool = False,
     ) -> None:
         """Clear any latched fatal registration error for a config entry.
 
@@ -311,7 +335,29 @@ class FcmReceiverHA:
         the Repairs panel keeps a stale non-fixable error after the underlying
         condition is gone (e.g. user re-registers credentials and FCM starts
         successfully again).
+
+        Defense 2 iter-8 (Codex second finding): a successful FCM
+        re-registration is NOT a recovery proof for the short-run crash cap.
+        While ``_short_run_cap_latched`` contains *entry_id* this method is a
+        no-op (the cap latch and the Repairs UI artefact persist), so users
+        keep seeing the fatal state until a real healthy supervisor run
+        (>= _SHORT_RUN_THRESHOLD_S) drops the latch from the monitor loop.
+        Hard-reset callers (entry unregister, test cleanup, integration
+        teardown) must opt in with ``force=True``.
         """
+
+        if not force and entry_id in self._short_run_cap_latched:
+            _LOGGER.debug(
+                "[entry=%s] Skipping fatal-error clear; short-run cap latch "
+                "active (reason=%s). Latch will be released by a healthy "
+                "supervisor run.",
+                entry_id,
+                reason or "unspecified",
+            )
+            return
+
+        if force:
+            self._short_run_cap_latched.discard(entry_id)
 
         removed = False
         if entry_id in self._fatal_errors:
@@ -1047,6 +1093,13 @@ class FcmReceiverHA:
                             )
                             _LOGGER.error("[entry=%s] %s", entry_id, message)
                             self._fatal_errors[entry_id] = message
+                            # Defense 2 iter-8: latch the cap state. While
+                            # this latch is set, ``_clear_fatal_error_for_entry``
+                            # is a no-op (registration / credential-update paths
+                            # cannot clear the fatal map or the Repairs issue
+                            # before a real healthy supervisor run proves the
+                            # poison message is gone).
+                            self._short_run_cap_latched.add(entry_id)
                             if self._hass:
                                 ir.async_create_issue(
                                     self._hass,
@@ -1079,6 +1132,34 @@ class FcmReceiverHA:
                         # the cap had previously fired on a prior supervisor
                         # incarnation, a healthy run is the user-visible
                         # signal that the condition is gone.
+                        #
+                        # Defense 2 iter-8: a healthy run is the ONLY proof
+                        # the system has that the poison-message condition is
+                        # gone, so this is also the only callsite that may
+                        # drop the cap latch. After dropping the latch, the
+                        # cap-related ``_fatal_errors`` entry is removed and
+                        # the aggregate ``_fatal_error`` re-derived (so the
+                        # System Health surface stops showing the stale
+                        # message). The Repairs delete below stays inside
+                        # ``self._hass is not None`` and intentionally also
+                        # runs when no latch was set (cheap idempotent UI
+                        # cleanup).
+                        cap_was_latched = entry_id in self._short_run_cap_latched
+                        if cap_was_latched:
+                            self._short_run_cap_latched.discard(entry_id)
+                            cap_message = self._fatal_errors.get(entry_id)
+                            if cap_message and cap_message.startswith(
+                                "FCM short-run crash loop:"
+                            ):
+                                self._fatal_errors.pop(entry_id, None)
+                                self._fatal_error = next(
+                                    iter(self._fatal_errors.values()), None
+                                )
+                                _LOGGER.info(
+                                    "[entry=%s] FCM short-run cap latch released "
+                                    "by healthy supervisor run",
+                                    entry_id,
+                                )
                         if self._hass is not None:
                             try:
                                 ir.async_delete_issue(
@@ -1441,7 +1522,12 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
-                self._clear_fatal_error_for_entry(entry_id, reason="Entry unregistered")
+                # Hard-reset on unregister: the entry is going away, so the
+                # short-run cap latch must be released together with the
+                # fatal-error map and the Repairs issue (force=True).
+                self._clear_fatal_error_for_entry(
+                    entry_id, reason="Entry unregistered", force=True
+                )
 
     # -------------------- Incoming notifications --------------------
 
