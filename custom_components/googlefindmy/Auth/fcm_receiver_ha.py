@@ -255,6 +255,22 @@ _SHORT_RUN_THRESHOLD_S = 30.0  # strictly < 30s between pc.start() and STOPPED =
 _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
 
+# Defense 2 iter-14 (Codex follow-up): the supervisor-level crash cap writes
+# its terminal state into ``_fatal_errors[entry_id]`` so the binary_sensor
+# diagnostic attribute and the "is FCM ready" check in
+# ``coordinator/polling.py`` see the listener as unavailable. However, the
+# coordinator's re-auth escalation in ``coordinator/polling.py`` also consumes
+# that map and, after _FCM_ERROR_RETRY_THRESHOLD consecutive update cycles,
+# raises ``ConfigEntryAuthFailed`` for ANY non-auth fatal it does not
+# explicitly classify. The crash-loop fatal is NOT an auth problem
+# (the user must reload / regenerate credentials per the repair issue, not
+# re-authenticate). To prevent users from being pushed into Home Assistant's
+# re-auth flow for what is really a poison-message defense, the cap-fire
+# branch tags its message with this prefix and the polling-side consumer
+# excludes it from the re-auth escalation. This module is the SSOT for the
+# prefix; the polling-side consumer imports it from here.
+CRASH_LOOP_FATAL_PREFIX = "FCM short-run crash loop:"
+
 
 async def _call_in_executor[**P, T](
     func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs
@@ -434,13 +450,13 @@ class FcmReceiverHA:
         dropped.
         """
 
-        cap_message_prefix = "FCM short-run crash loop:"
-
         if not force and entry_id in self._short_run_cap_latched:
             current_fatal = self._fatal_errors.get(entry_id)
             # No fatal stored, or the stored fatal IS the cap message:
             # preserve everything (latch, message, Repairs UI artefact).
-            if current_fatal is None or current_fatal.startswith(cap_message_prefix):
+            if current_fatal is None or current_fatal.startswith(
+                CRASH_LOOP_FATAL_PREFIX
+            ):
                 _LOGGER.debug(
                     "[entry=%s] Skipping fatal-error clear; short-run cap latch "
                     "active (reason=%s). Latch will be released by a healthy "
@@ -1243,7 +1259,7 @@ class FcmReceiverHA:
                                 pass
                         if short_run_counter >= _MAX_CONSECUTIVE_SHORT_RUNS:
                             message = (
-                                f"FCM short-run crash loop: "
+                                f"{CRASH_LOOP_FATAL_PREFIX} "
                                 f"{_MAX_CONSECUTIVE_SHORT_RUNS} consecutive "
                                 f"runs ended within "
                                 f"{_SHORT_RUN_THRESHOLD_S:.0f}s "
@@ -1323,7 +1339,7 @@ class FcmReceiverHA:
                             self._short_run_cap_latched.discard(entry_id)
                             cap_message = self._fatal_errors.get(entry_id)
                             if cap_message and cap_message.startswith(
-                                "FCM short-run crash loop:"
+                                CRASH_LOOP_FATAL_PREFIX
                             ):
                                 self._fatal_errors.pop(entry_id, None)
                                 self._fatal_error = next(
