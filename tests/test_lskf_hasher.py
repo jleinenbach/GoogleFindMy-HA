@@ -36,9 +36,9 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import MagicMock
 
-import pyscrypt
 import pytest
 
+import pyscrypt
 from custom_components.googlefindmy.KeyBackup import lskf_hasher
 
 # ---------------------------------------------------------------------------
