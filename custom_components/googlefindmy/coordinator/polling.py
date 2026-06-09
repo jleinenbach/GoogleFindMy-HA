@@ -1332,7 +1332,7 @@ class PollingOperations(_MixinBase):
 
                     except TimeoutError as terr:
                         if self.is_fcm_connected:
-                            _LOGGER.warning(
+                            _LOGGER.info(
                                 "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
                                 dev_name,
                             )
