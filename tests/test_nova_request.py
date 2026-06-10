@@ -20,7 +20,10 @@ from custom_components.googlefindmy.api import _EphemeralCache
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.Auth.token_retrieval import InvalidAasTokenError
 from custom_components.googlefindmy.Auth.username_provider import username_string
-from custom_components.googlefindmy.const import DATA_AAS_TOKEN
+from custom_components.googlefindmy.const import (
+    DATA_AAS_TOKEN,
+    NOVA_REQUEST_TOTAL_TIMEOUT_S,
+)
 from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (
     async_request_device_list,
 )
@@ -603,6 +606,49 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert session.calls
     headers = session.calls[0]["kwargs"].get("headers", {})
     assert headers.get("Authorization") == "Bearer resolved-token"
+
+
+async def test_async_nova_request_uses_central_total_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSOT regression: the HTTP request's ``total`` budget must come from the
+    central ``NOVA_REQUEST_TOTAL_TIMEOUT_S`` constant, not a scattered literal.
+
+    The outer poll guard (``POLL_DEVICE_OUTER_TIMEOUT_S``) is budgeted against
+    this exact value, so the two must never drift apart (Codex finding: the outer
+    guard has to cover the preceding HTTP phase). Pinning the wired-through total
+    here keeps the coupling honest.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x10\x20")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    await async_nova_request(
+        "testScope",
+        "00",
+        username="user@example.com",
+        cache=cache,
+        session=session,
+    )
+
+    assert session.calls
+    timeout = session.calls[0]["kwargs"].get("timeout")
+    assert timeout is not None, "nova_request must pass an explicit ClientTimeout"
+    assert timeout.total == NOVA_REQUEST_TOTAL_TIMEOUT_S
 
 
 def test_async_nova_request_uses_registered_cache_provider(
