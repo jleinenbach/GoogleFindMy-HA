@@ -324,6 +324,13 @@ The integration provides a couple of Home Assistant Actions for use with automat
 - Check if devices have moved recently (Find My devices may not update GPS when stationary)
 - Check battery levels (low battery may disable GPS reporting)
 
+### Location updates stopped after an upgrade
+Location data is fetched **outbound** from Home Assistant to Google (FCM push plus Nova/SPOT polling); it does **not** depend on your Home Assistant internal or external URL configuration. If updates stop after upgrading the integration:
+1. **Reload the integration** (Settings → Devices & Services → Google Find My Device → ⋮ → Reload) or restart Home Assistant. This re-establishes the FCM connection and refreshes tokens, which resolves most post-upgrade stalls.
+2. If updates are still missing, review the logs for authentication errors and re-authenticate if prompted (see [Authentication Expires Repeatedly](#authentication-expires-repeatedly)).
+
+> **Note on the internal/external URL:** Your Home Assistant internal/external URL only affects the clickable **Map View links** on each device page, not location reception. Changing it can appear to "fix" updates because it triggers a reload or restart, but it is the restart that restores tracking, not the URL value. A configuration such as internal `http://ip-address:8123` plus external `https://your-domain:8123` is perfectly valid.
+
 ### FCM Connection Problems
 - Extended timeout allows up to 60 seconds for device response
 - Check firewall settings for Firebase Cloud Messaging

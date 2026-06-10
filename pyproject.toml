@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.0-6"
+version = "1.7.0-7"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
