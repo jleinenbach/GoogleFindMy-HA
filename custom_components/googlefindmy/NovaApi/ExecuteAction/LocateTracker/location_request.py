@@ -701,7 +701,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         try:
             await asyncio.wait_for(ctx.event.wait(), timeout=timeout)
         except TimeoutError:
-            _LOGGER.warning(
+            # Expected when no reporter is in range to relay the BLE tag's
+            # location within the window; the RPC delivers data asynchronously
+            # via FCM. Returning an empty result is the healthy idle outcome,
+            # not a fault (INFO, not WARNING).
+            _LOGGER.info(
                 "No location response received for %s (timeout: %ss)", name, timeout
             )
             return []

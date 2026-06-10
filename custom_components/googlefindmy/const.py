@@ -426,6 +426,15 @@ REBUILD_REGISTRY_MODES: tuple[str, str] = (MODE_REBUILD, MODE_MIGRATE)
 # --------------------------------------------------------------------------------------
 LOCATION_REQUEST_TIMEOUT_S: int = 30
 
+# Outer per-device poll guard. Must stay strictly larger than the inner FCM wait
+# (LOCATION_REQUEST_TIMEOUT_S) so the inner request can return its clean empty
+# result before this safety net fires. Nested timeouts of equal size let the
+# outer one win the race and surface a spurious TimeoutError (Nygard: stagger
+# timeout budgets, decreasing from outer to inner). The +10s grace covers the
+# HTTP round-trip that precedes the inner wait; the upstream HTTP call already
+# caps itself at total=30s (NovaApi/nova_request.py), so a small grace suffices.
+POLL_DEVICE_OUTER_TIMEOUT_S: int = LOCATION_REQUEST_TIMEOUT_S + 10
+
 # --------------------------------------------------------------------------------------
 # HTTP headers / User-Agent (Nova API)
 # --------------------------------------------------------------------------------------
@@ -603,6 +612,7 @@ __all__ = [
     "MODE_MIGRATE",
     "REBUILD_REGISTRY_MODES",
     "LOCATION_REQUEST_TIMEOUT_S",
+    "POLL_DEVICE_OUTER_TIMEOUT_S",
     "NOVA_API_USER_AGENT",
     "FCM_CLIENT_HEARTBEAT_INTERVAL_S",
     "FCM_SERVER_HEARTBEAT_INTERVAL_S",

@@ -48,7 +48,7 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from ..const import (
     DEVICE_LIST_POLL_INTERVAL,
     DOMAIN,
-    LOCATION_REQUEST_TIMEOUT_S,
+    POLL_DEVICE_OUTER_TIMEOUT_S,
 )
 from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
@@ -178,6 +178,37 @@ class PollingOperations(_MixinBase):
     def is_fcm_connected(self) -> bool:
         """Convenience boolean for entities relying on push transport availability."""
         return self._fcm_status_state == FcmStatus.CONNECTED
+
+    def _log_idle_poll_diagnostics(
+        self, dev_id: str, dev_name: str, *, source: str
+    ) -> None:
+        """Emit a single DEBUG line per device per cycle to tell an expected
+        idle poll (no reporter in range to relay a BLE tag's location) apart
+        from a possible FCM transport fault.
+
+        Only rendered at DEBUG level, so this stays silent during normal
+        operation and adds no WARNING/INFO noise. ``source`` distinguishes the
+        inner empty result from the outer poll-guard timeout.
+        """
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        now = time.time()
+        cached = self._device_location_data.get(dev_id) or {}
+        last_seen = cached.get("last_seen")
+        try:
+            report_age = f"{now - float(last_seen):.0f}s" if last_seen else "never"
+        except (TypeError, ValueError):
+            report_age = "unknown"
+        changed_at = self._fcm_status_changed_at
+        fcm_age = f"{now - changed_at:.0f}s" if changed_at else "unknown"
+        _LOGGER.debug(
+            "Idle poll for %s (%s): last report %s ago, FCM status %s for %s",
+            dev_name,
+            source,
+            report_age,
+            self._fcm_status_state,
+            fcm_age,
+        )
 
     @property
     def consecutive_timeouts(self) -> int:
@@ -1106,10 +1137,16 @@ class PollingOperations(_MixinBase):
                     )
 
                     try:
-                        # Protect API awaitable with timeout
+                        # Protect API awaitable with an outer guard that is
+                        # strictly larger than the inner FCM wait
+                        # (LOCATION_REQUEST_TIMEOUT_S, see
+                        # NovaApi/.../location_request.py). Equal nested budgets
+                        # make this outer guard win the race and raise a spurious
+                        # TimeoutError before the inner request can return its
+                        # clean empty result (Nygard: stagger nested timeouts).
                         location = await asyncio.wait_for(
                             self.api.async_get_device_location(dev_id, dev_name),
-                            timeout=LOCATION_REQUEST_TIMEOUT_S,
+                            timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
                         )
 
                         # Success path: ensure any previous auth error is cleared
@@ -1124,8 +1161,15 @@ class PollingOperations(_MixinBase):
                             self._last_transient_auth_error = None
 
                         if not location:
-                            _LOGGER.warning(
+                            # Expected for BLE tags with no reporter nearby: the
+                            # inner FCM wait returns an empty result rather than
+                            # raising. This is a healthy idle outcome, not a fault
+                            # (kept at INFO, symmetric with the timeout branch).
+                            _LOGGER.info(
                                 "No location data returned for %s", dev_name
+                            )
+                            self._log_idle_poll_diagnostics(
+                                dev_id, dev_name, source="empty-result"
                             )
                             continue
 
@@ -1336,12 +1380,15 @@ class PollingOperations(_MixinBase):
                                 "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
                                 dev_name,
                             )
+                            self._log_idle_poll_diagnostics(
+                                dev_id, dev_name, source="outer-timeout"
+                            )
                             self.increment_stat("timeouts")
                         else:
                             _LOGGER.info(
                                 "Location request timed out for %s after %s seconds",
                                 dev_name,
-                                LOCATION_REQUEST_TIMEOUT_S,
+                                POLL_DEVICE_OUTER_TIMEOUT_S,
                             )
                             self.increment_stat("timeouts")
                             self._consecutive_timeouts += 1
