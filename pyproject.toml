@@ -20,6 +20,7 @@ beautifulsoup4 = ">=4.12.3"
 cryptography = ">=43.0.3"
 ecdsa = ">=0.19.1"
 gpsoauth = ">=2.0.0"
+grpclib = ">=0.4.7"
 h2 = ">=4.1.0"
 http-ece = ">=1.2.1"
 httpx = { version = ">=0.28.0", extras = ["http2"] }
@@ -49,7 +50,6 @@ pip-audit = ">=2.6"
 
 # Additional dev tools
 pyyaml = ">=6.0.2"
-grpclib = ">=0.4.7"
 pycares = ">=4.4.0"
 certifi = ">=2024.7.4"
 
