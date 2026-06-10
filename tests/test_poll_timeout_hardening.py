@@ -395,15 +395,21 @@ def test_inner_fcm_wait_timeout_logs_info_and_returns_empty(
     monkeypatch.setattr(lr, "async_nova_request", AsyncMock(return_value=""))
     lr.register_fcm_receiver_provider(lambda _entry=None: _FakeReceiver())
 
-    async def _run() -> list:
-        return await lr.get_location_data_for_device(
-            "canonic-1", "Idle Tag", username="user@example.com", cache=_Cache()
-        )
-
+    # Explicit event loop (not asyncio.run) to honour the repo's test-suite
+    # guard; mirrors the established pattern in this file.
+    loop = asyncio.new_event_loop()
     try:
         with caplog.at_level(logging.INFO, logger=_LOCATION_REQUEST_LOGGER):
-            result = asyncio.run(_run())
+            result = loop.run_until_complete(
+                lr.get_location_data_for_device(
+                    "canonic-1",
+                    "Idle Tag",
+                    username="user@example.com",
+                    cache=_Cache(),
+                )
+            )
     finally:
+        drain_loop(loop)
         lr.unregister_fcm_receiver_provider()
 
     assert result == []
