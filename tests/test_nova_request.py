@@ -608,7 +608,7 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert headers.get("Authorization") == "Bearer resolved-token"
 
 
-def test_async_nova_request_uses_central_total_timeout(
+async def test_async_nova_request_uses_central_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """SSOT regression: the HTTP request's ``total`` budget must come from the
@@ -637,16 +637,13 @@ def test_async_nova_request_uses_central_total_timeout(
         _fake_get_adm_token,
     )
 
-    async def _exercise() -> str:
-        return await async_nova_request(
-            "testScope",
-            "00",
-            username="user@example.com",
-            cache=cache,
-            session=session,
-        )
-
-    asyncio.run(_exercise())
+    await async_nova_request(
+        "testScope",
+        "00",
+        username="user@example.com",
+        cache=cache,
+        session=session,
+    )
 
     assert session.calls
     timeout = session.calls[0]["kwargs"].get("timeout")
