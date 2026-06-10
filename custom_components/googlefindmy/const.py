@@ -426,14 +426,25 @@ REBUILD_REGISTRY_MODES: tuple[str, str] = (MODE_REBUILD, MODE_MIGRATE)
 # --------------------------------------------------------------------------------------
 LOCATION_REQUEST_TIMEOUT_S: int = 30
 
-# Outer per-device poll guard. Must stay strictly larger than the inner FCM wait
-# (LOCATION_REQUEST_TIMEOUT_S) so the inner request can return its clean empty
-# result before this safety net fires. Nested timeouts of equal size let the
-# outer one win the race and surface a spurious TimeoutError (Nygard: stagger
-# timeout budgets, decreasing from outer to inner). The +10s grace covers the
-# HTTP round-trip that precedes the inner wait; the upstream HTTP call already
-# caps itself at total=30s (NovaApi/nova_request.py), so a small grace suffices.
-POLL_DEVICE_OUTER_TIMEOUT_S: int = LOCATION_REQUEST_TIMEOUT_S + 10
+# Total budget for a single Nova HTTP round-trip. Single source of truth for the
+# aiohttp ``ClientTimeout(total=...)`` used in NovaApi/nova_request.py. The outer
+# poll guard below budgets against this value, so the two MUST move together;
+# nova_request.py imports this constant instead of repeating the literal.
+NOVA_REQUEST_TOTAL_TIMEOUT_S: int = 30
+
+# Outer per-device poll guard. A single location request runs two *sequential*
+# phases: first the Nova HTTP round-trip (capped at NOVA_REQUEST_TOTAL_TIMEOUT_S),
+# then the FCM wait (capped at LOCATION_REQUEST_TIMEOUT_S). The outer guard must
+# cover BOTH phases plus a small grace, otherwise a slow-but-successful HTTP call
+# pushes the inner FCM wait past the guard and the outer wait_for raises a
+# spurious TimeoutError before the inner request can return its clean empty
+# result (Nygard: stagger nested timeout budgets, decreasing from outer to
+# inner). The +5s grace absorbs scheduling/setup overhead between the phases.
+# Note: this budgets a single HTTP attempt; a multi-retry backoff sequence inside
+# nova_request can still exceed it, in which case the guard correctly intervenes.
+POLL_DEVICE_OUTER_TIMEOUT_S: int = (
+    NOVA_REQUEST_TOTAL_TIMEOUT_S + LOCATION_REQUEST_TIMEOUT_S + 5
+)
 
 # --------------------------------------------------------------------------------------
 # HTTP headers / User-Agent (Nova API)
@@ -612,6 +623,7 @@ __all__ = [
     "MODE_MIGRATE",
     "REBUILD_REGISTRY_MODES",
     "LOCATION_REQUEST_TIMEOUT_S",
+    "NOVA_REQUEST_TOTAL_TIMEOUT_S",
     "POLL_DEVICE_OUTER_TIMEOUT_S",
     "NOVA_API_USER_AGENT",
     "FCM_CLIENT_HEARTBEAT_INTERVAL_S",

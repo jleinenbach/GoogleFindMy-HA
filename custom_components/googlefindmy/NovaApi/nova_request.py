@@ -76,7 +76,11 @@ except ImportError:
         ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
         _RPC_STATUS_AVAILABLE = False
 
-from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
+from ..const import (
+    DATA_AAS_TOKEN,
+    NOVA_API_USER_AGENT,
+    NOVA_REQUEST_TOTAL_TIMEOUT_S,
+)
 
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup as _BeautifulSoupType
@@ -1404,7 +1408,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         while True:
             attempt = retries_used + 1
             try:
-                timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
+                timeout = aiohttp.ClientTimeout(
+                    total=NOVA_REQUEST_TOTAL_TIMEOUT_S, connect=10, sock_read=30
+                )
                 async with session.post(
                     url,
                     headers=headers,
@@ -1538,7 +1544,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 _SHORT_COOLDOWN_S,
                             )
                             await asyncio.sleep(_SHORT_COOLDOWN_S)
-                            _LOGGER.info("Nova API: refreshing ADM token (AAS retained).")
+                            _LOGGER.info(
+                                "Nova API: refreshing ADM token (AAS retained)."
+                            )
                             try:
                                 await policy.async_on_401()
                             except NovaAuthPermanentError:
