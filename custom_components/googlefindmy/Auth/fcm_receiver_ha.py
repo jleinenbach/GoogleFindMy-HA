@@ -160,6 +160,84 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# Iter-12 (Codex follow-up): the short-run crash cap needs to know
+# whether the FCM client ever reached ``FcmPushClientRunState.STARTED``
+# during a run, even when the entire CREATED -> STARTED -> CRASH
+# lifecycle happens between two monitor polls (``FCM_MONITOR_INTERVAL_S``
+# >= 0.5s). Sampling alone is too coarse for the very poison-message
+# loop the cap is meant to stop. A subclass with a ``__setattr__`` hook
+# latches ``_has_been_started`` the moment the vendored library assigns
+# ``run_state = STARTED`` -- independent of any polling cadence and
+# without modifying the vendored library itself. See
+# CA-DEFENSE-OBSERVABILITY-001.
+if HAVE_FCM_PUSH_CLIENT and FcmPushClientRunState is not None:
+    # Snapshot of the original class for runtime identity comparison.
+    # Tests substitute the module-level ``FcmPushClient`` symbol via
+    # monkeypatch (the documented seam) to inject test doubles; the
+    # factory below honours that substitution by class identity, not by
+    # subclass relation. See CA-SUBCLASS-IDENTITY-001.
+    _OriginalFcmPushClient: type[Any] | None = FcmPushClient
+
+    class _ObservableFcmPushClient(FcmPushClient[Any]):
+        """FcmPushClient subclass with a run_state observer latch.
+
+        See CA-DEFENSE-OBSERVABILITY-001.
+        """
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Seed the latch before super().__init__ so any attribute
+            # assignment performed by the parent's constructor still
+            # routes through our ``__setattr__`` without raising.
+            object.__setattr__(self, "_has_been_started", False)
+            super().__init__(*args, **kwargs)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            super().__setattr__(name, value)
+            if (
+                name == "run_state"
+                and FcmPushClientRunState is not None
+                and value == FcmPushClientRunState.STARTED
+            ):
+                # ``object.__setattr__`` to avoid recursion through this hook.
+                object.__setattr__(self, "_has_been_started", True)
+
+    _ObservableFcmPushClientCls: type[Any] | None = _ObservableFcmPushClient
+else:  # pragma: no cover - exercised only when the vendored library is absent
+    _OriginalFcmPushClient = None
+    _ObservableFcmPushClientCls = None
+
+
+def _FcmPushClientFactory(*args: Any, **kwargs: Any) -> FcmPushClient[Any]:
+    """Construct an FCM client at call time, honouring test substitutions.
+
+    Production: prefers the ``_ObservableFcmPushClient`` subclass so the
+    short-run crash cap can observe ``run_state -> STARTED`` transitions
+    that happen between monitor polls (CA-DEFENSE-OBSERVABILITY-001).
+
+    Tests: when the module-level ``FcmPushClient`` symbol has been
+    monkeypatched away from the original class (the documented test
+    seam), the factory instantiates the patched class DIRECTLY rather
+    than the production subclass. This preserves ``isinstance`` identity
+    for test doubles (CA-SUBCLASS-IDENTITY-001) instead of returning a
+    subclass that diverges from the patched symbol.
+    """
+
+    current = globals().get("FcmPushClient")
+    if (
+        _ObservableFcmPushClientCls is not None
+        and _OriginalFcmPushClient is not None
+        and current is _OriginalFcmPushClient
+    ):
+        return cast(
+            "FcmPushClient[Any]",
+            _ObservableFcmPushClientCls(*args, **kwargs),
+        )
+    if current is None:  # pragma: no cover - vendored library missing
+        raise RuntimeError("FcmPushClient is not available")
+    return cast("FcmPushClient[Any]", current(*args, **kwargs))
+
+
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
@@ -167,8 +245,31 @@ _MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
 _BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
 _MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
 _MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
+# Defense 2: supervisor-level crash cap as a bulkhead around the inner-loop
+# poison-message filter (``fcmpushclient._listen`` Defense 1+3). When the FCM
+# client connects but loses the run-loop within ``_SHORT_RUN_THRESHOLD_S``
+# repeatedly, a persistent poison condition is suspected and the supervisor
+# stops looping to prevent unbounded retry pressure on Google + log spam.
+_MAX_CONSECUTIVE_SHORT_RUNS = 10
+_SHORT_RUN_THRESHOLD_S = 30.0  # strictly < 30s between pc.start() and STOPPED = short run
 _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
+
+# Defense 2 iter-14 (Codex follow-up): the supervisor-level crash cap writes
+# its terminal state into ``_fatal_errors[entry_id]`` so the binary_sensor
+# diagnostic attribute and the "is FCM ready" check in
+# ``coordinator/polling.py`` see the listener as unavailable. However, the
+# coordinator's re-auth escalation in ``coordinator/polling.py`` also consumes
+# that map and, after _FCM_ERROR_RETRY_THRESHOLD consecutive update cycles,
+# raises ``ConfigEntryAuthFailed`` for ANY non-auth fatal it does not
+# explicitly classify. The crash-loop fatal is NOT an auth problem
+# (the user must reload / regenerate credentials per the repair issue, not
+# re-authenticate). To prevent users from being pushed into Home Assistant's
+# re-auth flow for what is really a poison-message defense, the cap-fire
+# branch tags its message with this prefix and the polling-side consumer
+# excludes it from the re-auth escalation. This module is the SSOT for the
+# prefix; the polling-side consumer imports it from here.
+CRASH_LOOP_FATAL_PREFIX = "FCM short-run crash loop:"
 
 
 async def _call_in_executor[**P, T](
@@ -292,10 +393,120 @@ class FcmReceiverHA:
         # Per-entry nudge events: allows coordinator to wake up a sleeping supervisor
         self._retry_nudge_evts: dict[str, asyncio.Event] = {}
 
+        # Defense 2 iter-8: persistent short-run cap latch.
+        #
+        # When the cap fires the entry is in a *poison-message crash loop*
+        # that only a real healthy supervisor run (>= _SHORT_RUN_THRESHOLD_S)
+        # can prove gone. A successful FCM re-registration alone is NOT a
+        # proof: registration only contacts the GCM endpoint, it does not
+        # show that the subsequent listener stays up long enough to drain
+        # the poisoned notification.
+        #
+        # The latch is therefore set together with the user-visible repair
+        # issue at cap-fire time and is the *only* thing that gates whether
+        # ``_clear_fatal_error_for_entry`` (which gets called from every
+        # registration-success path) is allowed to drop the fatal-error map
+        # entry and the Repairs UI artefact. Without this latch, any reload
+        # or credential update would clear the cap-related fatal state, the
+        # supervisor would start a fresh 10-run burst, and the user would
+        # see no visible fatal state in between (Codex defense-2 iter-8
+        # second finding).
+        self._short_run_cap_latched: set[str] = set()
+        # Defense 2 iter-16 (Codex follow-up): persistent snapshot of the
+        # cap-fire message per entry. Populated when the cap fires and used
+        # by ``_clear_fatal_error_for_entry`` to restore the cap fatal after
+        # a non-cap fatal (e.g. a terminal 401/404 from a subsequent
+        # re-registration) was cleared. Cleared in the same two places that
+        # release the latch: the healthy-run cleanup branch and any
+        # ``force=True`` teardown. This keeps the per-entry fatal visible to
+        # the coordinator and the diagnostic binary sensor for the entire
+        # latch lifetime, even across non-cap fatal overwrites.
+        self._short_run_cap_messages: dict[str, str] = {}
+
     def _clear_fatal_error_for_entry(
-        self, entry_id: str, *, reason: str | None = None
+        self,
+        entry_id: str,
+        *,
+        reason: str | None = None,
+        force: bool = False,
     ) -> None:
-        """Clear any latched fatal registration error for a config entry."""
+        """Clear any latched fatal registration error for a config entry.
+
+        Also removes the Defense 2 short-run-crash-loop repair issue from the
+        Home Assistant Issue Registry. The fatal-error map and the Issue
+        Registry entry are a CREATE/DELETE pair: any recovery path that clears
+        the in-memory latch must also delete the user-visible UI artefact, or
+        the Repairs panel keeps a stale non-fixable error after the underlying
+        condition is gone (e.g. user re-registers credentials and FCM starts
+        successfully again).
+
+        Defense 2 iter-8 (Codex second finding): a successful FCM
+        re-registration is NOT a recovery proof for the short-run crash cap.
+        While ``_short_run_cap_latched`` contains *entry_id* this method must
+        protect the cap state (latched fatal message + Repairs UI artefact)
+        from being silently cleared, so users keep seeing the fatal state
+        until a real healthy supervisor run (>= _SHORT_RUN_THRESHOLD_S) drops
+        the latch from the monitor loop. Hard-reset callers (entry unregister,
+        test cleanup, integration teardown) must opt in with ``force=True``.
+
+        Defense 2 iter-10 (Codex follow-up): the latch guard is intentionally
+        narrow. It is a no-op ONLY when the currently stored fatal IS the
+        cap-related message (``FCM short-run crash loop: ...``). Non-cap fatal
+        errors (e.g. a terminal 401/404 from a subsequent re-registration that
+        overwrote ``_fatal_errors[entry_id]``) must clear normally so a
+        credentials recovery is not blocked by an unrelated latch. The cap
+        latch, any cap-related fatal it still protects, and the Repairs UI
+        artefact remain in place in that case; only the unrelated fatal is
+        dropped.
+        """
+
+        if not force and entry_id in self._short_run_cap_latched:
+            current_fatal = self._fatal_errors.get(entry_id)
+            # No fatal stored, or the stored fatal IS the cap message:
+            # preserve everything (latch, message, Repairs UI artefact).
+            if current_fatal is None or current_fatal.startswith(
+                CRASH_LOOP_FATAL_PREFIX
+            ):
+                _LOGGER.debug(
+                    "[entry=%s] Skipping fatal-error clear; short-run cap latch "
+                    "active (reason=%s). Latch will be released by a healthy "
+                    "supervisor run.",
+                    entry_id,
+                    reason or "unspecified",
+                )
+                return
+
+            # Non-cap fatal stored while the cap latch is active. Clear the
+            # unrelated fatal but KEEP the cap latch and Repairs UI artefact
+            # intact, so the user-visible cap warning is not silently
+            # invalidated by an unrelated recovery path.
+            #
+            # Defense 2 iter-16 (Codex follow-up): the per-entry cap-fire
+            # message snapshot (``_short_run_cap_messages``) must be
+            # re-written into ``_fatal_errors`` so the coordinator and the
+            # diagnostic binary sensor continue to see the cap-fatal state
+            # during the recovery/retry window. Otherwise the latch would
+            # silently invalidate the per-entry fatal even though the
+            # in-memory latch and the Repairs UI artefact remain set.
+            _LOGGER.debug(
+                "[entry=%s] Cap latch active; clearing non-cap fatal "
+                "(reason=%s) while preserving cap latch and repair issue",
+                entry_id,
+                reason or "unspecified",
+            )
+            self._fatal_errors.pop(entry_id, None)
+            cap_message = self._short_run_cap_messages.get(entry_id)
+            if cap_message is not None:
+                self._fatal_errors[entry_id] = cap_message
+            self._fatal_error = next(iter(self._fatal_errors.values()), None)
+            return
+
+        if force:
+            self._short_run_cap_latched.discard(entry_id)
+            # Iter-16: drop the cap-fire snapshot in lockstep with the latch
+            # so a forced teardown also retires the message that the
+            # pass-through branch would otherwise restore.
+            self._short_run_cap_messages.pop(entry_id, None)
 
         removed = False
         if entry_id in self._fatal_errors:
@@ -311,6 +522,18 @@ class FcmReceiverHA:
 
         if removed:
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
+
+        if self._hass is not None:
+            try:
+                ir.async_delete_issue(
+                    self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
+                )
+            except Exception:  # noqa: BLE001 - best-effort UI cleanup
+                _LOGGER.debug(
+                    "[entry=%s] Failed to delete short-run repair issue",
+                    entry_id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
@@ -709,7 +932,7 @@ class FcmReceiverHA:
                     "CredentialsUpdatedCallable[MutableJSONMapping]",
                     _on_creds_updated_entry,
                 )
-                pc = FcmPushClient(
+                pc = _FcmPushClientFactory(
                     lambda payload,
                     persistent_id,
                     context,
@@ -756,6 +979,12 @@ class FcmReceiverHA:
                     return False
 
             backoff = 1.0
+            # Defense 2: per-supervisor closure state for the short-run
+            # crash cap. Kept closure-local (not on ``self``) so a
+            # re-registration that cancels this supervisor and spawns a
+            # new one cannot inherit a stale counter (CA-Audit B1).
+            short_run_counter: int = 0
+            entry_start: float = 0.0
             try:
                 while not stop_evt.is_set():
                     pc = await self._ensure_client_for_entry(entry_id, cache)
@@ -919,6 +1148,22 @@ class FcmReceiverHA:
                             "[entry=%s] FCM client failed to start: %s", entry_id, err
                         )
 
+                    # Defense 2 snapshot: timestamp the entry into the
+                    # monitor loop.
+                    #
+                    # Iter-11 (Codex follow-up): per-run latch tracking
+                    # whether the client ever reached a connected/listening
+                    # state. The cap is meant to detect a poison-message
+                    # crash loop (client connects, decodes, dies, repeat),
+                    # NOT ordinary connectivity outages where ``_listen()``
+                    # exhausts its 5 connection retries (~15-20s) without
+                    # ever reaching ``STARTED``. Without this gate, a normal
+                    # MCS-unreachable / Google outage would cap the
+                    # supervisor after 10 brief connection-failure runs and
+                    # permanently disable FCM push until reload.
+                    entry_start = time.monotonic()
+                    became_started = False
+
                     while not stop_evt.is_set():
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
                         state = getattr(pc, "run_state", None)
@@ -928,6 +1173,27 @@ class FcmReceiverHA:
                             entry_id, pc, monotonic_now
                         )
                         stale_after = max(self._activity_stale_after_s, 0.0)
+                        # Iter-11: track ``became_started`` symmetrically to
+                        # the health probe (same fallback for libraries that
+                        # do not expose a ``run_state`` enum).
+                        if FcmPushClientRunState is None:
+                            if do_listen:
+                                became_started = True
+                        elif state == FcmPushClientRunState.STARTED:
+                            became_started = True
+                        # Iter-12 (Codex follow-up): sampling-gap defense.
+                        # When the full lifecycle ``CREATED -> STARTED ->
+                        # CRASH`` happens between two monitor polls (>=0.5s),
+                        # this loop reads STOPPED/!do_listen and ``became_started``
+                        # would remain false. The vendored client's
+                        # ``__setattr__`` hook latches ``_has_been_started``
+                        # the moment the library assigns ``run_state =
+                        # STARTED``, independent of polling cadence; mirror
+                        # that observation here so the cap branch correctly
+                        # classifies micro-window poison-message crashes.
+                        became_started = became_started or bool(
+                            getattr(pc, "_has_been_started", False)
+                        )
                         healthy = (
                             (
                                 FcmPushClientRunState is None
@@ -978,6 +1244,158 @@ class FcmReceiverHA:
                                 monotonic_now - last_activity,
                             )
                             break
+
+                    # Defense 2: short-run crash cap. Counts consecutive
+                    # monitor exits with ``run_duration <
+                    # _SHORT_RUN_THRESHOLD_S`` THAT ALSO reached
+                    # ``STARTED`` at least once during the run. After
+                    # ``_MAX_CONSECUTIVE_SHORT_RUNS`` such runs, surface a
+                    # non-fixable repair issue and stop the loop. The
+                    # comparison is strictly ``<`` (a 30.0s run counts as
+                    # healthy and resets the counter).
+                    #
+                    # Iter-11 (Codex follow-up): the ``became_started`` gate
+                    # ensures the cap is specific to the poison-message
+                    # scenario (client connects, decodes, dies, repeat) and
+                    # excludes pre-start connection/login failures. A burst
+                    # of MCS-unreachable failures (5 retries x ~3-4s each)
+                    # would otherwise be counted as short-run crashes and
+                    # permanently disable FCM push after one ordinary
+                    # network outage. Pre-start failures leave the counter
+                    # AND the latch UNTOUCHED so that (a) a poison-message
+                    # cascade interleaved with outages still accumulates
+                    # correctly, and (b) a long pre-start hang does not
+                    # falsely clear a real cap latch (no healthy proof).
+                    run_duration = time.monotonic() - entry_start
+                    if not became_started:
+                        # Pre-start failure (no connected/listening state
+                        # observed during this run). Do NOT touch the
+                        # short-run counter or the cap latch.
+                        pass
+                    elif run_duration < _SHORT_RUN_THRESHOLD_S:
+                        short_run_counter += 1
+                        # Test hook: expose the closure counter to stubs
+                        # without leaking it onto ``self``.
+                        observe = getattr(pc, "_observe_counter", None)
+                        if callable(observe):
+                            try:
+                                observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if short_run_counter >= _MAX_CONSECUTIVE_SHORT_RUNS:
+                            message = (
+                                f"{CRASH_LOOP_FATAL_PREFIX} "
+                                f"{_MAX_CONSECUTIVE_SHORT_RUNS} consecutive "
+                                f"runs ended within "
+                                f"{_SHORT_RUN_THRESHOLD_S:.0f}s "
+                                f"(persistent poison message suspected)"
+                            )
+                            _LOGGER.error("[entry=%s] %s", entry_id, message)
+                            self._fatal_errors[entry_id] = message
+                            # Defense 2 iter-8: latch the cap state. While
+                            # this latch is set, ``_clear_fatal_error_for_entry``
+                            # is a no-op (registration / credential-update paths
+                            # cannot clear the fatal map or the Repairs issue
+                            # before a real healthy supervisor run proves the
+                            # poison message is gone).
+                            self._short_run_cap_latched.add(entry_id)
+                            # Iter-16 (Codex follow-up): snapshot the
+                            # cap-fire message so the pass-through clear
+                            # branch in ``_clear_fatal_error_for_entry`` can
+                            # restore it after a non-cap fatal overwrote
+                            # ``_fatal_errors[entry_id]``. Released in the
+                            # same two places that release the latch.
+                            self._short_run_cap_messages[entry_id] = message
+                            if self._hass:
+                                ir.async_create_issue(
+                                    self._hass,
+                                    DOMAIN,
+                                    f"fcm_short_run_crash_loop_{entry_id}",
+                                    is_fixable=False,
+                                    severity=ir.IssueSeverity.ERROR,
+                                    translation_key="fcm_short_run_crash_loop",
+                                )
+                            # Cleanup the client before breaking out so
+                            # the loop exit doesn't leave a half-stopped pc.
+                            try:
+                                await pc.stop()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            finally:
+                                async with self._lock:
+                                    self.pcs.pop(entry_id, None)
+                                self._update_entry_health(entry_id, False)
+                            # Defense 2 iter-9 (Codex follow-up): the cap is
+                            # a TERMINAL state for this supervisor. ``break``
+                            # alone only exits the inner monitor loop and
+                            # falls through to the per-iteration restart
+                            # block (``if not stop_evt.is_set(): ...
+                            # _nudge_sleep(delay)``), which would spawn a
+                            # fresh FCM client and continue the retry
+                            # pressure / log spam the cap is meant to stop.
+                            # Set the stop event so the outer ``while not
+                            # stop_evt.is_set()`` exits, and pop the entry
+                            # from ``_stop_evts`` so a legitimate
+                            # re-registration / reload (which constructs a
+                            # fresh event via ``setdefault``) is not
+                            # short-circuited by the now-consumed event.
+                            stop_evt.set()
+                            self._stop_evts.pop(entry_id, None)
+                            break
+                    else:
+                        short_run_counter = 0  # healthy run resets the counter
+                        observe = getattr(pc, "_observe_counter", None)
+                        if callable(observe):
+                            try:
+                                observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        # Mirror the counter reset in the Issue Registry: if
+                        # the cap had previously fired on a prior supervisor
+                        # incarnation, a healthy run is the user-visible
+                        # signal that the condition is gone.
+                        #
+                        # Defense 2 iter-8: a healthy run is the ONLY proof
+                        # the system has that the poison-message condition is
+                        # gone, so this is also the only callsite that may
+                        # drop the cap latch. After dropping the latch, the
+                        # cap-related ``_fatal_errors`` entry is removed and
+                        # the aggregate ``_fatal_error`` re-derived (so the
+                        # System Health surface stops showing the stale
+                        # message). The Repairs delete below stays inside
+                        # ``self._hass is not None`` and intentionally also
+                        # runs when no latch was set (cheap idempotent UI
+                        # cleanup).
+                        cap_was_latched = entry_id in self._short_run_cap_latched
+                        if cap_was_latched:
+                            self._short_run_cap_latched.discard(entry_id)
+                            # Iter-16: a healthy run is also the moment to
+                            # retire the cap-fire snapshot so the
+                            # pass-through clear branch cannot re-introduce
+                            # it after the latch is gone.
+                            self._short_run_cap_messages.pop(entry_id, None)
+                            cap_message = self._fatal_errors.get(entry_id)
+                            if cap_message and cap_message.startswith(
+                                CRASH_LOOP_FATAL_PREFIX
+                            ):
+                                self._fatal_errors.pop(entry_id, None)
+                                self._fatal_error = next(
+                                    iter(self._fatal_errors.values()), None
+                                )
+                                _LOGGER.info(
+                                    "[entry=%s] FCM short-run cap latch released "
+                                    "by healthy supervisor run",
+                                    entry_id,
+                                )
+                        if self._hass is not None:
+                            try:
+                                ir.async_delete_issue(
+                                    self._hass,
+                                    DOMAIN,
+                                    f"fcm_short_run_crash_loop_{entry_id}",
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
 
                     # Cleanup before restart
                     try:
@@ -1331,7 +1749,12 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
-                self._clear_fatal_error_for_entry(entry_id, reason="Entry unregistered")
+                # Hard-reset on unregister: the entry is going away, so the
+                # short-run cap latch must be released together with the
+                # fatal-error map and the Repairs issue (force=True).
+                self._clear_fatal_error_for_entry(
+                    entry_id, reason="Entry unregistered", force=True
+                )
 
     # -------------------- Incoming notifications --------------------
 

@@ -714,6 +714,10 @@
     "cache_purged": {
       "title": "Authentication cache cleared",
       "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+    },
+    "fcm_short_run_crash_loop": {
+      "title": "Bucle de fallos de FCM Push detectado",
+      "description": "El cliente push de FCM se desconecta repetidamente a los pocos segundos de conectarse (bucle de fallos cortos). Esto suele estar causado por una notificación corrupta persistente en la cola entrante que no se puede decodificar.\n\n1. Recarga la integración para limpiar el estado de ejecución.\n2. Si el problema vuelve, regenera tu `secrets.json` (Google podría haber rotado las credenciales)."
     }
   },
   "exceptions": {

@@ -13,6 +13,9 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 
+from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
+    CRASH_LOOP_FATAL_PREFIX,
+)
 from custom_components.googlefindmy.binary_sensor import GoogleFindMyPollingSensor
 from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
@@ -245,6 +248,91 @@ def test_global_fatal_error_ignored_for_clean_entry(
     assert result == []
     assert coordinator.auth_error_active is False
     assert coordinator.hass.bus.fired == []
+
+
+# --------------------------------------------------------------------------
+# AP7 / CA-6: re-auth-escalation dispatch wiring for the crash-loop fatal.
+#
+# cov-integ's ``test_coordinator_polling_fatal_channel.py`` only pins the
+# pure ``_classify_fcm_fatal`` function (RV-G3q scenarios a+b). It never
+# drives ``_async_update_data``, so a regression that re-wires the
+# CRASH_LOOP_EXCLUDED branch back into the re-auth path (the #1086
+# channel-confusion bug, RV-G3q) would not turn any cov-integ test red.
+# These two tests pin the consumer-branch wiring (RV-G3q scenarios c+d):
+#   (c) no ConfigEntryAuthFailed / no auth-error flip for a cap fatal;
+#   (d) a crash-loop fatal resets a stale transient auth-error count.
+# --------------------------------------------------------------------------
+
+
+def test_crash_loop_fatal_excluded_from_reauth_escalation(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """AP7/CA-6 (c): a supervisor short-run-cap fatal must NOT escalate to re-auth.
+
+    The FCM receiver's poison-message cap publishes its terminal state into
+    the same ``_fatal_errors`` map the re-auth escalation consumes. Polling
+    ``_async_update_data`` well past ``_FCM_ERROR_RETRY_THRESHOLD`` with a
+    ``CRASH_LOOP_FATAL_PREFIX`` fatal must never raise ConfigEntryAuthFailed
+    nor flip the auth-error state.
+    """
+    fatal_error = f"{CRASH_LOOP_FATAL_PREFIX} entry abc stopped after 10 short runs"
+
+    class _DummyFcm:
+        def __init__(self, message: str) -> None:
+            self._fatal_error = message
+            self._fatal_errors = {coordinator.config_entry.entry_id: message}
+
+    dummy_api.fcm = _DummyFcm(fatal_error)
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator.config_entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, fcm_receiver=dummy_api.fcm
+    )
+    coordinator._is_fcm_ready_soft = lambda: False
+
+    loop = coordinator.hass.loop
+    # Five cycles is comfortably past the threshold (3); no escalation allowed.
+    for _ in range(5):
+        result = loop.run_until_complete(coordinator._async_update_data())
+        assert result == []
+
+    assert coordinator.auth_error_active is False
+    assert coordinator.hass.bus.fired == []
+    assert coordinator._fcm_error_count == 0
+
+
+def test_crash_loop_fatal_resets_stale_auth_error_count(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """AP7/CA-6 (d): a crash-loop fatal resets a stale transient auth-error count.
+
+    A partial count left over from earlier transient (non-cap) auth fatals
+    must not let a later real auth fatal inherit the crash-loop window's
+    count and escalate prematurely.
+    """
+    fatal_error = f"{CRASH_LOOP_FATAL_PREFIX} entry abc stopped after 10 short runs"
+
+    class _DummyFcm:
+        def __init__(self, message: str) -> None:
+            self._fatal_error = message
+            self._fatal_errors = {coordinator.config_entry.entry_id: message}
+
+    dummy_api.fcm = _DummyFcm(fatal_error)
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator.config_entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, fcm_receiver=dummy_api.fcm
+    )
+    coordinator._is_fcm_ready_soft = lambda: False
+    # Simulate two prior transient (non-cap) auth-error cycles.
+    coordinator._fcm_error_count = 2
+    coordinator._fcm_last_error = "GCM Registration failed (401): transient"
+
+    loop = coordinator.hass.loop
+    result = loop.run_until_complete(coordinator._async_update_data())
+
+    assert result == []
+    assert coordinator._fcm_error_count == 0
+    assert coordinator._fcm_last_error is None
+    assert coordinator.auth_error_active is False
 
 
 def test_api_status_recovers_after_success(
