@@ -608,6 +608,92 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert headers.get("Authorization") == "Bearer resolved-token"
 
 
+def test_async_nova_request_fires_on_dispatch_once_before_post(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_dispatch fires exactly once, immediately before session.post.
+
+    This is the wire-boundary signal that lets api.async_play_sound keep the
+    cancel key only when the command actually reached the wire.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x10\x20")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    fired: list[int] = []
+
+    def _hook() -> None:
+        # Record how many POSTs had happened at fire time; must be 0 (before post).
+        fired.append(len(session.calls))
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            on_dispatch=_hook,
+        )
+
+    result = asyncio.run(_exercise())
+
+    assert result == "1020"
+    assert fired == [0]  # fired exactly once, before the single POST
+    assert len(session.calls) == 1
+
+
+def test_async_nova_request_skips_on_dispatch_on_pre_dispatch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_dispatch must NOT fire when the request fails before the wire.
+
+    An invalid hex payload is rejected after token resolution but before the
+    POST loop, so the hook never fires and nothing is sent.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(200, b"\x10\x20")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    fired: list[int] = []
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "zz",  # invalid hex -> ValueError before the POST loop (pre-dispatch)
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            on_dispatch=lambda: fired.append(1),
+        )
+
+    with pytest.raises(ValueError, match="Invalid hex payload"):
+        asyncio.run(_exercise())
+
+    assert fired == []  # hook never fired; nothing was sent
+    assert session.calls == []
+
+
 async def test_async_nova_request_uses_central_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

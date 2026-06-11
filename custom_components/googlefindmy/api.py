@@ -1511,11 +1511,13 @@ class GoogleFindMyAPI:
             A tuple `(success, request_uuid)` where `success` indicates whether the
             command was submitted successfully and `request_uuid` captures the
             client-generated request identifier (the Stop-Sound correlation/cancel
-            key). The UUID is generated locally *before* dispatch and is therefore
-            returned on every post-dispatch outcome (success, empty response, and
-            every handled error), so Stop-Sound can cancel the ringing device.
-            Only the pre-dispatch guard (no FCM token, nothing sent) returns
-            `(False, None)`.
+            key). The UUID is generated locally *before* dispatch but is returned
+            only once the command was actually committed to the wire — i.e. on
+            success, on an empty server response, and on errors raised *after*
+            `session.post`. Every PRE-dispatch failure (no FCM token, missing
+            cache, username/payload/token resolution) returns `(False, None)` so
+            it cannot overwrite a still-valid cancel key of a previous, possibly
+            still-ringing play.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1523,11 +1525,20 @@ class GoogleFindMyAPI:
             # PRE-dispatch: nothing was sent, so there is no cancel key to keep.
             return (False, None)
         # Generate the cancel key locally *before* dispatch so it is in scope on
-        # every post-dispatch path (success, empty response, any exception) and
-        # survives a partial/failed play. "Fail toward keeping the cancel key":
-        # a stale UUID at most causes a harmless no-op Stop, whereas a missing
-        # UUID leaves the device ringing until the firmware default duration.
+        # every path. We only return it once the command was *actually* committed
+        # to the wire — never for a PRE-dispatch failure (token/username/payload
+        # resolution, missing cache), because such a stale key would overwrite a
+        # still-valid cancel key of a *previous* play that may still be ringing,
+        # making a later Stop fail. The exception type alone cannot tell the two
+        # apart (auth errors are raised on both sides of `session.post`), so the
+        # wire layer signals the boundary explicitly via `on_dispatch`.
         request_uuid = generate_random_uuid()
+        dispatched = False
+
+        def _mark_dispatched() -> None:
+            nonlocal dispatched
+            dispatched = True
+
         try:
             _LOGGER.info("Submitting Play Sound (async) for %s", device_id)
             # Delegate payload build + transport to the submitter; provide HA session.
@@ -1540,6 +1551,7 @@ class GoogleFindMyAPI:
                 namespace=self._namespace(),
                 cache=cast("TokenCache | None", self._cache),
                 request_uuid=request_uuid,
+                on_dispatch=_mark_dispatched,
             )
             if result is None:
                 _LOGGER.error(
@@ -1547,7 +1559,8 @@ class GoogleFindMyAPI:
                     "empty response from server (no error details available)",
                     device_id,
                 )
-                return (False, request_uuid)
+                # POST-dispatch (server responded with no body): keep the key.
+                return (False, request_uuid if dispatched else None)
 
             response_hex, _response_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
@@ -1566,8 +1579,12 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            # POST-dispatch: keep the cancel key so Stop-Sound can still correlate.
-            return (False, request_uuid)
+            # Auth errors straddle the wire boundary: a token-refresh failure
+            # (NovaAuthPermanentError) is PRE-dispatch and must drop the key,
+            # while a server 401/403 is POST-dispatch and keeps it. The
+            # `dispatched` flag, set by on_dispatch right before session.post,
+            # makes the distinction reliable.
+            return (False, request_uuid if dispatched else None)
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
@@ -1577,20 +1594,20 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return (False, request_uuid)
+                return (False, request_uuid if dispatched else None)
             _LOGGER.warning(
                 "Server error (%s) while playing sound on %s: %s",
                 err.status,
                 device_id,
                 _short_err(err),
             )
-            return (False, request_uuid)
+            return (False, request_uuid if dispatched else None)
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Play Sound rate-limited for %s: %s", device_id, _short_err(err)
             )
-            return (False, request_uuid)
+            return (False, request_uuid if dispatched else None)
 
         except ClientError as err:
             _LOGGER.error(
@@ -1598,13 +1615,13 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return (False, request_uuid)
+            return (False, request_uuid if dispatched else None)
 
         except Exception as err:
             _LOGGER.error(
                 "Failed to play sound (async) on %s: %s", device_id, _short_err(err)
             )
-            return (False, request_uuid)
+            return (False, request_uuid if dispatched else None)
 
     async def async_stop_sound(
         self, device_id: str, request_uuid: str | None = None

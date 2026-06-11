@@ -1226,6 +1226,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     namespace: str | None = None,
     # Entry-scoped TokenCache for strict multi-account separation
     cache: TokenCache | None = None,
+    # Optional dispatch hook: invoked exactly once immediately before the request
+    # is committed to the wire (`session.post`). Lets an upper layer distinguish
+    # PRE-dispatch failures (token/username/payload resolution, nothing sent) from
+    # POST-dispatch failures (server reached, outcome uncertain) without inferring
+    # it from the exception type — unreliable because auth errors are raised on
+    # both sides of the wire boundary.
+    on_dispatch: Callable[[], None] | None = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant (entry-scoped capable).
@@ -1405,12 +1412,21 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
         deadline_waits = 0  # Circuit breaker for 401 deadline-wait loops
+        dispatch_notified = False  # one-shot guard for the on_dispatch hook
         while True:
             attempt = retries_used + 1
             try:
                 timeout = aiohttp.ClientTimeout(
                     total=NOVA_REQUEST_TOTAL_TIMEOUT_S, connect=10, sock_read=30
                 )
+                if on_dispatch is not None and not dispatch_notified:
+                    # Signal the wire boundary once, just before the first POST.
+                    # Defensive: a buggy hook must never abort a real request.
+                    dispatch_notified = True
+                    try:
+                        on_dispatch()
+                    except Exception:  # noqa: BLE001 - hook must not break transport
+                        _LOGGER.debug("on_dispatch hook raised", exc_info=True)
                 async with session.post(
                     url,
                     headers=headers,

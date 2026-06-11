@@ -88,12 +88,15 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
         namespace: str | None,
         cache: DummyCache,
         request_uuid: str | None = None,
+        on_dispatch: Any = None,
     ) -> tuple[str, str | None]:
         submissions.append(
             ("start", device_id, token, namespace, getattr(cache, "entry_id", None))
         )
-        # Production-faithful: the builder uses the injected cancel key, so the
-        # submitter echoes it back.
+        # Production-faithful: the request reaches the wire, so fire the dispatch
+        # hook, and the builder echoes the injected cancel key back.
+        if on_dispatch is not None:
+            on_dispatch()
         return "ok", request_uuid
 
     async def fake_submit_stop(
@@ -178,6 +181,7 @@ def test_play_sound_returns_uuid_and_passes_to_stop(
         namespace: str | None,
         cache: DummyCache,
         request_uuid: str | None = None,
+        on_dispatch: Any = None,
     ) -> tuple[str, str | None]:
         submissions.append(
             (
@@ -188,7 +192,10 @@ def test_play_sound_returns_uuid_and_passes_to_stop(
                 getattr(cache, "entry_id", ""),
             )
         )
-        # Production-faithful: echo the injected cancel key back to the caller.
+        # Production-faithful: the request reaches the wire, so fire the dispatch
+        # hook, then echo the injected cancel key back to the caller.
+        if on_dispatch is not None:
+            on_dispatch()
         return "deadbeef", request_uuid
 
     async def fake_submit_stop(

@@ -84,6 +84,7 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
     cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
     request_uuid: str | None = None,
+    on_dispatch: Callable[[], None] | None = None,
 ) -> tuple[str, str] | None:  # noqa: PLR0913
     """Submit a 'Play Sound' action using the shared async Nova client.
 
@@ -112,6 +113,10 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
             builder generates one as before (backwards compatible). The upper
             layer (``api.async_play_sound``) supplies it so the cancel key is
             known before dispatch and survives every outcome.
+        on_dispatch: Optional hook forwarded to ``async_nova_request`` and fired
+            once immediately before the request is committed to the wire. Lets
+            the upper layer learn whether the command was actually dispatched, so
+            it caches the cancel key only when something was really sent.
 
     Returns:
         Tuple containing the hex response payload (may be empty) and the
@@ -169,6 +174,7 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
             refresh_override=refresh_override,
             namespace=resolved_namespace,
             cache=cache_ref,
+            on_dispatch=on_dispatch,
         )
         return (response_hex, request_uuid) if response_hex is not None else None
     except (

@@ -39,6 +39,7 @@ from custom_components.googlefindmy.const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DEFAULT_CONTRIBUTOR_MODE,
 )
+from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaHTTPError,
@@ -1131,8 +1132,23 @@ class TestAsyncPlaySoundErrorMapping:
         result: Any,
         *,
         raises: BaseException | None = None,
+        dispatched: bool = True,
     ) -> None:
+        """Install a fake submitter that models the wire boundary.
+
+        The real submitter forwards ``on_dispatch`` to ``async_nova_request``,
+        which fires it exactly once right before ``session.post``. ``dispatched``
+        mirrors that: when True the fake calls the hook (POST-dispatch outcome —
+        success, empty response, or an error raised after the request was sent);
+        when False it raises/returns *without* firing the hook (PRE-dispatch
+        failure — token/username/payload resolution, missing cache).
+        """
+
         async def _submit(*_a: Any, **_k: Any) -> Any:
+            if dispatched:
+                hook = _k.get("on_dispatch")
+                if hook is not None:
+                    hook()
             if raises is not None:
                 raise raises
             return result
@@ -1172,6 +1188,9 @@ class TestAsyncPlaySoundErrorMapping:
         self._patch_generate_uuid(monkeypatch)
 
         async def _echo_submit(*_a: Any, **_k: Any) -> Any:
+            hook = _k.get("on_dispatch")
+            if hook is not None:
+                hook()
             return ("AB", _k.get("request_uuid"))
 
         monkeypatch.setattr(
@@ -1190,15 +1209,40 @@ class TestAsyncPlaySoundErrorMapping:
             Exception("boom"),
         ],
     )
-    def test_documented_exceptions_keep_cancel_key(
+    def test_postdispatch_exceptions_keep_cancel_key(
         self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
     ) -> None:
-        # CHARACTERIZATION -> SOLL inversion: every post-dispatch handled error
-        # previously returned (False, None); it now keeps the cancel key.
+        # POST-dispatch (the request reached the wire, then the server/connection
+        # errored): the device may be ringing, so keep the cancel key.
         api = self._api_with_token(monkeypatch)
         self._patch_generate_uuid(monkeypatch)
-        self._patch_submit(monkeypatch, None, raises=exc)
+        self._patch_submit(monkeypatch, None, raises=exc, dispatched=True)
         assert run_coro(api.async_play_sound("d")) == (False, "uuid-injected")
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            MissingTokenCacheError(),
+            api_module.NovaAuthPermanentError(401, "token refresh failed"),
+            NovaAuthError(401, "auth resolution"),
+            ValueError("Username is not available for async_nova_request."),
+            Exception("boom before post"),
+        ],
+    )
+    def test_predispatch_failures_drop_cancel_key(
+        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
+    ) -> None:
+        # Codex regression (PR #1100): when the submitter raises *before* the Nova
+        # request reaches the wire (missing cache, token/username/payload
+        # resolution — incl. NovaAuthPermanentError from token refresh, which is a
+        # NovaAuthError subclass), nothing was sent. Returning a non-null UUID here
+        # would let the coordinator overwrite a still-valid cancel key of an
+        # earlier, possibly still-ringing play. The hook never fires, so we return
+        # (False, None).
+        api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
+        self._patch_submit(monkeypatch, None, raises=exc, dispatched=False)
+        assert run_coro(api.async_play_sound("d")) == (False, None)
 
 
 class TestAsyncStopSoundErrorMapping:
