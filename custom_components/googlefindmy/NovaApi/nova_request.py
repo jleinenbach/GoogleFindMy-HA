@@ -337,7 +337,10 @@ class NovaError(Exception):
             default) when the request provably never left the client (DNS,
             connect refused/timeout, or any pre-dispatch error), so no side
             effect can have happened. Network failures set this in the POST
-            loop's retry handler; all other Nova errors keep the safe default.
+            loop's retry handler, where it latches across the *whole* retry
+            sequence: once any attempt reaches the wire it stays True even if a
+            later attempt fails pre-connect. All other Nova errors keep the safe
+            default.
     """
 
     dispatched: bool = False
@@ -1445,6 +1448,14 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
         deadline_waits = 0  # Circuit breaker for 401 deadline-wait loops
+        # Sticky dispatch latch over the whole retry sequence. Dispatch is a
+        # property of the *sequence*, not of the final attempt: once *any*
+        # attempt reaches the wire, a side effect (a device ring) may already
+        # have started, so the cancel key must be preserved even if a *later*
+        # retry fails before it ever connects. Deriving this from the last
+        # exception alone is wrong (post-send read failure on attempt 1, then a
+        # pre-connect timeout on the last attempt -> still dispatched).
+        reached_wire = False
         while True:
             attempt = retries_used + 1
             try:
@@ -1692,6 +1703,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             except asyncio.CancelledError:
                 raise
             except (TimeoutError, aiohttp.ClientError) as e:
+                # Latch dispatch the moment *this* attempt reaches the wire. A
+                # later pre-connect retry failure must never clear it: an earlier
+                # post-send attempt may already have started a ring whose cancel
+                # key has to survive. The latch only ever flips False -> True.
+                if _network_failure_reached_wire(e):
+                    reached_wire = True
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
                     _LOGGER.warning(
@@ -1717,9 +1734,11 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     )
                     # Carry the pre-/post-dispatch classification in-band on the
                     # exception so callers can decide whether a side effect may
-                    # have started (and a cancel key must be kept). See
+                    # have started (and a cancel key must be kept). The flag is
+                    # the sticky sequence latch, NOT a fresh read of the final
+                    # exception: any wire-reaching attempt keeps it True. See
                     # NovaError.dispatched and _network_failure_reached_wire.
-                    nova_err.dispatched = _network_failure_reached_wire(e)
+                    nova_err.dispatched = reached_wire
                     raise nova_err from e
 
     finally:

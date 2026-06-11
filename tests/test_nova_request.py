@@ -835,6 +835,93 @@ def test_async_nova_request_marks_read_phase_failure_dispatched(
     assert session.calls  # the request reached the wire on every attempt
 
 
+def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch latches across the whole retry sequence, not the last attempt.
+
+    Regression for the Codex iter-6 finding: when an *early* attempt reaches the
+    wire and fails post-send (``ServerDisconnectedError`` during read), a ring
+    may already be active. If a *later* retry then fails pre-connect
+    (``ConnectionTimeoutError``), deriving ``dispatched`` from the final
+    exception alone would wrongly report ``False`` and drop the cancel key,
+    leaving the device ringing. The retry handler must therefore latch
+    ``dispatched is True`` the moment any attempt reaches the wire and keep it
+    set regardless of how a subsequent attempt fails.
+    """
+
+    class _ReadFailingCtx:
+        """Post-send failure: context enters, body read raises."""
+
+        def __init__(self) -> None:
+            self.status = 200
+            self.headers: dict[str, str] = {}
+
+        async def read(self) -> bytes:
+            raise aiohttp.ServerDisconnectedError("peer closed during read")
+
+        async def __aenter__(self) -> _ReadFailingCtx:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _ConnFailingCtx:
+        """Pre-connect failure: context raises on entry."""
+
+        async def __aenter__(self) -> Any:
+            raise aiohttp.ConnectionTimeoutError
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _MixedSession:
+        """First POST fails post-send, every later POST fails pre-connect."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> Any:
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            # Attempt 1 reaches the wire (read failure); the rest never connect.
+            return _ReadFailingCtx() if len(self.calls) == 1 else _ConnFailingCtx()
+
+    cache = _StubCache()
+    session = _MixedSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    with pytest.raises(NovaError) as exc_info:
+        asyncio.run(_exercise())
+
+    # The *final* attempt failed pre-connect, but an earlier attempt reached the
+    # wire: dispatch must remain latched so the cancel key is preserved.
+    assert exc_info.value.dispatched is True
+    assert len(session.calls) > 1  # the mixed sequence actually retried
+
+
 async def test_async_nova_request_uses_central_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
