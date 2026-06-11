@@ -85,11 +85,16 @@ class _SupervisorPushClientStub:
         jump_on_run_state_read: float = 0.0,
         become_started: bool = True,
         has_been_started: bool | None = None,
+        credential_error: object | None = None,
     ) -> None:
         self.clock = clock
         self.jump_on_start = jump_on_start
         self.jump_on_run_state_read = jump_on_run_state_read
         self.become_started = become_started
+        # Finding 1: mirror the production ``credential_error`` signal the
+        # supervisor reads after the monitor loop ends to escalate corrupt
+        # FCM key material to ``_invalidate_fcm_tokens`` + re-registration.
+        self.credential_error = credential_error
         # Iter-12 ``has_been_started``: mirrors the production subclass'
         # ``_has_been_started`` latch which is set by the vendored
         # library the moment ``run_state = STARTED`` is assigned,
@@ -249,6 +254,49 @@ async def test_short_run_triggers_repair_issue_after_threshold(
     assert call.kwargs["severity"] == fcm_receiver_ha.ir.IssueSeverity.ERROR
     assert call.kwargs["translation_key"] == "fcm_short_run_crash_loop"
     assert receiver._fatal_errors[entry_id].startswith("FCM short-run crash loop")
+
+
+@pytest.mark.asyncio
+async def test_credential_error_invalidates_tokens_and_bypasses_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A listener ``credential_error`` escalates to re-registration, not the cap.
+
+    Codex Finding 1: when the listener reports corrupt FCM key material via
+    ``pc.credential_error``, the supervisor must invalidate the bad tokens
+    (forcing re-registration with the device identity preserved) instead of
+    charging the short run to the crash cap. Even
+    ``_MAX_CONSECUTIVE_SHORT_RUNS + 2`` such runs must NOT fire the cap
+    repair issue -- corrective action is being taken, this is not a
+    poison-message loop.
+    """
+    entry_id = "entry-cred"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+
+    clock = _MonoClock(step=0.001)  # every run is short
+    cred_err = ValueError("Credentials key material failed base64 decode")
+    clients = [
+        _SupervisorPushClientStub(clock=clock, credential_error=cred_err)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS + 2)
+    ]
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    create_issue, _delete_issue = _install_ir_capture(monkeypatch)
+
+    invalidate_mock = AsyncMock()
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", invalidate_mock)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    # Every credential-error run escalated to re-registration ...
+    assert invalidate_mock.await_count == _MAX_CONSECUTIVE_SHORT_RUNS + 2
+    invalidate_mock.assert_awaited_with(entry_id)
+    # ... and NONE of them tripped the short-run crash cap.
+    assert create_issue.call_count == 0
+    assert entry_id not in receiver._fatal_errors
 
 
 @pytest.mark.asyncio

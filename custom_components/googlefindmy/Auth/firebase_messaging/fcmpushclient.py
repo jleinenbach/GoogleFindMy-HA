@@ -271,6 +271,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
         self.tasks: list[asyncio.Task[None]] = []
+        # Set by ``_listen`` when stored FCM key material is found to be
+        # corrupt/undecodable. The supervisor reads this after the listener
+        # stops to invalidate the bad credentials and force re-registration,
+        # instead of restarting against the same poison key material until the
+        # short-run crash cap fires.
+        self.credential_error: CredentialDecryptionError | None = None
 
         # Locks
         self.stopping_lock: asyncio.Lock = asyncio.Lock()
@@ -844,10 +850,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         Defense 1 (CA-CASCADING-FAILURE-001): per-message decode failures
         (``binascii.Error`` padding faults under Python 3.14 strict mode,
         ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
-        ``ValueError`` from header parsing) are acknowledged and skipped
-        instead of crashing the worker loop. Credential-material errors
-        (``CredentialDecryptionError``) propagate so the supervisor
-        surfaces them via STOPPED state and prompts re-registration.
+        ``ValueError`` from header parsing, and ``http_ece.ECEException``
+        from a corrupt encrypted body / failed auth tag) are acknowledged
+        and skipped instead of crashing the worker loop. Credential-material
+        errors (``CredentialDecryptionError``) propagate so ``_listen``
+        records them and the supervisor invalidates the bad key material and
+        prompts re-registration.
 
         Returns ``True`` to continue the loop, ``False`` to break (writer
         half-dead during ack).
@@ -857,18 +865,28 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             return True
         except CredentialDecryptionError:
             # Credential corruption is permanent; let the supervisor see it
-            # instead of silently ACKing every message that follows.
+            # (via ``_listen``'s dedicated handler) instead of silently ACKing
+            # every message that follows.
             raise
-        except ValueError as decrypt_err:
-            persistent_id = getattr(msg, "persistent_id", None)
-            self._log_warn_with_limit(
-                "Skipping FCM message that failed to decrypt "
-                "(persistent_id=%s): %s",
-                persistent_id,
-                decrypt_err,
-            )
-            return await self._ack_or_disconnect(persistent_id)
-        except (binascii.Error, RuntimeError) as decrypt_err:
+        except (ValueError, RuntimeError, http_ece.ECEException) as decrypt_err:
+            # Per-message poison: the exception-hierarchy UNION of every decode
+            # surface ``_handle_message`` touches.
+            #   * ValueError    -- header-param parse (``_extract_header_param``)
+            #                      plus ``binascii.Error`` padding faults and
+            #                      ``UnicodeError``; both are ValueError
+            #                      subclasses and need no separate arm.
+            #   * RuntimeError  -- ``_app_data_by_key`` missing-key lookup.
+            #   * ECEException  -- ``http_ece`` body decrypt / auth-tag failure.
+            #                      It is a SIBLING of ValueError under Exception
+            #                      (not a subclass), so it must be listed
+            #                      explicitly or it bypasses this poison defense
+            #                      entirely (Exception-Hierarchie-Audit lesson,
+            #                      CA-CASCADING-FAILURE-001).
+            # ``CredentialDecryptionError`` is a ValueError subclass but is
+            # matched by the more specific arm above and re-raised, so it never
+            # reaches here. ACK + skip so the FCM server stops redelivering and
+            # the supervisor's short-run crash cap is not tripped by a single
+            # bad message.
             persistent_id = getattr(msg, "persistent_id", None)
             self._log_warn_with_limit(
                 "Skipping FCM message that failed to decrypt "
@@ -915,6 +933,20 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         except asyncio.CancelledError:
             self.logger.debug("Listener task cancelled")
             raise
+        except CredentialDecryptionError as cred_err:
+            # Stored FCM key material is corrupt/undecodable. Record it as a
+            # DISTINCT credential fault instead of letting it fall through to
+            # the generic "Unknown error" arm below, so the supervisor can
+            # invalidate the bad key material and re-register rather than
+            # restarting the listener against the same poison credentials
+            # until the short-run crash cap fires.
+            self.logger.error(
+                "FCM credential material is corrupt and requires "
+                "re-registration: %s",
+                cred_err,
+            )
+            self.credential_error = cred_err
+            self.do_listen = False
         except ConnectionResetError:
             # Log a clean warning without noisy traceback; supervisor will reconnect.
             self.logger.warning(

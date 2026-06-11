@@ -70,6 +70,9 @@ class FcmPushClientSlim:
         self.logger.propagate = True
         self.do_listen = True
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.STARTED
+        # Mirror the production credential-error signal (_listen sets it when
+        # CredentialDecryptionError surfaces; the supervisor reads it).
+        self.credential_error = None
         self.config = FcmPushClientConfig()  # log_warn_limit default = 5
         self.log_warn_counters: dict[str, int] = {}
         self.persistent_ids: list[str] = []

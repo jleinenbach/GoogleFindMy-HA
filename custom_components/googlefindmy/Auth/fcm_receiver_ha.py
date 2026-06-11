@@ -1267,7 +1267,25 @@ class FcmReceiverHA:
                     # correctly, and (b) a long pre-start hang does not
                     # falsely clear a real cap latch (no healthy proof).
                     run_duration = time.monotonic() - entry_start
-                    if not became_started:
+                    credential_error = getattr(pc, "credential_error", None)
+                    if credential_error is not None:
+                        # Finding 1 (Codex): the listener surfaced corrupt FCM
+                        # key material via ``credential_error``. Restarting
+                        # against the same credentials would loop until the
+                        # short-run crash cap fires; instead invalidate the key
+                        # material so the next registration regenerates it
+                        # (android_id/security_token preserved) and do NOT
+                        # charge this run to the crash cap -- corrective action
+                        # is being taken, this is not a poison-message loop.
+                        _LOGGER.error(
+                            "[entry=%s] FCM credential material corrupt (%s); "
+                            "invalidating FCM tokens to force re-registration",
+                            entry_id,
+                            credential_error,
+                        )
+                        await self._invalidate_fcm_tokens(entry_id)
+                        short_run_counter = 0
+                    elif not became_started:
                         # Pre-start failure (no connected/listening state
                         # observed during this run). Do NOT touch the
                         # short-run counter or the cap latch.

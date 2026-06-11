@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import http_ece
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import (
     CredentialDecryptionError,
     FcmPushClientRunState,
@@ -208,6 +209,36 @@ async def test_runtime_error_from_app_data_by_key_caught(
 
 
 @pytest.mark.asyncio
+async def test_ece_exception_from_body_decrypt_caught(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``http_ece.ECEException`` (corrupt body / bad auth tag) is poison-class.
+
+    Regression for Codex Finding 2: ``http_ece.decrypt`` raises
+    ``http_ece.ECEException``, which is a SIBLING of ``ValueError`` under
+    ``Exception`` -- not a subclass. The old ``except (ValueError, ...)``
+    poison arm let it bypass the selective-ACK + skip path entirely, so a
+    single corrupt encrypted body was redelivered forever and could
+    eventually trip the short-run crash cap. It must be treated as
+    per-message poison: ACK + skip, outer-catch untouched.
+    """
+    caplog.set_level(logging.WARNING)
+    client = FcmPushClientSlim()
+    msg = make_poison_data_message("poison-ece-012", kind="value")
+    client._receive_msg = _stream_messages(client, [msg])
+    client._handle_message = _make_handle_side_effect(
+        [http_ece.ECEException("Decryption error: bad auth tag")]
+    )
+
+    await client._listen()
+
+    assert not _outer_catch_was_hit(caplog)
+    client._send_selective_ack.assert_awaited_once_with("poison-ece-012")
+    # Not a credential fault: no credential signal must be recorded.
+    assert client.credential_error is None
+
+
+@pytest.mark.asyncio
 async def test_rate_limit_kicks_in_after_threshold(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -298,32 +329,48 @@ async def test_connection_error_during_selective_ack_falls_through(
 
 
 @pytest.mark.asyncio
-async def test_credential_decryption_error_propagates_to_outer_catch(
+async def test_credential_decryption_error_surfaces_distinct_signal(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Cred/key-material errors must NOT be swallowed by Defense 1.
+    """Cred/key-material errors surface a DISTINCT credential signal.
 
     CredentialDecryptionError (typed exception) propagates past the
-    per-message ValueError catch. This is the iter-3 contract: the
-    discriminator is the exception TYPE, not a string-prefix marker.
+    per-message poison catch (iter-3 contract: the discriminator is the
+    exception TYPE). It is then caught by ``_listen``'s dedicated
+    ``except CredentialDecryptionError`` arm, which records
+    ``client.credential_error`` and logs a credential-specific error --
+    NOT the generic "Unknown error in listener" outer-catch (Codex
+    Finding 1). The supervisor reads ``credential_error`` to invalidate
+    the bad key material and re-register, instead of restarting against
+    the same poison credentials until the short-run crash cap fires.
     """
     caplog.set_level(logging.DEBUG)
     client = FcmPushClientSlim()
     msg = make_poison_data_message("poison-010", kind="value")
     client._receive_msg = _stream_messages(client, [msg])
-    client._handle_message = _make_handle_side_effect(
-        [CredentialDecryptionError("Credentials missing FCM key material")]
-    )
+    cred_err = CredentialDecryptionError("Credentials missing FCM key material")
+    client._handle_message = _make_handle_side_effect([cred_err])
 
     await client._listen()
 
-    # The outer ``except Exception`` block must have logged the error so the
-    # supervisor knows the worker stopped intentionally; selective-ack must NOT
-    # have been sent (this is a config fault, not a per-message poison).
-    assert _outer_catch_was_hit(caplog)
+    # (a) The generic outer ``except Exception`` arm must NOT have run: a
+    #     credential fault is no longer degraded to "Unknown error".
+    assert not _outer_catch_was_hit(caplog)
+    # (b) The distinct credential signal is recorded for the supervisor.
+    assert client.credential_error is cred_err
+    # (c) A credential-specific ERROR is logged (re-registration required).
+    cred_errors = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+        and "credential material is corrupt" in r.getMessage()
+    ]
+    assert len(cred_errors) == 1
+    # (d) Selective-ack must NOT be sent (config fault, not per-message poison).
     assert client._send_selective_ack.await_count == 0
-    # Worker reaches its terminal state via the finally block.
+    # (e) Worker reaches its terminal state via the finally block.
     assert client.run_state == FcmPushClientRunState.STOPPED
+    assert client.do_listen is False
 
 
 @pytest.mark.asyncio
