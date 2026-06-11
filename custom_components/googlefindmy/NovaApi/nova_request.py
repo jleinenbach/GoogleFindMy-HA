@@ -1226,12 +1226,13 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     namespace: str | None = None,
     # Entry-scoped TokenCache for strict multi-account separation
     cache: TokenCache | None = None,
-    # Optional dispatch hook: invoked exactly once immediately before the request
-    # is committed to the wire (`session.post`). Lets an upper layer distinguish
-    # PRE-dispatch failures (token/username/payload resolution, nothing sent) from
-    # POST-dispatch failures (server reached, outcome uncertain) without inferring
-    # it from the exception type — unreliable because auth errors are raised on
-    # both sides of the wire boundary.
+    # Optional dispatch hook: invoked exactly once the moment the server returns
+    # response headers (the request provably reached the wire). Lets an upper layer
+    # distinguish PRE-dispatch failures (token/username/payload resolution AND
+    # connection setup — DNS/connect/closed session/connect timeout, nothing sent)
+    # from POST-dispatch outcomes (server reached, result uncertain) without
+    # inferring it from the exception type — unreliable because auth errors are
+    # raised on both sides of the wire boundary.
     on_dispatch: Callable[[], None] | None = None,
 ) -> str:
     """
@@ -1419,14 +1420,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                 timeout = aiohttp.ClientTimeout(
                     total=NOVA_REQUEST_TOTAL_TIMEOUT_S, connect=10, sock_read=30
                 )
-                if on_dispatch is not None and not dispatch_notified:
-                    # Signal the wire boundary once, just before the first POST.
-                    # Defensive: a buggy hook must never abort a real request.
-                    dispatch_notified = True
-                    try:
-                        on_dispatch()
-                    except Exception:  # noqa: BLE001 - hook must not break transport
-                        _LOGGER.debug("on_dispatch hook raised", exc_info=True)
                 async with session.post(
                     url,
                     headers=headers,
@@ -1434,6 +1427,22 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     timeout=timeout,
                     allow_redirects=False,
                 ) as response:
+                    # Wire boundary: reaching this point means the server returned
+                    # response headers, so the request provably hit Google and a
+                    # ring may now be active. Connection-setup failures (DNS,
+                    # connect refused, closed connector/session, connect timeout)
+                    # raise on the `async with` entry above and never get here, so
+                    # they stay classified as PRE-dispatch. The one-shot guard keeps
+                    # this to a single signal across 401 retries; a later sock_read
+                    # timeout in `response.read()` fires after we have signalled,
+                    # which is correct (the server already answered).
+                    # Defensive: a buggy hook must never abort a real request.
+                    if on_dispatch is not None and not dispatch_notified:
+                        dispatch_notified = True
+                        try:
+                            on_dispatch()
+                        except Exception:  # noqa: BLE001 - hook must not break transport
+                            _LOGGER.debug("on_dispatch hook raised", exc_info=True)
                     content = await response.read()
                     status = response.status
                     _LOGGER.debug(

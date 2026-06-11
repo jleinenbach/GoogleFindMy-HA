@@ -1137,11 +1137,12 @@ class TestAsyncPlaySoundErrorMapping:
         """Install a fake submitter that models the wire boundary.
 
         The real submitter forwards ``on_dispatch`` to ``async_nova_request``,
-        which fires it exactly once right before ``session.post``. ``dispatched``
-        mirrors that: when True the fake calls the hook (POST-dispatch outcome —
-        success, empty response, or an error raised after the request was sent);
-        when False it raises/returns *without* firing the hook (PRE-dispatch
-        failure — token/username/payload resolution, missing cache).
+        which fires it exactly once the moment the server returns response
+        headers (the request provably reached the wire). ``dispatched`` mirrors
+        that: when True the fake calls the hook (POST-dispatch outcome — success,
+        empty response, or an error raised after the server answered); when False
+        it raises/returns *without* firing the hook (PRE-dispatch failure —
+        token/username/payload resolution, missing cache, or connection setup).
         """
 
         async def _submit(*_a: Any, **_k: Any) -> Any:

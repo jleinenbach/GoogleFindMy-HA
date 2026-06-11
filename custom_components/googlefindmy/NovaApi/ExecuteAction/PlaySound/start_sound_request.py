@@ -114,9 +114,10 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
             layer (``api.async_play_sound``) supplies it so the cancel key is
             known before dispatch and survives every outcome.
         on_dispatch: Optional hook forwarded to ``async_nova_request`` and fired
-            once immediately before the request is committed to the wire. Lets
-            the upper layer learn whether the command was actually dispatched, so
-            it caches the cancel key only when something was really sent.
+            once the moment the server returns response headers (the request
+            provably reached the wire). Lets the upper layer learn whether the
+            command was actually dispatched, so it caches the cancel key only when
+            the request really hit the server.
 
     Returns:
         Tuple containing the hex response payload (may be empty) and the

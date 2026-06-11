@@ -9,6 +9,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import aiohttp
 import pytest
 
 MAX_INITIAL_CALLS = 2
@@ -30,6 +31,7 @@ from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import 
 from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
+    NovaError,
     async_nova_request,
     register_cache_provider,
     unregister_cache_provider,
@@ -608,13 +610,16 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert headers.get("Authorization") == "Bearer resolved-token"
 
 
-def test_async_nova_request_fires_on_dispatch_once_before_post(
+def test_async_nova_request_fires_on_dispatch_once_on_server_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """on_dispatch fires exactly once, immediately before session.post.
+    """on_dispatch fires exactly once, only after the server returns headers.
 
     This is the wire-boundary signal that lets api.async_play_sound keep the
-    cancel key only when the command actually reached the wire.
+    cancel key only when the request provably reached the wire. The hook must
+    fire *after* the POST context is entered (server answered), not before — so
+    that connection-setup failures, which raise on context entry, stay
+    classified as PRE-dispatch (see the connection-error regression below).
     """
 
     cache = _StubCache()
@@ -633,7 +638,8 @@ def test_async_nova_request_fires_on_dispatch_once_before_post(
     fired: list[int] = []
 
     def _hook() -> None:
-        # Record how many POSTs had happened at fire time; must be 0 (before post).
+        # Record how many POSTs had been dispatched at fire time; must be 1,
+        # i.e. the hook fires only once the server has answered.
         fired.append(len(session.calls))
 
     async def _exercise() -> str:
@@ -649,7 +655,7 @@ def test_async_nova_request_fires_on_dispatch_once_before_post(
     result = asyncio.run(_exercise())
 
     assert result == "1020"
-    assert fired == [0]  # fired exactly once, before the single POST
+    assert fired == [1]  # fired exactly once, after the single POST answered
     assert len(session.calls) == 1
 
 
@@ -692,6 +698,80 @@ def test_async_nova_request_skips_on_dispatch_on_pre_dispatch_failure(
 
     assert fired == []  # hook never fired; nothing was sent
     assert session.calls == []
+
+
+def test_async_nova_request_skips_on_dispatch_on_connection_setup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """on_dispatch must NOT fire when the connection cannot be established.
+
+    Codex finding: DNS/connect/closed-session/connect-timeout errors raise the
+    moment the ``async with session.post(...)`` context is *entered* — after
+    token and payload resolution, but before a single byte reaches the wire.
+    The hook lives *inside* that context, so it must never fire here. If it
+    did, ``api.async_play_sound`` would return a never-sent UUID and the
+    coordinator would overwrite the still-valid cancel key of a previous ring,
+    so a later Stop could no longer cancel it.
+    """
+
+    class _ConnFailingResponse:
+        """Context manager that raises on entry, mimicking a connect failure."""
+
+        async def __aenter__(self) -> Any:
+            raise aiohttp.ClientConnectionError("cannot connect")
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _ConnFailingSession:
+        """Session stub whose every POST fails during connection setup."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> _ConnFailingResponse:
+            # post() merely builds the context manager; the failure surfaces on
+            # __aenter__, exactly like aiohttp's real connection acquisition.
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            return _ConnFailingResponse()
+
+    cache = _StubCache()
+    session = _ConnFailingSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    # Collapse the retry backoff so the test stays fast across NOVA_MAX_RETRIES.
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    fired: list[int] = []
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+            on_dispatch=lambda: fired.append(1),
+        )
+
+    # Connection errors are retried, then surface as NovaError once exhausted.
+    with pytest.raises(NovaError):
+        asyncio.run(_exercise())
+
+    assert fired == []  # hook never fired: the request never reached the wire
+    assert session.calls  # post() *was* attempted (and retried) — only entry failed
 
 
 async def test_async_nova_request_uses_central_total_timeout(

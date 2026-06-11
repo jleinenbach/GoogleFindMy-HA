@@ -1512,12 +1512,13 @@ class GoogleFindMyAPI:
             command was submitted successfully and `request_uuid` captures the
             client-generated request identifier (the Stop-Sound correlation/cancel
             key). The UUID is generated locally *before* dispatch but is returned
-            only once the command was actually committed to the wire — i.e. on
-            success, on an empty server response, and on errors raised *after*
-            `session.post`. Every PRE-dispatch failure (no FCM token, missing
-            cache, username/payload/token resolution) returns `(False, None)` so
-            it cannot overwrite a still-valid cancel key of a previous, possibly
-            still-ringing play.
+            only once the request provably reached the wire — i.e. the server
+            returned response headers (success, empty response, or an error status
+            such as 401/500). Every PRE-dispatch failure — no FCM token, missing
+            cache, username/payload/token resolution, *and* connection setup
+            (DNS/connect/closed session/connect timeout, nothing sent) — returns
+            `(False, None)` so it cannot overwrite a still-valid cancel key of a
+            previous, possibly still-ringing play.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1582,8 +1583,8 @@ class GoogleFindMyAPI:
             # Auth errors straddle the wire boundary: a token-refresh failure
             # (NovaAuthPermanentError) is PRE-dispatch and must drop the key,
             # while a server 401/403 is POST-dispatch and keeps it. The
-            # `dispatched` flag, set by on_dispatch right before session.post,
-            # makes the distinction reliable.
+            # `dispatched` flag, set by on_dispatch only once the server returns
+            # response headers, makes the distinction reliable.
             return (False, request_uuid if dispatched else None)
 
         except NovaHTTPError as err:
