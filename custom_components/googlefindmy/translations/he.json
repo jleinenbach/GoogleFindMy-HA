@@ -714,6 +714,10 @@
     "cache_purged": {
       "title": "Authentication cache cleared",
       "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+    },
+    "fcm_short_run_crash_loop": {
+      "title": "לולאת קריסה של FCM Push זוהתה",
+      "description": "לקוח ה-FCM Push מתנתק שוב ושוב תוך שניות לאחר ההתחברות (לולאת קריסה קצרה). הסיבה השכיחה היא הודעה פגומה מתמשכת בתור הנכנס שלא ניתן לפענח.\n\n1. טען מחדש את האינטגרציה כדי לנקות את מצב הריצה.\n2. אם הבעיה חוזרת, חולל מחדש את `secrets.json` (ייתכן ש-Google סובב את האישורים)."
     }
   },
   "exceptions": {

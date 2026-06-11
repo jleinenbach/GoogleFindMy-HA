@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import json
 import logging
 import random
@@ -84,6 +85,61 @@ http_decrypt: Callable[..., bytes] = http_ece.decrypt
 _logger = logging.getLogger(__name__)
 
 _LEGACY_MCS_PROTOCOL_VERSION = 38
+
+
+class CredentialDecryptionError(ValueError):
+    """Raised when stored FCM credential material cannot be decoded or parsed.
+
+    Subclass of ``ValueError`` for backward-compatibility with external
+    callers that catch broad ``ValueError``. Internal code (notably the
+    listener loop's poison-message defense) discriminates this type via
+    ``isinstance`` to distinguish per-message decode failures (which are
+    safely ACKed and skipped) from credential-corruption failures (which
+    must surface to the supervisor for re-registration).
+
+    Why a typed exception instead of a string-prefix marker: external
+    libraries such as ``cryptography`` and ``http_ece`` raise plain
+    ``ValueError`` without our markers; a ``str.startswith`` catch loses
+    them and silently treats credential corruption as per-message poison.
+    See CA-CRED-VS-MSG-DECRYPT-001 iter-3 lesson.
+    """
+
+
+def _safe_urlsafe_b64decode(value: str | bytes) -> bytes:
+    """Decode URL-safe base64 leniently (Python 3.14 compatibility shim).
+
+    Strips ASCII whitespace and re-appends ``=`` padding before delegating
+    to :func:`base64.urlsafe_b64decode`. Python 3.14 switched
+    ``binascii.a2b_base64`` to ``strict_mode=True`` by default, which
+    rejects payloads containing newlines, stray whitespace, or missing
+    padding -- exactly the conditions the wild FCM stream produces. This
+    helper restores the pre-3.14 lenient behaviour locally without altering
+    the global decoder state.
+
+    Defense layer 3 of the three-defense hotfix for the
+    ``fcmpushclient`` poison-message cascade (CA-CASCADING-FAILURE-001).
+    Defense 1 wraps credential-decode errors as
+    :class:`CredentialDecryptionError`; defense 2 caps the supervisor
+    restart loop. This helper closes the root cause: dirty base64 input
+    that the Python 3.14 strict decoder rejects unconditionally.
+
+    Raises ``binascii.Error`` only when the payload remains undecodable
+    after whitespace removal and padding normalisation. Raises
+    ``UnicodeError`` when ``str`` input contains non-ASCII characters
+    (``str.encode("ascii")`` fails before normalisation runs); callers in
+    a credential-decode path must catch both.
+    """
+    if isinstance(value, str):
+        raw = value.encode("ascii")
+    else:
+        raw = bytes(value)
+    # str.split() / bytes.split() with no args collapses every flavour of
+    # ASCII whitespace (space, tab, newline, CR, vtab, formfeed) -- this
+    # is exactly the set Python 3.14 strict mode now rejects.
+    stripped = b"".join(raw.split())
+    padded = stripped + b"=" * (-len(stripped) % 4)
+    return urlsafe_b64decode(padded)
+
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -215,6 +271,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
         self.tasks: list[asyncio.Task[None]] = []
+        # Set by ``_listen`` when stored FCM key material is found to be
+        # corrupt/undecodable. The supervisor reads this after the listener
+        # stops to invalidate the bad credentials and force re-registration,
+        # instead of restarting against the same poison key material until the
+        # short-run crash cap fires.
+        self.credential_error: CredentialDecryptionError | None = None
 
         # Locks
         self.stopping_lock: asyncio.Lock = asyncio.Lock()
@@ -434,21 +496,47 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
-        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii") + b"=" * (-len(crypto_key_str) % 4))
-        salt = urlsafe_b64decode(salt_str.encode("ascii") + b"=" * (-len(salt_str) % 4))
+        # Header decode (crypto-key / salt) -- per-message surface.
+        # Failures here are per-message poison, not credential corruption:
+        # they fall through to the listener's poison-message defense
+        # (selective-ACK + skip) without going through the credential
+        # try-block below.
+        crypto_key = _safe_urlsafe_b64decode(crypto_key_str)
+        salt = _safe_urlsafe_b64decode(salt_str)
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
-            raise ValueError("Credentials missing FCM key material")
+            raise CredentialDecryptionError("Credentials missing FCM key material")
 
         private_value = keys_section.get("private")
         secret_value = keys_section.get("secret")
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
-            raise ValueError("Invalid key values in credential payload")
+            raise CredentialDecryptionError(
+                "Credentials contain invalid key values"
+            )
 
-        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"=" * (-len(private_value) % 4))
-        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4))
-        privkey = load_der_private_key(der_data, password=None)
+        try:
+            der_data = _safe_urlsafe_b64decode(private_value)
+            secret = _safe_urlsafe_b64decode(secret_value)
+        except (binascii.Error, UnicodeError) as cred_decode_err:
+            # binascii.Error: corrupt base64 payload.
+            # UnicodeError (covers UnicodeEncodeError/UnicodeDecodeError):
+            # non-ASCII bytes in cached keys.private/keys.secret; .encode("ascii")
+            # raises before urlsafe_b64decode is reached. Both are permanent
+            # credential-corruption faults, not per-message poison.
+            raise CredentialDecryptionError(
+                "Credentials key material failed base64 decode; re-registration required"
+            ) from cred_decode_err
+        try:
+            privkey = load_der_private_key(der_data, password=None)
+        except Exception as der_err:
+            # cryptography raises plain ValueError (corrupt DER), TypeError
+            # (wrong type), or UnsupportedAlgorithm — all permanent and all
+            # requiring re-registration. Broad catch is intentional: the
+            # only successful path is a valid DER private key.
+            raise CredentialDecryptionError(
+                "Credentials key material failed DER private-key parse; re-registration required"
+            ) from der_err
         decrypted = http_decrypt(
             raw_data,
             salt=salt,
@@ -742,6 +830,72 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
         return connected
 
+    async def _ack_or_disconnect(self, persistent_id: str | None) -> bool:
+        """Best-effort selective-ACK for a poison message.
+
+        Returns ``True`` to continue the worker loop; ``False`` if the writer
+        half is dead and the supervisor should reconnect (caller breaks).
+        """
+        if not persistent_id:
+            return True
+        try:
+            await self._send_selective_ack(persistent_id)
+            return True
+        except (OSError, ssl.SSLError, ConnectionError):
+            return False
+
+    async def _process_one_inbound_message(self, msg: MessageProto) -> bool:
+        """Run ``_handle_message`` with poison-message defense.
+
+        Defense 1 (CA-CASCADING-FAILURE-001): per-message decode failures
+        (``binascii.Error`` padding faults under Python 3.14 strict mode,
+        ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
+        ``ValueError`` from header parsing, and ``http_ece.ECEException``
+        from a corrupt encrypted body / failed auth tag) are acknowledged
+        and skipped instead of crashing the worker loop. Credential-material
+        errors (``CredentialDecryptionError``) propagate so ``_listen``
+        records them and the supervisor invalidates the bad key material and
+        prompts re-registration.
+
+        Returns ``True`` to continue the loop, ``False`` to break (writer
+        half-dead during ack).
+        """
+        try:
+            await self._handle_message(msg)
+            return True
+        except CredentialDecryptionError:
+            # Credential corruption is permanent; let the supervisor see it
+            # (via ``_listen``'s dedicated handler) instead of silently ACKing
+            # every message that follows.
+            raise
+        except (ValueError, RuntimeError, http_ece.ECEException) as decrypt_err:
+            # Per-message poison: the exception-hierarchy UNION of every decode
+            # surface ``_handle_message`` touches.
+            #   * ValueError    -- header-param parse (``_extract_header_param``)
+            #                      plus ``binascii.Error`` padding faults and
+            #                      ``UnicodeError``; both are ValueError
+            #                      subclasses and need no separate arm.
+            #   * RuntimeError  -- ``_app_data_by_key`` missing-key lookup.
+            #   * ECEException  -- ``http_ece`` body decrypt / auth-tag failure.
+            #                      It is a SIBLING of ValueError under Exception
+            #                      (not a subclass), so it must be listed
+            #                      explicitly or it bypasses this poison defense
+            #                      entirely (Exception-Hierarchie-Audit lesson,
+            #                      CA-CASCADING-FAILURE-001).
+            # ``CredentialDecryptionError`` is a ValueError subclass but is
+            # matched by the more specific arm above and re-raised, so it never
+            # reaches here. ACK + skip so the FCM server stops redelivering and
+            # the supervisor's short-run crash cap is not tripped by a single
+            # bad message.
+            persistent_id = getattr(msg, "persistent_id", None)
+            self._log_warn_with_limit(
+                "Skipping FCM message that failed to decrypt "
+                "(persistent_id=%s): %s",
+                persistent_id,
+                decrypt_err,
+            )
+            return await self._ack_or_disconnect(persistent_id)
+
     async def _listen(self) -> None:
         """Listens for push notifications until an error or stop() occurs."""
         try:
@@ -760,7 +914,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             while self.do_listen:
                 try:
                     if msg := await self._receive_msg():
-                        await self._handle_message(msg)
+                        if not await self._process_one_inbound_message(msg):
+                            self.do_listen = False
+                            break
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart
@@ -777,6 +933,20 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         except asyncio.CancelledError:
             self.logger.debug("Listener task cancelled")
             raise
+        except CredentialDecryptionError as cred_err:
+            # Stored FCM key material is corrupt/undecodable. Record it as a
+            # DISTINCT credential fault instead of letting it fall through to
+            # the generic "Unknown error" arm below, so the supervisor can
+            # invalidate the bad key material and re-register rather than
+            # restarting the listener against the same poison credentials
+            # until the short-run crash cap fires.
+            self.logger.error(
+                "FCM credential material is corrupt and requires "
+                "re-registration: %s",
+                cred_err,
+            )
+            self.credential_error = cred_err
+            self.do_listen = False
         except ConnectionResetError:
             # Log a clean warning without noisy traceback; supervisor will reconnect.
             self.logger.warning(
