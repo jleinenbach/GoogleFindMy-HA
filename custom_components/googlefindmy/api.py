@@ -62,6 +62,7 @@ from .NovaApi.nova_request import (
     NovaProtobufDecodeError,
     NovaRateLimitError,
 )
+from .NovaApi.util import generate_random_uuid
 from .ProtoDecoders.decoder import (
     _select_best_location as _decoder_select_best_location,
 )
@@ -1509,12 +1510,24 @@ class GoogleFindMyAPI:
         Returns:
             A tuple `(success, request_uuid)` where `success` indicates whether the
             command was submitted successfully and `request_uuid` captures the
-            backend-generated request identifier when available.
+            client-generated request identifier (the Stop-Sound correlation/cancel
+            key). The UUID is generated locally *before* dispatch and is therefore
+            returned on every post-dispatch outcome (success, empty response, and
+            every handled error), so Stop-Sound can cancel the ringing device.
+            Only the pre-dispatch guard (no FCM token, nothing sent) returns
+            `(False, None)`.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
         if not token:
+            # PRE-dispatch: nothing was sent, so there is no cancel key to keep.
             return (False, None)
+        # Generate the cancel key locally *before* dispatch so it is in scope on
+        # every post-dispatch path (success, empty response, any exception) and
+        # survives a partial/failed play. "Fail toward keeping the cancel key":
+        # a stale UUID at most causes a harmless no-op Stop, whereas a missing
+        # UUID leaves the device ringing until the firmware default duration.
+        request_uuid = generate_random_uuid()
         try:
             _LOGGER.info("Submitting Play Sound (async) for %s", device_id)
             # Delegate payload build + transport to the submitter; provide HA session.
@@ -1526,6 +1539,7 @@ class GoogleFindMyAPI:
                 session=self._session,
                 namespace=self._namespace(),
                 cache=cast("TokenCache | None", self._cache),
+                request_uuid=request_uuid,
             )
             if result is None:
                 _LOGGER.error(
@@ -1533,9 +1547,9 @@ class GoogleFindMyAPI:
                     "empty response from server (no error details available)",
                     device_id,
                 )
-                return (False, None)
+                return (False, request_uuid)
 
-            response_hex, request_uuid = result
+            response_hex, _response_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
             _LOGGER.debug(
                 "Play Sound Nova response for %s (uuid=%s): %d bytes: %s",
@@ -1552,7 +1566,8 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return (False, None)
+            # POST-dispatch: keep the cancel key so Stop-Sound can still correlate.
+            return (False, request_uuid)
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
@@ -1562,20 +1577,20 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return (False, None)
+                return (False, request_uuid)
             _LOGGER.warning(
                 "Server error (%s) while playing sound on %s: %s",
                 err.status,
                 device_id,
                 _short_err(err),
             )
-            return (False, None)
+            return (False, request_uuid)
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Play Sound rate-limited for %s: %s", device_id, _short_err(err)
             )
-            return (False, None)
+            return (False, request_uuid)
 
         except ClientError as err:
             _LOGGER.error(
@@ -1583,13 +1598,13 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return (False, None)
+            return (False, request_uuid)
 
         except Exception as err:
             _LOGGER.error(
                 "Failed to play sound (async) on %s: %s", device_id, _short_err(err)
             )
-            return (False, None)
+            return (False, request_uuid)
 
     async def async_stop_sound(
         self, device_id: str, request_uuid: str | None = None

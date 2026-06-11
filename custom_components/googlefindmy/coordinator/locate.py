@@ -600,7 +600,14 @@ class LocateOperations(_MixinBase):
             return False
         try:
             ok, request_uuid = await self.api.async_play_sound(device_id)
-            if ok and request_uuid is not None:
+            # Store the cancel key on every dispatch *attempt*, not only on
+            # success: api.async_play_sound returns the UUID on all post-dispatch
+            # outcomes (success, empty response, handled errors) and only returns
+            # None when nothing was sent (pre-dispatch guard). "Fail toward
+            # keeping the cancel key" — a stale UUID at most yields a harmless
+            # no-op Stop, whereas a missing UUID leaves the device ringing until
+            # the firmware default duration. See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            if request_uuid is not None:
                 self._sound_request_uuids[device_id] = request_uuid
                 # Use getattr for test compatibility (tests may bypass __init__)
                 timestamps = getattr(self, "_sound_request_timestamps", None)

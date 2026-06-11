@@ -36,7 +36,9 @@ from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
 
 
 def start_sound_request(
-    canonic_device_id: str, gcm_registration_id: str
+    canonic_device_id: str,
+    gcm_registration_id: str,
+    request_uuid: str | None = None,
 ) -> tuple[str, str]:
     """Build the hex payload for a 'Play Sound' action (pure builder).
 
@@ -46,12 +48,19 @@ def start_sound_request(
     Args:
         canonic_device_id: The canonical ID of the target device.
         gcm_registration_id: The FCM registration token for push notifications.
+        request_uuid: Optional caller-supplied request UUID (the Stop-Sound
+            correlation/cancel key). When ``None`` a fresh UUID is generated, so
+            existing callers keep their previous behaviour. Passing it lets an
+            upper layer know the cancel key *before* dispatch, so it survives
+            every outcome (success, empty response, exception).
 
     Returns:
         Tuple containing the hex-encoded protobuf payload for Nova transport and
-        the generated request UUID.
+        the request UUID actually used (the injected one, or a freshly
+        generated one when none was supplied).
     """
-    request_uuid = generate_random_uuid()
+    if request_uuid is None:
+        request_uuid = generate_random_uuid()
     return (
         create_sound_request(
             True, canonic_device_id, gcm_registration_id, request_uuid
@@ -74,6 +83,7 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
     cache_get: Callable[[str], Awaitable[Any]] | None = None,
     cache_set: Callable[[str, Any], Awaitable[None]] | None = None,
     refresh_override: Callable[[], Awaitable[str | None]] | None = None,
+    request_uuid: str | None = None,
 ) -> tuple[str, str] | None:  # noqa: PLR0913
     """Submit a 'Play Sound' action using the shared async Nova client.
 
@@ -97,14 +107,20 @@ async def async_submit_start_sound_request(  # noqa: PLR0913
         token: Optional direct ADM token to bypass cache lookups for this call.
         cache_get/cache_set: Optional async cache I/O overrides (flow-local).
         refresh_override: Optional async function to obtain a fresh ADM token.
+        request_uuid: Optional caller-supplied request UUID (the Stop-Sound
+            correlation/cancel key). Forwarded to the builder; when ``None`` the
+            builder generates one as before (backwards compatible). The upper
+            layer (``api.async_play_sound``) supplies it so the cancel key is
+            known before dispatch and survives every outcome.
 
     Returns:
         Tuple containing the hex response payload (may be empty) and the
         request UUID on success, or None on handled errors.
     """
-    # Build payload (pure)
+    # Build payload (pure). Forward the caller-supplied cancel key when given,
+    # else the builder generates one (unchanged legacy behaviour).
     hex_payload, request_uuid = start_sound_request(
-        canonic_device_id, gcm_registration_id
+        canonic_device_id, gcm_registration_id, request_uuid
     )
 
     # Prepare optional namespaced TTL cache wrappers if requested and not overridden

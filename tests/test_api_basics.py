@@ -1139,20 +1139,45 @@ class TestAsyncPlaySoundErrorMapping:
 
         monkeypatch.setattr(api_module, "async_submit_start_sound_request", _submit)
 
+    def _patch_generate_uuid(
+        self, monkeypatch: pytest.MonkeyPatch, value: str = "uuid-injected"
+    ) -> None:
+        """Pin the client-generated cancel key so post-dispatch paths are testable."""
+        monkeypatch.setattr(api_module, "generate_random_uuid", lambda: value)
+
     def test_missing_token_short_circuits(self) -> None:
+        # PRE-dispatch guard: nothing was sent, so there is no cancel key to keep.
         api_module._FCM_ReceiverGetter = None
         api = GoogleFindMyAPI(cache=StubCache(entry_id="e"))
         assert run_coro(api.async_play_sound("d")) == (False, None)
 
-    def test_empty_submission_response(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_submission_keeps_cancel_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # CHARACTERIZATION -> SOLL inversion: the empty post-dispatch response
+        # previously returned (False, None) and dropped the cancel key. It now
+        # keeps the client-generated UUID so Stop-Sound can still correlate.
         api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
         self._patch_submit(monkeypatch, None)
-        assert run_coro(api.async_play_sound("d")) == (False, None)
+        assert run_coro(api.async_play_sound("d")) == (False, "uuid-injected")
 
-    def test_success_returns_uuid_tuple(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_success_returns_injected_uuid(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Success returns the client-generated (injected) cancel key. The real
+        # submitter echoes the injected UUID back through the builder; the mock
+        # mirrors that contract.
         api = self._api_with_token(monkeypatch)
-        self._patch_submit(monkeypatch, ("AB", "uuid-1234"))
-        assert run_coro(api.async_play_sound("d")) == (True, "uuid-1234")
+        self._patch_generate_uuid(monkeypatch)
+
+        async def _echo_submit(*_a: Any, **_k: Any) -> Any:
+            return ("AB", _k.get("request_uuid"))
+
+        monkeypatch.setattr(
+            api_module, "async_submit_start_sound_request", _echo_submit
+        )
+        assert run_coro(api.async_play_sound("d")) == (True, "uuid-injected")
 
     @pytest.mark.parametrize(
         "exc",
@@ -1165,12 +1190,15 @@ class TestAsyncPlaySoundErrorMapping:
             Exception("boom"),
         ],
     )
-    def test_documented_exceptions_return_false_none(
+    def test_documented_exceptions_keep_cancel_key(
         self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
     ) -> None:
+        # CHARACTERIZATION -> SOLL inversion: every post-dispatch handled error
+        # previously returned (False, None); it now keeps the cancel key.
         api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
         self._patch_submit(monkeypatch, None, raises=exc)
-        assert run_coro(api.async_play_sound("d")) == (False, None)
+        assert run_coro(api.async_play_sound("d")) == (False, "uuid-injected")
 
 
 class TestAsyncStopSoundErrorMapping:

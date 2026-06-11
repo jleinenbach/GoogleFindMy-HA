@@ -35,6 +35,70 @@ async def test_async_play_sound_stores_uuid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_play_sound_stores_uuid_on_failed_dispatch() -> None:
+    """Store the cancel key even when the play dispatch failed post-dispatch.
+
+    api.async_play_sound returns ``(False, uuid)`` when the request was sent but
+    the outcome was an empty response or a handled error. The coordinator must
+    still cache that UUID ("fail toward keeping the cancel key") so a later Stop
+    can correlate. Regression for IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    transport_problems: list[bool] = []
+    coordinator._note_push_transport_problem = (  # type: ignore[attr-defined]
+        lambda: transport_problems.append(True)
+    )
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # Post-dispatch failure: sent, but handled error / empty response.
+        return False, "uuid-2"
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-2"}  # type: ignore[attr-defined]
+    # Failure still flags a push-transport problem.
+    assert transport_problems == [True]
+
+
+@pytest.mark.asyncio
+async def test_async_play_sound_skips_store_on_pre_dispatch_guard() -> None:
+    """Do not cache a UUID when nothing was sent (pre-dispatch guard).
+
+    api.async_play_sound returns ``(False, None)`` only when it bailed out before
+    dispatch (e.g. no FCM token). With no request on the wire there is no cancel
+    key to keep, so the cache must stay empty.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    transport_problems: list[bool] = []
+    coordinator._note_push_transport_problem = (  # type: ignore[attr-defined]
+        lambda: transport_problems.append(True)
+    )
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # Pre-dispatch guard: nothing sent, no cancel key.
+        return False, None
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
+    assert transport_problems == [True]
+
+
+@pytest.mark.asyncio
 async def test_async_stop_sound_uses_cached_uuid() -> None:
     """Stop sound should look up a cached UUID when none is provided."""
 
