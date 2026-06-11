@@ -343,7 +343,11 @@ skip_covered = true
 # (was 60 in PR #1071 with 64 % headroom). Target remains >= 95 % per
 # quality-scale rule test-coverage; this floor only prevents regressions
 # while incremental test expansion lands (60 -> 63 -> 70 -> 80 -> 90 -> 95).
-fail_under = 63
+# Recalibrated to 67 after forward-porting the stranded Class-A coverage suite:
+# local full run measured 68.33 % scoped (3696 passed); floor = floor(68) - 1 Pp
+# jitter margin, clamped to [63, CI total]. Three local entity tests error on a
+# root-owned .storage path that CI does not hit, so CI total is >= 68.33 %.
+fail_under = 67
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
