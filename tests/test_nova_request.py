@@ -106,7 +106,7 @@ class _StubCache:
         return result
 
 
-def test_async_nova_request_returns_auth_error_on_repeated_401(
+async def test_async_nova_request_returns_auth_error_on_repeated_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Ensure NovaAuthError is raised instead of NameError on 401 responses.
@@ -165,14 +165,14 @@ def test_async_nova_request_returns_auth_error_on_repeated_401(
         )
 
     with pytest.raises(NovaAuthError) as err:
-        asyncio.run(_exercise())
+        await _exercise()
 
     assert err.value.status == 401
     assert isinstance(err.value.detail, str)
     assert "Unauthorized" in err.value.detail
 
 
-def test_async_nova_request_refreshes_token_after_initial_401(
+async def test_async_nova_request_refreshes_token_after_initial_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 401 triggers an ADM refresh and retries with the rotated token."""
@@ -231,7 +231,7 @@ def test_async_nova_request_refreshes_token_after_initial_401(
         final_aas = await cache.get(DATA_AAS_TOKEN)
         return result, final_aas
 
-    result, final_aas = asyncio.run(_exercise())
+    result, final_aas = await _exercise()
 
     assert result == "baadf00d"
     assert final_aas == "aas-original"
@@ -279,7 +279,7 @@ class _CoordinatedSession:
         return _DummyResponse(status, body)
 
 
-def test_async_nova_request_reuses_cached_token_after_recent_refresh(
+async def test_async_nova_request_reuses_cached_token_after_recent_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Overlapping 401 retries reuse the freshly cached ADM token."""
@@ -344,7 +344,7 @@ def test_async_nova_request_reuses_cached_token_after_recent_refresh(
         results = await asyncio.gather(*tasks)
         return results, session.calls, refresh_calls
 
-    results, calls, refreshes = asyncio.run(_exercise())
+    results, calls, refreshes = await _exercise()
 
     assert results == ["6f6b", "6f6b"]
     # With the pre-request gate, only ONE refresh should occur.
@@ -363,7 +363,7 @@ def test_async_nova_request_reuses_cached_token_after_recent_refresh(
     assert successful_auths == ["Bearer refreshed-token", "Bearer refreshed-token"]
 
 
-def test_device_list_namespace_override_does_not_double_prefix(
+async def test_device_list_namespace_override_does_not_double_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Namespace-aware overrides must not prefix keys twice when 401 triggers a refresh."""
@@ -423,7 +423,7 @@ def test_device_list_namespace_override_does_not_double_prefix(
             namespace=namespace,
         )
 
-    result_hex = asyncio.run(_exercise())
+    result_hex = await _exercise()
 
     assert result_hex == "deadbeef"
     double_prefixed = [
@@ -435,7 +435,7 @@ def test_device_list_namespace_override_does_not_double_prefix(
     assert f"{namespace}:adm_token_issued_at_{username}" in set_keys
 
 
-def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:  # noqa: PLR0915
+async def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:  # noqa: PLR0915
     """401 refresh clears stale token keys without resetting startup probe counters."""
 
     async def _run() -> None:  # noqa: PLR0915
@@ -515,10 +515,10 @@ def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> None:  #
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> None:
+async def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> None:
     """Invalid AAS tokens remove both namespaced and bare cache keys."""
 
     async def _run() -> None:
@@ -557,10 +557,10 @@ def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> No
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_nova_request_fetches_token_when_not_supplied(
+async def test_async_nova_request_fetches_token_when_not_supplied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Nova should resolve an ADM token when `token` kwarg is omitted."""
@@ -601,7 +601,7 @@ def test_async_nova_request_fetches_token_when_not_supplied(
             session=session,
         )
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     assert result == "1020"
     assert calls and calls[0]["username"] == "user@example.com"
@@ -610,7 +610,7 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert headers.get("Authorization") == "Bearer resolved-token"
 
 
-def test_async_nova_request_returns_hex_only_on_http_200(
+async def test_async_nova_request_returns_hex_only_on_http_200(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A non-None return is produced exclusively by an HTTP 200.
@@ -645,13 +645,13 @@ def test_async_nova_request_returns_hex_only_on_http_200(
             session=session,
         )
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     assert result == "1020"  # acceptance signal: a value came back from a 200
     assert len(session.calls) == 1
 
 
-def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
+async def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-dispatch failure raises and never returns a value.
@@ -685,12 +685,12 @@ def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
         )
 
     with pytest.raises(ValueError, match="Invalid hex payload"):
-        asyncio.run(_exercise())
+        await _exercise()
 
     assert session.calls == []  # nothing was sent
 
 
-def test_async_nova_request_raises_on_connection_setup_failure(
+async def test_async_nova_request_raises_on_connection_setup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A connect-phase failure raises NovaError flagged as *not* dispatched.
@@ -755,7 +755,7 @@ def test_async_nova_request_raises_on_connection_setup_failure(
 
     # Connection errors are retried, then surface as NovaError once exhausted.
     with pytest.raises(NovaError) as exc_info:
-        asyncio.run(_exercise())
+        await _exercise()
 
     # Pre-dispatch: the request never reached the wire, so the cancel key must
     # be dropped (no new ring could have started).
@@ -763,7 +763,7 @@ def test_async_nova_request_raises_on_connection_setup_failure(
     assert session.calls  # post() *was* attempted (and retried), only entry failed
 
 
-def test_async_nova_request_marks_read_phase_failure_dispatched(
+async def test_async_nova_request_marks_read_phase_failure_dispatched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A post-send read failure raises NovaError flagged as *dispatched*.
@@ -829,13 +829,13 @@ def test_async_nova_request_marks_read_phase_failure_dispatched(
 
     # Read-phase errors are retried, then surface as a *dispatched* NovaError.
     with pytest.raises(NovaError) as exc_info:
-        asyncio.run(_exercise())
+        await _exercise()
 
     assert exc_info.value.dispatched is True
     assert session.calls  # the request reached the wire on every attempt
 
 
-def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
+async def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Dispatch latches across the whole retry sequence, not the last attempt.
@@ -914,7 +914,7 @@ def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
         )
 
     with pytest.raises(NovaError) as exc_info:
-        asyncio.run(_exercise())
+        await _exercise()
 
     # The *final* attempt failed pre-connect, but an earlier attempt reached the
     # wire: dispatch must remain latched so the cancel key is preserved.
@@ -965,7 +965,7 @@ async def test_async_nova_request_uses_central_total_timeout(
     assert timeout.total == NOVA_REQUEST_TOTAL_TIMEOUT_S
 
 
-def test_async_nova_request_uses_registered_cache_provider(
+async def test_async_nova_request_uses_registered_cache_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Provider fallback supplies cache when async_nova_request cache arg is omitted."""
@@ -1009,7 +1009,7 @@ def test_async_nova_request_uses_registered_cache_provider(
         finally:
             unregister_cache_provider()
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     assert result == "0102"
     assert calls and calls[0]["cache"] is cache
@@ -1018,17 +1018,17 @@ def test_async_nova_request_uses_registered_cache_provider(
     assert headers.get("Authorization") == "Bearer provider-token"
 
 
-def test_async_nova_request_requires_cache_when_provider_missing() -> None:
+async def test_async_nova_request_requires_cache_when_provider_missing() -> None:
     """Missing cache and provider should raise before issuing the request."""
 
     async def _exercise() -> None:
         with pytest.raises(ValueError):
             await async_nova_request("testScope", "00", username="user@example.com")
 
-    asyncio.run(_exercise())
+    await _exercise()
 
 
-def test_async_nova_request_invokes_adm_exchange_even_with_token(
+async def test_async_nova_request_invokes_adm_exchange_even_with_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Providing a token kwarg must still route through async_get_adm_token_api."""
@@ -1072,7 +1072,7 @@ def test_async_nova_request_invokes_adm_exchange_even_with_token(
             session=session,
         )
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     assert result == "aabb"
     assert calls and calls[0]["username"] == "user@example.com"
@@ -1082,7 +1082,7 @@ def test_async_nova_request_invokes_adm_exchange_even_with_token(
     assert headers.get("Authorization") == "Bearer adm-from-override"
 
 
-def test_async_nova_request_skips_seeding_without_username(
+async def test_async_nova_request_skips_seeding_without_username(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Do not seed non-AAS override tokens when username kwarg is omitted."""
@@ -1120,7 +1120,7 @@ def test_async_nova_request_skips_seeding_without_username(
         final_state["seeded"] = await cache.get(DATA_AAS_TOKEN)
         return result
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     assert result == "0102"
     assert calls == [None]
@@ -1130,7 +1130,7 @@ def test_async_nova_request_skips_seeding_without_username(
     assert headers.get("Authorization") == "Bearer adm-fallback"
 
 
-def test_async_nova_request_preserves_existing_aas_when_username_missing(
+async def test_async_nova_request_preserves_existing_aas_when_username_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pre-seeded AAS token must survive flow token usage without username kwarg."""
@@ -1175,7 +1175,7 @@ def test_async_nova_request_preserves_existing_aas_when_username_missing(
         final_aas = await cache.get(DATA_AAS_TOKEN)
         return result, final_aas
 
-    result, final_aas = asyncio.run(_exercise())
+    result, final_aas = await _exercise()
 
     assert result == "face"
     assert calls and calls[0]["username"] == "user@example.com"
@@ -1188,7 +1188,7 @@ def test_async_nova_request_preserves_existing_aas_when_username_missing(
     assert headers.get("Authorization") == "Bearer adm-preseed"
 
 
-def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
+async def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Config-flow style caches must convert AAS tokens before Nova POST."""
@@ -1223,7 +1223,7 @@ def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
             session=session,
         )
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     assert result == "9933"
     assert calls == ["aas_et/CONFIG_FLOW"]
@@ -1232,7 +1232,7 @@ def test_async_nova_request_converts_flow_token_with_ephemeral_cache(
     assert headers.get("Authorization") == "Bearer adm-token"
 
 
-def test_async_ttl_policy_invalidate_aas_token_clears_both_bare_and_namespaced() -> (
+async def test_async_ttl_policy_invalidate_aas_token_clears_both_bare_and_namespaced() -> (
     None
 ):
     """async_invalidate_aas_token must clear AAS token from both bare and namespaced keys.
@@ -1285,10 +1285,10 @@ def test_async_ttl_policy_invalidate_aas_token_clears_both_bare_and_namespaced()
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
+async def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Persistent 401 errors after token refresh must raise a permanent error.
@@ -1367,7 +1367,7 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
         )
 
     with pytest.raises(NovaAuthError) as err:
-        asyncio.run(_exercise())
+        await _exercise()
 
     # After all retries exhausted, error is permanent (requires re-auth)
     assert err.value.status == 401
@@ -1378,7 +1378,7 @@ def test_async_nova_request_invalidates_aas_token_after_exhausted_401_retries(
     assert len(aas_invalidation_calls) == 0
 
 
-def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
+async def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AAS token is retained across poll cycles since it is not invalidated on 401.
@@ -1467,7 +1467,7 @@ def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
 
         return aas_after_first, second_result
 
-    aas_after_first, second_result = asyncio.run(_exercise())
+    aas_after_first, second_result = await _exercise()
 
     # AAS should be preserved after first failed cycle (not invalidated)
     assert aas_after_first == "stale-aas"
@@ -1480,7 +1480,7 @@ def test_async_nova_request_aas_token_cleared_enables_fresh_chain_on_next_cycle(
     assert aas_states_before_request[0] == (1, "stale-aas")
 
 
-def test_async_nova_request_preserves_aas_token_on_successful_401_recovery(
+async def test_async_nova_request_preserves_aas_token_on_successful_401_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AAS token must be preserved when 401 recovery succeeds within retry window.
@@ -1547,7 +1547,7 @@ def test_async_nova_request_preserves_aas_token_on_successful_401_recovery(
         final_aas = await cache.get(DATA_AAS_TOKEN)
         return result, final_aas
 
-    result, final_aas = asyncio.run(_exercise())
+    result, final_aas = await _exercise()
 
     # Request should succeed
     assert result == "beef"
@@ -1559,7 +1559,7 @@ def test_async_nova_request_preserves_aas_token_on_successful_401_recovery(
     assert len(aas_invalidation_calls) == 0
 
 
-def test_async_nova_request_no_double_aas_invalidation_on_repeated_failures(
+async def test_async_nova_request_no_double_aas_invalidation_on_repeated_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AAS invalidation must NOT happen during the 401 retry sequence.
@@ -1630,13 +1630,13 @@ def test_async_nova_request_no_double_aas_invalidation_on_repeated_failures(
         )
 
     with pytest.raises(NovaAuthError):
-        asyncio.run(_exercise())
+        await _exercise()
 
     # No AAS invalidation should occur during 401 retries
     assert invalidation_call_count == 0
 
 
-def test_async_nova_request_loop_prevention_across_multiple_cycles(
+async def test_async_nova_request_loop_prevention_across_multiple_cycles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """AAS token is preserved across multiple consecutive failed poll cycles.
@@ -1732,7 +1732,7 @@ def test_async_nova_request_loop_prevention_across_multiple_cycles(
             refresh_override=_refresh,
         )
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     # Final cycle should succeed
     assert result == "dead"
@@ -1747,7 +1747,7 @@ def test_async_nova_request_loop_prevention_across_multiple_cycles(
     assert aas_states_at_cycle_start[3][1] == "initial-stale-aas"
 
 
-def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
+async def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ADM refresh alone should fix most 401 errors without invalidating AAS.
@@ -1821,7 +1821,7 @@ def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
         final_aas = await cache.get(DATA_AAS_TOKEN)
         return result, final_aas
 
-    result, final_aas = asyncio.run(_exercise())
+    result, final_aas = await _exercise()
 
     # Request should succeed
     assert result == "cafebabe"
@@ -1837,7 +1837,7 @@ def test_async_nova_request_adm_only_failure_recovers_on_second_retry(
     assert 6.0 in sleep_delays
 
 
-def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
+async def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When ADM-only refresh fails, Step 2 retries ADM with AAS retained.
@@ -1914,7 +1914,7 @@ def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
         final_aas = await cache.get(DATA_AAS_TOKEN)
         return result, final_aas
 
-    result, final_aas = asyncio.run(_exercise())
+    result, final_aas = await _exercise()
 
     # Request should succeed
     assert result == "deadbeef"
@@ -1934,7 +1934,7 @@ def test_async_nova_request_aas_adm_failure_requires_full_chain_refresh(
     assert sleep_delays == [6.0, 61.0, 6.0]
 
 
-def test_async_nova_request_full_retry_sequence_exhausted(
+async def test_async_nova_request_full_retry_sequence_exhausted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When all 4 retry steps fail, a permanent auth error must be raised.
@@ -2010,7 +2010,7 @@ def test_async_nova_request_full_retry_sequence_exhausted(
         )
 
     with pytest.raises(NovaAuthError) as err:
-        asyncio.run(_exercise())
+        await _exercise()
 
     # Should be a permanent error requiring re-authentication
     assert err.value.status == 401
@@ -2029,7 +2029,7 @@ def test_async_nova_request_full_retry_sequence_exhausted(
     assert sleep_delays == [6.0, 61.0, 6.0, 501.0]
 
 
-def test_async_nova_request_recovers_on_long_cooldown(
+async def test_async_nova_request_recovers_on_long_cooldown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Recovery on step 3 (after 501s long cooldown) should succeed.
@@ -2087,7 +2087,7 @@ def test_async_nova_request_recovers_on_long_cooldown(
             refresh_override=_refresh,
         )
 
-    result = asyncio.run(_exercise())
+    result = await _exercise()
 
     # Should succeed after long cooldown
     assert result == "feedface"
@@ -2096,7 +2096,7 @@ def test_async_nova_request_recovers_on_long_cooldown(
     assert sleep_delays == [6.0, 61.0, 6.0, 501.0]
 
 
-def test_async_ttl_policy_aas_ttl_learning_records_observed_lifetime() -> None:
+async def test_async_ttl_policy_aas_ttl_learning_records_observed_lifetime() -> None:
     """AAS TTL learning should record the observed token lifetime when invalidated.
 
     This test verifies that when an AAS token is invalidated:
@@ -2150,10 +2150,10 @@ def test_async_ttl_policy_aas_ttl_learning_records_observed_lifetime() -> None:
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_ttl_policy_aas_proactive_refresh_triggers_near_expiry() -> None:
+async def test_async_ttl_policy_aas_proactive_refresh_triggers_near_expiry() -> None:
     """AAS proactive refresh should NOT trigger even when approaching learned TTL.
 
     The production code no longer proactively invalidates the AAS token.
@@ -2211,10 +2211,10 @@ def test_async_ttl_policy_aas_proactive_refresh_triggers_near_expiry() -> None:
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_ttl_policy_aas_proactive_refresh_skips_when_fresh() -> None:
+async def test_async_ttl_policy_aas_proactive_refresh_skips_when_fresh() -> None:
     """AAS proactive refresh should NOT trigger when token is still fresh.
 
     When the AAS token is well within its TTL, proactive refresh should skip.
@@ -2266,10 +2266,10 @@ def test_async_ttl_policy_aas_proactive_refresh_skips_when_fresh() -> None:
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_ttl_policy_ignores_very_short_ttl_in_recalibration() -> None:
+async def test_async_ttl_policy_ignores_very_short_ttl_in_recalibration() -> None:
     """Very short observed TTLs should be ignored to avoid race condition artifacts.
 
     When a token expires very quickly (< MIN_TTL_FOR_LEARNING_SEC), it typically
@@ -2327,10 +2327,10 @@ def test_async_ttl_policy_ignores_very_short_ttl_in_recalibration() -> None:
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -> None:
+async def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -> None:
     """TTLs above the minimum threshold should still trigger recalibration.
 
     When a token expires after MIN_TTL_FOR_LEARNING_SEC but significantly shorter
@@ -2390,10 +2390,10 @@ def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -> None
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
 
 
-def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
+async def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
     """CRITICAL: Both ADM and AAS tokens must have MIN_TTL protection.
 
     This test documents a past bug where only ADM tokens had MIN_TTL protection,
@@ -2491,4 +2491,4 @@ def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:
         finally:
             await cache.close()
 
-    asyncio.run(_run())
+    await _run()
