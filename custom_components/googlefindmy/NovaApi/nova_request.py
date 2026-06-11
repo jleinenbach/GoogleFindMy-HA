@@ -336,11 +336,13 @@ class NovaError(Exception):
             any client-generated cancel key must be preserved. False (the
             default) when the request provably never left the client (DNS,
             connect refused/timeout, or any pre-dispatch error), so no side
-            effect can have happened. Network failures set this in the POST
-            loop's retry handler, where it latches across the *whole* retry
-            sequence: once any attempt reaches the wire it stays True even if a
-            later attempt fails pre-connect. All other Nova errors keep the safe
-            default.
+            effect can have happened. The POST loop latches a wire-reaching
+            attempt across the *whole* retry sequence and stamps that latch onto
+            every error leaving the loop at a single choke point (the
+            `except NovaError` handler), so HTTP-status exits (429/5xx/4xx) carry
+            it just like wrapped network failures: once any attempt reaches the
+            wire it stays True even if a later attempt fails pre-connect or ends
+            on an HTTP status. All other Nova errors keep the safe default.
     """
 
     dispatched: bool = False
@@ -1729,17 +1731,29 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         retries_used + 1,
                         type(e).__name__,
                     )
-                    nova_err = NovaError(
+                    # Wrap the final network failure. The sticky dispatch latch
+                    # is stamped onto this — and onto every other NovaError that
+                    # leaves the retry loop — at the single choke point below
+                    # (see the `except NovaError` handler). Deriving dispatch
+                    # per raise-site is exactly the bug this centralization
+                    # removes: HTTP-status exits used to forget the latch.
+                    raise NovaError(
                         f"Nova API request failed after retries: {e}"
-                    )
-                    # Carry the pre-/post-dispatch classification in-band on the
-                    # exception so callers can decide whether a side effect may
-                    # have started (and a cancel key must be kept). The flag is
-                    # the sticky sequence latch, NOT a fresh read of the final
-                    # exception: any wire-reaching attempt keeps it True. See
-                    # NovaError.dispatched and _network_failure_reached_wire.
-                    nova_err.dispatched = reached_wire
-                    raise nova_err from e
+                    ) from e
+
+    except NovaError as nova_err:
+        # Single choke point for the whole retry sequence: stamp the sticky
+        # dispatch latch onto EVERY NovaError leaving the loop — the HTTP-status
+        # exits (429/5xx/4xx after retries) and the wrapped network failure
+        # alike. Dispatch is a property of the *sequence*, not of the final
+        # attempt: once any attempt reaches the wire a side effect (a device
+        # ring) may already have started, so the cancel key must survive
+        # regardless of how the sequence finally ended. The latch only ever
+        # flips False -> True, so a clean rejection sequence (no wire-reaching
+        # attempt) keeps dispatched=False and still drops the key.
+        if reached_wire:
+            nova_err.dispatched = True
+        raise
 
     finally:
         if ephemeral_session and session:

@@ -32,6 +32,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     AsyncTTLPolicy,
     NovaAuthError,
     NovaError,
+    NovaHTTPError,
     async_nova_request,
     register_cache_provider,
     unregister_cache_provider,
@@ -920,6 +921,86 @@ async def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
     # wire: dispatch must remain latched so the cancel key is preserved.
     assert exc_info.value.dispatched is True
     assert len(session.calls) > 1  # the mixed sequence actually retried
+
+
+async def test_async_nova_request_latches_dispatch_across_http_status_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch latches across a sequence that *ends* on an HTTP status.
+
+    Regression for the Codex iter-8 finding: an early attempt reaches the wire
+    and fails post-send (``ServerDisconnectedError`` during read), latching
+    dispatch — a ring may already be active. If the retries are then exhausted
+    by repeated HTTP 503s, the sequence raises ``NovaHTTPError``. That exit must
+    still report ``dispatched is True`` so ``api.async_play_sound`` keeps the
+    cancel key; otherwise a later Stop cannot target the ringing device. The
+    retry-loop choke point stamps the latch onto *every* error leaving the loop,
+    HTTP-status exits included — not only the wrapped network failure (which the
+    sibling test above already covers).
+    """
+
+    class _ReadFailingCtx:
+        """Post-send failure: context enters, body read raises."""
+
+        def __init__(self) -> None:
+            self.status = 200
+            self.headers: dict[str, str] = {}
+
+        async def read(self) -> bytes:
+            raise aiohttp.ServerDisconnectedError("peer closed during read")
+
+        async def __aenter__(self) -> _ReadFailingCtx:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _WireThenHttpSession:
+        """Attempt 1 fails post-send; every later attempt returns HTTP 503."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> Any:
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            if len(self.calls) == 1:
+                return _ReadFailingCtx()
+            return _DummyResponse(503, b"")
+
+    cache = _StubCache()
+    session = _WireThenHttpSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    with pytest.raises(NovaHTTPError) as exc_info:
+        await _exercise()
+
+    # The sequence ended on an HTTP 503, but an earlier attempt reached the wire:
+    # dispatch must remain latched so the cancel key is preserved.
+    assert exc_info.value.dispatched is True
+    assert len(session.calls) > 1  # the wire-reaching attempt actually retried
 
 
 async def test_async_nova_request_uses_central_total_timeout(

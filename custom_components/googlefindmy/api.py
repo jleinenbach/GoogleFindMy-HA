@@ -97,6 +97,26 @@ def _short_err(e: Exception | str) -> str:
     return msg
 
 
+def _cancel_key_after_failure(
+    err: NovaError, request_uuid: str
+) -> tuple[bool, str | None]:
+    """Decide the Play-Sound cancel-key fate for a non-accepted command.
+
+    A raised ``NovaError`` is never an acceptance (the submitter returns a tuple
+    only on HTTP 200), so ``success`` is always ``False``. The cancel key is
+    preserved ONLY when the failure latched dispatch (``err.dispatched``): some
+    attempt in the retry sequence reached the wire, so the device may already be
+    ringing and a later Stop needs the key. Pure rejections (401/403/5xx/429
+    with no wire-reaching attempt) and provable pre-dispatch failures inherit
+    ``dispatched is False`` and drop the key, so they can never overwrite a
+    previous, possibly still-ringing play's valid cancel key. Centralizing the
+    decision here keeps every non-acceptance exit on one rule instead of
+    re-deriving it per ``except`` handler. See ``NovaError.dispatched`` and
+    IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+    """
+    return (False, request_uuid if err.dispatched else None)
+
+
 # Backward-compatible export for tests and legacy call sites.
 get_canonic_ids = _decoder_get_canonic_ids
 
@@ -1524,8 +1544,13 @@ class GoogleFindMyAPI:
             (DNS/connect refused/connect timeout) — and every explicit server
             rejection (401/403/4xx/5xx/429) returns `(False, None)` so it cannot
             overwrite a still-valid cancel key of a previous, possibly still-ringing
-            play. The pre-/post-dispatch split is classified in-band on the raised
-            NovaError (`NovaError.dispatched`). See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            play. The sole exception is a rejection/HTTP-status exit whose retry
+            sequence latched dispatch on an *earlier* wire-reaching attempt: there
+            the key is preserved because that earlier attempt may already be
+            ringing. The pre-/post-dispatch split is classified in-band on the
+            raised NovaError (`NovaError.dispatched`), stamped uniformly at the
+            transport's retry-loop choke point for every exit. See
+            IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1587,12 +1612,12 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            # Any raised error means the command was NOT accepted (the submitter
-            # returns a tuple only on a 200). Whether the auth failure is a
-            # pre-dispatch token-refresh error or a server 401/403, the play never
-            # started a ring, so drop the key — never overwrite a previous play's
-            # still-valid cancel key.
-            return (False, None)
+            # A raised error is never an acceptance (the submitter returns a tuple
+            # only on a 200). Keep the cancel key only if an earlier attempt
+            # latched dispatch (err.dispatched): a pure 401/403 rejection with no
+            # wire-reaching attempt drops it, so it can never overwrite a
+            # previous, possibly still-ringing play's valid key.
+            return _cancel_key_after_failure(err, request_uuid)
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
@@ -1602,33 +1627,37 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return (False, None)
-            _LOGGER.warning(
-                "Server error (%s) while playing sound on %s: %s",
-                err.status,
-                device_id,
-                _short_err(err),
-            )
-            # Non-acceptance (5xx/other): no ring, drop the key.
-            return (False, None)
+            else:
+                _LOGGER.warning(
+                    "Server error (%s) while playing sound on %s: %s",
+                    err.status,
+                    device_id,
+                    _short_err(err),
+                )
+            # Non-acceptance (401/403/5xx/other): drop the key UNLESS an earlier
+            # attempt latched dispatch — a post-send failure on a prior retry may
+            # already be ringing. err.dispatched carries that sticky sequence
+            # latch (stamped at the transport's retry-loop choke point).
+            return _cancel_key_after_failure(err, request_uuid)
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Play Sound rate-limited for %s: %s", device_id, _short_err(err)
             )
-            return (False, None)
+            # Same rule as the other non-acceptances: a rate-limited final attempt
+            # never rang, but if a *prior* attempt reached the wire the latch
+            # (err.dispatched) preserves the key.
+            return _cancel_key_after_failure(err, request_uuid)
 
         except NovaError as err:
-            # A network failure wrapped by async_nova_request after its retries.
-            # If it occurred at or after the request reached the wire (server
-            # disconnect, read timeout, payload error), the play may already be
-            # ringing even though no 200 was read: keep the cancel key so a later
-            # Stop can target it. A pre-connect failure (DNS, refused, connect
-            # timeout) provably never rang, so drop the key. The pre-/post-
-            # dispatch split is classified in-band on the exception itself
-            # (NovaError.dispatched), not via an out-of-band signal.
-            # Other NovaError subclasses (NovaLogicError, NovaProtobufDecodeError)
-            # inherit dispatched=False and therefore keep the conservative drop.
+            # A network failure wrapped by async_nova_request after its retries,
+            # or any other NovaError leaving the transport. The retry-loop choke
+            # point stamps the sticky dispatch latch onto it (err.dispatched): if
+            # any attempt reached the wire (server disconnect, read timeout,
+            # payload error), the play may already be ringing, so keep the cancel
+            # key; a provable pre-connect failure never rang, so drop it. Other
+            # subclasses (NovaLogicError, NovaProtobufDecodeError) inherit
+            # dispatched=False and keep the conservative drop.
             if err.dispatched:
                 _LOGGER.warning(
                     "Play Sound for %s failed after reaching the server (%s); "
@@ -1636,13 +1665,13 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return (False, request_uuid)
-            _LOGGER.error(
-                "Network error while playing sound on %s before dispatch: %s",
-                device_id,
-                _short_err(err),
-            )
-            return (False, None)
+            else:
+                _LOGGER.error(
+                    "Network error while playing sound on %s before dispatch: %s",
+                    device_id,
+                    _short_err(err),
+                )
+            return _cancel_key_after_failure(err, request_uuid)
 
         except ClientError as err:
             # Defensive: async_nova_request wraps aiohttp errors into NovaError
