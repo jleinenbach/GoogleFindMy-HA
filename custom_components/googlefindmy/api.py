@@ -57,6 +57,7 @@ from .NovaApi.ListDevices.nbe_list_devices import async_request_device_list
 from .NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
+    NovaError,
     NovaHTTPError,
     NovaLogicError,
     NovaProtobufDecodeError,
@@ -1509,17 +1510,22 @@ class GoogleFindMyAPI:
 
         Returns:
             A tuple `(success, request_uuid)` where `success` indicates whether the
-            command was accepted and `request_uuid` captures the client-generated
-            request identifier (the Stop-Sound correlation/cancel key). The UUID is
-            generated locally *before* dispatch but is returned only once the server
-            *accepted* the command (HTTP 200). The submitter encodes acceptance in
-            its return contract: it returns a result tuple exclusively on a 200 and
-            re-raises on every other outcome. So a non-None UUID is returned only on
-            the success path; every failure — no FCM token, missing cache,
-            username/payload/token resolution, connection setup, *and* server
-            rejection (401/403/4xx/5xx/429) — returns `(False, None)` so it cannot
+            command was *accepted* (HTTP 200) and `request_uuid` captures the
+            client-generated cancel key. The UUID is generated locally *before*
+            dispatch. It is returned (non-None) in two cases where the device may
+            be ringing and a later Stop needs the key:
+              1. Acceptance — the server answered 200. `success` is True.
+              2. Post-dispatch ambiguity — a network failure occurred at or after
+                 the request reached the wire (server disconnect, read timeout,
+                 payload error), so the play may have started even though no 200
+                 was read. `success` is False, but the key is preserved.
+            Every failure that provably never reached the wire — no FCM token,
+            missing cache, username/payload/token resolution, connection setup
+            (DNS/connect refused/connect timeout) — and every explicit server
+            rejection (401/403/4xx/5xx/429) returns `(False, None)` so it cannot
             overwrite a still-valid cancel key of a previous, possibly still-ringing
-            play. See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            play. The pre-/post-dispatch split is classified in-band on the raised
+            NovaError (`NovaError.dispatched`). See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1527,16 +1533,16 @@ class GoogleFindMyAPI:
             # PRE-dispatch: nothing was sent, so there is no cancel key to keep.
             return (False, None)
         # Generate the cancel key locally *before* dispatch so it is in scope on
-        # every path. We return it ONLY when the server accepted the command, which
-        # the submitter signals structurally: it returns a result tuple exclusively
-        # on an HTTP 200 and re-raises on every non-acceptance (pre-dispatch errors,
-        # connection setup, AND server rejections such as 401/403/5xx). Deriving
-        # "accepted" from "the submitter returned" — instead of from an out-of-band
-        # dispatch signal or from the exception type — removes the channel-confusion
-        # class entirely: there is no parallel signal to keep in sync with the real
-        # status. A returned key for a rejected play would overwrite the still-valid
-        # cancel key of a *previous* play that may still be ringing, making a later
-        # Stop fail; that is exactly what the success-only contract prevents.
+        # every path. Acceptance is still derived structurally from the submitter's
+        # return contract: it returns a result tuple exclusively on an HTTP 200 and
+        # re-raises on every non-acceptance. So `success` (the True/False bool) is
+        # driven purely by "did the submitter return a tuple", with no out-of-band
+        # dispatch signal to keep in sync. On the failure branch we additionally
+        # preserve the key when the wrapped NovaError says the request reached the
+        # wire (err.dispatched): the play may be ringing even without a 200, so a
+        # later Stop needs the key. Explicit rejections (401/403/5xx) and provable
+        # pre-dispatch failures keep dropping the key, so they can never overwrite a
+        # previous, possibly still-ringing play's valid cancel key.
         request_uuid = generate_random_uuid()
 
         try:
@@ -1612,9 +1618,39 @@ class GoogleFindMyAPI:
             )
             return (False, None)
 
-        except ClientError as err:
+        except NovaError as err:
+            # A network failure wrapped by async_nova_request after its retries.
+            # If it occurred at or after the request reached the wire (server
+            # disconnect, read timeout, payload error), the play may already be
+            # ringing even though no 200 was read: keep the cancel key so a later
+            # Stop can target it. A pre-connect failure (DNS, refused, connect
+            # timeout) provably never rang, so drop the key. The pre-/post-
+            # dispatch split is classified in-band on the exception itself
+            # (NovaError.dispatched), not via an out-of-band signal.
+            # Other NovaError subclasses (NovaLogicError, NovaProtobufDecodeError)
+            # inherit dispatched=False and therefore keep the conservative drop.
+            if err.dispatched:
+                _LOGGER.warning(
+                    "Play Sound for %s failed after reaching the server (%s); "
+                    "keeping the cancel key in case the device is ringing.",
+                    device_id,
+                    _short_err(err),
+                )
+                return (False, request_uuid)
             _LOGGER.error(
-                "Network error while playing sound on %s: %s",
+                "Network error while playing sound on %s before dispatch: %s",
+                device_id,
+                _short_err(err),
+            )
+            return (False, None)
+
+        except ClientError as err:
+            # Defensive: async_nova_request wraps aiohttp errors into NovaError
+            # (handled above), so a raw ClientError here is a pre-dispatch failure
+            # raised before the POST loop (e.g. token/cache resolution). It never
+            # reached the wire, so the device cannot be ringing: drop the key.
+            _LOGGER.error(
+                "Network error while playing sound on %s before dispatch: %s",
                 device_id,
                 _short_err(err),
             )

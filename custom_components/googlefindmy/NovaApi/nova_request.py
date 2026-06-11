@@ -327,7 +327,20 @@ def _decode_error_response(content: bytes, http_status: int) -> str:
 
 # --- Custom Exceptions ---
 class NovaError(Exception):
-    """Base exception for Nova API errors."""
+    """Base exception for Nova API errors.
+
+    Attributes:
+        dispatched: True when the failure occurred *at or after* the request
+            reached the wire (server disconnect, read timeout, payload error),
+            so a side effect (e.g. a device ring) may already have started and
+            any client-generated cancel key must be preserved. False (the
+            default) when the request provably never left the client (DNS,
+            connect refused/timeout, or any pre-dispatch error), so no side
+            effect can have happened. Network failures set this in the POST
+            loop's retry handler; all other Nova errors keep the safe default.
+    """
+
+    dispatched: bool = False
 
 
 class NovaAuthError(NovaError):
@@ -418,6 +431,33 @@ class NovaProtobufDecodeError(NovaError):
         super().__init__(
             f"Failed to decode Google Protobuf response: {detail or 'Unknown error'}"
         )
+
+
+# Network failures that prove the request never reached the wire: a connection
+# was never established (DNS, refused, TLS, proxy) or the *connect* phase timed
+# out. In aiohttp 3.13 these are ClientConnectorError (a ClientOSError subclass)
+# and ConnectionTimeoutError (a ServerTimeoutError subclass). Every other error
+# under (TimeoutError, aiohttp.ClientError) -- ServerDisconnectedError, a
+# read-phase SocketTimeoutError (which shares ServerTimeoutError with the
+# connect-phase ConnectionTimeoutError, hence the *specific* check below),
+# ClientPayloadError, ClientOSError, or a generic total-timeout -- happened at
+# or after dispatch, so the server may have acted on the request.
+_PRE_DISPATCH_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    aiohttp.ClientConnectorError,
+    aiohttp.ConnectionTimeoutError,
+)
+
+
+def _network_failure_reached_wire(exc: BaseException) -> bool:
+    """Return True when a network failure may have been acted on by the server.
+
+    A pre-connect failure (DNS, connect refused/timeout, TLS) provably never
+    left the client. Any other aiohttp/timeout failure occurred at or after the
+    request reached the wire, so a side effect may already have started and the
+    caller must preserve its cancel key. See ``NovaError.dispatched``.
+    """
+
+    return not isinstance(exc, _PRE_DISPATCH_NETWORK_ERRORS)
 
 
 # ------------------------ Optional Home Assistant hooks ------------------------
@@ -1672,9 +1712,15 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         retries_used + 1,
                         type(e).__name__,
                     )
-                    raise NovaError(
+                    nova_err = NovaError(
                         f"Nova API request failed after retries: {e}"
-                    ) from e
+                    )
+                    # Carry the pre-/post-dispatch classification in-band on the
+                    # exception so callers can decide whether a side effect may
+                    # have started (and a cancel key must be kept). See
+                    # NovaError.dispatched and _network_failure_reached_wire.
+                    nova_err.dispatched = _network_failure_reached_wire(e)
+                    raise nova_err from e
 
     finally:
         if ephemeral_session and session:

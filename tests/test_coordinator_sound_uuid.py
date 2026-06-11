@@ -104,6 +104,42 @@ async def test_non_accepted_play_keeps_existing_cancel_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_dispatch_ambiguous_play_caches_uuid() -> None:
+    """A dispatched-but-unconfirmed Play caches its key so Stop can still cancel.
+
+    Codex regression (PR #1100, iter-5): a network failure at/after the request
+    reached the wire (server disconnect, read timeout) may have started a ring
+    even without a 200. api.async_play_sound then returns ``(False, <uuid>)`` —
+    ``ok`` is False, but the cancel key is preserved. The coordinator caches every
+    non-null UUID, so it stores this key (letting a later Stop target the
+    possibly-active ring) while still flagging the push-transport problem.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    transport_problems: list[bool] = []
+    coordinator._note_push_transport_problem = (  # type: ignore[attr-defined]
+        lambda: transport_problems.append(True)
+    )
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # Post-dispatch ambiguity: not confirmed (ok=False), but a ring may be
+        # active, so the cancel key is returned for caching.
+        return False, "uuid-postsend"
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    # The ambiguous-dispatch key is cached so a later Stop can target it.
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-postsend"}  # type: ignore[attr-defined]
+    assert transport_problems == [True]
+
+
+@pytest.mark.asyncio
 async def test_async_stop_sound_uses_cached_uuid() -> None:
     """Stop sound should look up a cached UUID when none is provided."""
 

@@ -42,6 +42,7 @@ from custom_components.googlefindmy.const import (
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
+    NovaError,
     NovaHTTPError,
     NovaLogicError,
     NovaProtobufDecodeError,
@@ -1229,6 +1230,35 @@ class TestAsyncPlaySoundErrorMapping:
         api = self._api_with_token(monkeypatch)
         self._patch_generate_uuid(monkeypatch)
         self._patch_submit(monkeypatch, None, raises=exc)
+        assert run_coro(api.async_play_sound("d")) == (False, None)
+
+    def test_post_dispatch_network_failure_keeps_cancel_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Codex PR #1100 iter-5: a network failure at/after the request reached
+        # the wire (server disconnect, read timeout) may have started a ring even
+        # without a 200. async_nova_request flags the wrapped NovaError as
+        # dispatched=True; async_play_sound then KEEPS the client-generated cancel
+        # key (success stays False) so a later Stop can target the possibly-active
+        # ring. This is the one failure path that preserves the key.
+        api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
+        err = NovaError("network failed after retries")
+        err.dispatched = True
+        self._patch_submit(monkeypatch, None, raises=err)
+        assert run_coro(api.async_play_sound("d")) == (False, "uuid-injected")
+
+    def test_pre_dispatch_network_failure_drops_cancel_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A NovaError flagged dispatched=False (a pre-connect failure: DNS,
+        # refused, connect timeout) provably never rang, so the key must be
+        # dropped, exactly like every other non-acceptance.
+        api = self._api_with_token(monkeypatch)
+        self._patch_generate_uuid(monkeypatch)
+        err = NovaError("connect failed before the wire")
+        err.dispatched = False
+        self._patch_submit(monkeypatch, None, raises=err)
         assert run_coro(api.async_play_sound("d")) == (False, None)
 
 

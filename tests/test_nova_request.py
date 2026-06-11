@@ -693,22 +693,22 @@ def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
 def test_async_nova_request_raises_on_connection_setup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A connection-setup failure raises and never returns a value.
+    """A connect-phase failure raises NovaError flagged as *not* dispatched.
 
-    Codex finding (earlier iteration): DNS/connect/closed-session/connect-timeout
-    errors raise the moment the ``async with session.post(...)`` context is
-    *entered* — after token and payload resolution, but before a single byte
-    reaches the wire. The function therefore raises instead of returning, so
-    ``api.async_play_sound`` sees no result, returns ``(False, None)``, and the
-    coordinator keeps the still-valid cancel key of a previous ring intact, so a
-    later Stop can still cancel it.
+    A connect-phase timeout (``ConnectionTimeoutError``) raises the moment the
+    ``async with session.post(...)`` context is *entered*, after token and
+    payload resolution but before a single byte reaches the wire. The retry
+    handler classifies it as pre-dispatch and re-raises a ``NovaError`` with
+    ``dispatched is False``, so ``api.async_play_sound`` returns ``(False,
+    None)`` and the coordinator keeps the still-valid cancel key of a previous
+    ring intact (it can never have started a new ring).
     """
 
     class _ConnFailingResponse:
         """Context manager that raises on entry, mimicking a connect failure."""
 
         async def __aenter__(self) -> Any:
-            raise aiohttp.ClientConnectionError("cannot connect")
+            raise aiohttp.ConnectionTimeoutError
 
         async def __aexit__(self, *_exc: object) -> None:
             return None
@@ -754,10 +754,85 @@ def test_async_nova_request_raises_on_connection_setup_failure(
         )
 
     # Connection errors are retried, then surface as NovaError once exhausted.
-    with pytest.raises(NovaError):
+    with pytest.raises(NovaError) as exc_info:
         asyncio.run(_exercise())
 
-    assert session.calls  # post() *was* attempted (and retried) — only entry failed
+    # Pre-dispatch: the request never reached the wire, so the cancel key must
+    # be dropped (no new ring could have started).
+    assert exc_info.value.dispatched is False
+    assert session.calls  # post() *was* attempted (and retried), only entry failed
+
+
+def test_async_nova_request_marks_read_phase_failure_dispatched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A post-send read failure raises NovaError flagged as *dispatched*.
+
+    The ``async with session.post(...)`` context is entered (the server
+    responded with headers), but reading the body raises ``ServerDisconnectedError``.
+    The request therefore reached the wire and may have started a ring, so the
+    retry handler re-raises a ``NovaError`` with ``dispatched is True`` and
+    ``api.async_play_sound`` keeps the cancel key for a later Stop.
+    """
+
+    class _ReadFailingResponse:
+        """Response whose body read fails after the context is entered."""
+
+        def __init__(self) -> None:
+            self.status = 200
+            self.headers: dict[str, str] = {}
+
+        async def read(self) -> bytes:
+            raise aiohttp.ServerDisconnectedError("peer closed during read")
+
+        async def __aenter__(self) -> _ReadFailingResponse:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _ReadFailingSession:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> _ReadFailingResponse:
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            return _ReadFailingResponse()
+
+    cache = _StubCache()
+    session = _ReadFailingSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    # Collapse the retry backoff so the test stays fast across NOVA_MAX_RETRIES.
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # Read-phase errors are retried, then surface as a *dispatched* NovaError.
+    with pytest.raises(NovaError) as exc_info:
+        asyncio.run(_exercise())
+
+    assert exc_info.value.dispatched is True
+    assert session.calls  # the request reached the wire on every attempt
 
 
 async def test_async_nova_request_uses_central_total_timeout(
