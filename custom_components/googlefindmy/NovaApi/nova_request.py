@@ -1226,14 +1226,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
     namespace: str | None = None,
     # Entry-scoped TokenCache for strict multi-account separation
     cache: TokenCache | None = None,
-    # Optional dispatch hook: invoked exactly once the moment the server returns
-    # response headers (the request provably reached the wire). Lets an upper layer
-    # distinguish PRE-dispatch failures (token/username/payload resolution AND
-    # connection setup — DNS/connect/closed session/connect timeout, nothing sent)
-    # from POST-dispatch outcomes (server reached, result uncertain) without
-    # inferring it from the exception type — unreliable because auth errors are
-    # raised on both sides of the wire boundary.
-    on_dispatch: Callable[[], None] | None = None,
 ) -> str:
     """
     Asynchronous Nova API request for Home Assistant (entry-scoped capable).
@@ -1413,7 +1405,6 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
         deadline_waits = 0  # Circuit breaker for 401 deadline-wait loops
-        dispatch_notified = False  # one-shot guard for the on_dispatch hook
         while True:
             attempt = retries_used + 1
             try:
@@ -1427,28 +1418,23 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     timeout=timeout,
                     allow_redirects=False,
                 ) as response:
-                    # Wire boundary: reaching this point means the server returned
-                    # response headers, so the request provably hit Google and a
-                    # ring may now be active. Connection-setup failures (DNS,
-                    # connect refused, closed connector/session, connect timeout)
-                    # raise on the `async with` entry above and never get here, so
-                    # they stay classified as PRE-dispatch. The one-shot guard keeps
-                    # this to a single signal across 401 retries; a later sock_read
-                    # timeout in `response.read()` fires after we have signalled,
-                    # which is correct (the server already answered).
-                    # Defensive: a buggy hook must never abort a real request.
-                    if on_dispatch is not None and not dispatch_notified:
-                        dispatch_notified = True
-                        try:
-                            on_dispatch()
-                        except Exception:  # noqa: BLE001 - hook must not break transport
-                            _LOGGER.debug("on_dispatch hook raised", exc_info=True)
                     content = await response.read()
                     status = response.status
                     _LOGGER.debug(
                         "Nova API async request to %s: status=%d", api_scope, status
                     )
 
+                    # Acceptance boundary: the request is treated as "accepted by
+                    # the server" — and therefore as a possibly-active ring whose
+                    # cancel key must be preserved — ONLY when Google answers 200.
+                    # This is signalled to upper layers purely via the return
+                    # contract: a non-None return reaches the caller exclusively
+                    # here. Every non-200 status raises below, and every
+                    # connection-setup failure (DNS, connect refused, closed
+                    # connector/session, connect timeout) raises on the `async
+                    # with` entry above. Callers therefore derive "accepted" from
+                    # "this function returned" rather than from an out-of-band
+                    # signal that has to be kept in sync with the real status.
                     if status == HTTP_OK:
                         return cast(bytes, content).hex()
 

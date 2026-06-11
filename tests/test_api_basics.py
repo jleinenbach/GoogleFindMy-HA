@@ -1132,24 +1132,19 @@ class TestAsyncPlaySoundErrorMapping:
         result: Any,
         *,
         raises: BaseException | None = None,
-        dispatched: bool = True,
     ) -> None:
-        """Install a fake submitter that models the wire boundary.
+        """Install a fake submitter that models the acceptance contract.
 
-        The real submitter forwards ``on_dispatch`` to ``async_nova_request``,
-        which fires it exactly once the moment the server returns response
-        headers (the request provably reached the wire). ``dispatched`` mirrors
-        that: when True the fake calls the hook (POST-dispatch outcome — success,
-        empty response, or an error raised after the server answered); when False
-        it raises/returns *without* firing the hook (PRE-dispatch failure —
-        token/username/payload resolution, missing cache, or connection setup).
+        The real submitter returns a result tuple *only* when the server accepted
+        the command (HTTP 200) and re-raises on every other outcome. The fake
+        mirrors that single contract: it returns ``result`` to model an accepted
+        command, or raises ``raises`` to model any non-acceptance — a pre-dispatch
+        failure (nothing sent), a connection-setup error, or a server rejection
+        (401/403/5xx, reached the wire but refused). There is no out-of-band
+        dispatch signal to model anymore.
         """
 
         async def _submit(*_a: Any, **_k: Any) -> Any:
-            if dispatched:
-                hook = _k.get("on_dispatch")
-                if hook is not None:
-                    hook()
             if raises is not None:
                 raise raises
             return result
@@ -1159,7 +1154,7 @@ class TestAsyncPlaySoundErrorMapping:
     def _patch_generate_uuid(
         self, monkeypatch: pytest.MonkeyPatch, value: str = "uuid-injected"
     ) -> None:
-        """Pin the client-generated cancel key so post-dispatch paths are testable."""
+        """Pin the client-generated cancel key so acceptance paths are testable."""
         monkeypatch.setattr(api_module, "generate_random_uuid", lambda: value)
 
     def test_missing_token_short_circuits(self) -> None:
@@ -1168,16 +1163,17 @@ class TestAsyncPlaySoundErrorMapping:
         api = GoogleFindMyAPI(cache=StubCache(entry_id="e"))
         assert run_coro(api.async_play_sound("d")) == (False, None)
 
-    def test_empty_submission_keeps_cancel_key(
+    def test_empty_submission_drops_cancel_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # CHARACTERIZATION -> SOLL inversion: the empty post-dispatch response
-        # previously returned (False, None) and dropped the cancel key. It now
-        # keeps the client-generated UUID so Stop-Sound can still correlate.
+        # The submitter returns a tuple on every accepted (200) command and
+        # re-raises otherwise, so a None result is not an expected outcome. Treat
+        # it conservatively: drop the key rather than risk overwriting a previous
+        # play's still-valid cancel key. See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
         api = self._api_with_token(monkeypatch)
         self._patch_generate_uuid(monkeypatch)
         self._patch_submit(monkeypatch, None)
-        assert run_coro(api.async_play_sound("d")) == (False, "uuid-injected")
+        assert run_coro(api.async_play_sound("d")) == (False, None)
 
     def test_success_returns_injected_uuid(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1189,9 +1185,6 @@ class TestAsyncPlaySoundErrorMapping:
         self._patch_generate_uuid(monkeypatch)
 
         async def _echo_submit(*_a: Any, **_k: Any) -> Any:
-            hook = _k.get("on_dispatch")
-            if hook is not None:
-                hook()
             return ("AB", _k.get("request_uuid"))
 
         monkeypatch.setattr(
@@ -1202,27 +1195,18 @@ class TestAsyncPlaySoundErrorMapping:
     @pytest.mark.parametrize(
         "exc",
         [
+            # Server rejections (reached the wire, then refused) — Codex PR #1100
+            # iter-4: a 401/403/5xx is NOT an accepted command, so it must drop the
+            # cancel key, never keep it.
             NovaAuthError(401, "auth"),
             NovaHTTPError(401, "http"),
             NovaHTTPError(503, "http"),
             NovaRateLimitError("rate"),
             ClientError("net"),
             Exception("boom"),
-        ],
-    )
-    def test_postdispatch_exceptions_keep_cancel_key(
-        self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
-    ) -> None:
-        # POST-dispatch (the request reached the wire, then the server/connection
-        # errored): the device may be ringing, so keep the cancel key.
-        api = self._api_with_token(monkeypatch)
-        self._patch_generate_uuid(monkeypatch)
-        self._patch_submit(monkeypatch, None, raises=exc, dispatched=True)
-        assert run_coro(api.async_play_sound("d")) == (False, "uuid-injected")
-
-    @pytest.mark.parametrize(
-        "exc",
-        [
+            # Pre-dispatch failures (nothing sent) — Codex PR #1100 earlier iters,
+            # incl. NovaAuthPermanentError from token refresh (a NovaAuthError
+            # subclass) raised before the wire.
             MissingTokenCacheError(),
             api_module.NovaAuthPermanentError(401, "token refresh failed"),
             NovaAuthError(401, "auth resolution"),
@@ -1230,19 +1214,21 @@ class TestAsyncPlaySoundErrorMapping:
             Exception("boom before post"),
         ],
     )
-    def test_predispatch_failures_drop_cancel_key(
+    def test_any_submitter_exception_drops_cancel_key(
         self, monkeypatch: pytest.MonkeyPatch, exc: BaseException
     ) -> None:
-        # Codex regression (PR #1100): when the submitter raises *before* the Nova
-        # request reaches the wire (missing cache, token/username/payload
-        # resolution — incl. NovaAuthPermanentError from token refresh, which is a
-        # NovaAuthError subclass), nothing was sent. Returning a non-null UUID here
-        # would let the coordinator overwrite a still-valid cancel key of an
-        # earlier, possibly still-ringing play. The hook never fires, so we return
-        # (False, None).
+        # Architectural invariant (IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY): the submitter
+        # returns a tuple only for an accepted command (HTTP 200) and re-raises for
+        # every non-acceptance — whether a pre-dispatch failure (nothing sent) or a
+        # server rejection (401/403/5xx, reached the wire but refused). In ALL these
+        # cases the play never started a ring, so async_play_sound must return
+        # (False, None); returning a non-null UUID would let the coordinator
+        # overwrite a still-valid cancel key of an earlier, possibly still-ringing
+        # play, breaking a later Stop. This collapses the former
+        # post-dispatch-keeps / pre-dispatch-drops split into one contract.
         api = self._api_with_token(monkeypatch)
         self._patch_generate_uuid(monkeypatch)
-        self._patch_submit(monkeypatch, None, raises=exc, dispatched=False)
+        self._patch_submit(monkeypatch, None, raises=exc)
         assert run_coro(api.async_play_sound("d")) == (False, None)
 
 

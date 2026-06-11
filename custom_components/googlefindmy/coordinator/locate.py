@@ -600,14 +600,14 @@ class LocateOperations(_MixinBase):
             return False
         try:
             ok, request_uuid = await self.api.async_play_sound(device_id)
-            # Store the cancel key whenever the command actually reached the wire,
-            # not only on success: api.async_play_sound returns the UUID on every
-            # post-dispatch outcome (success, empty response, errors after
-            # session.post) and returns None for every pre-dispatch failure
-            # (nothing sent). That invariant is what makes "store every non-null
-            # UUID" safe: a post-dispatch key may have started a ring that Stop
-            # must cancel, while a pre-dispatch None must NOT overwrite a previous,
-            # possibly still-ringing play's key. See
+            # Store the cancel key whenever the server accepted the command:
+            # api.async_play_sound returns a non-None UUID only when the play was
+            # accepted (HTTP 200) and therefore may have started a ring, and returns
+            # None for every non-acceptance (pre-dispatch failure, connection setup,
+            # OR a server rejection such as 401/403/5xx). That invariant is what
+            # makes "store every non-null UUID" safe: an accepted key may have
+            # started a ring that Stop must cancel, while a None must NOT overwrite a
+            # previous, possibly still-ringing play's key. See
             # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
             if request_uuid is not None:
                 self._sound_request_uuids[device_id] = request_uuid

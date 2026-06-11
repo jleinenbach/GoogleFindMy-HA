@@ -1509,16 +1509,17 @@ class GoogleFindMyAPI:
 
         Returns:
             A tuple `(success, request_uuid)` where `success` indicates whether the
-            command was submitted successfully and `request_uuid` captures the
-            client-generated request identifier (the Stop-Sound correlation/cancel
-            key). The UUID is generated locally *before* dispatch but is returned
-            only once the request provably reached the wire — i.e. the server
-            returned response headers (success, empty response, or an error status
-            such as 401/500). Every PRE-dispatch failure — no FCM token, missing
-            cache, username/payload/token resolution, *and* connection setup
-            (DNS/connect/closed session/connect timeout, nothing sent) — returns
-            `(False, None)` so it cannot overwrite a still-valid cancel key of a
-            previous, possibly still-ringing play.
+            command was accepted and `request_uuid` captures the client-generated
+            request identifier (the Stop-Sound correlation/cancel key). The UUID is
+            generated locally *before* dispatch but is returned only once the server
+            *accepted* the command (HTTP 200). The submitter encodes acceptance in
+            its return contract: it returns a result tuple exclusively on a 200 and
+            re-raises on every other outcome. So a non-None UUID is returned only on
+            the success path; every failure — no FCM token, missing cache,
+            username/payload/token resolution, connection setup, *and* server
+            rejection (401/403/4xx/5xx/429) — returns `(False, None)` so it cannot
+            overwrite a still-valid cancel key of a previous, possibly still-ringing
+            play. See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
         """
         # Pass cache explicitly for multi-account isolation
         token = self._get_fcm_token_for_action()
@@ -1526,19 +1527,17 @@ class GoogleFindMyAPI:
             # PRE-dispatch: nothing was sent, so there is no cancel key to keep.
             return (False, None)
         # Generate the cancel key locally *before* dispatch so it is in scope on
-        # every path. We only return it once the command was *actually* committed
-        # to the wire — never for a PRE-dispatch failure (token/username/payload
-        # resolution, missing cache), because such a stale key would overwrite a
-        # still-valid cancel key of a *previous* play that may still be ringing,
-        # making a later Stop fail. The exception type alone cannot tell the two
-        # apart (auth errors are raised on both sides of `session.post`), so the
-        # wire layer signals the boundary explicitly via `on_dispatch`.
+        # every path. We return it ONLY when the server accepted the command, which
+        # the submitter signals structurally: it returns a result tuple exclusively
+        # on an HTTP 200 and re-raises on every non-acceptance (pre-dispatch errors,
+        # connection setup, AND server rejections such as 401/403/5xx). Deriving
+        # "accepted" from "the submitter returned" — instead of from an out-of-band
+        # dispatch signal or from the exception type — removes the channel-confusion
+        # class entirely: there is no parallel signal to keep in sync with the real
+        # status. A returned key for a rejected play would overwrite the still-valid
+        # cancel key of a *previous* play that may still be ringing, making a later
+        # Stop fail; that is exactly what the success-only contract prevents.
         request_uuid = generate_random_uuid()
-        dispatched = False
-
-        def _mark_dispatched() -> None:
-            nonlocal dispatched
-            dispatched = True
 
         try:
             _LOGGER.info("Submitting Play Sound (async) for %s", device_id)
@@ -1552,7 +1551,6 @@ class GoogleFindMyAPI:
                 namespace=self._namespace(),
                 cache=cast("TokenCache | None", self._cache),
                 request_uuid=request_uuid,
-                on_dispatch=_mark_dispatched,
             )
             if result is None:
                 _LOGGER.error(
@@ -1560,8 +1558,11 @@ class GoogleFindMyAPI:
                     "empty response from server (no error details available)",
                     device_id,
                 )
-                # POST-dispatch (server responded with no body): keep the key.
-                return (False, request_uuid if dispatched else None)
+                # Defensive: the submitter returns a tuple on every accepted (200)
+                # command and re-raises otherwise, so None is not an expected
+                # outcome. Treat the unconfirmed result conservatively — drop the
+                # key rather than risk overwriting a previous play's valid one.
+                return (False, None)
 
             response_hex, _response_uuid = result
             _LOGGER.info("Play Sound (async) submitted successfully for %s", device_id)
@@ -1580,12 +1581,12 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            # Auth errors straddle the wire boundary: a token-refresh failure
-            # (NovaAuthPermanentError) is PRE-dispatch and must drop the key,
-            # while a server 401/403 is POST-dispatch and keeps it. The
-            # `dispatched` flag, set by on_dispatch only once the server returns
-            # response headers, makes the distinction reliable.
-            return (False, request_uuid if dispatched else None)
+            # Any raised error means the command was NOT accepted (the submitter
+            # returns a tuple only on a 200). Whether the auth failure is a
+            # pre-dispatch token-refresh error or a server 401/403, the play never
+            # started a ring, so drop the key — never overwrite a previous play's
+            # still-valid cancel key.
+            return (False, None)
 
         except NovaHTTPError as err:
             if getattr(err, "status", None) in (401, 403):
@@ -1595,20 +1596,21 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                return (False, request_uuid if dispatched else None)
+                return (False, None)
             _LOGGER.warning(
                 "Server error (%s) while playing sound on %s: %s",
                 err.status,
                 device_id,
                 _short_err(err),
             )
-            return (False, request_uuid if dispatched else None)
+            # Non-acceptance (5xx/other): no ring, drop the key.
+            return (False, None)
 
         except NovaRateLimitError as err:
             _LOGGER.warning(
                 "Play Sound rate-limited for %s: %s", device_id, _short_err(err)
             )
-            return (False, request_uuid if dispatched else None)
+            return (False, None)
 
         except ClientError as err:
             _LOGGER.error(
@@ -1616,13 +1618,13 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            return (False, request_uuid if dispatched else None)
+            return (False, None)
 
         except Exception as err:
             _LOGGER.error(
                 "Failed to play sound (async) on %s: %s", device_id, _short_err(err)
             )
-            return (False, request_uuid if dispatched else None)
+            return (False, None)
 
     async def async_stop_sound(
         self, device_id: str, request_uuid: str | None = None

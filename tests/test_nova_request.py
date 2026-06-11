@@ -610,16 +610,17 @@ def test_async_nova_request_fetches_token_when_not_supplied(
     assert headers.get("Authorization") == "Bearer resolved-token"
 
 
-def test_async_nova_request_fires_on_dispatch_once_on_server_response(
+def test_async_nova_request_returns_hex_only_on_http_200(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """on_dispatch fires exactly once, only after the server returns headers.
+    """A non-None return is produced exclusively by an HTTP 200.
 
-    This is the wire-boundary signal that lets api.async_play_sound keep the
-    cancel key only when the request provably reached the wire. The hook must
-    fire *after* the POST context is entered (server answered), not before — so
-    that connection-setup failures, which raise on context entry, stay
-    classified as PRE-dispatch (see the connection-error regression below).
+    The return contract IS the acceptance signal: ``async_nova_request`` returns
+    the hex body only when Google answers 200, and raises on every other outcome
+    (see the rejection/connection regressions below). That is what lets
+    ``api.async_play_sound`` derive "command accepted" — and therefore "keep the
+    cancel key" — purely from "the submitter returned", with no out-of-band
+    dispatch signal to keep in sync. See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
     """
 
     cache = _StubCache()
@@ -634,13 +635,6 @@ def test_async_nova_request_fires_on_dispatch_once_on_server_response(
         "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
         _fake_get_adm_token,
     )
-
-    fired: list[int] = []
-
-    def _hook() -> None:
-        # Record how many POSTs had been dispatched at fire time; must be 1,
-        # i.e. the hook fires only once the server has answered.
-        fired.append(len(session.calls))
 
     async def _exercise() -> str:
         return await async_nova_request(
@@ -649,23 +643,23 @@ def test_async_nova_request_fires_on_dispatch_once_on_server_response(
             username="user@example.com",
             cache=cache,
             session=session,
-            on_dispatch=_hook,
         )
 
     result = asyncio.run(_exercise())
 
-    assert result == "1020"
-    assert fired == [1]  # fired exactly once, after the single POST answered
+    assert result == "1020"  # acceptance signal: a value came back from a 200
     assert len(session.calls) == 1
 
 
-def test_async_nova_request_skips_on_dispatch_on_pre_dispatch_failure(
+def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """on_dispatch must NOT fire when the request fails before the wire.
+    """A pre-dispatch failure raises and never returns a value.
 
     An invalid hex payload is rejected after token resolution but before the
-    POST loop, so the hook never fires and nothing is sent.
+    POST loop, so nothing is sent and the function raises rather than returns.
+    The caller therefore never sees a result for an unsent command and keeps a
+    previous play's cancel key intact.
     """
 
     cache = _StubCache()
@@ -681,8 +675,6 @@ def test_async_nova_request_skips_on_dispatch_on_pre_dispatch_failure(
         _fake_get_adm_token,
     )
 
-    fired: list[int] = []
-
     async def _exercise() -> str:
         return await async_nova_request(
             "testScope",
@@ -690,28 +682,26 @@ def test_async_nova_request_skips_on_dispatch_on_pre_dispatch_failure(
             username="user@example.com",
             cache=cache,
             session=session,
-            on_dispatch=lambda: fired.append(1),
         )
 
     with pytest.raises(ValueError, match="Invalid hex payload"):
         asyncio.run(_exercise())
 
-    assert fired == []  # hook never fired; nothing was sent
-    assert session.calls == []
+    assert session.calls == []  # nothing was sent
 
 
-def test_async_nova_request_skips_on_dispatch_on_connection_setup_failure(
+def test_async_nova_request_raises_on_connection_setup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """on_dispatch must NOT fire when the connection cannot be established.
+    """A connection-setup failure raises and never returns a value.
 
-    Codex finding: DNS/connect/closed-session/connect-timeout errors raise the
-    moment the ``async with session.post(...)`` context is *entered* — after
-    token and payload resolution, but before a single byte reaches the wire.
-    The hook lives *inside* that context, so it must never fire here. If it
-    did, ``api.async_play_sound`` would return a never-sent UUID and the
-    coordinator would overwrite the still-valid cancel key of a previous ring,
-    so a later Stop could no longer cancel it.
+    Codex finding (earlier iteration): DNS/connect/closed-session/connect-timeout
+    errors raise the moment the ``async with session.post(...)`` context is
+    *entered* — after token and payload resolution, but before a single byte
+    reaches the wire. The function therefore raises instead of returning, so
+    ``api.async_play_sound`` sees no result, returns ``(False, None)``, and the
+    coordinator keeps the still-valid cancel key of a previous ring intact, so a
+    later Stop can still cancel it.
     """
 
     class _ConnFailingResponse:
@@ -754,8 +744,6 @@ def test_async_nova_request_skips_on_dispatch_on_connection_setup_failure(
 
     monkeypatch.setattr("asyncio.sleep", _instant_sleep)
 
-    fired: list[int] = []
-
     async def _exercise() -> str:
         return await async_nova_request(
             "testScope",
@@ -763,14 +751,12 @@ def test_async_nova_request_skips_on_dispatch_on_connection_setup_failure(
             username="user@example.com",
             cache=cache,
             session=session,
-            on_dispatch=lambda: fired.append(1),
         )
 
     # Connection errors are retried, then surface as NovaError once exhausted.
     with pytest.raises(NovaError):
         asyncio.run(_exercise())
 
-    assert fired == []  # hook never fired: the request never reached the wire
     assert session.calls  # post() *was* attempted (and retried) — only entry failed
 
 
