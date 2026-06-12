@@ -596,8 +596,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             self._app_data_by_key(msg, "encryption"), "salt"
         )
         subtype = self._app_data_by_key(msg, "subtype")
-        if TYPE_CHECKING:
-            assert self.credentials
+        # Guard before dereferencing: ``credentials`` is ``MutableJSONMapping |
+        # None`` and a missing/empty value must short-circuit *before* the
+        # ``["gcm"]["app_id"]`` lookups below, mirroring the defensive check in
+        # ``_decrypt_raw_data`` (see the ``isinstance(self.credentials, dict)``
+        # guard). Previously this guard sat *after* the dereference and was thus
+        # unreachable dead code for the ``None``/``{}`` states it was meant to
+        # protect against.
+        if not self.credentials:
+            return
         if subtype != self.credentials["gcm"]["app_id"]:
             self._log_warn_with_limit(
                 "Subtype %s in data message does not match"
@@ -605,8 +612,6 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 subtype,
                 self.credentials["gcm"]["app_id"],
             )
-        if not self.credentials:
-            return
 
         decrypted = self._decrypt_raw_data(
             self.credentials, crypto_key, salt, msg.raw_data
