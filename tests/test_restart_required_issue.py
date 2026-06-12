@@ -383,3 +383,55 @@ async def test_teardown_is_safe_without_registration(
     gfm._teardown_restart_required_check(hass, bucket)
     # Issue delete is still attempted (idempotent / no-op on the HA side).
     assert issue_calls["deleted"] == [ISSUE_RESTART_REQUIRED_KEY]
+
+
+# --- Fall F: watchdog re-arms after a last-entry reload teardown (Codex P1) --
+
+
+async def test_ensure_rearms_watchdog_after_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+    issue_calls: dict[str, list[Any]],
+) -> None:
+    """A last-entry reload tears the watchdog down; the next entry setup re-arms it.
+
+    ``async_setup`` does not run again on a config-entry reload, so without the
+    re-arm in ``async_setup_entry`` (via ``_async_ensure_restart_required_check``)
+    the "updated but not yet restarted" warning would stay hidden until a full
+    Home Assistant restart, defeating the common "reload instead of restart" case.
+    """
+
+    hass = _Hass()
+    counts = {"later": 0, "interval": 0}
+
+    def _fake_later(_hass: Any, _delay: Any, _cb: Any) -> Any:
+        counts["later"] += 1
+        return lambda: None
+
+    def _fake_interval(_hass: Any, _cb: Any, _interval: Any) -> Any:
+        counts["interval"] += 1
+        return lambda: None
+
+    monkeypatch.setattr(gfm, "async_call_later", _fake_later)
+    monkeypatch.setattr(gfm, "async_track_time_interval", _fake_interval)
+
+    bucket: dict[Any, Any] = {}
+
+    # 1) Component load arms the watchdog exactly once.
+    await gfm._async_ensure_restart_required_check(hass, bucket)
+    assert bucket["restart_check_registered"] is True
+    assert (counts["later"], counts["interval"]) == (1, 1)
+
+    # 2) Idempotent: a redundant ensure (e.g. a second entry) must not double-arm.
+    await gfm._async_ensure_restart_required_check(hass, bucket)
+    assert (counts["later"], counts["interval"]) == (1, 1)
+
+    # 3) Last-entry reload: teardown cancels the timers and pops the flag.
+    gfm._teardown_restart_required_check(hass, bucket)
+    assert "restart_check_registered" not in bucket
+
+    # 4) The reload's async_setup_entry re-arms the watchdog (the regression).
+    await gfm._async_ensure_restart_required_check(hass, bucket)
+    assert bucket["restart_check_registered"] is True
+    assert (counts["later"], counts["interval"]) == (2, 2)
+    assert callable(bucket["restart_check_initial_unsub"])
+    assert callable(bucket["restart_check_unsub"])

@@ -6185,6 +6185,36 @@ def _teardown_restart_required_check(
         ir.async_delete_issue(hass, DOMAIN, ISSUE_RESTART_REQUIRED_KEY)
 
 
+async def _async_ensure_restart_required_check(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Idempotently arm the global restart-required watchdog.
+
+    Called from both ``async_setup`` (component load) and ``async_setup_entry``
+    (each parent entry load). The shared services lock plus the
+    ``restart_check_registered`` idempotent flag keep a single timer pair even
+    across racey startups or multiple config entries (Codex-P1 #6).
+
+    Re-arming from ``async_setup_entry`` is what restores the watchdog after a
+    last-entry reload: ``_teardown_restart_required_check`` cancels the timers and
+    pops the flag on the final unload, but ``async_setup`` does *not* run again on
+    a config-entry reload. Without this re-arm the "updated but not yet restarted"
+    warning would stay hidden until a full Home Assistant restart, defeating the
+    common "reload instead of restart" scenario. This mirrors the EID resolver,
+    the other global singleton that is torn down on last-entry unload and
+    re-created on entry setup.
+    """
+    services_lock: asyncio.Lock = _ensure_services_lock(bucket)
+    async with services_lock:
+        registered = bucket.get("restart_check_registered")
+        if not isinstance(registered, bool):
+            registered = False
+        if not registered:
+            _register_restart_required_check(hass, bucket)
+            bucket["restart_check_registered"] = True
+            _LOGGER.debug("Registered %s restart-required watchdog", DOMAIN)
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the integration namespace and register global services.
 
@@ -6228,17 +6258,9 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             bucket["services_registered"] = True
             _LOGGER.debug("Registered %s services at integration level", DOMAIN)
 
-    # Register the global restart-required watchdog exactly once. Reusing the same
-    # lock + idempotent flag as the service registration above keeps a single timer
-    # pair even across racey startups or multiple config entries (Codex-P1 #6).
-    async with services_lock:
-        restart_check_registered = bucket.get("restart_check_registered")
-        if not isinstance(restart_check_registered, bool):
-            restart_check_registered = False
-        if not restart_check_registered:
-            _register_restart_required_check(hass, bucket)
-            bucket["restart_check_registered"] = True
-            _LOGGER.debug("Registered %s restart-required watchdog", DOMAIN)
+    # Arm the global restart-required watchdog exactly once. async_setup_entry
+    # re-arms it after a last-entry reload tears it down (see helper docstring).
+    await _async_ensure_restart_required_check(hass, bucket)
 
     return True
 
@@ -7293,6 +7315,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     entry.runtime_data = runtime_data
     entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
     entries_bucket[entry.entry_id] = runtime_data
+
+    # Re-arm the global restart-required watchdog now that an entry is active.
+    # async_setup arms it on component load, but a last-entry reload tears it down
+    # and async_setup does not run again; arming here (the exact inverse of the
+    # `not entries_bucket` teardown trigger) keeps the warning alive across reloads.
+    await _async_ensure_restart_required_check(hass, domain_bucket)
 
     _cloud_discovery_runtime(hass, entry)
 
