@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "FCM-Push-Abbruchschleife erkannt",
       "description": "Der FCM-Push-Client trennt die Verbindung wiederholt innerhalb weniger Sekunden nach dem Verbindungsaufbau (Short-Run-Crash-Schleife). Üblicherweise wird das durch eine persistente, nicht dekodierbare Push-Nachricht in der eingehenden Warteschlange ausgelöst.\n\n1. Laden Sie die Integration neu, um den Laufzustand zurückzusetzen.\n2. Falls das Problem erneut auftritt: Erneuern Sie Ihre `secrets.json` (Google könnte Anmeldedaten rotiert haben)."
+    },
+    "restart_required": {
+      "title": "Neustart von Home Assistant zum Abschluss des Updates erforderlich",
+      "description": "Google Find My Hub wurde auf der Festplatte auf Version {installed_version} aktualisiert, aber Home Assistant führt weiterhin Version {running_version} aus. Starten Sie Home Assistant neu, um die installierte Version zu aktivieren.\n\nEin Neuladen der Integration genügt nicht: Ein vollständiger Neustart von Home Assistant ist erforderlich."
     }
   },
   "exceptions": {

@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "לולאת קריסה של FCM Push זוהתה",
       "description": "לקוח ה-FCM Push מתנתק שוב ושוב תוך שניות לאחר ההתחברות (לולאת קריסה קצרה). הסיבה השכיחה היא הודעה פגומה מתמשכת בתור הנכנס שלא ניתן לפענח.\n\n1. טען מחדש את האינטגרציה כדי לנקות את מצב הריצה.\n2. אם הבעיה חוזרת, חולל מחדש את `secrets.json` (ייתכן ש-Google סובב את האישורים)."
+    },
+    "restart_required": {
+      "title": "הפעל מחדש את Home Assistant כדי להשלים את העדכון",
+      "description": "Google Find My Hub עודכן בדיסק לגרסה {installed_version}, אך Home Assistant עדיין מריץ את גרסה {running_version}. הפעל מחדש את Home Assistant כדי להפעיל את הגרסה המותקנת.\n\nטעינה מחדש של האינטגרציה אינה מספיקה: נדרשת הפעלה מחדש מלאה של Home Assistant."
     }
   },
   "exceptions": {

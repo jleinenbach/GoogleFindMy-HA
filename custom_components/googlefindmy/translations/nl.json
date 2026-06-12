@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "FCM Push crash-lus gedetecteerd",
       "description": "De FCM push-client verbreekt herhaaldelijk binnen enkele seconden na het verbinden de verbinding (short-run crash-lus). Dit wordt meestal veroorzaakt door een aanhoudende beschadigde melding in de inkomende wachtrij die niet kan worden gedecodeerd.\n\n1. Laad de integratie opnieuw om de looptijdstatus te wissen.\n2. Als het probleem terugkeert, regenereer je `secrets.json` (Google kan de inloggegevens hebben gerouleerd)."
+    },
+    "restart_required": {
+      "title": "Start Home Assistant opnieuw op om de update te voltooien",
+      "description": "Google Find My Hub is op de schijf bijgewerkt naar versie {installed_version}, maar Home Assistant draait nog versie {running_version}. Start Home Assistant opnieuw op om de geïnstalleerde versie te activeren.\n\nDe integratie opnieuw laden is niet voldoende: een volledige herstart van Home Assistant is vereist."
     }
   },
   "exceptions": {

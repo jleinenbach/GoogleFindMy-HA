@@ -21,7 +21,7 @@ DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
-INTEGRATION_VERSION: str = "1.7.0-7"
+INTEGRATION_VERSION: str = "1.7.1"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -494,6 +494,11 @@ TRANSLATION_KEY_CACHE_PURGED: str = "cache_purged"
 TRANSLATION_KEY_UNIQUE_ID_COLLISION: str = "unique_id_collision"
 TRANSLATION_KEY_DUPLICATE_ACCOUNT: str = "duplicate_account_entries"
 
+# Global Repairs issue raised when HACS has written new integration code to disk
+# but the running process still executes the previously loaded version.
+ISSUE_RESTART_REQUIRED_KEY: str = "restart_required"
+TRANSLATION_KEY_RESTART_REQUIRED: str = "restart_required"
+
 
 def issue_id_for(entry_id: str) -> str:
     """Return a stable Repairs issue_id for a given config entry.
@@ -640,6 +645,8 @@ __all__ = [
     "TRANSLATION_KEY_CACHE_PURGED",
     "TRANSLATION_KEY_UNIQUE_ID_COLLISION",
     "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
+    "ISSUE_RESTART_REQUIRED_KEY",
+    "TRANSLATION_KEY_RESTART_REQUIRED",
     "issue_id_for",
     "STORAGE_KEY",
     "STORAGE_VERSION",
