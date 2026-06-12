@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "Boucle de plantage FCM Push détectée",
       "description": "Le client push FCM se déconnecte à plusieurs reprises quelques secondes après s’être connecté (boucle de plantage court). Cela est généralement causé par une notification persistante corrompue dans la file d’attente entrante qui ne peut pas être décodée.\n\n1. Rechargez l’intégration pour réinitialiser l’état d’exécution.\n2. Si le problème revient, régénérez votre `secrets.json` (Google peut avoir rotaté les identifiants)."
+    },
+    "restart_required": {
+      "title": "Redémarrez Home Assistant pour terminer la mise à jour",
+      "description": "Google Find My Hub a été mis à jour sur le disque vers la version {installed_version}, mais Home Assistant exécute toujours la version {running_version}. Redémarrez Home Assistant pour activer la version installée.\n\nRecharger l'intégration ne suffit pas : un redémarrage complet de Home Assistant est nécessaire."
     }
   },
   "exceptions": {

@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "FCM Push Crash Loop Detected",
       "description": "The FCM push client repeatedly disconnects within seconds of connecting (short-run crash loop). This is most often caused by a persistent poison notification on the inbound queue that cannot be decoded.\n\n1. Reload the integration to clear the run state.\n2. If the issue returns, regenerate your `secrets.json` (Google may have rotated credentials)."
+    },
+    "restart_required": {
+      "title": "Restart Home Assistant to finish the update",
+      "description": "Google Find My Hub was updated on disk to version {installed_version}, but Home Assistant is still running version {running_version}. Restart Home Assistant to activate the installed version.\n\nReloading the integration is not enough: a full Home Assistant restart is required."
     }
   },
   "exceptions": {

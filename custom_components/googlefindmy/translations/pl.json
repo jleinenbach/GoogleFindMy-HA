@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "Wykryto pętlę awarii FCM Push",
       "description": "Klient push FCM wielokrotnie rozłącza się w ciągu kilku sekund od połączenia (pętla krótkich awarii). Najczęstszą przyczyną jest trwałe uszkodzone powiadomienie w kolejce przychodzącej, którego nie można zdekodować.\n\n1. Załaduj ponownie integrację, aby wyczyścić stan działania.\n2. Jeśli problem powraca, wygeneruj ponownie plik `secrets.json` (Google mógł zmienić dane uwierzytelniające)."
+    },
+    "restart_required": {
+      "title": "Uruchom ponownie Home Assistant, aby zakończyć aktualizację",
+      "description": "Google Find My Hub został zaktualizowany na dysku do wersji {installed_version}, ale Home Assistant nadal działa w wersji {running_version}. Uruchom ponownie Home Assistant, aby aktywować zainstalowaną wersję.\n\nPrzeładowanie integracji nie wystarczy: wymagane jest pełne ponowne uruchomienie Home Assistant."
     }
   },
   "exceptions": {

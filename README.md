@@ -21,8 +21,8 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 ---
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
->[!CAUTION]
->**Home Assistant Core 2025.10 or newer is required.** The integration relies on Core-managed config subentry scheduling and device-registry hooks introduced alongside the 2025.10 cycle. Older builds lack the platform-loading behavior and registry keywords exercised by the tracker/service subentries and are **not supported**.
+>[!TIP]
+>**Home Assistant Core 2025.10 or newer is recommended.** The functional minimum is **2025.8.0** (enforced in `hacs.json` and `pyproject.toml`): that release provides the config subentry flow maturity and the `async_added_to_hass` behavior the tracker/service subentries depend on. The Core-managed config subentry model itself has been available since the 2025.3 cycle. Running 2025.10 or newer is recommended for the bug fixes and stability improvements made since 2025.8, not because of a hard API requirement.
 
 ### Continuous integration checks
 

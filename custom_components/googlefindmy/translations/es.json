@@ -718,6 +718,10 @@
     "fcm_short_run_crash_loop": {
       "title": "Bucle de fallos de FCM Push detectado",
       "description": "El cliente push de FCM se desconecta repetidamente a los pocos segundos de conectarse (bucle de fallos cortos). Esto suele estar causado por una notificación corrupta persistente en la cola entrante que no se puede decodificar.\n\n1. Recarga la integración para limpiar el estado de ejecución.\n2. Si el problema vuelve, regenera tu `secrets.json` (Google podría haber rotado las credenciales)."
+    },
+    "restart_required": {
+      "title": "Reinicia Home Assistant para finalizar la actualización",
+      "description": "Google Find My Hub se actualizó en el disco a la versión {installed_version}, pero Home Assistant sigue ejecutando la versión {running_version}. Reinicia Home Assistant para activar la versión instalada.\n\nRecargar la integración no es suficiente: se requiere un reinicio completo de Home Assistant."
     }
   },
   "exceptions": {
