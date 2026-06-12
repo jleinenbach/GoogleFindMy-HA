@@ -35,6 +35,111 @@ async def test_async_play_sound_stores_uuid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_play_sound_skips_store_on_non_accepted_play() -> None:
+    """Do not cache a UUID when the command was not accepted.
+
+    Under the success-only contract api.async_play_sound returns ``(False, None)``
+    for *every* non-acceptance — a pre-dispatch guard (e.g. no FCM token), a
+    connection-setup error, or a server rejection (401/403/5xx). The play never
+    started a ring, so there is no cancel key to keep and the cache must stay
+    empty (while a push-transport problem is still flagged).
+    Regression for IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    transport_problems: list[bool] = []
+    coordinator._note_push_transport_problem = (  # type: ignore[attr-defined]
+        lambda: transport_problems.append(True)
+    )
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # Non-accepted play (pre-dispatch guard / rejection): no cancel key.
+        return False, None
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    assert coordinator._sound_request_uuids == {}  # type: ignore[attr-defined]
+    assert transport_problems == [True]
+
+
+@pytest.mark.asyncio
+async def test_non_accepted_play_keeps_existing_cancel_key() -> None:
+    """A non-accepted Play must not clobber an earlier, still-ringing play's key.
+
+    Codex regression (PR #1100, iter-4): a device is already ringing from an
+    earlier successful Play whose cancel key is cached. A *new* Play attempt is
+    not accepted — either it fails before reaching the wire OR the server rejects
+    it with 401/403/5xx. Under the success-only contract api.async_play_sound
+    returns ``(False, None)`` for *both* causes, so the coordinator keeps the
+    existing key intact. Overwriting it (the iter-4 bug: a rejected play used to
+    return its never-accepted UUID) would make the later Stop send a fresh,
+    non-correlating UUID and leave the device ringing.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    # Earlier successful Play cached a valid cancel key for this device.
+    coordinator._sound_request_uuids = {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    coordinator._note_push_transport_problem = lambda: None  # type: ignore[attr-defined]
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # New attempt not accepted (e.g. server 401/403, or pre-dispatch): the
+        # success-only contract yields (False, None) — no cancel key.
+        return False, None
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    # The previous, still-valid cancel key survives untouched.
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_post_dispatch_ambiguous_play_caches_uuid() -> None:
+    """A dispatched-but-unconfirmed Play caches its key so Stop can still cancel.
+
+    Codex regression (PR #1100, iter-5): a network failure at/after the request
+    reached the wire (server disconnect, read timeout) may have started a ring
+    even without a 200. api.async_play_sound then returns ``(False, <uuid>)`` —
+    ``ok`` is False, but the cancel key is preserved. The coordinator caches every
+    non-null UUID, so it stores this key (letting a later Stop target the
+    possibly-active ring) while still flagging the push-transport problem.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._sound_request_uuids = {}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    transport_problems: list[bool] = []
+    coordinator._note_push_transport_problem = (  # type: ignore[attr-defined]
+        lambda: transport_problems.append(True)
+    )
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # Post-dispatch ambiguity: not confirmed (ok=False), but a ring may be
+        # active, so the cancel key is returned for caching.
+        return False, "uuid-postsend"
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    # The ambiguous-dispatch key is cached so a later Stop can target it.
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-postsend"}  # type: ignore[attr-defined]
+    assert transport_problems == [True]
+
+
+@pytest.mark.asyncio
 async def test_async_stop_sound_uses_cached_uuid() -> None:
     """Stop sound should look up a cached UUID when none is provided."""
 
