@@ -26,19 +26,10 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import
 )
 
 
-class FalsyCredentials(dict):
-    """A ``dict`` that is index-able yet evaluates falsy.
-
-    Required to reach the ``if not self.credentials: return`` guard at line
-    608, which sits *after* line 601 dereferences
-    ``self.credentials["gcm"]["app_id"]``. A plain empty dict would raise
-    ``KeyError`` at line 601 before the guard is ever reached; this subclass
-    keeps the nested ``gcm.app_id`` lookup working while reporting falsy to the
-    ``not`` test, isolating the guard branch (plan R4 / risk P2).
-    """
-
-    def __bool__(self) -> bool:
-        return False
+# Sentinel distinguishing "caller did not pass credentials" (use the valid
+# default) from an explicit ``None``/``{}`` (a real production state the
+# missing-credentials guard must handle).
+_CREDENTIALS_UNSET = object()
 
 
 def make_data_message(
@@ -90,13 +81,13 @@ class FcmHandleSlim:
     branches from real crypto.
     """
 
-    def __init__(self, *, credentials: Any | None = None) -> None:
+    def __init__(self, *, credentials: Any = _CREDENTIALS_UNSET) -> None:
         self.logger = logging.getLogger(__name__ + ".FcmHandleSlim")
         self.logger.propagate = True
         self.credentials: Any = (
-            credentials
-            if credentials is not None
-            else {"gcm": {"app_id": "APPID"}, "keys": {}}
+            {"gcm": {"app_id": "APPID"}, "keys": {}}
+            if credentials is _CREDENTIALS_UNSET
+            else credentials
         )
         self.callback = Mock()  # synchronous: production calls it un-awaited (AE7)
         self.callback_context = object()

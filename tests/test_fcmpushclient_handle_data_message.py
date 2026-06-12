@@ -7,9 +7,14 @@ exercises: the poison stub mocks ``_handle_message`` away, so this method ran
 the additive ``FcmHandleSlim`` builder (composition, real unbound method bound
 to a light container) and a controlled ``_decrypt_raw_data`` return value.
 
-No production change; ``fcm_poison_stub.py`` is not edited.
+The missing-credentials guard (R4) is exercised with the real production
+states ``None``/``{}`` after the accompanying guard reorder in
+``fcmpushclient.py`` moves the ``if not self.credentials: return`` check ahead
+of the ``["gcm"]["app_id"]`` dereference; the poison stub is left untouched.
 """
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -17,7 +22,6 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import
     ErrorType,
 )
 from tests.helpers.fcm_handle_stub import (
-    FalsyCredentials,
     FcmHandleSlim,
     make_data_message,
 )
@@ -71,18 +75,20 @@ class TestHandleDataMessage:
         assert client.warnings == []
         assert client.callback.called
 
-    def test_empty_credentials_guard_returns(self) -> None:
-        """Falsy-but-indexable credentials -> guard at line 608 returns (R4).
+    @pytest.mark.parametrize("credentials", [None, {}], ids=["none", "empty"])
+    def test_missing_credentials_guard_returns(
+        self, credentials: Any
+    ) -> None:
+        """Missing credentials (``None`` or ``{}``) -> guard returns early (R4).
 
-        ``FalsyCredentials`` keeps ``["gcm"]["app_id"]`` (line 601) working
-        while evaluating falsy for ``if not self.credentials`` (line 608), the
-        only way to reach the guard without the earlier lookup raising.
+        After the production reorder the ``if not self.credentials: return``
+        guard sits *before* the ``["gcm"]["app_id"]`` dereference, so the real
+        production states reach it without raising: ``None`` (un-registered
+        client) and ``{}`` (cleared credentials). No artificial falsy dict is
+        needed. ``_decrypt_raw_data`` is left unset so any accidental call past
+        the guard would raise ``AttributeError`` and fail the test loudly.
         """
-        client = FcmHandleSlim(
-            credentials=FalsyCredentials({"gcm": {"app_id": "APPID"}})
-        )
-        # decrypt must NOT be reached; leave it unset so any accidental call
-        # would raise AttributeError and fail the test loudly.
+        client = FcmHandleSlim(credentials=credentials)
         msg = make_data_message(subtype="APPID")
 
         client._handle_data_message(msg)
