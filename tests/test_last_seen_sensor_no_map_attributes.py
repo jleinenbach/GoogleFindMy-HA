@@ -16,7 +16,6 @@ future change cannot regress the tracker.
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 from collections.abc import Callable, Iterable
 from types import SimpleNamespace
@@ -44,7 +43,7 @@ _POSITION_ROW: dict[str, Any] = {
 }
 
 
-def _build_last_seen_sensor(
+async def _build_last_seen_sensor(
     row: dict[str, Any] | None,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> Any:
@@ -55,6 +54,11 @@ def _build_last_seen_sensor(
     ``sensor.async_setup_entry`` to obtain a genuine entity instance. The stub
     serves ``row`` from ``get_device_location_data_for_subentry`` so the property
     under test sees a controlled position.
+
+    Authored as a coroutine and awaited directly (never ``asyncio.run()``): HA
+    tests run inside pytest-asyncio's managed loop (``asyncio_mode = "auto"``);
+    a private loop would break the managed-loop fixtures (see ``tests/AGENTS.md``
+    "Async tests").
     """
 
     del deterministic_config_subentry_id  # side effect: patches ensure_config_subentry_id
@@ -132,10 +136,7 @@ def _build_last_seen_sensor(
     def _capture_sensor(entities, update_before_add: bool = False):
         sensor_added.append(list(entities))
 
-    async def _run_setup() -> None:
-        await sensor.async_setup_entry(SimpleNamespace(), entry, _capture_sensor)
-
-    asyncio.run(_run_setup())
+    await sensor.async_setup_entry(SimpleNamespace(), entry, _capture_sensor)
 
     last_seen_entities = [
         entity
@@ -147,12 +148,14 @@ def _build_last_seen_sensor(
     return last_seen_entities[0]
 
 
-def test_last_seen_sensor_strips_map_coordinates(
+async def test_last_seen_sensor_strips_map_coordinates(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """A position row must not yield latitude/longitude on the TIMESTAMP sensor."""
 
-    entity = _build_last_seen_sensor(_POSITION_ROW, deterministic_config_subentry_id)
+    entity = await _build_last_seen_sensor(
+        _POSITION_ROW, deterministic_config_subentry_id
+    )
     attrs = entity.extra_state_attributes
 
     assert attrs is not None
@@ -161,12 +164,14 @@ def test_last_seen_sensor_strips_map_coordinates(
     assert "longitude" not in attrs
 
 
-def test_last_seen_sensor_keeps_diagnostic_attributes(
+async def test_last_seen_sensor_keeps_diagnostic_attributes(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Stripping coordinates must not drop the diagnostic attributes."""
 
-    entity = _build_last_seen_sensor(_POSITION_ROW, deterministic_config_subentry_id)
+    entity = await _build_last_seen_sensor(
+        _POSITION_ROW, deterministic_config_subentry_id
+    )
     attrs = entity.extra_state_attributes
 
     assert attrs is not None
@@ -175,12 +180,12 @@ def test_last_seen_sensor_keeps_diagnostic_attributes(
     assert "last_seen" in attrs
 
 
-def test_last_seen_sensor_none_row_yields_none(
+async def test_last_seen_sensor_none_row_yields_none(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """No location row → no attributes (unchanged None-guard behavior)."""
 
-    entity = _build_last_seen_sensor(None, deterministic_config_subentry_id)
+    entity = await _build_last_seen_sensor(None, deterministic_config_subentry_id)
     assert entity.extra_state_attributes is None
 
 

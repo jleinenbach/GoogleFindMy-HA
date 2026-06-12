@@ -36,7 +36,7 @@ _POSITIONLESS_ROW: dict[str, Any] = {
 }
 
 
-def test_last_seen_sensor_positionless_row_keeps_diagnostics(
+async def test_last_seen_sensor_positionless_row_keeps_diagnostics(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """A row without coordinates yields diagnostics and never adds lat/lon.
@@ -46,7 +46,7 @@ def test_last_seen_sensor_positionless_row_keeps_diagnostics(
     diagnostic attributes.
     """
 
-    entity = _build_last_seen_sensor(
+    entity = await _build_last_seen_sensor(
         _POSITIONLESS_ROW, deterministic_config_subentry_id
     )
     attrs = entity.extra_state_attributes
