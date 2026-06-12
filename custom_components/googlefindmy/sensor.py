@@ -26,7 +26,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE
+from homeassistant.const import ATTR_LATITUDE, ATTR_LONGITUDE, PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -1043,6 +1043,13 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         - Adds a normalized UTC timestamp mirror (`last_seen_utc`).
         - Uses `accuracy_m` (float meters) rather than `gps_accuracy` for stability.
         - Includes source labeling (`source_label`/`source_rank`) for transparency.
+
+        Map-marker self-heal: `latitude`/`longitude` are stripped here, at the
+        consumer, because the shared helper is also used by the device_tracker,
+        which legitimately carries coordinates. The map marker is a live-state
+        attribute (not a registry entry), so once this property stops emitting the
+        pair, HA drops the spurious marker on the next state write after upgrade.
+        No entity deletion, registry migration, or reconfigure is required.
         """
         dev_id = self._device_id
         if not dev_id:
@@ -1050,7 +1057,18 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         row = self.coordinator.get_device_location_data_for_subentry(
             self.subentry_key, dev_id
         )
-        return _as_ha_attributes(row) if row else None
+        attrs = _as_ha_attributes(row) if row else None
+        if not attrs:
+            return None
+        # Defensive copy: the shared helper output is also consumed by the
+        # device_tracker (which legitimately carries coordinates); never mutate it.
+        attrs = dict(attrs)
+        # A TIMESTAMP sensor must not advertise map coordinates, otherwise HA
+        # plots it as a third, spurious marker. Strip via the HA constants the
+        # device_tracker already uses (not string literals).
+        attrs.pop(ATTR_LATITUDE, None)
+        attrs.pop(ATTR_LONGITUDE, None)
+        return attrs
 
     @property
     def available(self) -> bool:
