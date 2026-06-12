@@ -25,7 +25,6 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import
     FcmPushClient,
 )
 
-
 # Sentinel distinguishing "caller did not pass credentials" (use the valid
 # default) from an explicit ``None``/``{}`` (a real production state the
 # missing-credentials guard must handle).
