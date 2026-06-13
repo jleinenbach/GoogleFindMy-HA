@@ -1,3 +1,4 @@
+# tests/test_restart_required_issue.py
 """Tests for the global "restart required" Repairs watchdog (AP6).
 
 Covers detection (on-disk vs. running version), self-healing deletion, read-error
