@@ -14,7 +14,7 @@ from homeassistant.data_entry_flow import FlowResult
 _LOGGER = logging.getLogger(__name__)
 
 
-class FcmReauthRepairFlow(RepairsFlow):
+class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
     """Guide the user from the fixable ``fcm_reauth_required`` issue into reauth.
 
     The issue is raised at the FCM supervisor's terminal give-up points
