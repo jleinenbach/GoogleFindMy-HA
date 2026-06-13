@@ -16,6 +16,7 @@ strip + padding append) without touching the global decoder state. These
 tests pin that lenient contract against a future regression that would
 re-introduce strict decoding on dirty input.
 """
+
 from __future__ import annotations
 
 import binascii
@@ -129,6 +130,47 @@ def test_python314_strict_mode_simulation_does_not_leak() -> None:
         assert _safe_urlsafe_b64decode(dirty) == payload
 
 
+def test_pure_punctuation_corruption_raises_binascii_error() -> None:
+    """Non-alphabet punctuation raises instead of decoding to garbage.
+
+    The stdlib's non-validating decoder DISCARDS characters outside the
+    base64 alphabet, so ``b"!!!!"`` would decode to ``b""`` silently. The
+    validating decoder must reject it with ``binascii.Error`` so that a
+    corrupt credential field cannot masquerade as a (wrongly) decodable
+    value. Pins the validate=True contract against a regression back to the
+    lenient ``urlsafe_b64decode`` default.
+    """
+    for corrupt in ("!!!!", "@@@@", "????", "(())"):
+        with pytest.raises(binascii.Error):
+            _safe_urlsafe_b64decode(corrupt)
+
+
+def test_corrupt_secret_field_reaches_credential_error_not_poison() -> None:
+    """A corrupt ``keys.secret`` hits the credential branch, not poison skip.
+
+    Regression for the validating-decode fix. ``keys.secret`` degraded to
+    pure punctuation must raise ``CredentialDecryptionError`` out of
+    ``_decrypt_raw_data`` -- the signal the supervisor uses to invalidate
+    the key material and re-register. Without validation it would decode to
+    garbage bytes, the decrypt would fail downstream, and the listener would
+    treat permanent credential corruption as recoverable per-message poison
+    (ACK + skip), looping forever on bad credentials.
+
+    Adequacy (AGENTS.md 2.2): asserts the error *type* that drives the
+    re-registration path, not merely that the decode line executed. The
+    valid ``private`` field proves the failure is isolated to the corrupt
+    ``secret`` rather than a generic key-section rejection.
+    """
+    valid_private = _b64_no_pad(b"\x01\x02\x03\x04" * 8)
+    crypto_key = _b64_no_pad(b"\xde\xad\xbe\xef" * 4)
+    salt = _b64_no_pad(b"\xfe\xed\xfa\xce" * 4)
+    credentials: dict[str, object] = {
+        "keys": {"private": valid_private, "secret": "!!!!"}
+    }
+    with pytest.raises(CredentialDecryptionError, match="base64 decode"):
+        FcmPushClient._decrypt_raw_data(credentials, crypto_key, salt, b"raw")
+
+
 def test_end_to_end_dirty_headers_decrypt_path_does_not_cascade() -> None:
     """Dirty crypto-key / salt headers reach ``_decrypt_raw_data`` cleanly.
 
@@ -153,9 +195,7 @@ def test_end_to_end_dirty_headers_decrypt_path_does_not_cascade() -> None:
     # decode would raise first and this test would fail with a different
     # exception type.
     credentials: dict[str, object] = {"gcm": {"app_id": "x"}}
-    with pytest.raises(
-        CredentialDecryptionError, match="missing FCM key material"
-    ):
+    with pytest.raises(CredentialDecryptionError, match="missing FCM key material"):
         FcmPushClient._decrypt_raw_data(
             credentials, crypto_key_dirty, salt_dirty, b"raw"
         )

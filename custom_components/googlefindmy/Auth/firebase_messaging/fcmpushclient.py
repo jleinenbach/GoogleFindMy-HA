@@ -37,7 +37,7 @@ import ssl
 import struct
 import time
 import traceback
-from base64 import urlsafe_b64decode
+from base64 import b64decode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -109,7 +109,8 @@ def _safe_urlsafe_b64decode(value: str | bytes) -> bytes:
     """Decode URL-safe base64 leniently (Python 3.14 compatibility shim).
 
     Strips ASCII whitespace and re-appends ``=`` padding before delegating
-    to :func:`base64.urlsafe_b64decode`. Python 3.14 switched
+    to :func:`base64.b64decode` (``altchars=b"-_"`` for the URL-safe
+    alphabet, ``validate=True``; see below). Python 3.14 switched
     ``binascii.a2b_base64`` to ``strict_mode=True`` by default, which
     rejects payloads containing newlines, stray whitespace, or missing
     padding -- exactly the conditions the wild FCM stream produces. This
@@ -123,8 +124,19 @@ def _safe_urlsafe_b64decode(value: str | bytes) -> bytes:
     restart loop. This helper closes the root cause: dirty base64 input
     that the Python 3.14 strict decoder rejects unconditionally.
 
-    Raises ``binascii.Error`` only when the payload remains undecodable
-    after whitespace removal and padding normalisation. Raises
+    Decoding runs in *validating* mode so that input containing characters
+    outside the URL-safe base64 alphabet (after whitespace/padding
+    normalisation) raises ``binascii.Error`` instead of being silently
+    discarded. This is a correctness requirement, not just hygiene: a
+    credential field corrupted to pure non-alphabet punctuation (e.g.
+    ``b"!!!!"``) must reach the ``CredentialDecryptionError`` branch in
+    :meth:`_decrypt_raw_data` and trigger re-registration, rather than
+    decoding to garbage bytes and being mistaken for recoverable
+    per-message poison.
+
+    Raises ``binascii.Error`` when the payload remains undecodable after
+    whitespace removal and padding normalisation -- including any residual
+    non-alphabet character rejected by the validating decoder. Raises
     ``UnicodeError`` when ``str`` input contains non-ASCII characters
     (``str.encode("ascii")`` fails before normalisation runs); callers in
     a credential-decode path must catch both.
@@ -138,7 +150,17 @@ def _safe_urlsafe_b64decode(value: str | bytes) -> bytes:
     # is exactly the set Python 3.14 strict mode now rejects.
     stripped = b"".join(raw.split())
     padded = stripped + b"=" * (-len(stripped) % 4)
-    return urlsafe_b64decode(padded)
+    # Decode in *validating* mode (``validate=True``). The stdlib's
+    # ``urlsafe_b64decode`` forwards to the non-validating ``b64decode``,
+    # which silently DISCARDS characters outside the base64 alphabet instead
+    # of raising. Corrupt credential fields that degrade to pure punctuation
+    # (e.g. ``b"!!!!"``) would therefore decode to garbage bytes and slip
+    # past the ``CredentialDecryptionError`` branch in ``_decrypt_raw_data``,
+    # causing the listener to treat permanent credential corruption as
+    # recoverable per-message poison (ACK + skip) and never trigger
+    # re-registration. ``altchars=b"-_"`` keeps the URL-safe alphabet;
+    # ``validate=True`` makes any non-alphabet residue raise ``binascii.Error``.
+    return b64decode(padded, altchars=b"-_", validate=True)
 
 
 # MCS Message Types and Tags
@@ -511,9 +533,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         private_value = keys_section.get("private")
         secret_value = keys_section.get("secret")
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
-            raise CredentialDecryptionError(
-                "Credentials contain invalid key values"
-            )
+            raise CredentialDecryptionError("Credentials contain invalid key values")
 
         try:
             der_data = _safe_urlsafe_b64decode(private_value)
@@ -894,8 +914,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             # bad message.
             persistent_id = getattr(msg, "persistent_id", None)
             self._log_warn_with_limit(
-                "Skipping FCM message that failed to decrypt "
-                "(persistent_id=%s): %s",
+                "Skipping FCM message that failed to decrypt (persistent_id=%s): %s",
                 persistent_id,
                 decrypt_err,
             )
@@ -946,8 +965,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             # restarting the listener against the same poison credentials
             # until the short-run crash cap fires.
             self.logger.error(
-                "FCM credential material is corrupt and requires "
-                "re-registration: %s",
+                "FCM credential material is corrupt and requires re-registration: %s",
                 cred_err,
             )
             self.credential_error = cred_err
