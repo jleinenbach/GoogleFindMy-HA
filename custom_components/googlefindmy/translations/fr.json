@@ -699,6 +699,17 @@
       "title": "Échec de la connexion push FCM",
       "description": "La connexion en arrière-plan vers Google est bloquée.\n\n1. Le **port TCP sortant 5228** est-il autorisé par votre pare-feu ?\n2. Si le réseau est correct, essayez de régénérer votre `secrets.json` (les identifiants peuvent être partiels/révoqués)."
     },
+    "fcm_reauth_required": {
+      "title": "Google Find My Device push needs re-authentication",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Re-authenticate Google Find My Device",
+            "description": "The background push connection to Google failed for an extended period and could not recover on its own. This usually means the stored push credentials were revoked or rotated (for example after a Google password change, or when requests arrive from a new IP address or region). Less commonly, outgoing **TCP port 5228** is blocked by a firewall.\n\nSelect **Submit** to re-authenticate this account. Your device identity is preserved. If the problem persists afterwards, make sure port 5228 is allowed and regenerate your `secrets.json`."
+          }
+        }
+      }
+    },
     "multiple_config_entries": {
       "title": "Plusieurs entrées de configuration détectées",
       "description": "Google Find My Device prend désormais en charge plusieurs entrées de configuration, une par compte Google. Si chaque entrée cible un compte différent, aucune action n'est nécessaire. Lorsque le même compte est ajouté deux fois, Home Assistant crée une réparation **Entrées de compte en double** pour la nouvelle entrée afin que vous puissiez retirer ou réactiver la bonne."

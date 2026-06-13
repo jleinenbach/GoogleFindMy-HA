@@ -955,6 +955,44 @@ class FcmReceiverHA:
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
             return pc
 
+    def _async_raise_reauth_issue(self, entry_id: str, *, reason: str) -> None:
+        """Surface a fixable repair that drives the user into the reauth flow.
+
+        All three terminal give-up points collapse into a single issue id
+        (``fcm_reauth_required_{entry_id}``) because the corrective action is
+        identical: re-authenticate / re-register. The fix flow in
+        ``repairs.py`` calls ``entry.async_start_reauth`` on confirmation.
+
+        The escalation thresholds are NOT re-invented here. They are the
+        existing retry caps consumed at the call sites:
+
+        * ``_MAX_FATAL_ENDPOINT_RETRIES`` (7) -- with the ``min(300, 30*n)``
+          backoff this is ~630 s of sustained 404 endpoint exhaustion before
+          give-up; a transient Google endpoint rotation clears well before it.
+        * ``_MAX_FATAL_AUTH_RETRIES`` (3) -- 401 token-renewal exhaustion.
+        * ``_BACKOFF_WARNING_THRESHOLD_S`` (64 s, ~6 failed registrations) --
+          the registration backoff warning point.
+
+        Because the repair hangs off those existing give-up/warning points, a
+        transient failure (count still below the cap) never raises it. The
+        recovery delete on a successful (re-)registration clears it again.
+
+        ``reason`` is a non-localised diagnostic hint forwarded via ``data``
+        so the fix flow / diagnostics can tell the three origins apart; the
+        fix flow itself only consumes ``entry_id``.
+        """
+        if not self._hass:
+            return
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            f"fcm_reauth_required_{entry_id}",
+            is_fixable=True,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="fcm_reauth_required",
+            data={"entry_id": entry_id, "reason": reason},
+        )
+
     async def _start_supervisor_for_entry(  # noqa: PLR0915
         self, entry_id: str, cache: TokenCache | None
     ) -> None:
@@ -1043,6 +1081,13 @@ class FcmReceiverHA:
                                     entry_id,
                                     fatal_count,
                                 )
+                                # Auth retry budget exhausted
+                                # (``_MAX_FATAL_AUTH_RETRIES``): offer the
+                                # fixable reauth repair instead of giving up
+                                # silently.
+                                self._async_raise_reauth_issue(
+                                    entry_id, reason="auth_401"
+                                )
                                 break
 
                             await self._invalidate_fcm_tokens(entry_id)
@@ -1071,6 +1116,15 @@ class FcmReceiverHA:
                                     "giving up.",
                                     entry_id,
                                     fatal_count,
+                                )
+                                # Endpoint retry budget exhausted
+                                # (``_MAX_FATAL_ENDPOINT_RETRIES`` == 7 ⇒
+                                # ~630 s of sustained 404 with the
+                                # ``min(300, 30*n)`` backoff): surface the
+                                # fixable reauth repair. This give-up was
+                                # previously a silent break with no issue.
+                                self._async_raise_reauth_issue(
+                                    entry_id, reason="endpoint_404"
                                 )
                                 break
 
@@ -1103,15 +1157,14 @@ class FcmReceiverHA:
                                 entry_id,
                                 delay,
                             )
-                            if self._hass:
-                                ir.async_create_issue(
-                                    self._hass,
-                                    DOMAIN,
-                                    f"fcm_stuck_{entry_id}",
-                                    is_fixable=False,
-                                    severity=ir.IssueSeverity.WARNING,
-                                    translation_key="fcm_connection_stuck",
-                                )
+                            # Registration backoff warning point
+                            # (``_BACKOFF_WARNING_THRESHOLD_S``): escalate to
+                            # the same fixable reauth repair as the 404/401
+                            # give-up paths (was a non-fixable ``fcm_stuck``
+                            # warning offering no action path).
+                            self._async_raise_reauth_issue(
+                                entry_id, reason="registration_backoff"
+                            )
                         else:
                             _LOGGER.info(
                                 "[entry=%s] Re-trying FCM registration in %.1fs",
@@ -1127,6 +1180,15 @@ class FcmReceiverHA:
 
                     # Telemetry (aggregate counters)
                     if self._hass:
+                        # A successful (re-)registration resolves the fixable
+                        # reauth repair. Also delete the legacy non-fixable
+                        # ``fcm_stuck`` issue so it does not linger after an
+                        # upgrade from the previous key.
+                        ir.async_delete_issue(
+                            self._hass,
+                            DOMAIN,
+                            f"fcm_reauth_required_{entry_id}",
+                        )
                         ir.async_delete_issue(
                             self._hass, DOMAIN, f"fcm_stuck_{entry_id}"
                         )
