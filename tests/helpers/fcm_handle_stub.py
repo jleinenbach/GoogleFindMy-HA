@@ -92,6 +92,9 @@ class FcmHandleSlim:
         self.callback_context = object()
         self._reset_error_count = Mock()
         self._try_increment_error_count = Mock()
+        # Mirror the stale-key escalation counter ``_handle_data_message`` now
+        # resets to 0 on a successful decrypt.
+        self._consecutive_decrypt_failures = 0
         # Records every rate-limited warning message the method emits.
         self.warnings: list[str] = []
 

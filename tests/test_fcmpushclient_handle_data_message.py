@@ -19,6 +19,7 @@ from typing import Any
 import pytest
 
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import (
+    _MAX_CONSECUTIVE_DECRYPT_FAILURES,
     ErrorType,
 )
 from tests.helpers.fcm_handle_stub import (
@@ -166,6 +167,28 @@ class TestHandleDataMessage:
             ErrorType.NOTIFY
         )
         assert not client._reset_error_count.called
+
+    def test_successful_decrypt_resets_stale_key_failure_counter(self) -> None:
+        """A successful decrypt clears the consecutive-ECE escalation counter.
+
+        Codex follow-up on PR #181: the stale-key counter
+        (``_consecutive_decrypt_failures``) only escalates on an UNINTERRUPTED
+        run of auth-tag failures. A real decrypt success proves the stored keys
+        still match the server, so it must reset the counter -- otherwise an
+        isolated corrupt body weeks apart could eventually force an unwarranted
+        re-registration. The reset is gated on a real decrypt success here (not
+        on ``_handle_message`` generally), so heartbeats cannot reset it.
+        """
+        client = FcmHandleSlim()
+        # One short of the escalation threshold, as a prior run would leave it.
+        client._consecutive_decrypt_failures = _MAX_CONSECUTIVE_DECRYPT_FAILURES - 1
+        _set_decrypt(client, b'{"ok": true}')
+        msg = make_data_message(subtype="APPID")
+
+        client._handle_data_message(msg)
+
+        assert client._consecutive_decrypt_failures == 0
+        assert client.callback.called
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -28,6 +28,7 @@ import pytest
 
 import http_ece
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmpushclient import (
+    _MAX_CONSECUTIVE_DECRYPT_FAILURES,
     CredentialDecryptionError,
     FcmPushClientRunState,
 )
@@ -478,3 +479,106 @@ async def test_no_cascading_on_repeated_poison_messages(
     assert not _outer_catch_was_hit(caplog)
     # (d) Sentinel valid message processed normally after the cascade.
     assert handled == ["valid-001"]
+
+
+# ---------------------------------------------------------------------------
+# Stale-key escalation (Codex follow-up on PR #181): a sustained run of
+# http_ece.ECEException means the stored DH/auth-secret keys no longer match
+# the server registration. A single ECE stays per-message poison; a run of
+# _MAX_CONSECUTIVE_DECRYPT_FAILURES escalates to CredentialDecryptionError so
+# the supervisor re-registers instead of ACKing every push forever.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sustained_ece_failures_escalate_to_credential_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A run of ``_MAX_CONSECUTIVE_DECRYPT_FAILURES`` ECEs escalates to re-register.
+
+    Codex follow-up on PR #181 ("do not ACK every ECE decrypt failure"): when
+    the stored key material is syntactically valid but stale/mismatched, every
+    push fails the auth tag with ``http_ece.ECEException``. ACKing each one
+    forever leaves ``credential_error`` unset, so the supervisor never
+    re-registers and push updates silently stop. The sustained run must surface
+    as ``CredentialDecryptionError`` instead.
+    """
+    caplog.set_level(logging.ERROR)
+    client = FcmPushClientSlim()
+    n = _MAX_CONSECUTIVE_DECRYPT_FAILURES
+    messages = [make_poison_data_message(f"ece-{i:03d}", kind="value") for i in range(n)]
+    client._receive_msg = _stream_messages(client, messages)
+    client._handle_message = _make_handle_side_effect(
+        [http_ece.ECEException("Decryption error: bad auth tag")] * n
+    )
+
+    await client._listen()
+
+    # (a) The threshold message escalated: a credential signal is recorded so
+    #     the supervisor invalidates the stale tokens and re-registers.
+    assert isinstance(client.credential_error, CredentialDecryptionError)
+    assert "stale" in str(client.credential_error)
+    # (b) It is NOT degraded to the generic "Unknown error" outer-catch.
+    assert not _outer_catch_was_hit(caplog)
+    # (c) The first n-1 were ACK+skipped (poison); the nth escalated instead of
+    #     ACKing, so exactly n-1 selective-acks were sent.
+    assert client._send_selective_ack.await_count == n - 1
+    # (d) Worker reaches its terminal state and stops listening.
+    assert client.run_state == FcmPushClientRunState.STOPPED
+    assert client.do_listen is False
+
+
+@pytest.mark.asyncio
+async def test_ece_failures_below_threshold_stay_poison(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``_MAX_CONSECUTIVE_DECRYPT_FAILURES - 1`` ECEs stay per-message poison.
+
+    Below the escalation threshold the listener must keep ACKing+skipping (a
+    handful of genuinely corrupt bodies is not a credential fault), so the
+    single-ECE poison contract (Codex Finding 2) is preserved for short runs.
+    """
+    caplog.set_level(logging.WARNING)
+    client = FcmPushClientSlim()
+    n = _MAX_CONSECUTIVE_DECRYPT_FAILURES - 1
+    messages = [make_poison_data_message(f"ece-{i:03d}", kind="value") for i in range(n)]
+    client._receive_msg = _stream_messages(client, messages)
+    client._handle_message = _make_handle_side_effect(
+        [http_ece.ECEException("Decryption error: bad auth tag")] * n
+    )
+
+    await client._listen()
+
+    # No escalation: every message ACK+skipped, no credential signal recorded.
+    assert client.credential_error is None
+    assert client._send_selective_ack.await_count == n
+    assert not _outer_catch_was_hit(caplog)
+
+
+@pytest.mark.asyncio
+async def test_non_ece_poison_never_escalates(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``binascii.Error``/``RuntimeError`` are per-message and never re-register.
+
+    Only ``http_ece.ECEException`` (the auth-tag/body surface, which depends on
+    the stored DH/auth-secret keys) signals stale credentials. Header decode and
+    app_data lookup faults vary per message and must NOT accumulate toward
+    re-registration, even far beyond the ECE escalation threshold.
+    """
+    caplog.set_level(logging.WARNING)
+    client = FcmPushClientSlim()
+    count = _MAX_CONSECUTIVE_DECRYPT_FAILURES * 3
+    messages = [
+        make_poison_data_message(f"p-{i:03d}", kind="padding") for i in range(count)
+    ]
+    client._receive_msg = _stream_messages(client, messages)
+    client._handle_message = _make_handle_side_effect(
+        [binascii.Error("Incorrect padding")] * count
+    )
+
+    await client._listen()
+
+    assert client.credential_error is None
+    assert client._send_selective_ack.await_count == count
+    assert not _outer_catch_was_hit(caplog)

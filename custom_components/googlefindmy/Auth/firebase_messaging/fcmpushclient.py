@@ -86,6 +86,20 @@ _logger = logging.getLogger(__name__)
 
 _LEGACY_MCS_PROTOCOL_VERSION = 38
 
+# A run of consecutive ECE (auth-tag / body) decrypt failures with no
+# successful decrypt in between means the stored DH / auth-secret key material
+# no longer matches the server-side registration: every push fails the auth tag
+# even though the credential fields are still syntactically valid base64/DER. A
+# SINGLE failure stays per-message poison (a corrupt individual body, ACK +
+# skip); only a sustained run escalates to ``CredentialDecryptionError`` so the
+# supervisor invalidates the stale tokens and re-registers, instead of ACKing
+# every undecryptable push forever and silently stalling location updates (Codex
+# follow-up on PR #181: "do not ACK every ECE decrypt failure"). This is a
+# DEDICATED counter rather than the connectivity-oriented
+# ``sequential_error_counters`` mechanism, whose escalation action is "stop the
+# listener", not "re-register the credentials".
+_MAX_CONSECUTIVE_DECRYPT_FAILURES = 5
+
 
 class CredentialDecryptionError(ValueError):
     """Raised when stored FCM credential material cannot be decoded or parsed.
@@ -299,6 +313,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         # instead of restarting against the same poison key material until the
         # short-run crash cap fires.
         self.credential_error: CredentialDecryptionError | None = None
+        # Counts consecutive ECE (auth-tag/body) decrypt failures with no
+        # successful decrypt in between; reset to 0 on every successful decrypt
+        # (``_handle_data_message``). When it reaches
+        # ``_MAX_CONSECUTIVE_DECRYPT_FAILURES`` the poison-message arm escalates
+        # a stale-key run to ``CredentialDecryptionError`` so the supervisor
+        # re-registers, instead of ACKing every undecryptable push indefinitely.
+        self._consecutive_decrypt_failures: int = 0
 
         # Locks
         self.stopping_lock: asyncio.Lock = asyncio.Lock()
@@ -636,6 +657,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         decrypted = self._decrypt_raw_data(
             self.credentials, crypto_key, salt, msg.raw_data
         )
+        # A successful decrypt proves the stored DH/auth-secret key material
+        # still matches the server registration: clear the stale-key escalation
+        # counter so a later ISOLATED corrupt body cannot accumulate toward an
+        # unwarranted re-registration. Only an uninterrupted run of decrypt
+        # failures (no success in between) signals stale credentials -- placing
+        # the reset here, gated on a real decrypt success, means heartbeats /
+        # deleted_messages / login traffic (which never reach this line) cannot
+        # falsely reset the counter.
+        self._consecutive_decrypt_failures = 0
 
         # Normalize decrypted payload to a dict (defensive against non-object JSON)
         decrypted_json: Any | None = None
@@ -875,12 +905,22 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         Defense 1 (CA-CASCADING-FAILURE-001): per-message decode failures
         (``binascii.Error`` padding faults under Python 3.14 strict mode,
         ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
-        ``ValueError`` from header parsing, and ``http_ece.ECEException``
-        from a corrupt encrypted body / failed auth tag) are acknowledged
-        and skipped instead of crashing the worker loop. Credential-material
-        errors (``CredentialDecryptionError``) propagate so ``_listen``
-        records them and the supervisor invalidates the bad key material and
-        prompts re-registration.
+        ``ValueError`` from header parsing, and an ISOLATED
+        ``http_ece.ECEException`` from a corrupt encrypted body / failed auth
+        tag) are acknowledged and skipped instead of crashing the worker loop.
+        Credential-material errors (``CredentialDecryptionError``) propagate so
+        ``_listen`` records them and the supervisor invalidates the bad key
+        material and prompts re-registration.
+
+        Stale-key escalation (Codex follow-up on PR #181): a SUSTAINED run of
+        ``http_ece.ECEException`` -- ``_MAX_CONSECUTIVE_DECRYPT_FAILURES`` in a
+        row with no successful decrypt in between -- is no longer per-message
+        poison but evidence that the stored DH/auth-secret keys are stale
+        (syntactically valid yet no longer matching the server registration).
+        The counter is reset on every successful decrypt
+        (``_handle_data_message``); on reaching the threshold this method raises
+        ``CredentialDecryptionError`` so the run escalates through the same
+        re-registration channel instead of ACKing every push indefinitely.
 
         Returns ``True`` to continue the loop, ``False`` to break (writer
         half-dead during ack).
@@ -906,13 +946,39 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             #                      (not a subclass), so it must be listed
             #                      explicitly or it bypasses this poison defense
             #                      entirely (Exception-Hierarchie-Audit lesson,
-            #                      CA-CASCADING-FAILURE-001).
+            #                      CA-CASCADING-FAILURE-001). An ISOLATED ECE is
+            #                      ACKed below; a sustained run escalates to
+            #                      re-registration (stale-key branch below).
             # ``CredentialDecryptionError`` is a ValueError subclass but is
             # matched by the more specific arm above and re-raised, so it never
             # reaches here. ACK + skip so the FCM server stops redelivering and
             # the supervisor's short-run crash cap is not tripped by a single
             # bad message.
             persistent_id = getattr(msg, "persistent_id", None)
+            if isinstance(decrypt_err, http_ece.ECEException):
+                # Auth-tag / body-decrypt failure. A single one is a corrupt
+                # individual body (poison, ACK + skip). A sustained run with no
+                # successful decrypt in between means the stored DH/auth-secret
+                # keys no longer match the server registration -- every push
+                # fails the auth tag. Escalate to credential corruption so the
+                # supervisor invalidates the stale tokens and re-registers
+                # (device identity preserved), rather than ACKing every push
+                # forever and silently stalling location updates (Codex
+                # follow-up on PR #181). ``binascii.Error`` (per-message header
+                # decode) and ``RuntimeError`` (``_app_data_by_key`` lookup) are
+                # genuinely per-message and never drive this counter.
+                self._consecutive_decrypt_failures += 1
+                if (
+                    self._consecutive_decrypt_failures
+                    >= _MAX_CONSECUTIVE_DECRYPT_FAILURES
+                ):
+                    self._consecutive_decrypt_failures = 0
+                    raise CredentialDecryptionError(
+                        "FCM auth-tag decrypt failed on "
+                        f"{_MAX_CONSECUTIVE_DECRYPT_FAILURES} consecutive "
+                        "messages; stored key material is stale and requires "
+                        "re-registration"
+                    ) from decrypt_err
             self._log_warn_with_limit(
                 "Skipping FCM message that failed to decrypt (persistent_id=%s): %s",
                 persistent_id,

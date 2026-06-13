@@ -73,6 +73,9 @@ class FcmPushClientSlim:
         # Mirror the production credential-error signal (_listen sets it when
         # CredentialDecryptionError surfaces; the supervisor reads it).
         self.credential_error = None
+        # Mirror the stale-key escalation counter the poison arm reads/writes
+        # (incremented on each ECE, reset on a successful decrypt).
+        self._consecutive_decrypt_failures = 0
         self.config = FcmPushClientConfig()  # log_warn_limit default = 5
         self.log_warn_counters: dict[str, int] = {}
         self.persistent_ids: list[str] = []
