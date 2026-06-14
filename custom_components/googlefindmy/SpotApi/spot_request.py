@@ -289,7 +289,7 @@ async def async_spot_request(
             raise SpotNetworkError("Fatal transport error after retries.") from err
 
         except AttributeError as err:
-            # AP9 (Befund 6a): asyncio SSL-transport teardown race. grpclib
+            # AP9 (finding 6a): asyncio SSL-transport teardown race. grpclib
             # wrote to an SSL transport whose protocol was already detached
             # (idle/serverside close, GOAWAY, or a concurrent reset), raising
             # ``AttributeError: 'NoneType' ... '_write_appdata'`` from inside

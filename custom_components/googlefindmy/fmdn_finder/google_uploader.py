@@ -310,7 +310,7 @@ async def _try_grpc_upload(
         ) from err
 
     except AttributeError as err:
-        # AP9 (Befund 6a): same asyncio SSL-transport teardown race as
+        # AP9 (finding 6a): same asyncio SSL-transport teardown race as
         # async_spot_request. This is a per-call transport with no retry loop
         # (and the upload path is disabled without DroidGuard attestation), so
         # classify it like the other connection failures instead of letting the

@@ -244,7 +244,7 @@ _SSL_TEARDOWN_ERR = AttributeError(
 async def test_ssl_teardown_error_resets_and_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP9 (Befund 6a): the SSL-transport teardown race resets and retries.
+    """AP9 (finding 6a): the SSL-transport teardown race resets and retries.
 
     grpclib writing to a detached SSL transport raises
     ``AttributeError('... _write_appdata')`` from asyncio.sslproto. The new
@@ -296,7 +296,7 @@ async def test_ssl_teardown_error_exhausts_to_network_error(
 async def test_non_teardown_attribute_error_is_reraised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP9 (Wächter B): an unrelated AttributeError must NOT be masked.
+    """AP9 (guard B): an unrelated AttributeError must NOT be masked.
 
     The discriminator only matches the asyncio ``_write_appdata`` signature;
     any other AttributeError is a genuine bug and is re-raised without a reset.

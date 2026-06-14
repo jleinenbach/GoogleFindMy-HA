@@ -16,7 +16,7 @@ __all__ = [
 
 
 def is_ssl_transport_teardown_error(exc: BaseException) -> bool:
-    """Return True for the asyncio SSL-transport teardown race (AP9, Befund 6a).
+    """Return True for the asyncio SSL-transport teardown race (AP9, finding 6a).
 
     During a connection teardown there is a narrow window in which asyncio has
     already detached the SSL transport (``_SSLProtocolTransport._ssl_protocol``

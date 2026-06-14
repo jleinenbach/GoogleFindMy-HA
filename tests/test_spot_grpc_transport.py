@@ -247,7 +247,7 @@ async def test_ssl_context_created_lazily_via_to_thread(
 
 
 def test_is_ssl_transport_teardown_error_signature() -> None:
-    """AP9 (Befund 6a): the predicate isolates the fragile asyncio signature.
+    """AP9 (finding 6a): the predicate isolates the fragile asyncio signature.
 
     It must match exactly the SSL-transport teardown ``AttributeError`` and
     nothing else, so every other AttributeError keeps propagating as a real bug.
