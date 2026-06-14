@@ -73,7 +73,10 @@ class _DummyEntry:
         self.data = {CONF_GOOGLE_EMAIL: "user@example.com"}
         self.reauth_calls = 0
 
-    async def async_start_reauth(self, hass) -> None:  # noqa: D401 - stub signature
+    def async_start_reauth(self, hass) -> None:  # noqa: D401 - stub signature
+        # Mirror the real ``ConfigEntry.async_start_reauth``: a synchronous
+        # ``@callback`` returning ``None`` (an async stub would mask a stray
+        # ``await`` in production code).
         self.reauth_calls += 1
 
 

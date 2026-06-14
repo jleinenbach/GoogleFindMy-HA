@@ -491,7 +491,13 @@ class LocateOperations(_MixinBase):
                 reauth_started = False
                 if entry is not None:
                     try:
-                        await entry.async_start_reauth(self.hass)
+                        # ``ConfigEntry.async_start_reauth`` is a synchronous
+                        # ``@callback`` returning ``None`` (it schedules the flow
+                        # itself). Awaiting it would raise ``TypeError`` on the
+                        # ``None`` result, which the broad ``except`` below would
+                        # swallow, leaving ``reauth_started`` False and emitting
+                        # the wrong user message. Call it without ``await``.
+                        entry.async_start_reauth(self.hass)
                         reauth_started = True
                     except Exception as reauth_err:  # pragma: no cover - defensive
                         _LOGGER.debug(
