@@ -38,15 +38,22 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
     ) -> FlowResult:
         """Confirm the repair and start the reauth flow for the entry."""
         if user_input is not None:
-            await self._async_start_reauth()
+            self._async_start_reauth()
             return self.async_create_entry(title="", data={})
 
         return self.async_show_form(
             step_id="confirm", data_schema=vol.Schema({})
         )
 
-    async def _async_start_reauth(self) -> None:
+    def _async_start_reauth(self) -> None:
         """Start the config-entry reauth flow, defensively.
+
+        ``ConfigEntry.async_start_reauth`` is a synchronous ``@callback`` that
+        returns ``None``: it schedules the reauth flow itself, or no-ops when a
+        reauth/reconfigure flow is already active for the entry (idempotent).
+        It must therefore be called without ``await`` -- awaiting its ``None``
+        result would raise ``TypeError`` on every confirmation, which the broad
+        guard below would then swallow while the issue is still dismissed.
 
         ``entry_id`` is used solely as a config-entry registry lookup key; it is
         never interpreted as a path or executable input. A missing or already
@@ -69,8 +76,8 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
             return
 
         try:
-            await entry.async_start_reauth(self.hass)
-        except Exception as err:  # noqa: BLE001 - defensive, mirrors locate.py
+            entry.async_start_reauth(self.hass)
+        except Exception as err:  # noqa: BLE001 - defensive: keep the repair UI robust
             _LOGGER.error(
                 "Failed to start reauth flow from repair for entry %s: %s",
                 self._entry_id,

@@ -195,7 +195,10 @@ async def test_fix_flow_factory_returns_reauth_flow() -> None:
 @pytest.mark.asyncio
 async def test_fix_flow_confirm_starts_reauth() -> None:
     """T4b: confirming the repair starts reauth for the resolved entry."""
-    entry = SimpleNamespace(async_start_reauth=AsyncMock())
+    # ``ConfigEntry.async_start_reauth`` is a synchronous ``@callback`` returning
+    # ``None``; mock it synchronously so the test fails if production re-adds an
+    # erroneous ``await`` on that result.
+    entry = SimpleNamespace(async_start_reauth=MagicMock(return_value=None))
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
             async_get_entry=lambda entry_id: (
@@ -206,9 +209,9 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
     flow = repairs.FcmReauthRepairFlow("entry-id")
     flow.hass = hass  # normally injected by the repairs flow manager
 
-    await flow._async_start_reauth()
+    flow._async_start_reauth()
 
-    entry.async_start_reauth.assert_awaited_once_with(hass)
+    entry.async_start_reauth.assert_called_once_with(hass)
 
 
 @pytest.mark.asyncio
@@ -221,11 +224,11 @@ async def test_fix_flow_missing_entry_is_noop() -> None:
     flow.hass = hass
 
     # Must not raise even though the entry cannot be resolved.
-    await flow._async_start_reauth()
+    flow._async_start_reauth()
 
     flow_no_id = repairs.FcmReauthRepairFlow(None)
     flow_no_id.hass = hass
-    await flow_no_id._async_start_reauth()
+    flow_no_id._async_start_reauth()
 
 
 @pytest.mark.asyncio
