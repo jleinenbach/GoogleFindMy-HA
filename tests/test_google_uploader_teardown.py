@@ -1,3 +1,4 @@
+# tests/test_google_uploader_teardown.py
 """AP9 (Befund 6a): SSL-transport teardown-race classification in the FMDN uploader.
 
 ``fmdn_finder/google_uploader._try_grpc_upload`` is the second grpclib stream
