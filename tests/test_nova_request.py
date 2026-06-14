@@ -33,6 +33,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaError,
     NovaHTTPError,
+    NovaRateLimitError,
     async_nova_request,
     register_cache_provider,
     unregister_cache_provider,
@@ -1082,7 +1083,7 @@ async def test_async_nova_request_pure_4xx_does_not_latch_dispatch(
     The server refuses a 403 *before* any side effect, so the cancel key must be
     dropped — otherwise it could overwrite the still-valid key of a parallel,
     possibly still-ringing earlier play on the same device. This pins the
-    deliberate asymmetry of the AP8 fix: only 5xx/429 latch, 4xx never do.
+    deliberate asymmetry of the AP8 fix: only transient 5xx latch; 4xx never do.
     """
 
     cache = _StubCache()
@@ -1132,8 +1133,8 @@ async def test_async_nova_request_non_retryable_5xx_does_not_latch_dispatch(
     so no device ring can have started. Latching them would let an undispatched
     failure overwrite the still-valid cancel key of a parallel, possibly still
     ringing earlier play on the same device. The latch is now scoped to
-    ``HTTP_DISPATCH_LATCH_ELIGIBLE`` (429 + transient 5xx only), so these raise
-    ``NovaHTTPError`` with ``dispatched is False``.
+    ``HTTP_DISPATCH_LATCH_ELIGIBLE`` (transient 5xx 500/502/503/504 only), so
+    these raise ``NovaHTTPError`` with ``dispatched is False``.
     """
 
     cache = _StubCache()
@@ -1166,6 +1167,102 @@ async def test_async_nova_request_non_retryable_5xx_does_not_latch_dispatch(
     # Non-retryable 5xx is refused before any side effect: the key must drop.
     assert exc_info.value.dispatched is False
     assert len(session.calls) == 1  # single attempt, no retry
+
+
+async def test_async_nova_request_pure_429_does_not_latch_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure 429 rate-limit sequence must NOT latch dispatch.
+
+    Regression for the Codex follow-up on the AP8 latch: 429 Too Many Requests
+    is rejected at the gate and never processed, so a Play Sound request that
+    only ever sees 429 cannot have started a device ring. Latching it would make
+    ``api.async_play_sound`` keep a cancel UUID for a request the server refused;
+    if the user presses Play while an older ring is still active, that bogus UUID
+    overwrites the valid cancel key and the default Stop Sound targets the wrong
+    request. 429 stays retry-eligible but is excluded from
+    ``HTTP_DISPATCH_LATCH_ELIGIBLE``, so the wrapped error reports
+    ``dispatched is False``.
+    """
+
+    cache = _StubCache()
+    # NOVA_MAX_RETRIES == 6 -> 7 attempts all rate-limited.
+    session = _DummySession([_DummyResponse(429, b"slow down") for _ in range(7)])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    with pytest.raises(NovaRateLimitError) as exc_info:
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # Pure rate-limit: never processed, so the cancel key must drop.
+    assert exc_info.value.dispatched is False
+    assert len(session.calls) == 7  # exhausted the retry budget
+
+
+async def test_async_nova_request_latch_survives_later_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch-ambiguous 5xx keeps the latch even when later attempts see 429.
+
+    The latch accumulates monotonically across the retry sequence: once an early
+    503 makes the command dispatch-ambiguous (the backend may have begun a ring),
+    a subsequent 429 must not clear that signal. This pins Codex's caveat that
+    429 should be excluded from the latch *unless* an earlier attempt was already
+    post-dispatch ambiguous.
+    """
+
+    cache = _StubCache()
+    # Attempt 1 = 503 (latches), the rest = 429 (must not clear the latch).
+    session = _DummySession(
+        [_DummyResponse(503, b"")] + [_DummyResponse(429, b"slow") for _ in range(6)]
+    )
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    with pytest.raises(NovaError) as exc_info:
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # The early 503 latched dispatch; the trailing 429s must not clear it.
+    assert exc_info.value.dispatched is True
+    assert len(session.calls) == 7
 
 
 async def test_async_nova_request_uses_central_total_timeout(
