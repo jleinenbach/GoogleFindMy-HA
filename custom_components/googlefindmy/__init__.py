@@ -8520,6 +8520,20 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
     except Exception as err:
         _LOGGER.debug("FCM release during async_remove_entry raised: %s", err)
 
+    # Retire any entry-scoped FCM Repairs issues now that the entry is actually
+    # being removed. The supervisor success path only deletes them on reload
+    # recovery, and the unload teardown deliberately leaves the fixable reauth
+    # prompt alone; once the entry is gone no supervisor will run again, so the
+    # orphaned repair must be cleaned up here (Codex PR #1104 follow-up).
+    try:
+        from .Auth.fcm_receiver_ha import FcmReceiverHA
+
+        FcmReceiverHA.async_delete_entry_repair_issues(hass, entry.entry_id)
+    except Exception as err:  # pragma: no cover - defensive best-effort cleanup
+        _LOGGER.debug(
+            "Deleting FCM repair issues during async_remove_entry raised: %s", err
+        )
+
     try:
         owner_index = _ensure_device_owner_index(bucket)
         stale = [cid for cid, eid in list(owner_index.items()) if eid == entry.entry_id]

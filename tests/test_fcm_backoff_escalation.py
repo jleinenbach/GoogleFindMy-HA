@@ -92,7 +92,7 @@ async def test_fcm_backoff_escalation_creates_and_clears_issue(
     monkeypatch.setattr(
         fcm_receiver_ha.ir,
         "IssueSeverity",
-        SimpleNamespace(WARNING="warning"),
+        SimpleNamespace(WARNING="warning", ERROR="error"),
     )
 
     await receiver._start_supervisor_for_entry(entry_id, None)
@@ -103,12 +103,19 @@ async def test_fcm_backoff_escalation_creates_and_clears_issue(
     assert create_issue.call_count == 6
     assert create_issue_attempts == [7, 8, 9, 10, 11, 12]
 
+    # The backoff path now escalates to the shared *fixable* reauth repair
+    # (same issue id / fix flow as the 404/401 give-up paths).
     for call in create_issue.call_args_list:
         assert call.args[0] is hass
         assert call.args[1] == DOMAIN
-        assert call.args[2] == f"fcm_stuck_{entry_id}"
-        assert call.kwargs["is_fixable"] is False
-        assert call.kwargs["severity"] == fcm_receiver_ha.ir.IssueSeverity.WARNING
-        assert call.kwargs["translation_key"] == "fcm_connection_stuck"
+        assert call.args[2] == f"fcm_reauth_required_{entry_id}"
+        assert call.kwargs["is_fixable"] is True
+        assert call.kwargs["severity"] == fcm_receiver_ha.ir.IssueSeverity.ERROR
+        assert call.kwargs["translation_key"] == "fcm_reauth_required"
+        assert call.kwargs["data"]["entry_id"] == entry_id
+        assert call.kwargs["data"]["reason"] == "registration_backoff"
 
-    delete_issue.assert_called_once_with(hass, DOMAIN, f"fcm_stuck_{entry_id}")
+    # Recovery deletes the fixable issue and cleans up any legacy
+    # ``fcm_stuck`` issue from before the key rename.
+    delete_issue.assert_any_call(hass, DOMAIN, f"fcm_reauth_required_{entry_id}")
+    delete_issue.assert_any_call(hass, DOMAIN, f"fcm_stuck_{entry_id}")

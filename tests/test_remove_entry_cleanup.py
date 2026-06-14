@@ -126,7 +126,13 @@ def test_async_remove_entry_purges_store_and_creates_issue(
 
     issue_id = f"cache_purged_{entry.entry_id}"
     assert any(item["issue_id"] == issue_id for item in issue_registry_capture.created)
-    assert issue_registry_capture.deleted == []
+
+    # Removal must retire every entry-scoped FCM repair issue, since no
+    # supervisor will run again to clear them (Codex PR #1104 follow-up).
+    deleted_ids = {iid for _domain, iid in issue_registry_capture.deleted}
+    assert f"fcm_reauth_required_{entry.entry_id}" in deleted_ids
+    assert f"fcm_stuck_{entry.entry_id}" in deleted_ids
+    assert f"fcm_short_run_crash_loop_{entry.entry_id}" in deleted_ids
 
 
 def test_async_remove_entry_respects_retention_option(

@@ -440,6 +440,17 @@ class FcmReceiverHA:
         condition is gone (e.g. user re-registers credentials and FCM starts
         successfully again).
 
+        A hard-reset teardown (``force=True``) additionally releases the
+        short-run cap latch (see below). It deliberately does NOT delete the
+        entry-scoped *fixable* reauth repairs: ``force=True`` is reached from
+        ``unregister_coordinator``, which fires on EVERY unload, including the
+        reload Home Assistant performs right after a successful reauth flow.
+        Deleting them here would dismiss a still-active prompt before the new
+        supervisor has proven recovery. Those repairs are retired by the
+        supervisor success path on reload and by
+        ``async_delete_entry_repair_issues`` on actual entry removal (Codex
+        PR #1104 follow-up).
+
         Defense 2 iter-8 (Codex second finding): a successful FCM
         re-registration is NOT a recovery proof for the short-run crash cap.
         While ``_short_run_cap_latched`` contains *entry_id* this method must
@@ -523,15 +534,74 @@ class FcmReceiverHA:
         if removed:
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
 
-        if self._hass is not None:
+        self._delete_repair_issues_for_entry(entry_id)
+
+    def _delete_repair_issues_for_entry(self, entry_id: str) -> None:
+        """Retire the transient short-run-crash-loop repair for a cleared entry.
+
+        This is the DELETE half of the ``fcm_short_run_crash_loop_{entry_id}``
+        CREATE/DELETE pair with the fatal-error map: any path that clears the
+        in-memory latch must also delete the user-visible UI artefact, or the
+        Repairs panel keeps a stale non-fixable error after the underlying
+        condition is gone.
+
+        It deliberately does NOT touch the *fixable* reauth repairs
+        (``fcm_reauth_required_{entry_id}`` / legacy ``fcm_stuck_{entry_id}``).
+        Those outlive a reload on purpose and are retired only by the supervisor
+        success path (reload recovery) or
+        ``async_delete_entry_repair_issues`` (actual entry removal). See those
+        for the full lifecycle rationale (Codex PR #1104 follow-up).
+
+        The deletion is best-effort UI cleanup; failures are logged and
+        swallowed so a registry hiccup never blocks the in-memory state reset.
+        """
+        if self._hass is None:
+            return
+
+        try:
+            ir.async_delete_issue(
+                self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
+            )
+        except Exception:  # noqa: BLE001 - best-effort UI cleanup
+            _LOGGER.debug(
+                "[entry=%s] Failed to delete short-run crash-loop repair issue",
+                entry_id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def async_delete_entry_repair_issues(hass: HomeAssistant, entry_id: str) -> None:
+        """Delete every entry-scoped FCM Repairs issue for a REMOVED config entry.
+
+        Call this ONLY from ``async_remove_entry`` (actual removal). On removal
+        no supervisor will run again, so the entry-scoped repairs must be retired
+        explicitly or they stay pinned in the Repairs panel for a config entry
+        that no longer exists. This covers the *fixable* reauth prompt
+        (``fcm_reauth_required_{entry_id}``), its legacy non-fixable predecessor
+        (``fcm_stuck_{entry_id}``) and the transient short-run crash-loop
+        diagnostic (``fcm_short_run_crash_loop_{entry_id}``).
+
+        A reload must NOT use this: there ``unregister_coordinator`` fires via
+        ``async_on_unload`` while the entry lives on, and the supervisor success
+        path clears the reauth repair once FCM re-registers. Deleting it on
+        reload would dismiss a still-active prompt before the new supervisor has
+        proven recovery (Codex PR #1104 follow-up).
+
+        All deletions are best-effort UI cleanup; failures are swallowed so a
+        registry hiccup never blocks entry removal.
+        """
+        for issue_id in (
+            f"fcm_short_run_crash_loop_{entry_id}",
+            f"fcm_reauth_required_{entry_id}",
+            f"fcm_stuck_{entry_id}",
+        ):
             try:
-                ir.async_delete_issue(
-                    self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
-                )
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
             except Exception:  # noqa: BLE001 - best-effort UI cleanup
                 _LOGGER.debug(
-                    "[entry=%s] Failed to delete short-run repair issue",
+                    "[entry=%s] Failed to delete repair issue %s on removal",
                     entry_id,
+                    issue_id,
                     exc_info=True,
                 )
 
@@ -955,6 +1025,44 @@ class FcmReceiverHA:
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
             return pc
 
+    def _async_raise_reauth_issue(self, entry_id: str, *, reason: str) -> None:
+        """Surface a fixable repair that drives the user into the reauth flow.
+
+        All three terminal give-up points collapse into a single issue id
+        (``fcm_reauth_required_{entry_id}``) because the corrective action is
+        identical: re-authenticate / re-register. The fix flow in
+        ``repairs.py`` calls ``entry.async_start_reauth`` on confirmation.
+
+        The escalation thresholds are NOT re-invented here. They are the
+        existing retry caps consumed at the call sites:
+
+        * ``_MAX_FATAL_ENDPOINT_RETRIES`` (7) -- with the ``min(300, 30*n)``
+          backoff this is ~630 s of sustained 404 endpoint exhaustion before
+          give-up; a transient Google endpoint rotation clears well before it.
+        * ``_MAX_FATAL_AUTH_RETRIES`` (3) -- 401 token-renewal exhaustion.
+        * ``_BACKOFF_WARNING_THRESHOLD_S`` (64 s, ~6 failed registrations) --
+          the registration backoff warning point.
+
+        Because the repair hangs off those existing give-up/warning points, a
+        transient failure (count still below the cap) never raises it. The
+        recovery delete on a successful (re-)registration clears it again.
+
+        ``reason`` is a non-localised diagnostic hint forwarded via ``data``
+        so the fix flow / diagnostics can tell the three origins apart; the
+        fix flow itself only consumes ``entry_id``.
+        """
+        if not self._hass:
+            return
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            f"fcm_reauth_required_{entry_id}",
+            is_fixable=True,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="fcm_reauth_required",
+            data={"entry_id": entry_id, "reason": reason},
+        )
+
     async def _start_supervisor_for_entry(  # noqa: PLR0915
         self, entry_id: str, cache: TokenCache | None
     ) -> None:
@@ -1043,6 +1151,13 @@ class FcmReceiverHA:
                                     entry_id,
                                     fatal_count,
                                 )
+                                # Auth retry budget exhausted
+                                # (``_MAX_FATAL_AUTH_RETRIES``): offer the
+                                # fixable reauth repair instead of giving up
+                                # silently.
+                                self._async_raise_reauth_issue(
+                                    entry_id, reason="auth_401"
+                                )
                                 break
 
                             await self._invalidate_fcm_tokens(entry_id)
@@ -1071,6 +1186,15 @@ class FcmReceiverHA:
                                     "giving up.",
                                     entry_id,
                                     fatal_count,
+                                )
+                                # Endpoint retry budget exhausted
+                                # (``_MAX_FATAL_ENDPOINT_RETRIES`` == 7 ⇒
+                                # ~630 s of sustained 404 with the
+                                # ``min(300, 30*n)`` backoff): surface the
+                                # fixable reauth repair. This give-up was
+                                # previously a silent break with no issue.
+                                self._async_raise_reauth_issue(
+                                    entry_id, reason="endpoint_404"
                                 )
                                 break
 
@@ -1103,15 +1227,14 @@ class FcmReceiverHA:
                                 entry_id,
                                 delay,
                             )
-                            if self._hass:
-                                ir.async_create_issue(
-                                    self._hass,
-                                    DOMAIN,
-                                    f"fcm_stuck_{entry_id}",
-                                    is_fixable=False,
-                                    severity=ir.IssueSeverity.WARNING,
-                                    translation_key="fcm_connection_stuck",
-                                )
+                            # Registration backoff warning point
+                            # (``_BACKOFF_WARNING_THRESHOLD_S``): escalate to
+                            # the same fixable reauth repair as the 404/401
+                            # give-up paths (was a non-fixable ``fcm_stuck``
+                            # warning offering no action path).
+                            self._async_raise_reauth_issue(
+                                entry_id, reason="registration_backoff"
+                            )
                         else:
                             _LOGGER.info(
                                 "[entry=%s] Re-trying FCM registration in %.1fs",
@@ -1127,6 +1250,15 @@ class FcmReceiverHA:
 
                     # Telemetry (aggregate counters)
                     if self._hass:
+                        # A successful (re-)registration resolves the fixable
+                        # reauth repair. Also delete the legacy non-fixable
+                        # ``fcm_stuck`` issue so it does not linger after an
+                        # upgrade from the previous key.
+                        ir.async_delete_issue(
+                            self._hass,
+                            DOMAIN,
+                            f"fcm_reauth_required_{entry_id}",
+                        )
                         ir.async_delete_issue(
                             self._hass, DOMAIN, f"fcm_stuck_{entry_id}"
                         )
@@ -1767,9 +1899,15 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
-                # Hard-reset on unregister: the entry is going away, so the
-                # short-run cap latch must be released together with the
-                # fatal-error map and the Repairs issue (force=True).
+                # Hard-reset on unregister: this fires via ``async_on_unload``
+                # on EVERY unload (reload AND removal), so it only resets the
+                # in-memory state -- the short-run cap latch, the fatal-error
+                # map and the transient short-run crash-loop Repairs issue
+                # (force=True). It must NOT delete the fixable reauth repairs:
+                # on a reauth-success reload the new supervisor still has to
+                # prove recovery first. Those are retired by the supervisor
+                # success path (reload) or ``async_delete_entry_repair_issues``
+                # (actual removal). See ``_clear_fatal_error_for_entry``.
                 self._clear_fatal_error_for_entry(
                     entry_id, reason="Entry unregistered", force=True
                 )
