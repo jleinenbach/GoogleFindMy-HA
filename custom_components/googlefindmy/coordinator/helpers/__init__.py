@@ -12,6 +12,7 @@ from __future__ import annotations
 from .cache import (
     DEFAULT_SNAPSHOT_FIELDS,
     LOCATION_FIELDS,
+    SOUND_UUID_MAX_AGE_S,
     SOURCE_PRIORITY,
     STATUS_AGING,
     STATUS_CURRENT,
@@ -23,6 +24,7 @@ from .cache import (
     epoch_to_datetime_utc,
     fill_missing_coordinates,
     is_presence_expired,
+    is_sound_uuid_expired,
     merge_cache_row,
     normalize_location_fields,
     preserve_metadata_fields,
@@ -139,6 +141,7 @@ __all__ = [
     # cache.py
     "DEFAULT_SNAPSHOT_FIELDS",
     "LOCATION_FIELDS",
+    "SOUND_UUID_MAX_AGE_S",
     "SOURCE_PRIORITY",
     "STATUS_AGING",
     "STATUS_CURRENT",
@@ -150,6 +153,7 @@ __all__ = [
     "epoch_to_datetime_utc",
     "fill_missing_coordinates",
     "is_presence_expired",
+    "is_sound_uuid_expired",
     "merge_cache_row",
     "normalize_location_fields",
     "preserve_metadata_fields",

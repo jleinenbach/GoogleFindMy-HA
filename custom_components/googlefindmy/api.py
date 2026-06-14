@@ -1635,9 +1635,10 @@ class GoogleFindMyAPI:
                     _short_err(err),
                 )
             # Non-acceptance (401/403/5xx/other): drop the key UNLESS an earlier
-            # attempt latched dispatch — a post-send failure on a prior retry may
-            # already be ringing. err.dispatched carries that sticky sequence
-            # latch (stamped at the transport's retry-loop choke point).
+            # attempt latched dispatch — a prior attempt that reached the server
+            # (a post-send network failure, or a 5xx/429 status read) may already
+            # be ringing. err.dispatched carries that sticky sequence latch
+            # (stamped at the transport's retry-loop choke point).
             return _cancel_key_after_failure(err, request_uuid)
 
         except NovaRateLimitError as err:
@@ -1653,9 +1654,10 @@ class GoogleFindMyAPI:
             # A network failure wrapped by async_nova_request after its retries,
             # or any other NovaError leaving the transport. The retry-loop choke
             # point stamps the sticky dispatch latch onto it (err.dispatched): if
-            # any attempt reached the wire (server disconnect, read timeout,
-            # payload error), the play may already be ringing, so keep the cancel
-            # key; a provable pre-connect failure never rang, so drop it. Other
+            # any attempt may have been processed by the server (a post-send
+            # network failure, or a 5xx/429 status read), the play may already be
+            # ringing, so keep the cancel key; a provable pre-connect failure
+            # never rang, so drop it. Other
             # subclasses (NovaLogicError, NovaProtobufDecodeError) inherit
             # dispatched=False and keep the conservative drop.
             if err.dispatched:

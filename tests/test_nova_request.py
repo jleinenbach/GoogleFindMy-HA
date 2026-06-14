@@ -33,6 +33,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaError,
     NovaHTTPError,
+    NovaRateLimitError,
     async_nova_request,
     register_cache_provider,
     unregister_cache_provider,
@@ -1001,6 +1002,267 @@ async def test_async_nova_request_latches_dispatch_across_http_status_exit(
     # dispatch must remain latched so the cancel key is preserved.
     assert exc_info.value.dispatched is True
     assert len(session.calls) > 1  # the wire-reaching attempt actually retried
+
+
+async def test_async_nova_request_latches_dispatch_on_pure_status_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure server-status read (no read exception) latches dispatch.
+
+    Regression for the Codex finding (AP8): a 5xx/429 status reaches the server
+    even though the body read itself never fails, so the request may already
+    have started a side effect (a device ring). If a *later* retry then fails
+    pre-connect, the wrapped ``NovaError`` must still report ``dispatched is
+    True`` so ``api.async_play_sound`` keeps the cancel key. Before the fix the
+    latch flipped only inside the network-exception handler, so a pure status
+    read left it ``False`` and the ring became unstoppable.
+    """
+
+    class _ConnFailingCtx:
+        """Pre-connect failure: context raises on entry."""
+
+        async def __aenter__(self) -> Any:
+            raise aiohttp.ConnectionTimeoutError
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _StatusThenConnSession:
+        """Attempt 1 reads HTTP 503 (no read error); later attempts never connect."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> Any:
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            if len(self.calls) == 1:
+                return _DummyResponse(503, b"")
+            return _ConnFailingCtx()
+
+    cache = _StubCache()
+    session = _StatusThenConnSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    with pytest.raises(NovaError) as exc_info:
+        await _exercise()
+
+    # The 503 status read on attempt 1 latched dispatch; the final pre-connect
+    # failure must not clear it.
+    assert exc_info.value.dispatched is True
+    assert len(session.calls) > 1  # the status read actually triggered a retry
+
+
+async def test_async_nova_request_pure_4xx_does_not_latch_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanent 4xx rejection must NOT latch dispatch (S2 boundary).
+
+    The server refuses a 403 *before* any side effect, so the cancel key must be
+    dropped — otherwise it could overwrite the still-valid key of a parallel,
+    possibly still-ringing earlier play on the same device. This pins the
+    deliberate asymmetry of the AP8 fix: only transient 5xx latch; 4xx never do.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(403, b"forbidden")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    with pytest.raises(NovaAuthError) as exc_info:
+        await _exercise()
+
+    # A clean 4xx rejection never reached a side effect: the key must drop.
+    assert exc_info.value.dispatched is False
+
+
+@pytest.mark.parametrize("status", [501, 505, 508])
+async def test_async_nova_request_non_retryable_5xx_does_not_latch_dispatch(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """A non-retryable 5xx (501/505/508) must NOT latch dispatch.
+
+    Regression for the Codex follow-up on the AP8 latch: the first cut flipped
+    the latch for *every* ``status >= 500``, but 501 Not Implemented, 505 HTTP
+    Version Not Supported and 508 Loop Detected are documented as permanent
+    config rejections — the server refuses them *before* executing the command,
+    so no device ring can have started. Latching them would let an undispatched
+    failure overwrite the still-valid cancel key of a parallel, possibly still
+    ringing earlier play on the same device. The latch is now scoped to
+    ``HTTP_DISPATCH_LATCH_ELIGIBLE`` (transient 5xx 500/502/503/504 only), so
+    these raise ``NovaHTTPError`` with ``dispatched is False``.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(status, b"nope")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    with pytest.raises(NovaHTTPError) as exc_info:
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # Non-retryable 5xx is refused before any side effect: the key must drop.
+    assert exc_info.value.dispatched is False
+    assert len(session.calls) == 1  # single attempt, no retry
+
+
+async def test_async_nova_request_pure_429_does_not_latch_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure 429 rate-limit sequence must NOT latch dispatch.
+
+    Regression for the Codex follow-up on the AP8 latch: 429 Too Many Requests
+    is rejected at the gate and never processed, so a Play Sound request that
+    only ever sees 429 cannot have started a device ring. Latching it would make
+    ``api.async_play_sound`` keep a cancel UUID for a request the server refused;
+    if the user presses Play while an older ring is still active, that bogus UUID
+    overwrites the valid cancel key and the default Stop Sound targets the wrong
+    request. 429 stays retry-eligible but is excluded from
+    ``HTTP_DISPATCH_LATCH_ELIGIBLE``, so the wrapped error reports
+    ``dispatched is False``.
+    """
+
+    cache = _StubCache()
+    # NOVA_MAX_RETRIES == 6 -> 7 attempts all rate-limited.
+    session = _DummySession([_DummyResponse(429, b"slow down") for _ in range(7)])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    with pytest.raises(NovaRateLimitError) as exc_info:
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # Pure rate-limit: never processed, so the cancel key must drop.
+    assert exc_info.value.dispatched is False
+    assert len(session.calls) == 7  # exhausted the retry budget
+
+
+async def test_async_nova_request_latch_survives_later_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch-ambiguous 5xx keeps the latch even when later attempts see 429.
+
+    The latch accumulates monotonically across the retry sequence: once an early
+    503 makes the command dispatch-ambiguous (the backend may have begun a ring),
+    a subsequent 429 must not clear that signal. This pins Codex's caveat that
+    429 should be excluded from the latch *unless* an earlier attempt was already
+    post-dispatch ambiguous.
+    """
+
+    cache = _StubCache()
+    # Attempt 1 = 503 (latches), the rest = 429 (must not clear the latch).
+    session = _DummySession(
+        [_DummyResponse(503, b"")] + [_DummyResponse(429, b"slow") for _ in range(6)]
+    )
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    with pytest.raises(NovaError) as exc_info:
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # The early 503 latched dispatch; the trailing 429s must not clear it.
+    assert exc_info.value.dispatched is True
+    assert len(session.calls) == 7
 
 
 async def test_async_nova_request_uses_central_total_timeout(
