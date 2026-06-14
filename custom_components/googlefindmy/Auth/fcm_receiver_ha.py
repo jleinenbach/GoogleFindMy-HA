@@ -1070,7 +1070,18 @@ class FcmReceiverHA:
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
 
-        stop_evt = self._stop_evts.setdefault(entry_id, asyncio.Event())
+        # AP5 (finding 4b): a prior stop (request_stop on unload, or the cap
+        # teardown) leaves the entry's event *set* without installing a fresh
+        # one. The old ``setdefault`` then handed that set event to the new
+        # supervisor, whose ``while not stop_evt.is_set()`` exited immediately
+        # (wedged restart after a reload). Replace the event only when it is
+        # missing or already set; a still-unset event is kept so a deliberately
+        # pre-installed one (and the still-running old supervisor, which holds
+        # its own reference) keeps working.
+        stop_evt = self._stop_evts.get(entry_id)
+        if stop_evt is None or stop_evt.is_set():
+            stop_evt = asyncio.Event()
+            self._stop_evts[entry_id] = stop_evt
 
         async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
             nudge_evt = self._retry_nudge_evts.setdefault(
@@ -1406,7 +1417,8 @@ class FcmReceiverHA:
                         # against the same credentials would loop until the
                         # short-run crash cap fires; instead invalidate the key
                         # material so the next registration regenerates it
-                        # (android_id/security_token preserved) and do NOT
+                        # (a valid GCM identity is preserved, a corrupt one
+                        # dropped) and do NOT
                         # charge this run to the crash cap -- corrective action
                         # is being taken, this is not a poison-message loop.
                         _LOGGER.error(
@@ -1583,22 +1595,88 @@ class FcmReceiverHA:
         self.supervisors[entry_id] = task
         _LOGGER.info("Started FCM supervisor for entry %s", entry_id)
 
-    async def _invalidate_fcm_tokens(self, entry_id: str) -> None:
-        """Clear renewable FCM tokens while preserving GCM device identity.
+    @staticmethod
+    def _is_reregisterable_id(value: Any) -> bool:
+        """Return True when ``value`` survives the reregister path's ``int()``.
 
-        After this, the next registration attempt will use
-        ``reregister_keeping_identity()`` to get fresh FCM tokens with
-        the same android_id/security_token.
+        ``FcmRegister._get_checkin_payload`` re-uses a cached identity only when
+        both fields are truthy *and* ``int()``-convertible (it runs
+        ``int(android_id)`` / ``int(security_token)``). A truthy-but-malformed
+        value — e.g. a non-numeric string ``"sec-tok"`` or a list — passes the
+        truthiness gate but raises ``ValueError``/``TypeError`` on ``int()``,
+        trapping the supervisor in the same retry loop. A corrupted payload may
+        also carry a float infinity (``1e309`` / ``Infinity`` in JSON), which is
+        truthy and not a bool but raises ``OverflowError`` on ``int()`` — the
+        same trap, so it is rejected here too. ``bool`` is rejected explicitly:
+        it is an ``int`` subclass but never a real device identity.
+        """
+        if not value or isinstance(value, bool):
+            return False
+        try:
+            int(value)
+        except (ValueError, TypeError, OverflowError):
+            return False
+        return True
+
+    @classmethod
+    def _gcm_identity_is_complete(cls, gcm: dict[str, Any]) -> bool:
+        """Return True when a GCM block carries a re-registerable identity.
+
+        ``FcmRegister.reregister_keeping_identity()`` subscripts
+        ``credentials["gcm"]["android_id"]`` and ``["security_token"]`` *without*
+        guarding (and only falls back to a full register when the ``gcm`` key is
+        entirely absent). A partial block — e.g. an ``android_id`` with no
+        ``security_token`` — raises ``KeyError`` on every retry, and a block
+        whose values are present but not ``int()``-convertible raises
+        ``ValueError``/``TypeError`` instead (see ``_is_reregisterable_id``).
+        Only a block carrying both ``int()``-convertible values can be preserved
+        across an FCM-token invalidation; anything else must be dropped so the
+        next attempt performs a full fresh handshake instead of looping on the
+        same broken identity.
+        """
+        return cls._is_reregisterable_id(gcm.get("android_id")) and cls._is_reregisterable_id(
+            gcm.get("security_token")
+        )
+
+    async def _invalidate_fcm_tokens(self, entry_id: str) -> None:
+        """Clear renewable FCM tokens, preserving a *usable* GCM identity.
+
+        When the GCM block still carries a complete device identity
+        (android_id + security_token), only the renewable FCM parts are stripped
+        so the next attempt can take the fast ``reregister_keeping_identity()``
+        path. When the identity itself is incomplete/corrupt, the whole ``gcm``
+        block is dropped instead: keeping it would make
+        ``reregister_keeping_identity()`` raise ``KeyError`` forever (Codex
+        follow-up), so dropping it forces ``_register_for_fcm_entry`` onto the
+        full ``checkin_or_register()`` handshake.
         """
         creds = self.creds.get(entry_id)
         if creds and isinstance(creds, dict):
-            # Remove FCM-related parts, keep GCM device identity
+            # Renewable FCM parts always go.
             creds.pop("fcm", None)
             creds.pop("keys", None)
+
             gcm = creds.get("gcm")
-            if isinstance(gcm, dict):
+            if isinstance(gcm, dict) and self._gcm_identity_is_complete(gcm):
+                # Identity is usable: strip only the renewable GCM token parts
+                # and keep android_id/security_token for a fast re-register.
                 gcm.pop("token", None)
                 gcm.pop("app_id", None)
+                _LOGGER.info(
+                    "[entry=%s] Invalidated FCM tokens; "
+                    "android_id/security_token preserved for re-registration",
+                    entry_id,
+                )
+            else:
+                # Identity is missing/partial/corrupt: drop the whole block so
+                # the next attempt does a full registration rather than replaying
+                # the same KeyError-raising creds.
+                creds.pop("gcm", None)
+                _LOGGER.warning(
+                    "[entry=%s] Corrupt or incomplete GCM identity; dropped device "
+                    "identity to force a full FCM re-registration",
+                    entry_id,
+                )
 
             # Persist partial credentials so restarts also trigger re-register
             entry_cache = self._entry_caches.get(entry_id)
@@ -1607,12 +1685,6 @@ class FcmReceiverHA:
                     await entry_cache.set("fcm_credentials", creds)
                 except Exception:
                     pass
-
-            _LOGGER.info(
-                "[entry=%s] Invalidated FCM tokens; "
-                "android_id/security_token preserved for re-registration",
-                entry_id,
-            )
 
     @staticmethod
     def _raise_if_fatal_client_error(
@@ -1737,18 +1809,60 @@ class FcmReceiverHA:
             # retry budget (with _invalidate_fcm_tokens) runs.
             self._raise_if_fatal_http_error(entry_id, err)
             return False
-        except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
-            # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
-            # are logged at info level; other exceptions at error level.
-            if isinstance(err, (TimeoutError, RuntimeError)):
-                _LOGGER.info(
-                    "[entry=%s] FCM registration failed (transient): %s - will retry",
-                    entry_id,
-                    err,
-                )
-            else:
-                _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
+        except Exception as err:  # noqa: BLE001
+            # AP6 (finding 3a): the previous combined
+            # ``(TimeoutError, RuntimeError, Exception)`` made the specific types
+            # redundant and treated every non-fatal error the same. Delegate the
+            # classification to a dedicated helper (extract-method keeps this
+            # function under PLR0911 and makes the rule unit-testable) and return
+            # a single non-fatal result. Fatal paths
+            # (FatalRegistrationError / ClientError / FcmRegisterHTTPError) are
+            # handled above and never reach here.
+            await self._classify_registration_exception(entry_id, err)
             return False
+
+    async def _classify_registration_exception(
+        self, entry_id: str, err: BaseException
+    ) -> None:
+        """Classify a non-fatal registration exception (AP6, finding 3a).
+
+        Splits the formerly conflated catch-all into three honest classes:
+
+        * ``TimeoutError`` / ``RuntimeError`` — genuinely transient (network
+          timeout, or firebase_messaging "...token missing..."); just retry.
+        * ``KeyError`` / ``ValueError`` / ``TypeError`` — structural credential
+          corruption (``reregister_keeping_identity()`` /
+          ``checkin_or_register()`` raise ``KeyError`` on corrupt
+          ``credentials["gcm"][...]`` and ``ValueError``/``TypeError`` on
+          malformed/JSON-broken creds; ``json.JSONDecodeError`` is a
+          ``ValueError``). NOT transient: retrying replays the same broken creds
+          forever with no visible fatal state. Escalate by invalidating the FCM
+          tokens, which preserves a *complete* GCM identity but drops a
+          partial/corrupt one, so the next attempt performs a fresh handshake
+          instead of looping. Conservative: only these well-defined types.
+        * anything else — unexpected; logged at error (not silently swallowed as
+          benign) but left non-fatal so a single surprise cannot crash the
+          supervisor.
+        """
+        if isinstance(err, (TimeoutError, RuntimeError)):
+            _LOGGER.info(
+                "[entry=%s] FCM registration failed (transient): %s - will retry",
+                entry_id,
+                err,
+            )
+        elif isinstance(err, (KeyError, ValueError, TypeError)):
+            _LOGGER.error(
+                "[entry=%s] FCM registration hit corrupt credentials (%s): %s "
+                "- invalidating FCM tokens to force re-registration",
+                entry_id,
+                type(err).__name__,
+                err,
+            )
+            await self._invalidate_fcm_tokens(entry_id)
+        else:
+            _LOGGER.error(
+                "[entry=%s] FCM registration unexpected error: %s", entry_id, err
+            )
 
     # Public entrypoint kept for back-compat (starts supervisors lazily if needed)
     async def _start_listening(self) -> None:
@@ -2598,8 +2712,10 @@ class FcmReceiverHA:
     async def async_reregister_fcm(self, entry_id: str) -> bool:
         """Public API: invalidate FCM tokens and re-register for a specific entry.
 
-        Preserves the GCM device identity (android_id/security_token) and
-        obtains fresh GCM + FCM tokens via ``reregister_keeping_identity()``.
+        Preserves a *complete* GCM device identity (android_id/security_token)
+        for a fast ``reregister_keeping_identity()``; a partial/corrupt identity
+        is dropped so the next attempt does a full ``checkin_or_register()``
+        handshake instead of looping on broken creds.
 
         Returns True if re-registration was initiated (supervisor restarted),
         False if the entry is not known to this receiver.

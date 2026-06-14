@@ -6,9 +6,11 @@ import importlib
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
@@ -438,3 +440,269 @@ async def test_register_keeps_transient_runtime_error_transient() -> None:
 
     assert result is False
     assert entry_id not in receiver._fatal_errors
+
+
+# --------------------------------------------------------------------------
+# PR B — stop-event lifecycle (AP5) + exception classification (AP6)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restart_installs_fresh_stop_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP5 (finding 4b): a re-setup must not inherit a leftover *set* stop event.
+
+    ``request_stop`` sets the entry's event without installing a fresh one. The
+    old ``setdefault`` in ``_start_supervisor_for_entry`` then handed that set
+    event to the new supervisor, whose ``while not stop_evt.is_set()`` exited
+    immediately (wedged restart). The fix installs a fresh, unset event so the
+    supervisor body actually runs.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-wedge"
+    stale = asyncio.Event()
+    stale.set()  # leftover from a prior request_stop
+    receiver._stop_evts[entry_id] = stale
+
+    ran = asyncio.Event()
+
+    async def _ensure(eid: str, _cache: Any) -> None:
+        ran.set()
+        # Terminate the loop deterministically after one body execution.
+        receiver._stop_evts[eid].set()
+
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
+    monkeypatch.setattr(fcm_receiver_ha.asyncio, "sleep", AsyncMock())
+
+    real_wait_for = asyncio.wait_for
+
+    async def _instant_wait_for(fut: Any, *, timeout: Any = None) -> Any:
+        # Make the supervisor's nudge-sleep return immediately.
+        coro_name = getattr(getattr(fut, "cr_code", None), "co_name", "")
+        if coro_name == "wait":
+            if asyncio.iscoroutine(fut):
+                fut.close()
+            raise TimeoutError
+        return await real_wait_for(fut, timeout=timeout)
+
+    monkeypatch.setattr(fcm_receiver_ha.asyncio, "wait_for", _instant_wait_for)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await real_wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert ran.is_set()  # body executed -> a fresh, unset event was installed
+    assert receiver._stop_evts[entry_id] is not stale  # stale event replaced
+
+
+@pytest.mark.asyncio
+async def test_register_invalidates_tokens_on_corrupt_creds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP6 (finding 3a): a KeyError (corrupt creds) escalates via token invalidation."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-corrupt"
+
+    class _PcKeyError:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise KeyError("gcm")
+
+    receiver.pcs[entry_id] = _PcKeyError()
+
+    invalidated: list[str] = []
+
+    async def _inv(eid: str) -> None:
+        invalidated.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is False
+    assert invalidated == [entry_id]
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_preserves_complete_gcm_identity() -> None:
+    """A complete GCM identity survives an FCM-token invalidation.
+
+    Positive control for the corrupt-identity drop: when android_id AND
+    security_token are present, only the renewable FCM parts (fcm, keys, the
+    gcm token/app_id) are stripped, so ``reregister_keeping_identity()`` can
+    take the fast path on the next attempt.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-complete-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            # Both fields are int()-convertible (an int and a numeric string),
+            # exactly what reregister_keeping_identity() can consume.
+            "android_id": 1234567890123456,
+            "security_token": "9876543210987654",
+            "token": "gcm-tok",
+            "app_id": "app-1",
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    gcm = creds["gcm"]
+    assert gcm["android_id"] == 1234567890123456
+    assert gcm["security_token"] == "9876543210987654"
+    assert "token" not in gcm  # renewable gcm token stripped
+    assert "app_id" not in gcm
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_drops_corrupt_gcm_identity() -> None:
+    """A partial GCM identity is dropped to break the KeyError retry loop.
+
+    Regression for the Codex follow-up on AP6: ``reregister_keeping_identity()``
+    subscripts ``credentials["gcm"]["security_token"]`` unguarded and only falls
+    back to a full register when ``gcm`` is entirely absent. A block with an
+    ``android_id`` but no ``security_token`` therefore raises ``KeyError`` on
+    every retry. The invalidation must drop the whole ``gcm`` block so
+    ``_register_for_fcm_entry`` takes the full ``checkin_or_register()``
+    handshake instead of replaying the same broken identity forever.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-corrupt-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {"android_id": 1234567890123456},  # security_token missing
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    # Whole gcm block gone -> next _register_for_fcm_entry uses checkin_or_register.
+    assert "gcm" not in creds
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    # And the predicate that drives the decision is honest about both shapes:
+    # a missing field is incomplete; both int()-convertible fields are complete.
+    assert FcmReceiverHA._gcm_identity_is_complete({"android_id": 1}) is False
+    assert (
+        FcmReceiverHA._gcm_identity_is_complete(
+            {"android_id": 1, "security_token": "2"}
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_security_token",
+    ["sec-tok", ["1", "2"], {"x": 1}, True, float("inf"), float("-inf")],
+    ids=["non-numeric-str", "list", "dict", "bool", "inf", "-inf"],
+)
+async def test_invalidate_fcm_tokens_drops_malformed_gcm_identity(
+    bad_security_token: object,
+) -> None:
+    """A truthy-but-non-numeric GCM identity is dropped, not preserved.
+
+    Regression for the Codex follow-up: ``reregister_keeping_identity()`` runs
+    ``int(security_token)`` only after a truthiness gate, so a truthy value that
+    is not ``int()``-convertible passes the gate but raises on every retry —
+    ``ValueError``/``TypeError`` for a non-numeric string, list, dict or bool,
+    and ``OverflowError`` for a float infinity (JSON ``1e309`` / ``Infinity``).
+    The earlier predicate preserved such a block and the supervisor looped
+    forever (or, for infinity, ``_invalidate_fcm_tokens`` itself raised and
+    stopped the supervisor). The hardened predicate now drops the whole ``gcm``
+    block so the next attempt does a full ``checkin_or_register()``.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-malformed-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            "android_id": 1234567890123456,
+            "security_token": bad_security_token,
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    # Malformed identity cannot be re-registered -> whole block must be dropped.
+    assert "gcm" not in creds
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    # The predicate is the single source of that decision.
+    assert (
+        FcmReceiverHA._gcm_identity_is_complete(
+            {"android_id": 1234567890123456, "security_token": bad_security_token}
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_register_unexpected_error_is_non_fatal_without_invalidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP6 (finding 3a): an unexpected error stays non-fatal and does NOT invalidate."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-weird"
+
+    class _WeirdError(Exception):
+        pass
+
+    class _PcWeird:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise _WeirdError("boom")
+
+    receiver.pcs[entry_id] = _PcWeird()
+
+    invalidated: list[str] = []
+
+    async def _inv(eid: str) -> None:
+        invalidated.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is False
+    assert invalidated == []  # unexpected path must not invalidate
+
+
+@pytest.mark.asyncio
+async def test_classify_registration_exception_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP6 (finding 3a): the classification helper routes each error class."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-classify"
+
+    calls: list[str] = []
+
+    async def _inv(eid: str) -> None:
+        calls.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    # Transient: no invalidation.
+    await receiver._classify_registration_exception(entry_id, RuntimeError("x"))
+    await receiver._classify_registration_exception(entry_id, TimeoutError())
+    assert calls == []
+
+    # Structural corruption: invalidate each time.
+    await receiver._classify_registration_exception(entry_id, KeyError("gcm"))
+    await receiver._classify_registration_exception(entry_id, ValueError("bad"))
+    await receiver._classify_registration_exception(entry_id, TypeError("bad"))
+    assert calls == [entry_id, entry_id, entry_id]
+
+    # Unexpected: no invalidation.
+    class _WeirdError(Exception):
+        pass
+
+    await receiver._classify_registration_exception(entry_id, _WeirdError())
+    assert calls == [entry_id, entry_id, entry_id]
