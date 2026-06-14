@@ -330,19 +330,24 @@ class NovaError(Exception):
     """Base exception for Nova API errors.
 
     Attributes:
-        dispatched: True when the failure occurred *at or after* the request
+        dispatched: True when the server may already have processed the request
+            (a side effect such as a device ring could have started), so any
+            client-generated cancel key must be preserved. It is latched True by
+            either of two events: (a) a post-send network failure that provably
             reached the wire (server disconnect, read timeout, payload error),
-            so a side effect (e.g. a device ring) may already have started and
-            any client-generated cancel key must be preserved. False (the
-            default) when the request provably never left the client (DNS,
-            connect refused/timeout, or any pre-dispatch error), so no side
-            effect can have happened. The POST loop latches a wire-reaching
-            attempt across the *whole* retry sequence and stamps that latch onto
-            every error leaving the loop at a single choke point (the
-            `except NovaError` handler), so HTTP-status exits (429/5xx/4xx) carry
-            it just like wrapped network failures: once any attempt reaches the
-            wire it stays True even if a later attempt fails pre-connect or ends
-            on an HTTP status. All other Nova errors keep the safe default.
+            or (b) a server/rate-limit HTTP status read (5xx or 429), which means
+            the request reached the server even though it ultimately failed.
+            False (the default) when the request provably never left the client
+            (DNS, connect refused/timeout, or any pre-dispatch error) or was
+            refused by the server *before* any side effect (a permanent 4xx such
+            as 401/403/404). The POST loop latches such a wire-reaching attempt
+            across the *whole* retry sequence and stamps that latch onto every
+            error leaving the loop at a single choke point (the `except NovaError`
+            handler), so once any attempt may have been processed it stays True
+            even if a later attempt fails pre-connect or ends on another HTTP
+            status. Permanent client rejections never latch (they only carry an
+            already-set latch through the choke point). All other Nova errors
+            keep the safe default.
     """
 
     dispatched: bool = False
@@ -1477,6 +1482,24 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         "Nova API async request to %s: status=%d", api_scope, status
                     )
 
+                    # Latch dispatch the moment a status is read: reading any
+                    # status proves this attempt reached the wire, so a later
+                    # pre-connect retry failure must not clear it. Restrict the
+                    # latch to server/rate-limit statuses (5xx, 429): the server
+                    # may already have processed the request and started a side
+                    # effect (a device ring) before answering, so its cancel key
+                    # must survive the rest of the retry sequence. Permanent
+                    # client rejections (401/403/404) are refused *before* any
+                    # side effect, so they must NOT latch — preserving the
+                    # deliberate semantics that a clean rejection drops the key
+                    # (otherwise it could overwrite the key of a still-ringing
+                    # earlier play on the same device).
+                    if (
+                        status >= HTTP_INTERNAL_SERVER_ERROR
+                        or status == HTTP_TOO_MANY_REQUESTS
+                    ):
+                        reached_wire = True
+
                     # Acceptance boundary: the request is treated as "accepted by
                     # the server" — and therefore as a possibly-active ring whose
                     # cancel key must be preserved — ONLY when Google answers 200.
@@ -1743,14 +1766,15 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
 
     except NovaError as nova_err:
         # Single choke point for the whole retry sequence: stamp the sticky
-        # dispatch latch onto EVERY NovaError leaving the loop — the HTTP-status
-        # exits (429/5xx/4xx after retries) and the wrapped network failure
-        # alike. Dispatch is a property of the *sequence*, not of the final
-        # attempt: once any attempt reaches the wire a side effect (a device
-        # ring) may already have started, so the cancel key must survive
-        # regardless of how the sequence finally ended. The latch only ever
-        # flips False -> True, so a clean rejection sequence (no wire-reaching
-        # attempt) keeps dispatched=False and still drops the key.
+        # dispatch latch onto EVERY NovaError leaving the loop. The latch is set
+        # earlier — on a post-send network failure or on a server/rate-limit
+        # status read (5xx/429) — so this point only propagates it. Dispatch is
+        # a property of the *sequence*, not of the final attempt: once any
+        # attempt may have been processed a side effect (a device ring) may
+        # already have started, so the cancel key must survive regardless of how
+        # the sequence finally ended. The latch only ever flips False -> True, so
+        # a sequence of pure permanent rejections (4xx, no wire-reaching attempt)
+        # keeps dispatched=False and still drops the key.
         if reached_wire:
             nova_err.dispatched = True
         raise

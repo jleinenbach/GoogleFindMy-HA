@@ -1003,6 +1003,122 @@ async def test_async_nova_request_latches_dispatch_across_http_status_exit(
     assert len(session.calls) > 1  # the wire-reaching attempt actually retried
 
 
+async def test_async_nova_request_latches_dispatch_on_pure_status_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pure server-status read (no read exception) latches dispatch.
+
+    Regression for the Codex finding (AP8): a 5xx/429 status reaches the server
+    even though the body read itself never fails, so the request may already
+    have started a side effect (a device ring). If a *later* retry then fails
+    pre-connect, the wrapped ``NovaError`` must still report ``dispatched is
+    True`` so ``api.async_play_sound`` keeps the cancel key. Before the fix the
+    latch flipped only inside the network-exception handler, so a pure status
+    read left it ``False`` and the ring became unstoppable.
+    """
+
+    class _ConnFailingCtx:
+        """Pre-connect failure: context raises on entry."""
+
+        async def __aenter__(self) -> Any:
+            raise aiohttp.ConnectionTimeoutError
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _StatusThenConnSession:
+        """Attempt 1 reads HTTP 503 (no read error); later attempts never connect."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> Any:
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            if len(self.calls) == 1:
+                return _DummyResponse(503, b"")
+            return _ConnFailingCtx()
+
+    cache = _StubCache()
+    session = _StatusThenConnSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    with pytest.raises(NovaError) as exc_info:
+        await _exercise()
+
+    # The 503 status read on attempt 1 latched dispatch; the final pre-connect
+    # failure must not clear it.
+    assert exc_info.value.dispatched is True
+    assert len(session.calls) > 1  # the status read actually triggered a retry
+
+
+async def test_async_nova_request_pure_4xx_does_not_latch_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A permanent 4xx rejection must NOT latch dispatch (S2 boundary).
+
+    The server refuses a 403 *before* any side effect, so the cancel key must be
+    dropped — otherwise it could overwrite the still-valid key of a parallel,
+    possibly still-ringing earlier play on the same device. This pins the
+    deliberate asymmetry of the AP8 fix: only 5xx/429 latch, 4xx never do.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(403, b"forbidden")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    async def _exercise() -> str:
+        return await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    with pytest.raises(NovaAuthError) as exc_info:
+        await _exercise()
+
+    # A clean 4xx rejection never reached a side effect: the key must drop.
+    assert exc_info.value.dispatched is False
+
+
 async def test_async_nova_request_uses_central_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
