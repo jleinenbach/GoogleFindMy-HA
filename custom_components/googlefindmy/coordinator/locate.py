@@ -34,6 +34,7 @@ from ..NovaApi.nova_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
+from .helpers.cache import SOUND_UUID_MAX_AGE_S, is_sound_uuid_expired
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
 _LOGGER = logging.getLogger(__name__)
@@ -583,6 +584,24 @@ class LocateOperations(_MixinBase):
                 # Push an update so buttons/entities can refresh availability
                 self.async_set_updated_data(self.data)
 
+    def _cached_sound_uuid_is_stale(self, device_id: str) -> bool:
+        """Return True if the device's cached Play Sound UUID has aged out.
+
+        Mirrors the load-path expiry (#108) so the store-path overwrite guard
+        and the Stop read-path agree with the reload filter on what "stale"
+        means. A key with no tracked timestamp (e.g. tests that bypass
+        ``__init__``, or pre-tracking entries) is treated as fresh here: only a
+        present, genuinely aged timestamp marks the key stale, so a known-good
+        cancel key is never dropped on incomplete state.
+        """
+        timestamps = getattr(self, "_sound_request_timestamps", None)
+        if timestamps is None:
+            return False
+        existing_ts = timestamps.get(device_id)
+        if existing_ts is None:
+            return False
+        return is_sound_uuid_expired(existing_ts, time.time(), SOUND_UUID_MAX_AGE_S)
+
     async def async_play_sound(self, device_id: str) -> bool:
         """Play sound on a device using the native async API (no executor).
 
@@ -620,10 +639,18 @@ class LocateOperations(_MixinBase):
             # ambiguous result (ok=False with a fresh UUID) must NOT clobber a
             # known-good key for an earlier, possibly still-ringing play —
             # otherwise the default Stop would cancel the wrong request. With no
-            # cached key, the ambiguous UUID is still stored, since it may be the
-            # only handle on a ring. See IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
+            # cached key — or one that has aged past SOUND_UUID_MAX_AGE_S, which
+            # the reload filter would discard — the ambiguous UUID is still
+            # stored, since it may be the only handle on a current ring. See
+            # IRR-CA-CANCEL-KEY-ON-SUCCESS-ONLY.
             existing_uuid = self._sound_request_uuids.get(device_id)
-            if request_uuid is not None and (ok or existing_uuid is None):
+            existing_is_stale = (
+                existing_uuid is not None
+                and self._cached_sound_uuid_is_stale(device_id)
+            )
+            if request_uuid is not None and (
+                ok or existing_uuid is None or existing_is_stale
+            ):
                 self._sound_request_uuids[device_id] = request_uuid
                 # Use getattr for test compatibility (tests may bypass __init__)
                 timestamps = getattr(self, "_sound_request_timestamps", None)
@@ -693,7 +720,18 @@ class LocateOperations(_MixinBase):
             return False
         request_uuid_to_use = request_uuid
         if request_uuid_to_use is None:
-            request_uuid_to_use = self._sound_request_uuids.get(device_id)
+            cached_uuid = self._sound_request_uuids.get(device_id)
+            # An aged-out key is no better than no key: the ring it referenced
+            # auto-stopped long ago (the reload filter would discard it), so
+            # targeting it could miss a current ring. Treat it as absent.
+            if cached_uuid is not None and self._cached_sound_uuid_is_stale(
+                device_id
+            ):
+                _LOGGER.debug(
+                    "Ignoring expired cached Play Sound UUID for %s", device_id
+                )
+                cached_uuid = None
+            request_uuid_to_use = cached_uuid
             if request_uuid_to_use is not None:
                 _LOGGER.debug(
                     "Using cached Play Sound UUID for %s: %s",
