@@ -541,17 +541,19 @@ def test_unload_clears_fatal_errors_via_force() -> None:
     assert receiver._fatal_error is None
 
 
-def test_force_teardown_deletes_orphaned_reauth_repairs(
+def test_force_teardown_leaves_fixable_reauth_repairs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Teardown (force=True) retires ALL entry-scoped FCM repair issues.
+    """Teardown (force=True) must NOT delete the fixable reauth repairs.
 
-    Codex finding (PR #1104): on entry removal the success-path delete in the
-    supervisor loop can no longer fire, so the fixable ``fcm_reauth_required``
-    repair (and the legacy ``fcm_stuck``) would otherwise stay pinned in the
-    Repairs panel for a config entry that no longer exists. The teardown clear
-    must delete them alongside the ``fcm_short_run_crash_loop`` issue, mirroring
-    the supervisor success-path delete set.
+    Codex finding (PR #1104 follow-up): ``force=True`` is reached from
+    ``unregister_coordinator``, which fires via ``async_on_unload`` on EVERY
+    unload -- including the reload Home Assistant performs right after a
+    successful reauth flow. Deleting ``fcm_reauth_required`` / legacy
+    ``fcm_stuck`` here would dismiss a still-active prompt before the new
+    supervisor has proven recovery. Only the transient short-run crash-loop
+    issue (the DELETE half of the fatal-error CREATE/DELETE pair) is cleared.
+    Actual removal cleanup lives in ``async_delete_entry_repair_issues``.
     """
     entry_id = "entry-teardown"
     receiver = FcmReceiverHA()
@@ -561,6 +563,29 @@ def test_force_teardown_deletes_orphaned_reauth_repairs(
     receiver._clear_fatal_error_for_entry(
         entry_id, reason="Entry unregistered", force=True
     )
+
+    deleted = {call.args[2] for call in delete_issue.call_args_list}
+    assert f"fcm_short_run_crash_loop_{entry_id}" in deleted
+    assert f"fcm_reauth_required_{entry_id}" not in deleted
+    assert f"fcm_stuck_{entry_id}" not in deleted
+
+
+def test_async_delete_entry_repair_issues_retires_all_on_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On actual entry removal ALL entry-scoped FCM repairs are retired.
+
+    Codex finding (PR #1104): once the entry is gone no supervisor will run
+    again, so ``async_remove_entry`` must delete the fixable reauth prompt and
+    its legacy ``fcm_stuck`` predecessor alongside the transient short-run
+    issue, or they stay pinned for a config entry that no longer exists. This
+    is the removal-only counterpart to the reload-safe teardown above.
+    """
+    entry_id = "entry-removed"
+    hass = SimpleNamespace()
+    _create_issue, delete_issue = _install_ir_capture(monkeypatch)
+
+    FcmReceiverHA.async_delete_entry_repair_issues(hass, entry_id)
 
     deleted = {call.args[2] for call in delete_issue.call_args_list}
     assert f"fcm_short_run_crash_loop_{entry_id}" in deleted

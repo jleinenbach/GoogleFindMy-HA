@@ -440,12 +440,16 @@ class FcmReceiverHA:
         condition is gone (e.g. user re-registers credentials and FCM starts
         successfully again).
 
-        On a hard-reset teardown (``force=True``) the entry-scoped *fixable*
-        reauth repairs (``fcm_reauth_required_{entry_id}`` and the legacy
-        ``fcm_stuck_{entry_id}``) are retired as well. They are normally
-        deleted by the supervisor success path, but once the entry is gone no
-        supervisor will run again, so the orphaned repair would otherwise stay
-        pinned in the Repairs panel for a config entry that no longer exists.
+        A hard-reset teardown (``force=True``) additionally releases the
+        short-run cap latch (see below). It deliberately does NOT delete the
+        entry-scoped *fixable* reauth repairs: ``force=True`` is reached from
+        ``unregister_coordinator``, which fires on EVERY unload, including the
+        reload Home Assistant performs right after a successful reauth flow.
+        Deleting them here would dismiss a still-active prompt before the new
+        supervisor has proven recovery. Those repairs are retired by the
+        supervisor success path on reload and by
+        ``async_delete_entry_repair_issues`` on actual entry removal (Codex
+        PR #1104 follow-up).
 
         Defense 2 iter-8 (Codex second finding): a successful FCM
         re-registration is NOT a recovery proof for the short-run crash cap.
@@ -530,42 +534,72 @@ class FcmReceiverHA:
         if removed:
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
 
-        self._delete_repair_issues_for_entry(entry_id, teardown=force)
+        self._delete_repair_issues_for_entry(entry_id)
 
-    def _delete_repair_issues_for_entry(
-        self, entry_id: str, *, teardown: bool
-    ) -> None:
-        """Retire the entry-scoped Repairs issues for a cleared/torn-down entry.
+    def _delete_repair_issues_for_entry(self, entry_id: str) -> None:
+        """Retire the transient short-run-crash-loop repair for a cleared entry.
 
-        Always deletes the Defense 2 short-run-crash-loop issue, which is the
-        DELETE half of its CREATE/DELETE pair with the fatal-error map.
+        This is the DELETE half of the ``fcm_short_run_crash_loop_{entry_id}``
+        CREATE/DELETE pair with the fatal-error map: any path that clears the
+        in-memory latch must also delete the user-visible UI artefact, or the
+        Repairs panel keeps a stale non-fixable error after the underlying
+        condition is gone.
 
-        On a hard-reset teardown (``teardown=True``) it additionally retires
-        the *fixable* reauth repairs (``fcm_reauth_required_{entry_id}`` and the
-        legacy ``fcm_stuck_{entry_id}``). Those are normally deleted by the
-        supervisor success path, but once the entry is gone no supervisor will
-        run again, so the orphaned fixable repair would otherwise stay pinned in
-        the Repairs panel for a config entry that no longer exists. Non-teardown
-        recovery clears (credentials updated) keep relying on the success-path
-        delete and leave those issues untouched.
+        It deliberately does NOT touch the *fixable* reauth repairs
+        (``fcm_reauth_required_{entry_id}`` / legacy ``fcm_stuck_{entry_id}``).
+        Those outlive a reload on purpose and are retired only by the supervisor
+        success path (reload recovery) or
+        ``async_delete_entry_repair_issues`` (actual entry removal). See those
+        for the full lifecycle rationale (Codex PR #1104 follow-up).
 
-        All deletions are best-effort UI cleanup; failures are logged and
+        The deletion is best-effort UI cleanup; failures are logged and
         swallowed so a registry hiccup never blocks the in-memory state reset.
         """
         if self._hass is None:
             return
 
-        issue_ids = [f"fcm_short_run_crash_loop_{entry_id}"]
-        if teardown:
-            issue_ids.append(f"fcm_reauth_required_{entry_id}")
-            issue_ids.append(f"fcm_stuck_{entry_id}")
+        try:
+            ir.async_delete_issue(
+                self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
+            )
+        except Exception:  # noqa: BLE001 - best-effort UI cleanup
+            _LOGGER.debug(
+                "[entry=%s] Failed to delete short-run crash-loop repair issue",
+                entry_id,
+                exc_info=True,
+            )
 
-        for issue_id in issue_ids:
+    @staticmethod
+    def async_delete_entry_repair_issues(hass: HomeAssistant, entry_id: str) -> None:
+        """Delete every entry-scoped FCM Repairs issue for a REMOVED config entry.
+
+        Call this ONLY from ``async_remove_entry`` (actual removal). On removal
+        no supervisor will run again, so the entry-scoped repairs must be retired
+        explicitly or they stay pinned in the Repairs panel for a config entry
+        that no longer exists. This covers the *fixable* reauth prompt
+        (``fcm_reauth_required_{entry_id}``), its legacy non-fixable predecessor
+        (``fcm_stuck_{entry_id}``) and the transient short-run crash-loop
+        diagnostic (``fcm_short_run_crash_loop_{entry_id}``).
+
+        A reload must NOT use this: there ``unregister_coordinator`` fires via
+        ``async_on_unload`` while the entry lives on, and the supervisor success
+        path clears the reauth repair once FCM re-registers. Deleting it on
+        reload would dismiss a still-active prompt before the new supervisor has
+        proven recovery (Codex PR #1104 follow-up).
+
+        All deletions are best-effort UI cleanup; failures are swallowed so a
+        registry hiccup never blocks entry removal.
+        """
+        for issue_id in (
+            f"fcm_short_run_crash_loop_{entry_id}",
+            f"fcm_reauth_required_{entry_id}",
+            f"fcm_stuck_{entry_id}",
+        ):
             try:
-                ir.async_delete_issue(self._hass, DOMAIN, issue_id)
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
             except Exception:  # noqa: BLE001 - best-effort UI cleanup
                 _LOGGER.debug(
-                    "[entry=%s] Failed to delete repair issue %s",
+                    "[entry=%s] Failed to delete repair issue %s on removal",
                     entry_id,
                     issue_id,
                     exc_info=True,
@@ -1865,9 +1899,15 @@ class FcmReceiverHA:
             else:
                 self._entry_caches.pop(entry_id, None)
                 self._purge_entry_tokens(entry_id)
-                # Hard-reset on unregister: the entry is going away, so the
-                # short-run cap latch must be released together with the
-                # fatal-error map and the Repairs issue (force=True).
+                # Hard-reset on unregister: this fires via ``async_on_unload``
+                # on EVERY unload (reload AND removal), so it only resets the
+                # in-memory state -- the short-run cap latch, the fatal-error
+                # map and the transient short-run crash-loop Repairs issue
+                # (force=True). It must NOT delete the fixable reauth repairs:
+                # on a reauth-success reload the new supervisor still has to
+                # prove recovery first. Those are retired by the supervisor
+                # success path (reload) or ``async_delete_entry_repair_issues``
+                # (actual removal). See ``_clear_fatal_error_for_entry``.
                 self._clear_fatal_error_for_entry(
                     entry_id, reason="Entry unregistered", force=True
                 )
