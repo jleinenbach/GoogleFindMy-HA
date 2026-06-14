@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.googlefindmy import repairs
 from custom_components.googlefindmy.Auth import fcm_receiver_ha
@@ -211,6 +212,39 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
 
     flow._async_start_reauth()
 
+    entry.async_start_reauth.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_confirm_aborts_to_keep_issue_open() -> None:
+    """T4b-2: confirming aborts (keeps the issue) instead of CREATE_ENTRY.
+
+    Home Assistant's repairs manager deletes the issue for any non-ABORT
+    result. Returning CREATE_ENTRY here would strand the account if the launched
+    reauth flow is cancelled or fails: the supervisor already broke out at its
+    terminal 401/404 give-up points and will not re-raise. The fixable issue
+    must persist until the supervisor's success path clears it after credentials
+    are actually renewed. This guard fails if production reverts to
+    ``async_create_entry``.
+    """
+    entry = SimpleNamespace(async_start_reauth=MagicMock(return_value=None))
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda entry_id: (
+                entry if entry_id == "entry-id" else None
+            )
+        )
+    )
+    flow = repairs.FcmReauthRepairFlow("entry-id")
+    flow.hass = hass  # normally injected by the repairs flow manager
+    flow.flow_id = "test-flow-id"  # set by the flow manager in production
+    flow.handler = DOMAIN  # set by the flow manager in production
+
+    result = await flow.async_step_confirm(user_input={})
+
+    # ABORT keeps the fixable issue alive; the reauth flow was still launched.
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "reauth_started"
     entry.async_start_reauth.assert_called_once_with(hass)
 
 

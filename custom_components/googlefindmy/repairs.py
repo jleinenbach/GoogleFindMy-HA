@@ -36,10 +36,29 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Confirm the repair and start the reauth flow for the entry."""
+        """Confirm the repair, launch reauth, and keep the issue open.
+
+        Confirming only *launches* the config-entry reauth flow; the stored
+        credentials are not renewed yet at this point. Returning
+        ``async_create_entry`` would make Home Assistant's repairs manager
+        delete the issue immediately -- only a non-``ABORT`` result triggers the
+        delete (see ``homeassistant.components.repairs.issue_handler``). That is
+        unsafe here: the supervisor reaches this repair at its *terminal*
+        give-up points, and the 401/404 exhaustion paths ``break`` out of the
+        loop, so the supervisor will not re-raise the issue on its own. If the
+        user then cancels or fails the reauth flow, both this issue and the core
+        ``config_entry_reauth`` issue (removed by ``async_flow_removed``) would
+        vanish, stranding the account with no guidance.
+
+        Returning ``async_abort`` keeps the issue. Its real resolution is owned
+        by the supervisor's success path, which deletes
+        ``fcm_reauth_required_{entry_id}`` on the next successful FCM
+        (re-)registration once reauth has renewed credentials and reloaded the
+        entry (see ``Auth/fcm_receiver_ha.py``).
+        """
         if user_input is not None:
             self._async_start_reauth()
-            return self.async_create_entry(title="", data={})
+            return self.async_abort(reason="reauth_started")
 
         return self.async_show_form(
             step_id="confirm", data_schema=vol.Schema({})
