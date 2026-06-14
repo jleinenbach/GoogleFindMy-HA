@@ -331,6 +331,58 @@ async def test_register_clears_latched_fatal_error(
 
 
 @pytest.mark.asyncio
+async def test_register_success_skips_routing_writes_for_tombstoned_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration attempt that finishes after the entry was torn down must
+    not resurrect token routing for the tombstoned entry (AP4 teardown race).
+
+    The routing writes RE-CREATE the per-entry state ``_purge_entry_tokens``
+    just removed, so they must be skipped while the entry is tombstoned. The
+    fatal/repair clears only REMOVE state, so they stay teardown-safe and still
+    run, and the attempt still reports success.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-tombstoned"
+    receiver._fatal_errors[entry_id] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+    # The synchronous teardown purged this entry while this in-flight
+    # registration was still running.
+    receiver._unregistered.add(entry_id)
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is True
+    # Routing writes are suppressed for the tombstoned entry...
+    assert token_routes == []
+    assert persisted_tokens == []
+    # ...but the teardown-safe clears still run.
+    assert entry_id not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

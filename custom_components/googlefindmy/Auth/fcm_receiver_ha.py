@@ -1751,7 +1751,14 @@ class FcmReceiverHA:
             if token_or_creds:
                 _LOGGER.info("[entry=%s] FCM registered successfully", entry_id)
                 token = self.get_fcm_token(entry_id)
-                if token:
+                # AP4 race guard: a teardown may have purged this entry while
+                # this registration attempt was in flight. The routing writes
+                # below RE-CREATE per-entry state ``_purge_entry_tokens`` just
+                # removed, so skip them while the entry is tombstoned; without
+                # this guard a successful in-flight (re-)registration would
+                # resurrect routable stale tokens for a removed/reloading entry.
+                # The clears below only REMOVE state and stay teardown-safe.
+                if token and not self._entry_writes_suppressed(entry_id):
                     self._update_token_routing(token, {entry_id})
                     await self._persist_routing_token(entry_id, token)
                 self._clear_fatal_error_for_entry(
