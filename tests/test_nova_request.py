@@ -1119,6 +1119,55 @@ async def test_async_nova_request_pure_4xx_does_not_latch_dispatch(
     assert exc_info.value.dispatched is False
 
 
+@pytest.mark.parametrize("status", [501, 505, 508])
+async def test_async_nova_request_non_retryable_5xx_does_not_latch_dispatch(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """A non-retryable 5xx (501/505/508) must NOT latch dispatch.
+
+    Regression for the Codex follow-up on the AP8 latch: the first cut flipped
+    the latch for *every* ``status >= 500``, but 501 Not Implemented, 505 HTTP
+    Version Not Supported and 508 Loop Detected are documented as permanent
+    config rejections — the server refuses them *before* executing the command,
+    so no device ring can have started. Latching them would let an undispatched
+    failure overwrite the still-valid cancel key of a parallel, possibly still
+    ringing earlier play on the same device. The latch is now scoped to
+    ``HTTP_DISPATCH_LATCH_ELIGIBLE`` (429 + transient 5xx only), so these raise
+    ``NovaHTTPError`` with ``dispatched is False``.
+    """
+
+    cache = _StubCache()
+    session = _DummySession([_DummyResponse(status, b"nope")])
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    with pytest.raises(NovaHTTPError) as exc_info:
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    # Non-retryable 5xx is refused before any side effect: the key must drop.
+    assert exc_info.value.dispatched is False
+    assert len(session.calls) == 1  # single attempt, no retry
+
+
 async def test_async_nova_request_uses_central_total_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
