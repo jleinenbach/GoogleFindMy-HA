@@ -293,7 +293,10 @@ async def test_credential_error_invalidates_tokens_and_bypasses_cap(
 
     # Every credential-error run escalated to re-registration ...
     assert invalidate_mock.await_count == _MAX_CONSECUTIVE_SHORT_RUNS + 2
-    invalidate_mock.assert_awaited_with(entry_id)
+    # AP4 (finding 4b): the supervisor passes its captured generation (0 here,
+    # no teardown occurred) so a superseded run cannot write back invalidated
+    # creds after the tombstone is cleared.
+    invalidate_mock.assert_awaited_with(entry_id, 0)
     # ... and NONE of them tripped the short-run crash cap.
     assert create_issue.call_count == 0
     assert entry_id not in receiver._fatal_errors

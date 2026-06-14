@@ -490,3 +490,176 @@ async def test_register_keeps_transient_runtime_error_transient() -> None:
 
     assert result is False
     assert entry_id not in receiver._fatal_errors
+
+
+def test_entry_writes_suppressed_generation_and_tombstone() -> None:
+    """``_entry_writes_suppressed`` combines the boolean tombstone with the
+    per-entry generation (finding 4b).
+
+    The tombstone suppresses regardless of generation; a mismatched generation
+    suppresses even without a tombstone; ``None`` falls back to tombstone-only.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-gen"
+
+    # Fresh entry: generation 0 matches, no tombstone -> writes allowed.
+    assert receiver._entry_writes_suppressed(entry_id, 0) is False
+
+    # The tombstone suppresses regardless of the supplied generation.
+    receiver._unregistered.add(entry_id)
+    assert receiver._entry_writes_suppressed(entry_id, 0) is True
+    receiver._unregistered.discard(entry_id)
+
+    # A teardown bumped the generation; a stale supervisor (captured 0) is
+    # suppressed even though the tombstone was cleared by the reload.
+    receiver._entry_generation[entry_id] = 1
+    assert receiver._entry_writes_suppressed(entry_id, 0) is True
+    # The current incarnation (captured 1) writes again.
+    assert receiver._entry_writes_suppressed(entry_id, 1) is False
+    # Callers without a captured generation get tombstone-only behaviour.
+    assert receiver._entry_writes_suppressed(entry_id, None) is False
+
+
+@pytest.mark.asyncio
+async def test_register_success_skips_routing_writes_for_superseded_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration attempt from a superseded supervisor must not resurrect
+    routing even after the boolean tombstone was cleared by a reload (finding 4b).
+
+    This is the gap left by the tombstone-only guard: ``request_stop`` cancels
+    the old supervisor without awaiting it, and ``register_coordinator`` clears
+    ``_unregistered`` for the new incarnation, so only the generation keeps the
+    stale supervisor's success-path writes suppressed.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-superseded"
+    # Teardown bumped the generation; the reload then cleared the tombstone.
+    receiver._entry_generation[entry_id] = 1
+    assert entry_id not in receiver._unregistered
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    # Stale supervisor captured generation 0; current is 1 -> writes suppressed.
+    result = await receiver._register_for_fcm_entry(entry_id, 0)
+    assert result is True
+    assert token_routes == []
+    assert persisted_tokens == []
+
+    # The current incarnation (generation 1) still writes routing.
+    result_current = await receiver._register_for_fcm_entry(entry_id, 1)
+    assert result_current is True
+    assert token_routes == [("token-123", {entry_id})]
+    assert persisted_tokens == [(entry_id, "token-123")]
+
+
+def test_unregister_bumps_generation_and_suppresses_old_supervisor() -> None:
+    """A real removal bumps the entry generation so a supervisor that captured
+    the prior value stays suppressed once the tombstone is cleared (finding 4b).
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-bumped"
+    coordinator = SimpleNamespace(
+        config_entry=make_config_entry(entry_id=entry_id), cache=None
+    )
+    receiver.coordinators.append(coordinator)
+
+    # A supervisor for this entry captured generation 0 before the teardown.
+    assert receiver._entry_generation.get(entry_id, 0) == 0
+
+    receiver.unregister_coordinator(coordinator)
+
+    # Teardown tombstoned the entry and bumped the generation.
+    assert entry_id in receiver._unregistered
+    assert receiver._entry_generation[entry_id] == 1
+    # Simulate the reload clearing the tombstone; the old supervisor (gen 0)
+    # must remain suppressed purely by generation.
+    receiver._unregistered.discard(entry_id)
+    assert receiver._entry_writes_suppressed(entry_id, 0) is True
+    assert receiver._entry_writes_suppressed(entry_id, 1) is False
+
+
+def test_purge_entry_debounce_drops_entry_from_foreign_target_set() -> None:
+    """A flush keyed by another source entry that also targets the purged entry
+    must drop the purged entry from its target set while keeping the flush for
+    the remaining recipients (Codex follow-up, finding for shared targets).
+    """
+    receiver = FcmReceiverHA()
+    source = "entry-source"
+    victim = "entry-victim"
+    other = "entry-other"
+    key = (source, "device-1")
+    receiver._pending[key] = {"latitude": 1.0}
+    receiver._pending_targets[key] = {source, victim, other}
+
+    receiver._purge_entry_debounce(victim)
+
+    # Victim removed from the foreign target set; flush kept for the rest.
+    assert receiver._pending_targets[key] == {source, other}
+    assert key in receiver._pending
+
+
+@pytest.mark.asyncio
+async def test_purge_entry_debounce_cancels_orphaned_flush_when_targets_empty() -> None:
+    """When the purged entry is the sole recipient of a foreign-keyed flush, the
+    whole flush is cancelled and dropped (an empty target set would otherwise
+    fan out to no one and leak).
+    """
+    receiver = FcmReceiverHA()
+    source = "entry-source"
+    victim = "entry-victim"
+    key = (source, "device-1")
+    receiver._pending[key] = {"latitude": 1.0}
+    receiver._pending_targets[key] = {victim}
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_never())
+    receiver._flush_tasks[key] = task
+
+    receiver._purge_entry_debounce(victim)
+
+    assert key not in receiver._pending_targets
+    assert key not in receiver._pending
+    assert key not in receiver._flush_tasks
+    # Let the cancellation settle, then confirm the orphaned flush was cancelled.
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+def test_purge_entry_debounce_leaves_broadcast_targets() -> None:
+    """Broadcast fallbacks (target set is ``None``) are device-scoped, not
+    entry-scoped, so a purge must leave them untouched.
+    """
+    receiver = FcmReceiverHA()
+    source = "entry-source"
+    victim = "entry-victim"
+    key = (source, "device-1")
+    receiver._pending[key] = {"latitude": 1.0}
+    receiver._pending_targets[key] = None
+
+    receiver._purge_entry_debounce(victim)
+
+    assert key in receiver._pending_targets
+    assert receiver._pending_targets[key] is None
