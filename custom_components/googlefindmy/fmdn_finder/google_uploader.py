@@ -265,7 +265,10 @@ async def _try_grpc_upload(
         RuntimeError: If grpclib not available
         ValueError: If upload fails
     """
-    from ..SpotApi.spot_grpc_transport import SpotGrpcTransport  # noqa: PLC0415
+    from ..SpotApi.spot_grpc_transport import (  # noqa: PLC0415
+        SpotGrpcTransport,
+        is_ssl_transport_teardown_error,
+    )
     from ..SpotApi.spot_request import (  # noqa: PLC0415
         SpotGrpcStatusError,
         _pick_auth_token_async,
@@ -304,6 +307,19 @@ async def _try_grpc_upload(
         # UNIMPLEMENTED likely means missing attestation, not wrong endpoint
         raise SpotGrpcStatusError(
             f"gRPC error: {status_name} (likely missing DroidGuard attestation)"
+        ) from err
+
+    except AttributeError as err:
+        # AP9 (Befund 6a): same asyncio SSL-transport teardown race as
+        # async_spot_request. This is a per-call transport with no retry loop
+        # (and the upload path is disabled without DroidGuard attestation), so
+        # classify it like the other connection failures instead of letting the
+        # raw AttributeError escape. Any other AttributeError is a real bug and
+        # is re-raised.
+        if not is_ssl_transport_teardown_error(err):
+            raise
+        raise ValueError(
+            f"Connection to {server} failed (SSL transport teardown): {err}"
         ) from err
 
     except (OSError, ConnectionError, TimeoutError) as err:

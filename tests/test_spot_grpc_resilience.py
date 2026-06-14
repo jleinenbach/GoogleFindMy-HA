@@ -235,6 +235,90 @@ async def test_protocol_error_triggers_reset(monkeypatch: pytest.MonkeyPatch) ->
     transport.reset.assert_awaited_once()
 
 
+_SSL_TEARDOWN_ERR = AttributeError(
+    "'NoneType' object has no attribute '_write_appdata'"
+)
+
+
+@pytest.mark.asyncio
+async def test_ssl_teardown_error_resets_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP9 (Befund 6a): the SSL-transport teardown race resets and retries.
+
+    grpclib writing to a detached SSL transport raises
+    ``AttributeError('... _write_appdata')`` from asyncio.sslproto. The new
+    handler must treat it like the other transient transport errors: reset the
+    (possibly poisoned) channel and retry within budget.
+    """
+    plan: list[Exception | bytes | None] = [_SSL_TEARDOWN_ERR, b"reply"]
+    _install_stub_method(monkeypatch, plan)
+    transport = AsyncMock()
+    transport.get_channel = AsyncMock(return_value=object())
+    transport.reset = AsyncMock()
+    cache = _DummyCache()
+
+    result = await spot_request_module.async_spot_request(
+        "Scope",
+        b"payload",
+        cache=cache,
+        transport=transport,  # type: ignore[arg-type]
+    )
+
+    assert result == b"reply"
+    transport.reset.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ssl_teardown_error_exhausts_to_network_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP9: a persistent teardown race converts to SpotNetworkError after retries."""
+    plan: list[Exception | bytes | None] = [_SSL_TEARDOWN_ERR]
+    _install_stub_method(monkeypatch, plan)
+    transport = AsyncMock()
+    transport.get_channel = AsyncMock(return_value=object())
+    transport.reset = AsyncMock()
+    cache = _DummyCache()
+
+    with pytest.raises(spot_request_module.SpotNetworkError):
+        await spot_request_module.async_spot_request(
+            "Scope",
+            b"payload",
+            cache=cache,
+            transport=transport,  # type: ignore[arg-type]
+        )
+
+    assert transport.reset.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_non_teardown_attribute_error_is_reraised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP9 (Wächter B): an unrelated AttributeError must NOT be masked.
+
+    The discriminator only matches the asyncio ``_write_appdata`` signature;
+    any other AttributeError is a genuine bug and is re-raised without a reset.
+    """
+    plan: list[Exception | bytes | None] = [AttributeError("totally unrelated")]
+    _install_stub_method(monkeypatch, plan)
+    transport = AsyncMock()
+    transport.get_channel = AsyncMock(return_value=object())
+    transport.reset = AsyncMock()
+    cache = _DummyCache()
+
+    with pytest.raises(AttributeError, match="totally unrelated"):
+        await spot_request_module.async_spot_request(
+            "Scope",
+            b"payload",
+            cache=cache,
+            transport=transport,  # type: ignore[arg-type]
+        )
+
+    assert transport.reset.await_count == 0
+
+
 def test_polling_path_translates_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """SpotAuthPermanentError from the API should surface as ConfigEntryAuthFailed."""
 

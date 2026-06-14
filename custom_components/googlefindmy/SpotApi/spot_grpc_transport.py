@@ -7,7 +7,28 @@ from typing import Final
 from grpclib.client import Channel
 from grpclib.encoding.base import CodecBase
 
-__all__ = ["RawCodec", "SpotGrpcTransport", "SPOT_GRPC_TRANSPORT"]
+__all__ = [
+    "RawCodec",
+    "SpotGrpcTransport",
+    "SPOT_GRPC_TRANSPORT",
+    "is_ssl_transport_teardown_error",
+]
+
+
+def is_ssl_transport_teardown_error(exc: BaseException) -> bool:
+    """Return True for the asyncio SSL-transport teardown race (AP9, Befund 6a).
+
+    During a connection teardown there is a narrow window in which asyncio has
+    already detached the SSL transport (``_SSLProtocolTransport._ssl_protocol``
+    is ``None``) but grpclib's ``handler.connection_lost`` flag is not set yet.
+    A write that lands in that window raises
+    ``AttributeError: 'NoneType' object has no attribute '_write_appdata'`` from
+    deep inside ``asyncio.sslproto`` — code we do not own, so we cannot attach a
+    custom exception type at the throw site. Isolating the fragile asyncio
+    signature in this single predicate is the legitimate boundary discriminator:
+    every other ``AttributeError`` is a real bug and must propagate.
+    """
+    return isinstance(exc, AttributeError) and "_write_appdata" in str(exc)
 
 
 class RawCodec(CodecBase):
