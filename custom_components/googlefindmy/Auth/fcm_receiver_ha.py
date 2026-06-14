@@ -440,6 +440,13 @@ class FcmReceiverHA:
         condition is gone (e.g. user re-registers credentials and FCM starts
         successfully again).
 
+        On a hard-reset teardown (``force=True``) the entry-scoped *fixable*
+        reauth repairs (``fcm_reauth_required_{entry_id}`` and the legacy
+        ``fcm_stuck_{entry_id}``) are retired as well. They are normally
+        deleted by the supervisor success path, but once the entry is gone no
+        supervisor will run again, so the orphaned repair would otherwise stay
+        pinned in the Repairs panel for a config entry that no longer exists.
+
         Defense 2 iter-8 (Codex second finding): a successful FCM
         re-registration is NOT a recovery proof for the short-run crash cap.
         While ``_short_run_cap_latched`` contains *entry_id* this method must
@@ -523,15 +530,44 @@ class FcmReceiverHA:
         if removed:
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
 
-        if self._hass is not None:
+        self._delete_repair_issues_for_entry(entry_id, teardown=force)
+
+    def _delete_repair_issues_for_entry(
+        self, entry_id: str, *, teardown: bool
+    ) -> None:
+        """Retire the entry-scoped Repairs issues for a cleared/torn-down entry.
+
+        Always deletes the Defense 2 short-run-crash-loop issue, which is the
+        DELETE half of its CREATE/DELETE pair with the fatal-error map.
+
+        On a hard-reset teardown (``teardown=True``) it additionally retires
+        the *fixable* reauth repairs (``fcm_reauth_required_{entry_id}`` and the
+        legacy ``fcm_stuck_{entry_id}``). Those are normally deleted by the
+        supervisor success path, but once the entry is gone no supervisor will
+        run again, so the orphaned fixable repair would otherwise stay pinned in
+        the Repairs panel for a config entry that no longer exists. Non-teardown
+        recovery clears (credentials updated) keep relying on the success-path
+        delete and leave those issues untouched.
+
+        All deletions are best-effort UI cleanup; failures are logged and
+        swallowed so a registry hiccup never blocks the in-memory state reset.
+        """
+        if self._hass is None:
+            return
+
+        issue_ids = [f"fcm_short_run_crash_loop_{entry_id}"]
+        if teardown:
+            issue_ids.append(f"fcm_reauth_required_{entry_id}")
+            issue_ids.append(f"fcm_stuck_{entry_id}")
+
+        for issue_id in issue_ids:
             try:
-                ir.async_delete_issue(
-                    self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
-                )
+                ir.async_delete_issue(self._hass, DOMAIN, issue_id)
             except Exception:  # noqa: BLE001 - best-effort UI cleanup
                 _LOGGER.debug(
-                    "[entry=%s] Failed to delete short-run repair issue",
+                    "[entry=%s] Failed to delete repair issue %s",
                     entry_id,
+                    issue_id,
                     exc_info=True,
                 )
 

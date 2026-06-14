@@ -541,6 +541,57 @@ def test_unload_clears_fatal_errors_via_force() -> None:
     assert receiver._fatal_error is None
 
 
+def test_force_teardown_deletes_orphaned_reauth_repairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Teardown (force=True) retires ALL entry-scoped FCM repair issues.
+
+    Codex finding (PR #1104): on entry removal the success-path delete in the
+    supervisor loop can no longer fire, so the fixable ``fcm_reauth_required``
+    repair (and the legacy ``fcm_stuck``) would otherwise stay pinned in the
+    Repairs panel for a config entry that no longer exists. The teardown clear
+    must delete them alongside the ``fcm_short_run_crash_loop`` issue, mirroring
+    the supervisor success-path delete set.
+    """
+    entry_id = "entry-teardown"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    _create_issue, delete_issue = _install_ir_capture(monkeypatch)
+
+    receiver._clear_fatal_error_for_entry(
+        entry_id, reason="Entry unregistered", force=True
+    )
+
+    deleted = {call.args[2] for call in delete_issue.call_args_list}
+    assert f"fcm_short_run_crash_loop_{entry_id}" in deleted
+    assert f"fcm_reauth_required_{entry_id}" in deleted
+    assert f"fcm_stuck_{entry_id}" in deleted
+
+
+def test_non_teardown_clear_leaves_reauth_repair_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovery clear (force=False) must NOT delete the reauth repairs.
+
+    Non-teardown clears (credentials updated, registration success) rely on the
+    supervisor success path to retire ``fcm_reauth_required`` / ``fcm_stuck``;
+    deleting them here would dismiss a still-valid reauth prompt before the
+    supervisor has actually re-registered successfully. Only the short-run
+    issue (the DELETE half of the fatal-error CREATE/DELETE pair) is cleared.
+    """
+    entry_id = "entry-recovery"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    _create_issue, delete_issue = _install_ir_capture(monkeypatch)
+
+    receiver._clear_fatal_error_for_entry(entry_id, reason="Credentials updated")
+
+    deleted = {call.args[2] for call in delete_issue.call_args_list}
+    assert f"fcm_short_run_crash_loop_{entry_id}" in deleted
+    assert f"fcm_reauth_required_{entry_id}" not in deleted
+    assert f"fcm_stuck_{entry_id}" not in deleted
+
+
 # --------------------------------------------------------------------------
 # Defense 2 iter-8: cap-latch lifecycle (Codex second finding)
 # --------------------------------------------------------------------------
