@@ -599,8 +599,8 @@ async def test_invalidate_fcm_tokens_drops_corrupt_gcm_identity() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad_security_token",
-    ["sec-tok", ["1", "2"], {"x": 1}, True],
-    ids=["non-numeric-str", "list", "dict", "bool"],
+    ["sec-tok", ["1", "2"], {"x": 1}, True, float("inf"), float("-inf")],
+    ids=["non-numeric-str", "list", "dict", "bool", "inf", "-inf"],
 )
 async def test_invalidate_fcm_tokens_drops_malformed_gcm_identity(
     bad_security_token: object,
@@ -609,11 +609,13 @@ async def test_invalidate_fcm_tokens_drops_malformed_gcm_identity(
 
     Regression for the Codex follow-up: ``reregister_keeping_identity()`` runs
     ``int(security_token)`` only after a truthiness gate, so a truthy value that
-    is not ``int()``-convertible (a non-numeric string, a list, a dict, or a
-    bool) passes the gate but raises ``ValueError``/``TypeError`` on every
-    retry. The earlier truthiness-only predicate preserved such a block and the
-    supervisor looped forever. The hardened predicate now drops the whole
-    ``gcm`` block so the next attempt does a full ``checkin_or_register()``.
+    is not ``int()``-convertible passes the gate but raises on every retry —
+    ``ValueError``/``TypeError`` for a non-numeric string, list, dict or bool,
+    and ``OverflowError`` for a float infinity (JSON ``1e309`` / ``Infinity``).
+    The earlier predicate preserved such a block and the supervisor looped
+    forever (or, for infinity, ``_invalidate_fcm_tokens`` itself raised and
+    stopped the supervisor). The hardened predicate now drops the whole ``gcm``
+    block so the next attempt does a full ``checkin_or_register()``.
     """
     receiver = FcmReceiverHA()
     entry_id = "entry-malformed-identity"

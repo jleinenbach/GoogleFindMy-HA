@@ -1604,14 +1604,17 @@ class FcmReceiverHA:
         ``int(android_id)`` / ``int(security_token)``). A truthy-but-malformed
         value — e.g. a non-numeric string ``"sec-tok"`` or a list — passes the
         truthiness gate but raises ``ValueError``/``TypeError`` on ``int()``,
-        trapping the supervisor in the same retry loop. ``bool`` is rejected
-        explicitly: it is an ``int`` subclass but never a real device identity.
+        trapping the supervisor in the same retry loop. A corrupted payload may
+        also carry a float infinity (``1e309`` / ``Infinity`` in JSON), which is
+        truthy and not a bool but raises ``OverflowError`` on ``int()`` — the
+        same trap, so it is rejected here too. ``bool`` is rejected explicitly:
+        it is an ``int`` subclass but never a real device identity.
         """
         if not value or isinstance(value, bool):
             return False
         try:
             int(value)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             return False
         return True
 
