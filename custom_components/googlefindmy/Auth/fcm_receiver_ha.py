@@ -1070,7 +1070,18 @@ class FcmReceiverHA:
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
 
-        stop_evt = self._stop_evts.setdefault(entry_id, asyncio.Event())
+        # AP5 (Befund 4b): a prior stop (request_stop on unload, or the cap
+        # teardown) leaves the entry's event *set* without installing a fresh
+        # one. The old ``setdefault`` then handed that set event to the new
+        # supervisor, whose ``while not stop_evt.is_set()`` exited immediately
+        # (wedged restart after a reload). Replace the event only when it is
+        # missing or already set; a still-unset event is kept so a deliberately
+        # pre-installed one (and the still-running old supervisor, which holds
+        # its own reference) keeps working.
+        stop_evt = self._stop_evts.get(entry_id)
+        if stop_evt is None or stop_evt.is_set():
+            stop_evt = asyncio.Event()
+            self._stop_evts[entry_id] = stop_evt
 
         async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
             nudge_evt = self._retry_nudge_evts.setdefault(
@@ -1737,18 +1748,59 @@ class FcmReceiverHA:
             # retry budget (with _invalidate_fcm_tokens) runs.
             self._raise_if_fatal_http_error(entry_id, err)
             return False
-        except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
-            # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
-            # are logged at info level; other exceptions at error level.
-            if isinstance(err, (TimeoutError, RuntimeError)):
-                _LOGGER.info(
-                    "[entry=%s] FCM registration failed (transient): %s - will retry",
-                    entry_id,
-                    err,
-                )
-            else:
-                _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
+        except Exception as err:  # noqa: BLE001
+            # AP6 (Befund 3a): the previous combined
+            # ``(TimeoutError, RuntimeError, Exception)`` made the specific types
+            # redundant and treated every non-fatal error the same. Delegate the
+            # classification to a dedicated helper (extract-method keeps this
+            # function under PLR0911 and makes the rule unit-testable) and return
+            # a single non-fatal result. Fatal paths
+            # (FatalRegistrationError / ClientError / FcmRegisterHTTPError) are
+            # handled above and never reach here.
+            await self._classify_registration_exception(entry_id, err)
             return False
+
+    async def _classify_registration_exception(
+        self, entry_id: str, err: BaseException
+    ) -> None:
+        """Classify a non-fatal registration exception (AP6, Befund 3a).
+
+        Splits the formerly conflated catch-all into three honest classes:
+
+        * ``TimeoutError`` / ``RuntimeError`` — genuinely transient (network
+          timeout, or firebase_messaging "...token missing..."); just retry.
+        * ``KeyError`` / ``ValueError`` / ``TypeError`` — structural credential
+          corruption (``reregister_keeping_identity()`` /
+          ``checkin_or_register()`` raise ``KeyError`` on corrupt
+          ``credentials["gcm"][...]`` and ``ValueError``/``TypeError`` on
+          malformed/JSON-broken creds; ``json.JSONDecodeError`` is a
+          ``ValueError``). NOT transient: retrying replays the same broken creds
+          forever with no visible fatal state. Escalate by invalidating the FCM
+          tokens (GCM device identity preserved) so the next attempt performs a
+          fresh handshake. Conservative: only these well-defined types.
+        * anything else — unexpected; logged at error (not silently swallowed as
+          benign) but left non-fatal so a single surprise cannot crash the
+          supervisor.
+        """
+        if isinstance(err, (TimeoutError, RuntimeError)):
+            _LOGGER.info(
+                "[entry=%s] FCM registration failed (transient): %s - will retry",
+                entry_id,
+                err,
+            )
+        elif isinstance(err, (KeyError, ValueError, TypeError)):
+            _LOGGER.error(
+                "[entry=%s] FCM registration hit corrupt credentials (%s): %s "
+                "- invalidating FCM tokens to force re-registration",
+                entry_id,
+                type(err).__name__,
+                err,
+            )
+            await self._invalidate_fcm_tokens(entry_id)
+        else:
+            _LOGGER.error(
+                "[entry=%s] FCM registration unexpected error: %s", entry_id, err
+            )
 
     # Public entrypoint kept for back-compat (starts supervisors lazily if needed)
     async def _start_listening(self) -> None:
