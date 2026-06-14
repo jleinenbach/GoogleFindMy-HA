@@ -48,14 +48,18 @@ class _DummyBus:
 
 
 class _DummyConfigEntries:
-    """Stub Home Assistant config_entries manager."""
+    """Stub Home Assistant config_entries manager.
+
+    The real ``ConfigEntries`` manager exposes no ``async_start_reauth``
+    helper -- reauth is entry-scoped via ``ConfigEntry.async_start_reauth``.
+    The stub therefore deliberately omits it: a stray production call to
+    ``hass.config_entries.async_start_reauth(...)`` raises ``AttributeError``
+    here exactly as it would at runtime, instead of being silently recorded
+    by a fictional method.
+    """
 
     def __init__(self) -> None:
-        self.calls: list[object] = []
         self.setup_calls: list[str] = []
-
-    async def async_start_reauth(self, entry: object) -> None:
-        self.calls.append(entry)
 
     def async_get_subentries(self, _entry_id: str) -> list[Any]:
         return []
@@ -188,8 +192,12 @@ def test_api_auth_error_preserves_fcm_status(
 
     assert coordinator.api_status.state == ApiStatus.REAUTH
     assert coordinator.fcm_status.state == FcmStatus.CONNECTED
+    # The coordinator must not start reauth manually; it relies on HA's
+    # automatic reauth triggered by raising ConfigEntryAuthFailed. Only the
+    # entry-level call exists in the real API, so that is what we guard. The
+    # manager has no async_start_reauth, so a stray manager call would raise
+    # AttributeError above instead of passing silently.
     assert coordinator.config_entry.reauth_calls == 0
-    assert coordinator.hass.config_entries.calls == []
     assert "Invalid" in (coordinator.api_status.reason or "")
 
 
