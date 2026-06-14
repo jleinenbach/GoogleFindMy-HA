@@ -140,6 +140,45 @@ async def test_post_dispatch_ambiguous_play_caches_uuid() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_play_does_not_overwrite_known_cancel_key() -> None:
+    """An ambiguous new Play must not clobber a known-good cancel key.
+
+    Codex regression (PR #1106, follow-up): a device is already ringing from an
+    earlier accepted Play whose cancel key is cached. A *new* Play attempt hits a
+    transient 5xx that may have been generated before Nova accepted the command,
+    so api.async_play_sound returns ``(False, <new-uuid>)`` — ok is False but a
+    fresh UUID is present. Storing every non-null UUID would overwrite the
+    known-good key for the still-ringing earlier play, making the default Stop
+    target the wrong request. The storing rule (overwrite only on ok=True or an
+    empty slot) keeps the cached key intact while still flagging the transport
+    problem.
+    """
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    # Earlier accepted Play cached a valid cancel key for this device.
+    coordinator._sound_request_uuids = {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
+    coordinator.can_play_sound = lambda _device_id: True  # type: ignore[assignment]
+    transport_problems: list[bool] = []
+    coordinator._note_push_transport_problem = (  # type: ignore[attr-defined]
+        lambda: transport_problems.append(True)
+    )
+    coordinator._set_auth_state = lambda **kwargs: None  # type: ignore[attr-defined]
+
+    async def _async_play_sound(device_id: str) -> tuple[bool, str | None]:
+        # Ambiguous transient 5xx: not accepted (ok=False), fresh UUID present.
+        return False, "uuid-ambiguous-new"
+
+    coordinator.api = SimpleNamespace(async_play_sound=_async_play_sound)  # type: ignore[attr-defined]
+
+    result = await coordinator.async_play_sound("device-1")
+
+    assert result is False
+    # The known-good cancel key survives; the ambiguous UUID is discarded.
+    assert coordinator._sound_request_uuids == {"device-1": "uuid-ringing"}  # type: ignore[attr-defined]
+    assert transport_problems == [True]
+
+
+@pytest.mark.asyncio
 async def test_async_stop_sound_uses_cached_uuid() -> None:
     """Stop sound should look up a cached UUID when none is provided."""
 
