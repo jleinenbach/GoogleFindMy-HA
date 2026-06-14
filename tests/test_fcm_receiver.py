@@ -451,7 +451,7 @@ async def test_register_keeps_transient_runtime_error_transient() -> None:
 async def test_supervisor_restart_installs_fresh_stop_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP5 (Befund 4b): a re-setup must not inherit a leftover *set* stop event.
+    """AP5 (finding 4b): a re-setup must not inherit a leftover *set* stop event.
 
     ``request_stop`` sets the entry's event without installing a fresh one. The
     old ``setdefault`` in ``_start_supervisor_for_entry`` then handed that set
@@ -499,7 +499,7 @@ async def test_supervisor_restart_installs_fresh_stop_event(
 async def test_register_invalidates_tokens_on_corrupt_creds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP6 (Befund 3a): a KeyError (corrupt creds) escalates via token invalidation."""
+    """AP6 (finding 3a): a KeyError (corrupt creds) escalates via token invalidation."""
     receiver = FcmReceiverHA()
     entry_id = "entry-corrupt"
 
@@ -535,8 +535,10 @@ async def test_invalidate_fcm_tokens_preserves_complete_gcm_identity() -> None:
     entry_id = "entry-complete-identity"
     receiver.creds[entry_id] = {
         "gcm": {
+            # Both fields are int()-convertible (an int and a numeric string),
+            # exactly what reregister_keeping_identity() can consume.
             "android_id": 1234567890123456,
-            "security_token": "sec-tok",
+            "security_token": "9876543210987654",
             "token": "gcm-tok",
             "app_id": "app-1",
         },
@@ -551,7 +553,7 @@ async def test_invalidate_fcm_tokens_preserves_complete_gcm_identity() -> None:
     assert "keys" not in creds
     gcm = creds["gcm"]
     assert gcm["android_id"] == 1234567890123456
-    assert gcm["security_token"] == "sec-tok"
+    assert gcm["security_token"] == "9876543210987654"
     assert "token" not in gcm  # renewable gcm token stripped
     assert "app_id" not in gcm
 
@@ -583,13 +585,60 @@ async def test_invalidate_fcm_tokens_drops_corrupt_gcm_identity() -> None:
     assert "gcm" not in creds
     assert "fcm" not in creds
     assert "keys" not in creds
-    # And the predicate that drives the decision is honest about both shapes.
+    # And the predicate that drives the decision is honest about both shapes:
+    # a missing field is incomplete; both int()-convertible fields are complete.
     assert FcmReceiverHA._gcm_identity_is_complete({"android_id": 1}) is False
     assert (
         FcmReceiverHA._gcm_identity_is_complete(
-            {"android_id": 1, "security_token": "s"}
+            {"android_id": 1, "security_token": "2"}
         )
         is True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_security_token",
+    ["sec-tok", ["1", "2"], {"x": 1}, True],
+    ids=["non-numeric-str", "list", "dict", "bool"],
+)
+async def test_invalidate_fcm_tokens_drops_malformed_gcm_identity(
+    bad_security_token: object,
+) -> None:
+    """A truthy-but-non-numeric GCM identity is dropped, not preserved.
+
+    Regression for the Codex follow-up: ``reregister_keeping_identity()`` runs
+    ``int(security_token)`` only after a truthiness gate, so a truthy value that
+    is not ``int()``-convertible (a non-numeric string, a list, a dict, or a
+    bool) passes the gate but raises ``ValueError``/``TypeError`` on every
+    retry. The earlier truthiness-only predicate preserved such a block and the
+    supervisor looped forever. The hardened predicate now drops the whole
+    ``gcm`` block so the next attempt does a full ``checkin_or_register()``.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-malformed-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            "android_id": 1234567890123456,
+            "security_token": bad_security_token,
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    # Malformed identity cannot be re-registered -> whole block must be dropped.
+    assert "gcm" not in creds
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    # The predicate is the single source of that decision.
+    assert (
+        FcmReceiverHA._gcm_identity_is_complete(
+            {"android_id": 1234567890123456, "security_token": bad_security_token}
+        )
+        is False
     )
 
 
@@ -597,7 +646,7 @@ async def test_invalidate_fcm_tokens_drops_corrupt_gcm_identity() -> None:
 async def test_register_unexpected_error_is_non_fatal_without_invalidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP6 (Befund 3a): an unexpected error stays non-fatal and does NOT invalidate."""
+    """AP6 (finding 3a): an unexpected error stays non-fatal and does NOT invalidate."""
     receiver = FcmReceiverHA()
     entry_id = "entry-weird"
 
@@ -627,7 +676,7 @@ async def test_register_unexpected_error_is_non_fatal_without_invalidate(
 async def test_classify_registration_exception_branches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP6 (Befund 3a): the classification helper routes each error class."""
+    """AP6 (finding 3a): the classification helper routes each error class."""
     receiver = FcmReceiverHA()
     entry_id = "entry-classify"
 

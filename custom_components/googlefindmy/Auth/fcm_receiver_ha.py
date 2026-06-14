@@ -1070,7 +1070,7 @@ class FcmReceiverHA:
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
 
-        # AP5 (Befund 4b): a prior stop (request_stop on unload, or the cap
+        # AP5 (finding 4b): a prior stop (request_stop on unload, or the cap
         # teardown) leaves the entry's event *set* without installing a fresh
         # one. The old ``setdefault`` then handed that set event to the new
         # supervisor, whose ``while not stop_evt.is_set()`` exited immediately
@@ -1596,19 +1596,44 @@ class FcmReceiverHA:
         _LOGGER.info("Started FCM supervisor for entry %s", entry_id)
 
     @staticmethod
-    def _gcm_identity_is_complete(gcm: dict[str, Any]) -> bool:
+    def _is_reregisterable_id(value: Any) -> bool:
+        """Return True when ``value`` survives the reregister path's ``int()``.
+
+        ``FcmRegister._get_checkin_payload`` re-uses a cached identity only when
+        both fields are truthy *and* ``int()``-convertible (it runs
+        ``int(android_id)`` / ``int(security_token)``). A truthy-but-malformed
+        value — e.g. a non-numeric string ``"sec-tok"`` or a list — passes the
+        truthiness gate but raises ``ValueError``/``TypeError`` on ``int()``,
+        trapping the supervisor in the same retry loop. ``bool`` is rejected
+        explicitly: it is an ``int`` subclass but never a real device identity.
+        """
+        if not value or isinstance(value, bool):
+            return False
+        try:
+            int(value)
+        except (ValueError, TypeError):
+            return False
+        return True
+
+    @classmethod
+    def _gcm_identity_is_complete(cls, gcm: dict[str, Any]) -> bool:
         """Return True when a GCM block carries a re-registerable identity.
 
         ``FcmRegister.reregister_keeping_identity()`` subscripts
         ``credentials["gcm"]["android_id"]`` and ``["security_token"]`` *without*
         guarding (and only falls back to a full register when the ``gcm`` key is
         entirely absent). A partial block — e.g. an ``android_id`` with no
-        ``security_token`` — therefore raises ``KeyError`` on every retry. Only a
-        block carrying both non-empty values can be preserved across an FCM-token
-        invalidation; anything else must be dropped so the next attempt performs
-        a full fresh handshake instead of looping on the same broken identity.
+        ``security_token`` — raises ``KeyError`` on every retry, and a block
+        whose values are present but not ``int()``-convertible raises
+        ``ValueError``/``TypeError`` instead (see ``_is_reregisterable_id``).
+        Only a block carrying both ``int()``-convertible values can be preserved
+        across an FCM-token invalidation; anything else must be dropped so the
+        next attempt performs a full fresh handshake instead of looping on the
+        same broken identity.
         """
-        return bool(gcm.get("android_id")) and bool(gcm.get("security_token"))
+        return cls._is_reregisterable_id(gcm.get("android_id")) and cls._is_reregisterable_id(
+            gcm.get("security_token")
+        )
 
     async def _invalidate_fcm_tokens(self, entry_id: str) -> None:
         """Clear renewable FCM tokens, preserving a *usable* GCM identity.
@@ -1782,7 +1807,7 @@ class FcmReceiverHA:
             self._raise_if_fatal_http_error(entry_id, err)
             return False
         except Exception as err:  # noqa: BLE001
-            # AP6 (Befund 3a): the previous combined
+            # AP6 (finding 3a): the previous combined
             # ``(TimeoutError, RuntimeError, Exception)`` made the specific types
             # redundant and treated every non-fatal error the same. Delegate the
             # classification to a dedicated helper (extract-method keeps this
@@ -1796,7 +1821,7 @@ class FcmReceiverHA:
     async def _classify_registration_exception(
         self, entry_id: str, err: BaseException
     ) -> None:
-        """Classify a non-fatal registration exception (AP6, Befund 3a).
+        """Classify a non-fatal registration exception (AP6, finding 3a).
 
         Splits the formerly conflated catch-all into three honest classes:
 
