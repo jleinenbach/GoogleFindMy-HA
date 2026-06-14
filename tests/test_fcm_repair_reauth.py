@@ -210,7 +210,9 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
     flow = repairs.FcmReauthRepairFlow("entry-id")
     flow.hass = hass  # normally injected by the repairs flow manager
 
-    flow._async_start_reauth()
+    # A live entry means the issue must stay open (True) until the supervisor
+    # success path clears it.
+    assert flow._async_start_reauth() is True
 
     entry.async_start_reauth.assert_called_once_with(hass)
 
@@ -257,12 +259,51 @@ async def test_fix_flow_missing_entry_is_noop() -> None:
     flow = repairs.FcmReauthRepairFlow("entry-id")
     flow.hass = hass
 
-    # Must not raise even though the entry cannot be resolved.
-    flow._async_start_reauth()
+    # Must not raise even though the entry cannot be resolved, and must report
+    # the repair as stale (False) so the caller dismisses it.
+    assert flow._async_start_reauth() is False
 
     flow_no_id = repairs.FcmReauthRepairFlow(None)
     flow_no_id.hass = hass
-    flow_no_id._async_start_reauth()
+    assert flow_no_id._async_start_reauth() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry_id", "async_get_entry"),
+    [
+        # Entry id present in the issue data, but the entry was already removed.
+        ("entry-id", lambda entry_id: None),
+        # The issue data never carried an entry id at all.
+        (None, lambda entry_id: None),
+    ],
+)
+async def test_fix_flow_stale_confirm_dismisses_issue(
+    entry_id: str | None, async_get_entry
+) -> None:
+    """T4c-2: confirming a *stale* repair returns CREATE_ENTRY to dismiss it.
+
+    The keep-open ABORT contract only holds while a supervisor can still run for
+    the entry and clear ``fcm_reauth_required_{entry_id}`` on its success path.
+    When the entry is gone (or was never recorded), no supervisor exists to ever
+    clear the entry-scoped issue and reauth can never start. Returning
+    CREATE_ENTRY lets Home Assistant's repairs manager delete the orphaned issue
+    (only ABORT is exempt from that delete) instead of pinning an unfixable
+    repair in the UI forever. This guard fails if production reverts to keeping
+    stale repairs open.
+    """
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(async_get_entry=async_get_entry)
+    )
+    flow = repairs.FcmReauthRepairFlow(entry_id)
+    flow.hass = hass
+    flow.flow_id = "test-flow-id"  # set by the flow manager in production
+    flow.handler = DOMAIN  # set by the flow manager in production
+
+    result = await flow.async_step_confirm(user_input={})
+
+    # CREATE_ENTRY signals the repairs manager to delete the stale issue.
+    assert result["type"] == FlowResultType.CREATE_ENTRY
 
 
 @pytest.mark.asyncio

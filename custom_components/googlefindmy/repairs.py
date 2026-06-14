@@ -43,28 +43,38 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
         ``async_create_entry`` would make Home Assistant's repairs manager
         delete the issue immediately -- only a non-``ABORT`` result triggers the
         delete (see ``homeassistant.components.repairs.issue_handler``). That is
-        unsafe here: the supervisor reaches this repair at its *terminal*
-        give-up points, and the 401/404 exhaustion paths ``break`` out of the
-        loop, so the supervisor will not re-raise the issue on its own. If the
-        user then cancels or fails the reauth flow, both this issue and the core
-        ``config_entry_reauth`` issue (removed by ``async_flow_removed``) would
-        vanish, stranding the account with no guidance.
+        unsafe in the *normal* case: the supervisor reaches this repair at its
+        *terminal* give-up points, and the 401/404 exhaustion paths ``break``
+        out of the loop, so the supervisor will not re-raise the issue on its
+        own. If the user then cancels or fails the reauth flow, both this issue
+        and the core ``config_entry_reauth`` issue (removed by
+        ``async_flow_removed``) would vanish, stranding the account with no
+        guidance.
 
         Returning ``async_abort`` keeps the issue. Its real resolution is owned
         by the supervisor's success path, which deletes
         ``fcm_reauth_required_{entry_id}`` on the next successful FCM
         (re-)registration once reauth has renewed credentials and reloaded the
         entry (see ``Auth/fcm_receiver_ha.py``).
+
+        The keep-open contract only holds while a supervisor can still run for
+        this entry. When the repair is *stale* -- the entry id is missing, or
+        the config entry has already been removed -- no supervisor exists to
+        ever clear this entry-scoped issue, and reauth can never start. In that
+        case ``_async_start_reauth`` reports failure and we deliberately return
+        ``async_create_entry`` so the repairs manager dismisses the orphaned
+        issue instead of leaving an unfixable repair pinned in the UI.
         """
         if user_input is not None:
-            self._async_start_reauth()
-            return self.async_abort(reason="reauth_started")
+            if self._async_start_reauth():
+                return self.async_abort(reason="reauth_started")
+            return self.async_create_entry(data={})
 
         return self.async_show_form(
             step_id="confirm", data_schema=vol.Schema({})
         )
 
-    def _async_start_reauth(self) -> None:
+    def _async_start_reauth(self) -> bool:
         """Start the config-entry reauth flow, defensively.
 
         ``ConfigEntry.async_start_reauth`` is a synchronous ``@callback`` that
@@ -75,15 +85,21 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
         guard below would then swallow while the issue is still dismissed.
 
         ``entry_id`` is used solely as a config-entry registry lookup key; it is
-        never interpreted as a path or executable input. A missing or already
-        removed entry simply dismisses the (now stale) repair without raising.
+        never interpreted as a path or executable input.
+
+        Returns ``True`` when the fixable issue must stay open: either reauth
+        was launched, or it failed transiently for an entry that still exists
+        (the user can retry and the supervisor success path can still clear the
+        issue). Returns ``False`` when the repair is *stale* -- a missing entry
+        id or an already removed config entry -- so the caller dismisses the now
+        unfixable issue instead of pinning it open forever.
         """
         if not self._entry_id:
             _LOGGER.warning(
                 "fcm_reauth_required repair confirmed without an entry_id; "
                 "dismissing stale issue"
             )
-            return
+            return False
 
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
         if entry is None:
@@ -92,7 +108,7 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
                 "gone; dismissing stale issue",
                 self._entry_id,
             )
-            return
+            return False
 
         try:
             entry.async_start_reauth(self.hass)
@@ -102,6 +118,11 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
                 self._entry_id,
                 err,
             )
+            # The entry still exists, so the issue is not stale: keep it open so
+            # the user can retry and the supervisor can still resolve it.
+            return True
+
+        return True
 
 
 async def async_create_fix_flow(
