@@ -1719,7 +1719,7 @@ def test_factory_honours_monkeypatched_fcm_push_client_symbol(
 
 
 def test_purge_entry_tokens_clears_fatal_retry_counts() -> None:
-    """AP1 (Befund 2a): the teardown purge drops both fatal-retry counters."""
+    """AP1 (finding 2a): the teardown purge drops both fatal-retry counters."""
     receiver = FcmReceiverHA()
     eid = "entry-purge-counts"
     receiver._fatal_retry_counts[f"{eid}:auth"] = 4
@@ -1734,7 +1734,7 @@ def test_purge_entry_tokens_clears_fatal_retry_counts() -> None:
 
 
 def test_purge_entry_tokens_clears_entry_health() -> None:
-    """AP2 (Befund 2b): per-entry health snapshots are purged on teardown."""
+    """AP2 (finding 2b): per-entry health snapshots are purged on teardown."""
     receiver = FcmReceiverHA()
     eid = "entry-purge-health"
     receiver._entry_health[eid] = True
@@ -1747,7 +1747,7 @@ def test_purge_entry_tokens_clears_entry_health() -> None:
 
 
 def test_purge_entry_tokens_clears_creds() -> None:
-    """AP3 (Befund 2c): in-memory creds + pending creds are purged on teardown."""
+    """AP3 (finding 2c): in-memory creds + pending creds are purged on teardown."""
     receiver = FcmReceiverHA()
     eid = "entry-purge-creds"
     receiver.creds[eid] = {"gcm": {"token": "x"}}
@@ -1780,7 +1780,7 @@ async def test_reregister_returns_false_after_purge() -> None:
 
 @pytest.mark.asyncio
 async def test_purge_cancels_pending_debounce_flush_tasks() -> None:
-    """AP7 (Befund 2d): pending flush tasks are cancelled and the trias dropped."""
+    """AP7 (finding 2d): pending flush tasks are cancelled and the trias dropped."""
     receiver = FcmReceiverHA()
     eid = "entry-debounce"
     key = (eid, "device-1")
@@ -1817,7 +1817,7 @@ async def test_purge_cancels_pending_debounce_flush_tasks() -> None:
 
 
 def test_unregister_coordinator_tombstones_and_purges() -> None:
-    """AP4 (Befund 4a): unregister tombstones the entry and purges its state."""
+    """AP4 (finding 4a): unregister tombstones the entry and purges its state."""
     receiver = FcmReceiverHA()
     eid = "entry-unreg-tombstone"
     coord = SimpleNamespace(
@@ -1838,7 +1838,7 @@ def test_unregister_coordinator_tombstones_and_purges() -> None:
 def test_register_coordinator_clears_tombstone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP4 (Befund 4a, Wächter B): a setup un-tombstones the entry."""
+    """AP4 (finding 4a, guard B): a setup un-tombstones the entry."""
     receiver = FcmReceiverHA()
     receiver.attach_hass(SimpleNamespace())
     eid = "entry-reload"
@@ -1863,7 +1863,7 @@ def test_register_coordinator_clears_tombstone(
 
 @pytest.mark.asyncio
 async def test_invalidate_fcm_tokens_skipped_when_tombstoned() -> None:
-    """AP4 (Befund 4a): _invalidate_fcm_tokens does not persist for a dead entry."""
+    """AP4 (finding 4a): _invalidate_fcm_tokens does not persist for a dead entry."""
     receiver = FcmReceiverHA()
     eid = "entry-invalidate"
     creds = {"gcm": {"token": "keep"}, "fcm": {"x": 1}}
@@ -1879,7 +1879,7 @@ async def test_invalidate_fcm_tokens_skipped_when_tombstoned() -> None:
 def test_credentials_callback_suppressed_when_tombstoned(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP4 (Befund 4a, Codex follow-up): a late creds callback cannot resurrect.
+    """AP4 (finding 4a, Codex follow-up): a late creds callback cannot resurrect.
 
     The old FCM client is not awaited during ``unregister_coordinator``'s
     synchronous teardown, so it can still fire ``_on_credentials_updated_for_entry``
@@ -1919,7 +1919,7 @@ def test_credentials_callback_suppressed_when_tombstoned(
 async def test_tombstone_suppresses_cap_latch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP4 (Befund 4a, Wächter A): a post-unregister supervisor write is dropped.
+    """AP4 (finding 4a, guard A): a post-unregister supervisor write is dropped.
 
     The short-run cap fires while the entry is tombstoned (it was torn down
     mid-flight). The cap latch, the fatal-error map and the Repairs issue must
@@ -1953,7 +1953,7 @@ async def test_tombstone_suppresses_cap_latch(
 async def test_tombstone_suppresses_fatal_retry_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AP4 (Befund 4a, Wächter A): the fatal-retry counter is not re-created.
+    """AP4 (finding 4a, guard A): the fatal-retry counter is not re-created.
 
     A tombstoned entry hitting the endpoint-404 fatal path must not repopulate
     ``_fatal_retry_counts`` (which the teardown just purged).

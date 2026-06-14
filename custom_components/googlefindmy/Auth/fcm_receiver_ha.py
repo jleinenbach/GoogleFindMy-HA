@@ -423,7 +423,7 @@ class FcmReceiverHA:
         # latch lifetime, even across non-cap fatal overwrites.
         self._short_run_cap_messages: dict[str, str] = {}
 
-        # AP4 (Befund 4a): tombstone set of entry_ids whose synchronous
+        # AP4 (finding 4a): tombstone set of entry_ids whose synchronous
         # teardown (``unregister_coordinator``) has already purged their
         # per-entry state. ``unregister_coordinator`` does not await the
         # still-running supervisor task, which writes per-entry state (fatal
@@ -1821,7 +1821,7 @@ class FcmReceiverHA:
         if entry is None:
             return
 
-        # AP4 (Befund 4a): a setup (initial or reload) un-tombstones the entry
+        # AP4 (finding 4a): a setup (initial or reload) un-tombstones the entry
         # so its supervisor writes take effect again. This is the single reset
         # point: it runs synchronously before the supervisor is (re)dispatched
         # below, and the prior supervisor was already cancelled by request_stop
@@ -1944,7 +1944,7 @@ class FcmReceiverHA:
                 self._entry_caches[entry_id] = replacement
             else:
                 self._entry_caches.pop(entry_id, None)
-                # AP4 (Befund 4a): tombstone the entry BEFORE purging so any
+                # AP4 (finding 4a): tombstone the entry BEFORE purging so any
                 # write from the still-running supervisor task (this method is
                 # synchronous and does not await it) is dropped instead of
                 # re-creating the state purged below. Cleared by
@@ -2788,23 +2788,23 @@ class FcmReceiverHA:
     def _purge_entry_tokens(self, entry_id: str) -> None:
         """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
-        # AP1 (Befund 2a): fatal retry counters are only cleared on the success
+        # AP1 (finding 2a): fatal retry counters are only cleared on the success
         # path (registration ok), so they leak per teardown without this.
         self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
         self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
-        # AP2 (Befund 2b): per-entry health snapshots are written by
+        # AP2 (finding 2b): per-entry health snapshots are written by
         # _update_entry_health but never purged; a stale snapshot makes the
         # first healthy transition after a same-id reload look like a no-change
         # and suppresses its listener push.
         self._entry_health.pop(entry_id, None)
         self._entry_last_connected_wall.pop(entry_id, None)
-        # AP3 (Befund 2c): in-memory creds keep async_reregister_fcm's guard
+        # AP3 (finding 2c): in-memory creds keep async_reregister_fcm's guard
         # (entry_id in self.creds) True after teardown, which can revive a dead
         # entry (zombie supervisor). The on-disk cache is untouched, so a reload
         # reloads creds via _ensure_client_for_entry.
         self.creds.pop(entry_id, None)
         self._pending_creds.pop(entry_id, None)
-        # AP7 (Befund 2d): cancel pending debounce flush tasks and drop their
+        # AP7 (finding 2d): cancel pending debounce flush tasks and drop their
         # payloads so a flush cannot fire at an already-removed coordinator.
         self._purge_entry_debounce(entry_id)
         tokens = self._entry_to_tokens.pop(entry_id, set())
