@@ -423,6 +423,26 @@ class FcmReceiverHA:
         # latch lifetime, even across non-cap fatal overwrites.
         self._short_run_cap_messages: dict[str, str] = {}
 
+        # AP4 (Befund 4a): tombstone set of entry_ids whose synchronous
+        # teardown (``unregister_coordinator``) has already purged their
+        # per-entry state. ``unregister_coordinator`` does not await the
+        # still-running supervisor task, which writes per-entry state (fatal
+        # counts, cap latch, creds) largely outside ``self._lock`` and could
+        # otherwise re-create exactly what the purge removed. While an entry is
+        # tombstoned those supervisor writes are skipped; ``register_coordinator``
+        # clears the tombstone on the next setup so a reload restores normal
+        # writes while a real removal stays clean.
+        self._unregistered: set[str] = set()
+
+    def _entry_writes_suppressed(self, entry_id: str) -> bool:
+        """Return True while *entry_id* is tombstoned by a teardown (AP4).
+
+        Used by the supervisor's per-entry write paths to drop post-purge
+        writes that would otherwise resurrect state ``_purge_entry_tokens``
+        just cleared.
+        """
+        return entry_id in self._unregistered
+
     def _clear_fatal_error_for_entry(
         self,
         entry_id: str,
@@ -1136,7 +1156,14 @@ class FcmReceiverHA:
                         fatal_count = (
                             self._fatal_retry_counts.get(counter_key, 0) + 1
                         )
-                        self._fatal_retry_counts[counter_key] = fatal_count
+                        # AP4 race guard: if the entry was torn down mid-flight,
+                        # do not re-create the fatal-retry counters the purge
+                        # just removed. The count stays effectively 1 while
+                        # suppressed, so the give-up branches below (which write
+                        # _fatal_errors and raise the reauth repair) are never
+                        # reached for a dead entry.
+                        if not self._entry_writes_suppressed(entry_id):
+                            self._fatal_retry_counts[counter_key] = fatal_count
 
                         if is_auth:
                             # 401: Token renewal while preserving android_id
@@ -1441,30 +1468,37 @@ class FcmReceiverHA:
                                 f"(persistent poison message suspected)"
                             )
                             _LOGGER.error("[entry=%s] %s", entry_id, message)
-                            self._fatal_errors[entry_id] = message
-                            # Defense 2 iter-8: latch the cap state. While
-                            # this latch is set, ``_clear_fatal_error_for_entry``
-                            # is a no-op (registration / credential-update paths
-                            # cannot clear the fatal map or the Repairs issue
-                            # before a real healthy supervisor run proves the
-                            # poison message is gone).
-                            self._short_run_cap_latched.add(entry_id)
-                            # Iter-16 (Codex follow-up): snapshot the
-                            # cap-fire message so the pass-through clear
-                            # branch in ``_clear_fatal_error_for_entry`` can
-                            # restore it after a non-cap fatal overwrote
-                            # ``_fatal_errors[entry_id]``. Released in the
-                            # same two places that release the latch.
-                            self._short_run_cap_messages[entry_id] = message
-                            if self._hass:
-                                ir.async_create_issue(
-                                    self._hass,
-                                    DOMAIN,
-                                    f"fcm_short_run_crash_loop_{entry_id}",
-                                    is_fixable=False,
-                                    severity=ir.IssueSeverity.ERROR,
-                                    translation_key="fcm_short_run_crash_loop",
-                                )
+                            # AP4 race guard: a teardown may have purged this
+                            # entry while the monitor loop was running. Skip the
+                            # cap latch / fatal map / Repairs issue so they are
+                            # not resurrected for a dead entry; the terminal
+                            # break below still stops this supervisor.
+                            if not self._entry_writes_suppressed(entry_id):
+                                self._fatal_errors[entry_id] = message
+                                # Defense 2 iter-8: latch the cap state. While
+                                # this latch is set,
+                                # ``_clear_fatal_error_for_entry`` is a no-op
+                                # (registration / credential-update paths cannot
+                                # clear the fatal map or the Repairs issue before
+                                # a real healthy supervisor run proves the poison
+                                # message is gone).
+                                self._short_run_cap_latched.add(entry_id)
+                                # Iter-16 (Codex follow-up): snapshot the
+                                # cap-fire message so the pass-through clear
+                                # branch in ``_clear_fatal_error_for_entry`` can
+                                # restore it after a non-cap fatal overwrote
+                                # ``_fatal_errors[entry_id]``. Released in the
+                                # same two places that release the latch.
+                                self._short_run_cap_messages[entry_id] = message
+                                if self._hass:
+                                    ir.async_create_issue(
+                                        self._hass,
+                                        DOMAIN,
+                                        f"fcm_short_run_crash_loop_{entry_id}",
+                                        is_fixable=False,
+                                        severity=ir.IssueSeverity.ERROR,
+                                        translation_key="fcm_short_run_crash_loop",
+                                    )
                             # Cleanup the client before breaking out so
                             # the loop exit doesn't leave a half-stopped pc.
                             try:
@@ -1590,6 +1624,11 @@ class FcmReceiverHA:
         ``reregister_keeping_identity()`` to get fresh FCM tokens with
         the same android_id/security_token.
         """
+        # AP4 race guard: never persist creds for an entry the teardown already
+        # purged (a still-running supervisor must not write back the credentials
+        # _purge_entry_tokens dropped).
+        if self._entry_writes_suppressed(entry_id):
+            return
         creds = self.creds.get(entry_id)
         if creds and isinstance(creds, dict):
             # Remove FCM-related parts, keep GCM device identity
@@ -1782,6 +1821,13 @@ class FcmReceiverHA:
         if entry is None:
             return
 
+        # AP4 (Befund 4a): a setup (initial or reload) un-tombstones the entry
+        # so its supervisor writes take effect again. This is the single reset
+        # point: it runs synchronously before the supervisor is (re)dispatched
+        # below, and the prior supervisor was already cancelled by request_stop
+        # on unload, so no stale supervisor can clear it prematurely.
+        self._unregistered.discard(entry.entry_id)
+
         self._entry_to_tokens.setdefault(entry.entry_id, set())
 
         if cache is not None:
@@ -1898,6 +1944,12 @@ class FcmReceiverHA:
                 self._entry_caches[entry_id] = replacement
             else:
                 self._entry_caches.pop(entry_id, None)
+                # AP4 (Befund 4a): tombstone the entry BEFORE purging so any
+                # write from the still-running supervisor task (this method is
+                # synchronous and does not await it) is dropped instead of
+                # re-creating the state purged below. Cleared by
+                # register_coordinator on the next setup (reload-safe).
+                self._unregistered.add(entry_id)
                 self._purge_entry_tokens(entry_id)
                 # Hard-reset on unregister: this fires via ``async_on_unload``
                 # on EVERY unload (reload AND removal), so it only resets the
@@ -2693,9 +2745,53 @@ class FcmReceiverHA:
         self.last_stop_monotonic = time.monotonic()
         _LOGGER.info("FCM receiver stopped")
 
+    def _purge_entry_debounce(self, entry_id: str) -> None:
+        """Cancel and drop the debounce trias for *entry_id*'s keys (AP7).
+
+        The push-path debounce maps (``_pending`` / ``_pending_targets`` /
+        ``_flush_tasks``) are keyed by ``(entry_id, device_id)`` and are only
+        ever cleaned per key inside ``_flush``. No teardown path iterates them
+        by entry, so a flush task still pending at unregister keeps running and
+        may write to an already-removed coordinator, while ``_pending`` /
+        ``_pending_targets`` leak until the next flush. Only this entry's keys
+        are touched (``key[0] == entry_id``); ``task.cancel()`` is safe from
+        sync code and idempotent.
+        """
+        for key in [key for key in self._flush_tasks if key[0] == entry_id]:
+            task = self._flush_tasks.pop(key, None)
+            if task is not None:
+                task.cancel()
+        pending_keys = {
+            key
+            for key in (*self._pending, *self._pending_targets)
+            if key[0] == entry_id
+        }
+        for key in pending_keys:
+            self._pending.pop(key, None)
+            self._pending_targets.pop(key, None)
+
     def _purge_entry_tokens(self, entry_id: str) -> None:
-        """Remove all routing references for a given entry."""
+        """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
+        # AP1 (Befund 2a): fatal retry counters are only cleared on the success
+        # path (registration ok), so they leak per teardown without this.
+        self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
+        self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
+        # AP2 (Befund 2b): per-entry health snapshots are written by
+        # _update_entry_health but never purged; a stale snapshot makes the
+        # first healthy transition after a same-id reload look like a no-change
+        # and suppresses its listener push.
+        self._entry_health.pop(entry_id, None)
+        self._entry_last_connected_wall.pop(entry_id, None)
+        # AP3 (Befund 2c): in-memory creds keep async_reregister_fcm's guard
+        # (entry_id in self.creds) True after teardown, which can revive a dead
+        # entry (zombie supervisor). The on-disk cache is untouched, so a reload
+        # reloads creds via _ensure_client_for_entry.
+        self.creds.pop(entry_id, None)
+        self._pending_creds.pop(entry_id, None)
+        # AP7 (Befund 2d): cancel pending debounce flush tasks and drop their
+        # payloads so a flush cannot fire at an already-removed coordinator.
+        self._purge_entry_debounce(entry_id)
         tokens = self._entry_to_tokens.pop(entry_id, set())
         self._pending_routing_tokens.pop(entry_id, None)
         if not tokens:
