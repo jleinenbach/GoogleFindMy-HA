@@ -2569,6 +2569,21 @@ class FcmReceiverHA:
 
     def _on_credentials_updated_for_entry(self, entry_id: str, creds: Any) -> None:
         """Update in-memory creds for the entry and persist asynchronously."""
+        # AP4 race guard: the old FCM client is not awaited during the
+        # synchronous teardown in ``unregister_coordinator``, so it can still
+        # fire this credentials-updated callback *after* ``_purge_entry_tokens``
+        # cleared the entry. Without this guard the callback would re-write
+        # ``self.creds[entry_id]``, restore token routing and queue persistence /
+        # pending creds, making a removed entry look known again to
+        # ``async_reregister_fcm``. Drop the late write while the entry is
+        # tombstoned; ``register_coordinator`` clears the tombstone on the next
+        # setup so a genuine reload still accepts fresh credentials.
+        if self._entry_writes_suppressed(entry_id):
+            _LOGGER.debug(
+                "[entry=%s] Ignoring credentials-updated callback for tombstoned entry",
+                entry_id,
+            )
+            return
         normalized: Any = creds
         if isinstance(normalized, str):
             try:

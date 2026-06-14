@@ -1876,6 +1876,45 @@ async def test_invalidate_fcm_tokens_skipped_when_tombstoned() -> None:
     assert receiver.creds[eid]["fcm"] == {"x": 1}
 
 
+def test_credentials_callback_suppressed_when_tombstoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (Befund 4a, Codex follow-up): a late creds callback cannot resurrect.
+
+    The old FCM client is not awaited during ``unregister_coordinator``'s
+    synchronous teardown, so it can still fire ``_on_credentials_updated_for_entry``
+    after ``_purge_entry_tokens`` cleared the entry. While tombstoned the callback
+    must not re-write ``self.creds[entry_id]``, restore routing or queue
+    persistence — otherwise the removed entry looks known to ``async_reregister_fcm``
+    again. Once the tombstone is cleared (a real reload), fresh creds are accepted.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-creds-callback"
+
+    dispatched: list[str | None] = []
+
+    def _capture(coro: object, *, label: str | None = None) -> None:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        dispatched.append(label)
+
+    monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _capture)
+
+    # Tombstoned: the late callback is dropped wholesale.
+    receiver._unregistered.add(eid)
+    receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "late"}})
+
+    assert eid not in receiver.creds
+    assert eid not in receiver._pending_creds
+    assert dispatched == []  # no routing/persistence dispatch happened
+
+    # Real reload clears the tombstone; the next callback is honoured again.
+    receiver._unregistered.discard(eid)
+    receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "fresh"}})
+
+    assert receiver.creds[eid] == {"fcm": {"token": "fresh"}}
+
+
 @pytest.mark.asyncio
 async def test_tombstone_suppresses_cap_latch(
     monkeypatch: pytest.MonkeyPatch,
