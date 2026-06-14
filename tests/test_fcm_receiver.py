@@ -523,6 +523,77 @@ async def test_register_invalidates_tokens_on_corrupt_creds(
 
 
 @pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_preserves_complete_gcm_identity() -> None:
+    """A complete GCM identity survives an FCM-token invalidation.
+
+    Positive control for the corrupt-identity drop: when android_id AND
+    security_token are present, only the renewable FCM parts (fcm, keys, the
+    gcm token/app_id) are stripped, so ``reregister_keeping_identity()`` can
+    take the fast path on the next attempt.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-complete-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            "android_id": 1234567890123456,
+            "security_token": "sec-tok",
+            "token": "gcm-tok",
+            "app_id": "app-1",
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    gcm = creds["gcm"]
+    assert gcm["android_id"] == 1234567890123456
+    assert gcm["security_token"] == "sec-tok"
+    assert "token" not in gcm  # renewable gcm token stripped
+    assert "app_id" not in gcm
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_drops_corrupt_gcm_identity() -> None:
+    """A partial GCM identity is dropped to break the KeyError retry loop.
+
+    Regression for the Codex follow-up on AP6: ``reregister_keeping_identity()``
+    subscripts ``credentials["gcm"]["security_token"]`` unguarded and only falls
+    back to a full register when ``gcm`` is entirely absent. A block with an
+    ``android_id`` but no ``security_token`` therefore raises ``KeyError`` on
+    every retry. The invalidation must drop the whole ``gcm`` block so
+    ``_register_for_fcm_entry`` takes the full ``checkin_or_register()``
+    handshake instead of replaying the same broken identity forever.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-corrupt-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {"android_id": 1234567890123456},  # security_token missing
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    # Whole gcm block gone -> next _register_for_fcm_entry uses checkin_or_register.
+    assert "gcm" not in creds
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    # And the predicate that drives the decision is honest about both shapes.
+    assert FcmReceiverHA._gcm_identity_is_complete({"android_id": 1}) is False
+    assert (
+        FcmReceiverHA._gcm_identity_is_complete(
+            {"android_id": 1, "security_token": "s"}
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
 async def test_register_unexpected_error_is_non_fatal_without_invalidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
