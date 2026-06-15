@@ -466,7 +466,9 @@ async def test_supervisor_bails_out_for_superseded_generation(
         do_listen=False,
     )
 
-    async def _ensure(_entry_id: str, _cache: object) -> object:
+    async def _ensure(
+        _entry_id: str, _cache: object, _generation: int | None = None
+    ) -> object:
         return fake_pc
 
     monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
@@ -518,6 +520,66 @@ async def test_discard_own_client_spares_live_client_after_reload() -> None:
     # When the stored client IS the caller's own client, it is removed.
     receiver._discard_own_client(entry_id, live_pc)
     assert entry_id not in receiver.pcs
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_skips_build_for_suppressed_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_ensure_client_for_entry`` must not re-create state for a suppressed entry.
+
+    ``register_coordinator`` dispatches the supervisor asynchronously. If
+    ``unregister_coordinator`` tombstones the entry before that queued coroutine
+    runs (unload-before-dispatch), the supervisor's first iteration would
+    otherwise revive the torn-down entry's ``self.pcs``/``self.creds`` -- the
+    generation guard in ``_register_for_fcm_entry`` fires one step too late
+    (after the client is already stored). The build chokepoint gates on
+    ``_entry_writes_suppressed`` so a suppressed entry returns ``None`` and
+    writes nothing (Codex finding 5).
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-build-suppressed"
+
+    built: list[object] = []
+
+    class DummyPushClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            built.append(self)
+            self.run_state = None
+            self.do_listen = False
+
+    monkeypatch.setattr(fcm_receiver_ha, "FcmPushClient", DummyPushClient)
+    monkeypatch.setattr(fcm_receiver_ha, "HAVE_FCM_PUSH_CLIENT", True)
+
+    # Positive control: a live entry (no tombstone, matching generation) builds
+    # and stores a client. This proves the suppression branch -- not some
+    # unrelated early return -- is what blocks the two cases below.
+    receiver._entry_generation[entry_id] = 3
+    live = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert isinstance(live, DummyPushClient)
+    assert receiver.pcs[entry_id] is live
+    assert len(built) == 1
+
+    # Tombstone path: a torn-down entry must not be revived. Clear the stored
+    # client/creds first so only a fresh build could repopulate the maps.
+    receiver.pcs.clear()
+    receiver.creds.clear()
+    receiver._unregistered.add(entry_id)
+    suppressed = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert suppressed is None
+    assert entry_id not in receiver.pcs
+    assert entry_id not in receiver.creds
+    assert len(built) == 1  # no new client constructed
+
+    # Superseded-generation path: the tombstone is cleared (a new incarnation
+    # is set up) but a stale supervisor holding an old generation snapshot must
+    # still be blocked from clobbering the live generation's state.
+    receiver._unregistered.discard(entry_id)
+    receiver._entry_generation[entry_id] = 4  # live incarnation moved on
+    stale = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert stale is None
+    assert entry_id not in receiver.pcs
+    assert len(built) == 1
 
 
 @pytest.mark.asyncio
@@ -828,7 +890,7 @@ async def test_supervisor_restart_installs_fresh_stop_event(
 
     ran = asyncio.Event()
 
-    async def _ensure(eid: str, _cache: Any) -> None:
+    async def _ensure(eid: str, _cache: Any, _generation: int | None = None) -> None:
         ran.set()
         # Terminate the loop deterministically after one body execution.
         receiver._stop_evts[eid].set()

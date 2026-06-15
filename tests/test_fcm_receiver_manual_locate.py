@@ -58,7 +58,9 @@ def test_manual_locate_registration_and_cleanup(
     start_calls: list[tuple[str, Any]] = []
     register_calls: list[str] = []
 
-    async def fake_ensure(eid: str, provided_cache: Any) -> object:
+    async def fake_ensure(
+        eid: str, provided_cache: Any, generation: int | None = None
+    ) -> object:
         ensure_calls.append((eid, provided_cache))
         return object()
 

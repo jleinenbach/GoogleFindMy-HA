@@ -164,7 +164,7 @@ def _install_supervisor_mocks(
 
     ensure_iter = iter(ensure_clients)
 
-    async def _ensure(entry_id: str, cache):  # noqa: ARG001
+    async def _ensure(entry_id: str, cache, generation=None):  # noqa: ARG001
         # Codex Iter-7 (PR #1086): modelling exhaustion as ``None`` mirrors
         # production's ``if not pc`` path, which is designed to back off and
         # retry **forever**. The non-cap tests (long-run reset,
@@ -1182,7 +1182,7 @@ async def test_cap_fire_terminates_outer_loop_without_helper_safety_net(
     ensure_iter = iter(clients)
     ensure_call_count = 0
 
-    async def _ensure(entry_id_inner: str, cache):  # noqa: ARG001
+    async def _ensure(entry_id_inner: str, cache, generation=None):  # noqa: ARG001
         # NOTE: no StopIteration->stop_evt.set() escape hatch here. If the
         # production cap fails to terminate the supervisor, this returns the
         # 11th client and we explicitly fail the test below.

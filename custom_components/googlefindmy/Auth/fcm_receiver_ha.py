@@ -1024,14 +1024,40 @@ class FcmReceiverHA:
         return True
 
     async def _ensure_client_for_entry(
-        self, entry_id: str, cache: TokenCache | None
+        self, entry_id: str, cache: TokenCache | None, generation: int | None = None
     ) -> FcmPushClient[Any] | None:
-        """Create or return the FCM client for the given entry (idempotent)."""
+        """Create or return the FCM client for the given entry (idempotent).
+
+        ``generation`` is the supervisor's captured generation snapshot (or
+        ``None`` for live callers such as manual-locate registration). It gates
+        the *build* path through ``_entry_writes_suppressed`` (finding 5).
+        """
         if cache is not None:
             self._ensure_cache_entry_id(cache, entry_id)
         async with self._lock:
             if entry_id in self.pcs:
                 return self.pcs[entry_id]
+
+            # AP6 (finding 5): this is the single client-build chokepoint, and
+            # everything below RE-CREATES per-entry state (``self.creds`` on the
+            # cache load, ``self.pcs``/``self.creds`` on store). Drop the build
+            # when the entry is tombstoned or this supervisor's generation is
+            # superseded. The race: ``register_coordinator`` dispatches the
+            # supervisor asynchronously; if ``unregister_coordinator`` tombstones
+            # the entry before that queued coroutine runs (unload-before-dispatch),
+            # the first loop iteration would otherwise revive a torn-down entry's
+            # ``self.pcs``/``self.creds``. The generation guard in
+            # ``_register_for_fcm_entry`` fires one step too late -- the client is
+            # already stored by then. Placed AFTER the existing-client early
+            # return: returning an already-built client is a read, not a
+            # re-creation, so it stays teardown-safe (idempotent contract).
+            if self._entry_writes_suppressed(entry_id, generation):
+                _LOGGER.debug(
+                    "[entry=%s] Skipping FCM client build for suppressed entry "
+                    "(tombstoned or superseded generation)",
+                    entry_id,
+                )
+                return None
 
             # Load entry-scoped credentials if present
             creds = self.creds.get(entry_id)
@@ -1211,7 +1237,9 @@ class FcmReceiverHA:
             entry_start: float = 0.0
             try:
                 while not stop_evt.is_set():
-                    pc = await self._ensure_client_for_entry(entry_id, cache)
+                    pc = await self._ensure_client_for_entry(
+                        entry_id, cache, generation
+                    )
                     if not pc:
                         nudged = await _nudge_sleep(backoff)
                         if nudged:
