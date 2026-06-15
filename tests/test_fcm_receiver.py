@@ -494,6 +494,33 @@ async def test_supervisor_bails_out_for_superseded_generation(
 
 
 @pytest.mark.asyncio
+async def test_discard_own_client_spares_live_client_after_reload() -> None:
+    """``_discard_own_client`` evicts only the client it was handed.
+
+    Every supervisor cleanup path funnels its ``pcs`` removal through this
+    helper. A fast reload can install a fresh client under the same
+    ``entry_id`` while a stale supervisor reaches its cleanup; an identity-blind
+    ``pcs.pop`` would evict the LIVE client and leave the new generation without
+    an FCM client. The helper compares by identity, so the live client survives
+    and a supervisor only removes the client it owns.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-discard"
+    stale_pc = SimpleNamespace(label="stale")
+    live_pc = SimpleNamespace(label="live")
+
+    # The live incarnation already owns the slot; the stale supervisor cleans up
+    # with its own (superseded) client object -> the live client must survive.
+    receiver.pcs[entry_id] = live_pc
+    receiver._discard_own_client(entry_id, stale_pc)
+    assert receiver.pcs[entry_id] is live_pc
+
+    # When the stored client IS the caller's own client, it is removed.
+    receiver._discard_own_client(entry_id, live_pc)
+    assert entry_id not in receiver.pcs
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

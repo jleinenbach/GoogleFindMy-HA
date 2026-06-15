@@ -1103,6 +1103,26 @@ class FcmReceiverHA:
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
             return pc
 
+    def _discard_own_client(
+        self, entry_id: str, pc: FcmPushClient[Any]
+    ) -> None:
+        """Remove *pc* from ``self.pcs`` only if it is still the live client.
+
+        A supervisor cleans up the client it built by popping ``self.pcs``
+        under ``self._lock``. A key-only ``pop(entry_id)`` is identity-blind:
+        when a fast reload bumps the generation and the new incarnation has
+        already installed a fresh client under the same ``entry_id`` (via
+        ``_ensure_client_for_entry``), a stale supervisor reaching its cleanup
+        would evict the LIVE client, leaving the new generation without an FCM
+        client until its next restart. Comparing by identity ensures each
+        supervisor only discards the client it owns; a superseded supervisor
+        leaves the live client untouched.
+
+        Caller must hold ``self._lock``.
+        """
+        if self.pcs.get(entry_id) is pc:
+            self.pcs.pop(entry_id, None)
+
     def _async_raise_reauth_issue(self, entry_id: str, *, reason: str) -> None:
         """Surface a fixable repair that drives the user into the reauth flow.
 
@@ -1223,7 +1243,7 @@ class FcmReceiverHA:
                             pass
                         finally:
                             async with self._lock:
-                                self.pcs.pop(entry_id, None)
+                                self._discard_own_client(entry_id, pc)
 
                         is_auth = getattr(err, "is_auth_error", False)
                         counter_key = (
@@ -1346,7 +1366,7 @@ class FcmReceiverHA:
                             pass
                         finally:
                             async with self._lock:
-                                self.pcs.pop(entry_id, None)
+                                self._discard_own_client(entry_id, pc)
                         break
 
                     if not ok_reg:
@@ -1356,7 +1376,7 @@ class FcmReceiverHA:
                             pass
                         finally:
                             async with self._lock:
-                                self.pcs.pop(entry_id, None)
+                                self._discard_own_client(entry_id, pc)
                         delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
                         if backoff >= _BACKOFF_WARNING_THRESHOLD_S:
                             _LOGGER.warning(
@@ -1637,7 +1657,7 @@ class FcmReceiverHA:
                                 pass
                             finally:
                                 async with self._lock:
-                                    self.pcs.pop(entry_id, None)
+                                    self._discard_own_client(entry_id, pc)
                                 # AP4 (finding 4b, related sweep): suppress the
                                 # stale-health write for a superseded/tombstoned
                                 # supervisor (resurrection class, finding 2b).
@@ -1737,7 +1757,7 @@ class FcmReceiverHA:
                         pass
                     finally:
                         async with self._lock:
-                            self.pcs.pop(entry_id, None)
+                            self._discard_own_client(entry_id, pc)
                         # AP4 (finding 4b, related sweep): suppress the
                         # stale-health write for a superseded/tombstoned
                         # supervisor (resurrection class, finding 2b).
