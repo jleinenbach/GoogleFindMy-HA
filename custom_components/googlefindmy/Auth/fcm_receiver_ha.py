@@ -161,6 +161,26 @@ else:
 _LOGGER = logging.getLogger(__name__)
 
 
+# AP4 (finding 4c): the driving supervisor generation for the in-flight FCM
+# handshake. The vendored ``firebase_messaging`` client invokes
+# ``credentials_updated_callback`` SYNCHRONOUSLY from inside
+# ``checkin_or_register`` / ``reregister_keeping_identity`` (same task). The
+# credentials callback closure is bound at client-build time and is shared
+# across a fast reload (``unregister_coordinator`` bumps the generation but does
+# NOT pop the reused client), so the closure alone cannot tell which supervisor
+# drives the current handshake. ``_register_for_fcm_entry`` publishes its
+# captured generation here for the duration of the await; the callback reads it
+# and gates its writes on the *triggering* generation. A ContextVar (not a plain
+# attribute) is required: many awaits inside firebase separate the publish from
+# the callback, so a concurrent supervisor task must not clobber the value --
+# task-local isolation does exactly that. Outside any handshake (a live-
+# connection cred refresh) the default ``None`` preserves the historical
+# tombstone-only behaviour.
+_FCM_DRIVING_GENERATION: contextvars.ContextVar[tuple[str, int | None] | None] = (
+    contextvars.ContextVar("fcm_driving_generation", default=None)
+)
+
+
 # Iter-12 (Codex follow-up): the short-run crash cap needs to know
 # whether the FCM client ever reached ``FcmPushClientRunState.STARTED``
 # during a run, even when the entire CREATED -> STARTED -> CRASH
@@ -443,9 +463,16 @@ class FcmReceiverHA:
         # teardown bumps this counter; a supervisor captures the value current
         # when it starts, so a superseded supervisor's writes stay suppressed by
         # generation even after the tombstone is cleared for the new
-        # incarnation. The credentials-updated callback intentionally does NOT
-        # use this: its FCM client is reused across a reload and legitimately
-        # serves the new incarnation, so it follows the boolean tombstone only.
+        # incarnation. The credentials-updated callback cannot capture this at
+        # build time (its FCM client -- and the bound closure -- is reused across
+        # a fast reload, so the build-time snapshot would suppress the LIVE
+        # incarnation's legitimate writes). Instead it reads the *driving*
+        # generation that ``_register_for_fcm_entry`` publishes in
+        # ``_FCM_DRIVING_GENERATION`` around each handshake (finding 4c): a
+        # cancelled-but-unwinding supervisor that fires the callback mid-checkin
+        # is then recognised as superseded, while a live handshake (matching
+        # generation) or an out-of-band refresh (no driving generation -> the
+        # boolean tombstone window only) still writes.
         self._entry_generation: dict[str, int] = {}
 
     def _entry_writes_suppressed(
@@ -811,6 +838,26 @@ class FcmReceiverHA:
                     _CACHE_PROVIDER.reset(token)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("Cache provider reset failed: %s", err)
+
+    @contextmanager
+    def _driving_generation_scope(
+        self, entry_id: str, generation: int | None
+    ) -> Iterator[None]:
+        """Publish the driving supervisor generation for one FCM handshake.
+
+        ``firebase_messaging`` fires ``credentials_updated_callback``
+        synchronously from inside the awaited ``checkin_or_register`` /
+        ``reregister_keeping_identity`` (same task). The callback closure is
+        shared across a fast reload, so it gates on this published generation
+        instead of a stale build-time snapshot. See ``_FCM_DRIVING_GENERATION``
+        for the full rationale (finding 4c). Reset in ``finally`` so a nested or
+        sibling handshake never inherits a leaked value.
+        """
+        token = _FCM_DRIVING_GENERATION.set((entry_id, generation))
+        try:
+            yield
+        finally:
+            _FCM_DRIVING_GENERATION.reset(token)
 
     def _monotonic_from_wall_time(
         self, wall_time: float, monotonic_now: float
@@ -2098,15 +2145,19 @@ class FcmReceiverHA:
                 and "gcm" in creds
                 and "fcm" not in creds
             )
-            if needs_reregister:
-                _LOGGER.info(
-                    "[entry=%s] Partial credentials detected; "
-                    "re-registering with existing device identity",
-                    entry_id,
-                )
-                token_or_creds = await pc.reregister_keeping_identity()
-            else:
-                token_or_creds = await pc.checkin_or_register()
+            # Publish this supervisor's captured generation for the handshake so
+            # the synchronously-fired credentials callback gates on the driving
+            # generation, not the reused client's stale build-time one (4c).
+            with self._driving_generation_scope(entry_id, generation):
+                if needs_reregister:
+                    _LOGGER.info(
+                        "[entry=%s] Partial credentials detected; "
+                        "re-registering with existing device identity",
+                        entry_id,
+                    )
+                    token_or_creds = await pc.reregister_keeping_identity()
+                else:
+                    token_or_creds = await pc.checkin_or_register()
 
             if token_or_creds:
                 _LOGGER.info("[entry=%s] FCM registered successfully", entry_id)
@@ -3007,18 +3058,35 @@ class FcmReceiverHA:
 
     def _on_credentials_updated_for_entry(self, entry_id: str, creds: Any) -> None:
         """Update in-memory creds for the entry and persist asynchronously."""
-        # AP4 race guard: the old FCM client is not awaited during the
-        # synchronous teardown in ``unregister_coordinator``, so it can still
+        # AP4 race guard (two tiers): the old FCM client is not awaited during
+        # the synchronous teardown in ``unregister_coordinator``, so it can still
         # fire this credentials-updated callback *after* ``_purge_entry_tokens``
         # cleared the entry. Without this guard the callback would re-write
         # ``self.creds[entry_id]``, restore token routing and queue persistence /
         # pending creds, making a removed entry look known again to
-        # ``async_reregister_fcm``. Drop the late write while the entry is
-        # tombstoned; ``register_coordinator`` clears the tombstone on the next
-        # setup so a genuine reload still accepts fresh credentials.
-        if self._entry_writes_suppressed(entry_id):
+        # ``async_reregister_fcm``.
+        #
+        # The tombstone alone is insufficient on a fast reload (finding 4c):
+        # ``unregister_coordinator`` bumps the generation but does NOT pop the
+        # reused client, and ``register_coordinator`` clears the tombstone for
+        # the new incarnation while a cancelled-but-unwinding supervisor is still
+        # inside ``checkin_or_register`` on that same client. Its synchronously-
+        # fired callback would then pass a tombstone-only gate and clobber the
+        # LIVE generation's creds, routing and fatal latch -- exactly the writes
+        # ``_register_for_fcm_entry`` guards post-await. Resolve the *driving*
+        # generation published by the supervisor for this handshake and gate on
+        # it: a superseded supervisor is suppressed, a live handshake (matching
+        # generation) and an out-of-band refresh (no driving generation -> pure
+        # tombstone window) still write. ``register_coordinator`` clears the
+        # tombstone on the next setup so a genuine reload still accepts creds.
+        driving = _FCM_DRIVING_GENERATION.get()
+        generation = (
+            driving[1] if driving is not None and driving[0] == entry_id else None
+        )
+        if self._entry_writes_suppressed(entry_id, generation):
             _LOGGER.debug(
-                "[entry=%s] Ignoring credentials-updated callback for tombstoned entry",
+                "[entry=%s] Ignoring credentials-updated callback for suppressed "
+                "entry (tombstoned or superseded generation)",
                 entry_id,
             )
             return

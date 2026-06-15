@@ -1948,6 +1948,120 @@ def test_credentials_callback_suppressed_when_tombstoned(
     assert receiver.creds[eid] == {"fcm": {"token": "fresh"}}
 
 
+def test_credentials_callback_gates_on_driving_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4c): a superseded supervisor's mid-handshake callback is dropped.
+
+    On a fast reload ``unregister_coordinator`` bumps the generation but does NOT
+    pop the reused client, and ``register_coordinator`` clears the tombstone for
+    the new incarnation. A cancelled-but-unwinding supervisor still inside
+    ``checkin_or_register`` fires the synchronous credentials callback; the
+    tombstone is already gone, so a tombstone-only gate would let it clobber the
+    LIVE generation's creds and fatal latch. The callback must instead gate on
+    the *driving* generation published by the supervisor for the handshake: a
+    superseded generation is suppressed, the matching live generation writes.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-driving-gen"
+
+    dispatched: list[str | None] = []
+
+    def _capture(coro: object, *, label: str | None = None) -> None:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        dispatched.append(label)
+
+    monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _capture)
+    # Isolate the callback's own effects from the supervisor routing block.
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _eid=None: None)
+
+    # Live incarnation: tombstone cleared, generation bumped to 1, fatal latched.
+    receiver._unregistered.discard(eid)
+    receiver._entry_generation[eid] = 1
+    receiver._fatal_errors[eid] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+
+    # A superseded supervisor (captured generation 0) drives the handshake.
+    with receiver._driving_generation_scope(eid, 0):
+        receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "stale"}})
+
+    # Dropped wholesale: no creds resurrection, no dispatch, LIVE latch survives.
+    assert eid not in receiver.creds
+    assert eid not in receiver._pending_creds
+    assert dispatched == []
+    assert receiver._fatal_errors[eid] == "BadAuthentication"
+    assert receiver._fatal_error == "BadAuthentication"
+
+    # The live supervisor (matching generation 1) is honoured: creds written,
+    # latch cleared, persistence dispatched.
+    with receiver._driving_generation_scope(eid, 1):
+        receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "live"}})
+
+    assert receiver.creds[eid] == {"fcm": {"token": "live"}}
+    assert eid not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    assert dispatched  # save_credentials dispatch happened
+
+
+@pytest.mark.asyncio
+async def test_register_handshake_publishes_generation_for_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4c): the handshake publishes its generation end to end.
+
+    ``firebase_messaging`` fires the credentials callback synchronously from
+    inside ``checkin_or_register``. This pins the wiring: a superseded supervisor
+    running ``_register_for_fcm_entry`` must suppress that mid-handshake callback,
+    while a live supervisor's identical callback writes. A plain instance
+    attribute could not survive firebase's internal awaits without a concurrent
+    task clobbering it; the task-local ContextVar is what makes this hold.
+    """
+    eid = "entry-handshake-gen"
+
+    def _build_receiver() -> FcmReceiverHA:
+        receiver = FcmReceiverHA()
+        monkeypatch.setattr(receiver, "get_fcm_token", lambda _eid=None: None)
+
+        def _capture(coro: object, *, label: str | None = None) -> None:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+
+        monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _capture)
+        receiver._unregistered.discard(eid)
+        return receiver
+
+    class _FakePc:
+        """Mimics firebase firing the creds callback synchronously mid-checkin."""
+
+        credentials = {"gcm": {"t": 1}, "fcm": {"t": 2}}  # not a re-register path
+
+        def __init__(self, receiver: FcmReceiverHA) -> None:
+            self._receiver = receiver
+
+        async def checkin_or_register(self) -> dict[str, dict[str, str]]:
+            # Yield like the real client so the ContextVar must survive an await.
+            await asyncio.sleep(0)
+            self._receiver._on_credentials_updated_for_entry(
+                eid, {"fcm": {"token": "from-handshake"}}
+            )
+            return {"fcm": {"token": "from-handshake"}}
+
+    # Superseded supervisor (captured generation 0; a reload bumped it to 1).
+    superseded = _build_receiver()
+    superseded._entry_generation[eid] = 1
+    superseded.pcs[eid] = _FakePc(superseded)
+    assert await superseded._register_for_fcm_entry(eid, generation=0) is True
+    assert eid not in superseded.creds  # mid-handshake callback was suppressed
+
+    # Live supervisor (captured generation matches current).
+    live = _build_receiver()
+    live._entry_generation[eid] = 0
+    live.pcs[eid] = _FakePc(live)
+    assert await live._register_for_fcm_entry(eid, generation=0) is True
+    assert live.creds[eid] == {"fcm": {"token": "from-handshake"}}
+
+
 @pytest.mark.asyncio
 async def test_tombstone_suppresses_cap_latch(
     monkeypatch: pytest.MonkeyPatch,
