@@ -13,6 +13,7 @@ import pytest
 from custom_components.googlefindmy.SpotApi.spot_grpc_transport import (
     RawCodec,
     SpotGrpcTransport,
+    is_ssl_transport_teardown_error,
 )
 
 
@@ -243,3 +244,23 @@ async def test_ssl_context_created_lazily_via_to_thread(
     await transport.get_channel()
 
     assert to_thread.await_count == 1
+
+
+def test_is_ssl_transport_teardown_error_signature() -> None:
+    """AP9 (finding 6a): the predicate isolates the fragile asyncio signature.
+
+    It must match exactly the SSL-transport teardown ``AttributeError`` and
+    nothing else, so every other AttributeError keeps propagating as a real bug.
+    Acts as an early-warning unit test should a future CPython rename the
+    internal ``_write_appdata`` attribute.
+    """
+    assert (
+        is_ssl_transport_teardown_error(
+            AttributeError("'NoneType' object has no attribute '_write_appdata'")
+        )
+        is True
+    )
+    # Wrong type / wrong signature / non-exception input must not match.
+    assert is_ssl_transport_teardown_error(AttributeError("other attribute")) is False
+    assert is_ssl_transport_teardown_error(ValueError("_write_appdata")) is False
+    assert is_ssl_transport_teardown_error(RuntimeError("_write_appdata")) is False

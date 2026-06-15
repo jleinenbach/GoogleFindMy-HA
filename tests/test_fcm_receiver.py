@@ -6,9 +6,11 @@ import importlib
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
+from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
@@ -331,6 +333,361 @@ async def test_register_clears_latched_fatal_error(
 
 
 @pytest.mark.asyncio
+async def test_register_success_skips_routing_writes_for_tombstoned_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration attempt that finishes after the entry was torn down must
+    not resurrect token routing for the tombstoned entry (AP4 teardown race).
+
+    The routing writes RE-CREATE the per-entry state ``_purge_entry_tokens``
+    just removed, so they must be skipped while the entry is tombstoned. The
+    fatal/repair clears only REMOVE state, so they stay teardown-safe and still
+    run, and the attempt still reports success.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-tombstoned"
+    receiver._fatal_errors[entry_id] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+    # The synchronous teardown purged this entry while this in-flight
+    # registration was still running.
+    receiver._unregistered.add(entry_id)
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is True
+    # Routing writes are suppressed for the tombstoned entry...
+    assert token_routes == []
+    assert persisted_tokens == []
+    # ...but the teardown-safe clears still run.
+    assert entry_id not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+
+
+@pytest.mark.asyncio
+async def test_register_success_skips_clears_for_superseded_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A success finishing under a SUPERSEDED generation must not clear the
+    LIVE generation's diagnostics (Codex: guard all stale success side effects).
+
+    Distinct from the pure-tombstone case: here the entry is NOT tombstoned (a
+    fast reload already cleared the tombstone and bumped the generation), so the
+    old generation's success would otherwise wipe the new incarnation's fatal
+    latch and retry counters. Both the routing writes AND the clears must be
+    skipped for the stale generation, while the attempt still reports success.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-superseded"
+    # State owned by the LIVE (new) generation after a fast reload.
+    receiver._fatal_errors[entry_id] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+    receiver._fatal_retry_counts[f"{entry_id}:auth"] = 2
+    # The new incarnation bumped the generation; this in-flight attempt still
+    # carries the old (now superseded) snapshot. No tombstone is set.
+    receiver._entry_generation[entry_id] = 5
+    stale_generation = 4
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    result = await receiver._register_for_fcm_entry(entry_id, stale_generation)
+
+    assert result is True
+    # Routing writes stay suppressed for the superseded generation...
+    assert token_routes == []
+    assert persisted_tokens == []
+    # ...and so do the clears: the LIVE generation's diagnostics survive.
+    assert receiver._fatal_errors[entry_id] == "BadAuthentication"
+    assert receiver._fatal_error == "BadAuthentication"
+    assert receiver._fatal_retry_counts[f"{entry_id}:auth"] == 2
+
+
+@pytest.mark.asyncio
+async def test_supervisor_bails_out_for_superseded_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor whose generation is superseded mid-flight must terminate,
+    not run the caller-level success path (Codex: stale registration success).
+
+    ``_register_for_fcm_entry`` already guards its in-method writes, but its
+    boolean return cannot signal the caller that the generation was superseded.
+    Here a fast reload bumps the generation while registration is in flight, so
+    the (now stale) supervisor must NOT delete the live reauth issue, bump start
+    metrics or (re)start + monitor the old client; it stops the client and exits.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-sup-superseded"
+    # Generation captured by the supervisor at start.
+    receiver._entry_generation[entry_id] = 1
+
+    fake_pc = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        run_state=None,
+        do_listen=False,
+    )
+
+    async def _ensure(
+        _entry_id: str, _cache: object, _generation: int | None = None
+    ) -> object:
+        return fake_pc
+
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
+
+    async def _register(_entry_id: str, _generation: int | None = None) -> bool:
+        # A live incarnation took over (fast reload) while this attempt ran.
+        receiver._entry_generation[_entry_id] = 2
+        return True
+
+    monkeypatch.setattr(receiver, "_register_for_fcm_entry", _register)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    task = receiver.supervisors[entry_id]
+    # The bail-out terminates the supervisor; without it the stale supervisor
+    # would enter the monitor loop and never finish (so the timeout also pins
+    # the regression).
+    await asyncio.wait_for(task, timeout=2)
+
+    # Caller-level success side effects must NOT have run for the stale gen.
+    fake_pc.start.assert_not_awaited()
+    assert receiver.start_count == 0
+    # The stale client is stopped and dropped on bail-out.
+    fake_pc.stop.assert_awaited()
+    assert entry_id not in receiver.pcs
+
+
+@pytest.mark.asyncio
+async def test_discard_own_client_spares_live_client_after_reload() -> None:
+    """``_discard_own_client`` evicts only the client it was handed.
+
+    Every supervisor cleanup path funnels its ``pcs`` removal through this
+    helper. A fast reload can install a fresh client under the same
+    ``entry_id`` while a stale supervisor reaches its cleanup; an identity-blind
+    ``pcs.pop`` would evict the LIVE client and leave the new generation without
+    an FCM client. The helper compares by identity, so the live client survives
+    and a supervisor only removes the client it owns.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-discard"
+    stale_pc = SimpleNamespace(label="stale")
+    live_pc = SimpleNamespace(label="live")
+
+    # The live incarnation already owns the slot; the stale supervisor cleans up
+    # with its own (superseded) client object -> the live client must survive.
+    receiver.pcs[entry_id] = live_pc
+    receiver._discard_own_client(entry_id, stale_pc)
+    assert receiver.pcs[entry_id] is live_pc
+
+    # When the stored client IS the caller's own client, it is removed.
+    receiver._discard_own_client(entry_id, live_pc)
+    assert entry_id not in receiver.pcs
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_skips_build_for_suppressed_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_ensure_client_for_entry`` must not re-create state for a suppressed entry.
+
+    ``register_coordinator`` dispatches the supervisor asynchronously. If
+    ``unregister_coordinator`` tombstones the entry before that queued coroutine
+    runs (unload-before-dispatch), the supervisor's first iteration would
+    otherwise revive the torn-down entry's ``self.pcs``/``self.creds`` -- the
+    generation guard in ``_register_for_fcm_entry`` fires one step too late
+    (after the client is already stored). The build chokepoint gates on
+    ``_entry_writes_suppressed`` so a suppressed entry returns ``None`` and
+    writes nothing (Codex finding 5).
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-build-suppressed"
+
+    built: list[object] = []
+
+    class DummyPushClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            built.append(self)
+            self.run_state = None
+            self.do_listen = False
+
+    monkeypatch.setattr(fcm_receiver_ha, "FcmPushClient", DummyPushClient)
+    monkeypatch.setattr(fcm_receiver_ha, "HAVE_FCM_PUSH_CLIENT", True)
+
+    # Positive control: a live entry (no tombstone, matching generation) builds
+    # and stores a client. This proves the suppression branch -- not some
+    # unrelated early return -- is what blocks the two cases below.
+    receiver._entry_generation[entry_id] = 3
+    live = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert isinstance(live, DummyPushClient)
+    assert receiver.pcs[entry_id] is live
+    assert len(built) == 1
+
+    # Tombstone path: a torn-down entry must not be revived. Clear the stored
+    # client/creds first so only a fresh build could repopulate the maps.
+    receiver.pcs.clear()
+    receiver.creds.clear()
+    receiver._unregistered.add(entry_id)
+    suppressed = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert suppressed is None
+    assert entry_id not in receiver.pcs
+    assert entry_id not in receiver.creds
+    assert len(built) == 1  # no new client constructed
+
+    # Superseded-generation path: the tombstone is cleared (a new incarnation
+    # is set up) but a stale supervisor holding an old generation snapshot must
+    # still be blocked from clobbering the live generation's state.
+    receiver._unregistered.discard(entry_id)
+    receiver._entry_generation[entry_id] = 4  # live incarnation moved on
+    stale = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert stale is None
+    assert entry_id not in receiver.pcs
+    assert len(built) == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_does_not_hand_live_client_to_stale_supervisor() -> None:
+    """A stale supervisor must never receive the live incarnation's client.
+
+    Fast-reload race (Codex finding 6): the new incarnation already installed a
+    fresh client under ``entry_id`` (live generation 4). A stale supervisor that
+    captured generation 3 then calls in here. If the existing-client fast path
+    ran before the suppression guard it would hand that stale supervisor the LIVE
+    client, which it later stops + discards on its own suppression branch --
+    ``_discard_own_client`` compares by identity, but the handle IS the live
+    client, so the identity guard cannot save it and the new incarnation loses
+    its client. The build chokepoint therefore gates on
+    ``_entry_writes_suppressed`` BEFORE the existing-client return: the stale
+    supervisor gets ``None`` and the live client stays untouched.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-stale-handover"
+    live_pc = SimpleNamespace(label="live")
+
+    # New incarnation owns the slot at the current (live) generation.
+    receiver.pcs[entry_id] = live_pc
+    receiver._entry_generation[entry_id] = 4
+
+    # Stale supervisor (captured generation 3) must NOT be handed the live client.
+    stale = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert stale is None
+    assert receiver.pcs[entry_id] is live_pc  # live client untouched
+
+    # Idempotent read still works for the live, current generation: a matching
+    # caller receives the existing client as-is (no re-creation, no None).
+    current = await receiver._ensure_client_for_entry(entry_id, None, 4)
+    assert current is live_pc
+    assert receiver.pcs[entry_id] is live_pc
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_drops_handover_on_teardown_during_cache_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A teardown during the credential-load await must not resurrect state.
+
+    Slow-cache race (Codex finding 7): ``_ensure_client_for_entry`` holds the
+    asyncio ``self._lock``, but ``unregister_coordinator`` is synchronous and
+    takes no lock, so it runs to completion while this method is suspended on
+    ``await cache.get("fcm_credentials")``. The single suppression check before
+    that await is stale on resume; committing the per-entry stores afterwards
+    would re-create exactly the ``self.pcs``/``self.creds`` state the teardown
+    purged. The post-await re-check drops the handover instead, while the
+    no-teardown path still performs every store the inline writes used to.
+    """
+    built: list[object] = []
+
+    class DummyPushClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            built.append(self)
+            self.run_state = None
+            self.do_listen = False
+
+    monkeypatch.setattr(fcm_receiver_ha, "FcmPushClient", DummyPushClient)
+    monkeypatch.setattr(fcm_receiver_ha, "HAVE_FCM_PUSH_CLIENT", True)
+
+    receiver = FcmReceiverHA()
+    entry_id = "entry-slow-cache-teardown"
+    creds_payload = {"fcm": {"registration": {"token": "creds-from-cache"}}}
+
+    class _TeardownDuringGetCache:
+        """A cache whose awaited ``get`` lets a sync teardown land mid-flight."""
+
+        def __init__(self, *, tombstone: bool) -> None:
+            self.entry_id = entry_id
+            self._tombstone = tombstone
+
+        async def get(self, _key: str) -> dict[str, object]:
+            if self._tombstone:
+                # The synchronous async_on_unload teardown running while this
+                # coroutine is suspended: tombstone the entry exactly as
+                # ``unregister_coordinator`` does before it purges.
+                receiver._unregistered.add(entry_id)
+            return dict(creds_payload)
+
+    # Negative case: teardown lands during the await -> handover dropped, no
+    # per-entry state resurrected, build never reached.
+    receiver._pending_creds[entry_id] = {"stale": "pending"}
+    dropped = await receiver._ensure_client_for_entry(
+        entry_id, _TeardownDuringGetCache(tombstone=True), None
+    )
+    assert dropped is None
+    assert entry_id not in receiver.pcs
+    assert entry_id not in receiver.creds
+    assert built == []  # no client constructed for a torn-down entry
+
+    # Positive control: no teardown -> client built, creds committed from the
+    # cache load, and the consumed pending-creds entry popped. This proves the
+    # deferred single commit still performs every store the inline writes did.
+    receiver._unregistered.discard(entry_id)
+    live = await receiver._ensure_client_for_entry(
+        entry_id, _TeardownDuringGetCache(tombstone=False), None
+    )
+    assert isinstance(live, DummyPushClient)
+    assert receiver.pcs[entry_id] is live
+    assert receiver.creds[entry_id] == creds_payload
+    assert entry_id not in receiver._pending_creds  # loaded_from_cache popped it
+    assert len(built) == 1
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -438,3 +795,471 @@ async def test_register_keeps_transient_runtime_error_transient() -> None:
 
     assert result is False
     assert entry_id not in receiver._fatal_errors
+
+
+def test_entry_writes_suppressed_generation_and_tombstone() -> None:
+    """``_entry_writes_suppressed`` combines the boolean tombstone with the
+    per-entry generation (finding 4b).
+
+    The tombstone suppresses regardless of generation; a mismatched generation
+    suppresses even without a tombstone; ``None`` falls back to tombstone-only.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-gen"
+
+    # Fresh entry: generation 0 matches, no tombstone -> writes allowed.
+    assert receiver._entry_writes_suppressed(entry_id, 0) is False
+
+    # The tombstone suppresses regardless of the supplied generation.
+    receiver._unregistered.add(entry_id)
+    assert receiver._entry_writes_suppressed(entry_id, 0) is True
+    receiver._unregistered.discard(entry_id)
+
+    # A teardown bumped the generation; a stale supervisor (captured 0) is
+    # suppressed even though the tombstone was cleared by the reload.
+    receiver._entry_generation[entry_id] = 1
+    assert receiver._entry_writes_suppressed(entry_id, 0) is True
+    # The current incarnation (captured 1) writes again.
+    assert receiver._entry_writes_suppressed(entry_id, 1) is False
+    # Callers without a captured generation get tombstone-only behaviour.
+    assert receiver._entry_writes_suppressed(entry_id, None) is False
+
+
+@pytest.mark.asyncio
+async def test_register_success_skips_routing_writes_for_superseded_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A registration attempt from a superseded supervisor must not resurrect
+    routing even after the boolean tombstone was cleared by a reload (finding 4b).
+
+    This is the gap left by the tombstone-only guard: ``request_stop`` cancels
+    the old supervisor without awaiting it, and ``register_coordinator`` clears
+    ``_unregistered`` for the new incarnation, so only the generation keeps the
+    stale supervisor's success-path writes suppressed.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-superseded"
+    # Teardown bumped the generation; the reload then cleared the tombstone.
+    receiver._entry_generation[entry_id] = 1
+    assert entry_id not in receiver._unregistered
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    # Stale supervisor captured generation 0; current is 1 -> writes suppressed.
+    result = await receiver._register_for_fcm_entry(entry_id, 0)
+    assert result is True
+    assert token_routes == []
+    assert persisted_tokens == []
+
+    # The current incarnation (generation 1) still writes routing.
+    result_current = await receiver._register_for_fcm_entry(entry_id, 1)
+    assert result_current is True
+    assert token_routes == [("token-123", {entry_id})]
+    assert persisted_tokens == [(entry_id, "token-123")]
+
+
+def test_unregister_bumps_generation_and_suppresses_old_supervisor() -> None:
+    """A real removal bumps the entry generation so a supervisor that captured
+    the prior value stays suppressed once the tombstone is cleared (finding 4b).
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-bumped"
+    coordinator = SimpleNamespace(
+        config_entry=make_config_entry(entry_id=entry_id), cache=None
+    )
+    receiver.coordinators.append(coordinator)
+
+    # A supervisor for this entry captured generation 0 before the teardown.
+    assert receiver._entry_generation.get(entry_id, 0) == 0
+
+    receiver.unregister_coordinator(coordinator)
+
+    # Teardown tombstoned the entry and bumped the generation.
+    assert entry_id in receiver._unregistered
+    assert receiver._entry_generation[entry_id] == 1
+    # Simulate the reload clearing the tombstone; the old supervisor (gen 0)
+    # must remain suppressed purely by generation.
+    receiver._unregistered.discard(entry_id)
+    assert receiver._entry_writes_suppressed(entry_id, 0) is True
+    assert receiver._entry_writes_suppressed(entry_id, 1) is False
+
+
+def test_purge_entry_debounce_drops_entry_from_foreign_target_set() -> None:
+    """A flush keyed by another source entry that also targets the purged entry
+    must drop the purged entry from its target set while keeping the flush for
+    the remaining recipients (Codex follow-up, finding for shared targets).
+    """
+    receiver = FcmReceiverHA()
+    source = "entry-source"
+    victim = "entry-victim"
+    other = "entry-other"
+    key = (source, "device-1")
+    receiver._pending[key] = {"latitude": 1.0}
+    receiver._pending_targets[key] = {source, victim, other}
+
+    receiver._purge_entry_debounce(victim)
+
+    # Victim removed from the foreign target set; flush kept for the rest.
+    assert receiver._pending_targets[key] == {source, other}
+    assert key in receiver._pending
+
+
+@pytest.mark.asyncio
+async def test_purge_entry_debounce_cancels_orphaned_flush_when_targets_empty() -> None:
+    """When the purged entry is the sole recipient of a foreign-keyed flush, the
+    whole flush is cancelled and dropped (an empty target set would otherwise
+    fan out to no one and leak).
+    """
+    receiver = FcmReceiverHA()
+    source = "entry-source"
+    victim = "entry-victim"
+    key = (source, "device-1")
+    receiver._pending[key] = {"latitude": 1.0}
+    receiver._pending_targets[key] = {victim}
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_never())
+    receiver._flush_tasks[key] = task
+
+    receiver._purge_entry_debounce(victim)
+
+    assert key not in receiver._pending_targets
+    assert key not in receiver._pending
+    assert key not in receiver._flush_tasks
+    # Let the cancellation settle, then confirm the orphaned flush was cancelled.
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()
+
+
+def test_purge_entry_debounce_leaves_broadcast_targets() -> None:
+    """Broadcast fallbacks (target set is ``None``) are device-scoped, not
+    entry-scoped, so a purge must leave them untouched.
+    """
+    receiver = FcmReceiverHA()
+    source = "entry-source"
+    victim = "entry-victim"
+    key = (source, "device-1")
+    receiver._pending[key] = {"latitude": 1.0}
+    receiver._pending_targets[key] = None
+
+    receiver._purge_entry_debounce(victim)
+
+    assert key in receiver._pending_targets
+    assert receiver._pending_targets[key] is None
+
+
+# --------------------------------------------------------------------------
+# PR B — stop-event lifecycle (AP5) + exception classification (AP6)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_supervisor_restart_installs_fresh_stop_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP5 (finding 4b): a re-setup must not inherit a leftover *set* stop event.
+
+    ``request_stop`` sets the entry's event without installing a fresh one. The
+    old ``setdefault`` in ``_start_supervisor_for_entry`` then handed that set
+    event to the new supervisor, whose ``while not stop_evt.is_set()`` exited
+    immediately (wedged restart). The fix installs a fresh, unset event so the
+    supervisor body actually runs.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-wedge"
+    stale = asyncio.Event()
+    stale.set()  # leftover from a prior request_stop
+    receiver._stop_evts[entry_id] = stale
+
+    ran = asyncio.Event()
+
+    async def _ensure(eid: str, _cache: Any, _generation: int | None = None) -> None:
+        ran.set()
+        # Terminate the loop deterministically after one body execution.
+        receiver._stop_evts[eid].set()
+
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
+    monkeypatch.setattr(fcm_receiver_ha.asyncio, "sleep", AsyncMock())
+
+    real_wait_for = asyncio.wait_for
+
+    async def _instant_wait_for(fut: Any, *, timeout: Any = None) -> Any:
+        # Make the supervisor's nudge-sleep return immediately.
+        coro_name = getattr(getattr(fut, "cr_code", None), "co_name", "")
+        if coro_name == "wait":
+            if asyncio.iscoroutine(fut):
+                fut.close()
+            raise TimeoutError
+        return await real_wait_for(fut, timeout=timeout)
+
+    monkeypatch.setattr(fcm_receiver_ha.asyncio, "wait_for", _instant_wait_for)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await real_wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert ran.is_set()  # body executed -> a fresh, unset event was installed
+    assert receiver._stop_evts[entry_id] is not stale  # stale event replaced
+
+
+@pytest.mark.asyncio
+async def test_register_invalidates_tokens_on_corrupt_creds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP6 (finding 3a): a KeyError (corrupt creds) escalates via token invalidation."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-corrupt"
+
+    class _PcKeyError:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise KeyError("gcm")
+
+    receiver.pcs[entry_id] = _PcKeyError()
+
+    invalidated: list[str] = []
+
+    async def _inv(eid: str, generation: int | None = None) -> None:
+        invalidated.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is False
+    assert invalidated == [entry_id]
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_preserves_complete_gcm_identity() -> None:
+    """A complete GCM identity survives an FCM-token invalidation.
+
+    Positive control for the corrupt-identity drop: when android_id AND
+    security_token are present, only the renewable FCM parts (fcm, keys, the
+    gcm token/app_id) are stripped, so ``reregister_keeping_identity()`` can
+    take the fast path on the next attempt.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-complete-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            # Both fields are int()-convertible (an int and a numeric string),
+            # exactly what reregister_keeping_identity() can consume.
+            "android_id": 1234567890123456,
+            "security_token": "9876543210987654",
+            "token": "gcm-tok",
+            "app_id": "app-1",
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    gcm = creds["gcm"]
+    assert gcm["android_id"] == 1234567890123456
+    assert gcm["security_token"] == "9876543210987654"
+    assert "token" not in gcm  # renewable gcm token stripped
+    assert "app_id" not in gcm
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_drops_corrupt_gcm_identity() -> None:
+    """A partial GCM identity is dropped to break the KeyError retry loop.
+
+    Regression for the Codex follow-up on AP6: ``reregister_keeping_identity()``
+    subscripts ``credentials["gcm"]["security_token"]`` unguarded and only falls
+    back to a full register when ``gcm`` is entirely absent. A block with an
+    ``android_id`` but no ``security_token`` therefore raises ``KeyError`` on
+    every retry. The invalidation must drop the whole ``gcm`` block so
+    ``_register_for_fcm_entry`` takes the full ``checkin_or_register()``
+    handshake instead of replaying the same broken identity forever.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-corrupt-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {"android_id": 1234567890123456},  # security_token missing
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    # Whole gcm block gone -> next _register_for_fcm_entry uses checkin_or_register.
+    assert "gcm" not in creds
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    # And the predicate that drives the decision is honest about both shapes:
+    # a missing field is incomplete; both int()-convertible fields are complete.
+    assert FcmReceiverHA._gcm_identity_is_complete({"android_id": 1}) is False
+    assert (
+        FcmReceiverHA._gcm_identity_is_complete(
+            {"android_id": 1, "security_token": "2"}
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_security_token",
+    ["sec-tok", ["1", "2"], {"x": 1}, True, float("inf"), float("-inf")],
+    ids=["non-numeric-str", "list", "dict", "bool", "inf", "-inf"],
+)
+async def test_invalidate_fcm_tokens_drops_malformed_gcm_identity(
+    bad_security_token: object,
+) -> None:
+    """A truthy-but-non-numeric GCM identity is dropped, not preserved.
+
+    Regression for the Codex follow-up: ``reregister_keeping_identity()`` runs
+    ``int(security_token)`` only after a truthiness gate, so a truthy value that
+    is not ``int()``-convertible passes the gate but raises on every retry —
+    ``ValueError``/``TypeError`` for a non-numeric string, list, dict or bool,
+    and ``OverflowError`` for a float infinity (JSON ``1e309`` / ``Infinity``).
+    The earlier predicate preserved such a block and the supervisor looped
+    forever (or, for infinity, ``_invalidate_fcm_tokens`` itself raised and
+    stopped the supervisor). The hardened predicate now drops the whole ``gcm``
+    block so the next attempt does a full ``checkin_or_register()``.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-malformed-identity"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            "android_id": 1234567890123456,
+            "security_token": bad_security_token,
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    creds = receiver.creds[entry_id]
+    # Malformed identity cannot be re-registered -> whole block must be dropped.
+    assert "gcm" not in creds
+    assert "fcm" not in creds
+    assert "keys" not in creds
+    # The predicate is the single source of that decision.
+    assert (
+        FcmReceiverHA._gcm_identity_is_complete(
+            {"android_id": 1234567890123456, "security_token": bad_security_token}
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_register_unexpected_error_is_non_fatal_without_invalidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP6 (finding 3a): an unexpected error stays non-fatal and does NOT invalidate."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-weird"
+
+    class _WeirdError(Exception):
+        pass
+
+    class _PcWeird:
+        async def checkin_or_register(self) -> dict[str, str]:
+            raise _WeirdError("boom")
+
+    receiver.pcs[entry_id] = _PcWeird()
+
+    invalidated: list[str] = []
+
+    async def _inv(eid: str, generation: int | None = None) -> None:
+        invalidated.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    result = await receiver._register_for_fcm_entry(entry_id)
+
+    assert result is False
+    assert invalidated == []  # unexpected path must not invalidate
+
+
+@pytest.mark.asyncio
+async def test_classify_registration_exception_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP6 (finding 3a): the classification helper routes each error class."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-classify"
+
+    calls: list[str] = []
+
+    async def _inv(eid: str, generation: int | None = None) -> None:
+        calls.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    # Transient: no invalidation.
+    await receiver._classify_registration_exception(entry_id, RuntimeError("x"))
+    await receiver._classify_registration_exception(entry_id, TimeoutError())
+    assert calls == []
+
+    # Structural corruption: invalidate each time.
+    await receiver._classify_registration_exception(entry_id, KeyError("gcm"))
+    await receiver._classify_registration_exception(entry_id, ValueError("bad"))
+    await receiver._classify_registration_exception(entry_id, TypeError("bad"))
+    assert calls == [entry_id, entry_id, entry_id]
+
+    # Unexpected: no invalidation.
+    class _WeirdError(Exception):
+        pass
+
+    await receiver._classify_registration_exception(entry_id, _WeirdError())
+    assert calls == [entry_id, entry_id, entry_id]
+
+
+@pytest.mark.asyncio
+async def test_classify_registration_exception_forwards_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Merge guard (AP4 x AP6): the supervisor's captured generation reaches
+    ``_invalidate_fcm_tokens`` through the classification helper.
+
+    The AP6 extract-method refactor (#1108) split the corrupt-creds escalation
+    into ``_classify_registration_exception``; the AP4 generation guard (#1107)
+    must keep flowing through it, or a superseded supervisor could strip the
+    creds of the next incarnation despite the tombstone already being cleared.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-classify-gen"
+
+    seen: list[int | None] = []
+
+    async def _inv(eid: str, generation: int | None = None) -> None:
+        seen.append(generation)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _inv)
+
+    await receiver._classify_registration_exception(
+        entry_id, KeyError("gcm"), generation=7
+    )
+
+    assert seen == [7]

@@ -21,8 +21,8 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 ---
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
->[!CAUTION]
->**Home Assistant Core 2025.10 or newer is required.** The integration relies on Core-managed config subentry scheduling and device-registry hooks introduced alongside the 2025.10 cycle. Older builds lack the platform-loading behavior and registry keywords exercised by the tracker/service subentries and are **not supported**.
+>[!TIP]
+>**Home Assistant Core 2025.10 or newer is recommended.** The functional minimum is **2025.8.0** (enforced in `hacs.json` and `pyproject.toml`): that release provides the config subentry flow maturity and the `async_added_to_hass` behavior the tracker/service subentries depend on. The Core-managed config subentry model itself has been available since the 2025.3 cycle. Running 2025.10 or newer is recommended for the bug fixes and stability improvements made since 2025.8, not because of a hard API requirement.
 
 ### Continuous integration checks
 
@@ -323,6 +323,13 @@ The integration provides a couple of Home Assistant Actions for use with automat
 ### No Location Data
 - Check if devices have moved recently (Find My devices may not update GPS when stationary)
 - Check battery levels (low battery may disable GPS reporting)
+
+### Location updates stopped after an upgrade
+Location data is fetched **outbound** from Home Assistant to Google (FCM push plus Nova/SPOT polling); it does **not** depend on your Home Assistant internal or external URL configuration. If updates stop after upgrading the integration:
+1. **Reload the integration** (Settings → Devices & Services → Google Find My Device → ⋮ → Reload) or restart Home Assistant. This re-establishes the FCM connection and refreshes tokens, which resolves most post-upgrade stalls.
+2. If updates are still missing, review the logs for authentication errors and re-authenticate if prompted (see [Authentication Expires Repeatedly](#authentication-expires-repeatedly)).
+
+> **Note on the internal/external URL:** Your Home Assistant internal/external URL only affects the clickable **Map View links** on each device page, not location reception. Changing it can appear to "fix" updates because it triggers a reload or restart, but it is the restart that restores tracking, not the URL value. A configuration such as internal `http://ip-address:8123` plus external `https://your-domain:8123` is perfectly valid.
 
 ### FCM Connection Problems
 - Extended timeout allows up to 60 seconds for device response

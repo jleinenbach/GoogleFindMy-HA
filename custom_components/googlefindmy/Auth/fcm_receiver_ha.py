@@ -160,6 +160,104 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# AP4 (finding 4c): the driving supervisor generation for the in-flight FCM
+# handshake. The vendored ``firebase_messaging`` client invokes
+# ``credentials_updated_callback`` SYNCHRONOUSLY from inside
+# ``checkin_or_register`` / ``reregister_keeping_identity`` (same task). The
+# credentials callback closure is bound at client-build time and is shared
+# across a fast reload (``unregister_coordinator`` bumps the generation but does
+# NOT pop the reused client), so the closure alone cannot tell which supervisor
+# drives the current handshake. ``_register_for_fcm_entry`` publishes its
+# captured generation here for the duration of the await; the callback reads it
+# and gates its writes on the *triggering* generation. A ContextVar (not a plain
+# attribute) is required: many awaits inside firebase separate the publish from
+# the callback, so a concurrent supervisor task must not clobber the value --
+# task-local isolation does exactly that. Outside any handshake (a live-
+# connection cred refresh) the default ``None`` preserves the historical
+# tombstone-only behaviour.
+_FCM_DRIVING_GENERATION: contextvars.ContextVar[tuple[str, int | None] | None] = (
+    contextvars.ContextVar("fcm_driving_generation", default=None)
+)
+
+
+# Iter-12 (Codex follow-up): the short-run crash cap needs to know
+# whether the FCM client ever reached ``FcmPushClientRunState.STARTED``
+# during a run, even when the entire CREATED -> STARTED -> CRASH
+# lifecycle happens between two monitor polls (``FCM_MONITOR_INTERVAL_S``
+# >= 0.5s). Sampling alone is too coarse for the very poison-message
+# loop the cap is meant to stop. A subclass with a ``__setattr__`` hook
+# latches ``_has_been_started`` the moment the vendored library assigns
+# ``run_state = STARTED`` -- independent of any polling cadence and
+# without modifying the vendored library itself. See
+# CA-DEFENSE-OBSERVABILITY-001.
+if HAVE_FCM_PUSH_CLIENT and FcmPushClientRunState is not None:
+    # Snapshot of the original class for runtime identity comparison.
+    # Tests substitute the module-level ``FcmPushClient`` symbol via
+    # monkeypatch (the documented seam) to inject test doubles; the
+    # factory below honours that substitution by class identity, not by
+    # subclass relation. See CA-SUBCLASS-IDENTITY-001.
+    _OriginalFcmPushClient: type[Any] | None = FcmPushClient
+
+    class _ObservableFcmPushClient(FcmPushClient[Any]):
+        """FcmPushClient subclass with a run_state observer latch.
+
+        See CA-DEFENSE-OBSERVABILITY-001.
+        """
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            # Seed the latch before super().__init__ so any attribute
+            # assignment performed by the parent's constructor still
+            # routes through our ``__setattr__`` without raising.
+            object.__setattr__(self, "_has_been_started", False)
+            super().__init__(*args, **kwargs)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            super().__setattr__(name, value)
+            if (
+                name == "run_state"
+                and FcmPushClientRunState is not None
+                and value == FcmPushClientRunState.STARTED
+            ):
+                # ``object.__setattr__`` to avoid recursion through this hook.
+                object.__setattr__(self, "_has_been_started", True)
+
+    _ObservableFcmPushClientCls: type[Any] | None = _ObservableFcmPushClient
+else:  # pragma: no cover - exercised only when the vendored library is absent
+    _OriginalFcmPushClient = None
+    _ObservableFcmPushClientCls = None
+
+
+def _FcmPushClientFactory(*args: Any, **kwargs: Any) -> FcmPushClient[Any]:
+    """Construct an FCM client at call time, honouring test substitutions.
+
+    Production: prefers the ``_ObservableFcmPushClient`` subclass so the
+    short-run crash cap can observe ``run_state -> STARTED`` transitions
+    that happen between monitor polls (CA-DEFENSE-OBSERVABILITY-001).
+
+    Tests: when the module-level ``FcmPushClient`` symbol has been
+    monkeypatched away from the original class (the documented test
+    seam), the factory instantiates the patched class DIRECTLY rather
+    than the production subclass. This preserves ``isinstance`` identity
+    for test doubles (CA-SUBCLASS-IDENTITY-001) instead of returning a
+    subclass that diverges from the patched symbol.
+    """
+
+    current = globals().get("FcmPushClient")
+    if (
+        _ObservableFcmPushClientCls is not None
+        and _OriginalFcmPushClient is not None
+        and current is _OriginalFcmPushClient
+    ):
+        return cast(
+            "FcmPushClient[Any]",
+            _ObservableFcmPushClientCls(*args, **kwargs),
+        )
+    if current is None:  # pragma: no cover - vendored library missing
+        raise RuntimeError("FcmPushClient is not available")
+    return cast("FcmPushClient[Any]", current(*args, **kwargs))
+
+
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
@@ -167,8 +265,31 @@ _MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
 _BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
 _MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
 _MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
+# Defense 2: supervisor-level crash cap as a bulkhead around the inner-loop
+# poison-message filter (``fcmpushclient._listen`` Defense 1+3). When the FCM
+# client connects but loses the run-loop within ``_SHORT_RUN_THRESHOLD_S``
+# repeatedly, a persistent poison condition is suspected and the supervisor
+# stops looping to prevent unbounded retry pressure on Google + log spam.
+_MAX_CONSECUTIVE_SHORT_RUNS = 10
+_SHORT_RUN_THRESHOLD_S = 30.0  # strictly < 30s between pc.start() and STOPPED = short run
 _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
+
+# Defense 2 iter-14 (Codex follow-up): the supervisor-level crash cap writes
+# its terminal state into ``_fatal_errors[entry_id]`` so the binary_sensor
+# diagnostic attribute and the "is FCM ready" check in
+# ``coordinator/polling.py`` see the listener as unavailable. However, the
+# coordinator's re-auth escalation in ``coordinator/polling.py`` also consumes
+# that map and, after _FCM_ERROR_RETRY_THRESHOLD consecutive update cycles,
+# raises ``ConfigEntryAuthFailed`` for ANY non-auth fatal it does not
+# explicitly classify. The crash-loop fatal is NOT an auth problem
+# (the user must reload / regenerate credentials per the repair issue, not
+# re-authenticate). To prevent users from being pushed into Home Assistant's
+# re-auth flow for what is really a poison-message defense, the cap-fire
+# branch tags its message with this prefix and the polling-side consumer
+# excludes it from the re-auth escalation. This module is the SSOT for the
+# prefix; the polling-side consumer imports it from here.
+CRASH_LOOP_FATAL_PREFIX = "FCM short-run crash loop:"
 
 
 async def _call_in_executor[**P, T](
@@ -292,10 +413,216 @@ class FcmReceiverHA:
         # Per-entry nudge events: allows coordinator to wake up a sleeping supervisor
         self._retry_nudge_evts: dict[str, asyncio.Event] = {}
 
+        # Defense 2 iter-8: persistent short-run cap latch.
+        #
+        # When the cap fires the entry is in a *poison-message crash loop*
+        # that only a real healthy supervisor run (>= _SHORT_RUN_THRESHOLD_S)
+        # can prove gone. A successful FCM re-registration alone is NOT a
+        # proof: registration only contacts the GCM endpoint, it does not
+        # show that the subsequent listener stays up long enough to drain
+        # the poisoned notification.
+        #
+        # The latch is therefore set together with the user-visible repair
+        # issue at cap-fire time and is the *only* thing that gates whether
+        # ``_clear_fatal_error_for_entry`` (which gets called from every
+        # registration-success path) is allowed to drop the fatal-error map
+        # entry and the Repairs UI artefact. Without this latch, any reload
+        # or credential update would clear the cap-related fatal state, the
+        # supervisor would start a fresh 10-run burst, and the user would
+        # see no visible fatal state in between (Codex defense-2 iter-8
+        # second finding).
+        self._short_run_cap_latched: set[str] = set()
+        # Defense 2 iter-16 (Codex follow-up): persistent snapshot of the
+        # cap-fire message per entry. Populated when the cap fires and used
+        # by ``_clear_fatal_error_for_entry`` to restore the cap fatal after
+        # a non-cap fatal (e.g. a terminal 401/404 from a subsequent
+        # re-registration) was cleared. Cleared in the same two places that
+        # release the latch: the healthy-run cleanup branch and any
+        # ``force=True`` teardown. This keeps the per-entry fatal visible to
+        # the coordinator and the diagnostic binary sensor for the entire
+        # latch lifetime, even across non-cap fatal overwrites.
+        self._short_run_cap_messages: dict[str, str] = {}
+
+        # AP4 (finding 4a): tombstone set of entry_ids whose synchronous
+        # teardown (``unregister_coordinator``) has already purged their
+        # per-entry state. ``unregister_coordinator`` does not await the
+        # still-running supervisor task, which writes per-entry state (fatal
+        # counts, cap latch, creds) largely outside ``self._lock`` and could
+        # otherwise re-create exactly what the purge removed. While an entry is
+        # tombstoned those supervisor writes are skipped; ``register_coordinator``
+        # clears the tombstone on the next setup so a reload restores normal
+        # writes while a real removal stays clean.
+        self._unregistered: set[str] = set()
+
+        # AP4 (finding 4b): per-entry supervisor generation. The boolean
+        # tombstone above is cleared by ``register_coordinator`` on the next
+        # setup, but every unload also calls ``request_stop()`` which only
+        # *cancels* the prior supervisor without awaiting it. A fast reload can
+        # therefore clear the tombstone while the cancelled supervisor is still
+        # unwinding, re-opening the teardown race for that stale task. Each
+        # teardown bumps this counter; a supervisor captures the value current
+        # when it starts, so a superseded supervisor's writes stay suppressed by
+        # generation even after the tombstone is cleared for the new
+        # incarnation. The credentials-updated callback cannot capture this at
+        # build time (its FCM client -- and the bound closure -- is reused across
+        # a fast reload, so the build-time snapshot would suppress the LIVE
+        # incarnation's legitimate writes). Instead it reads the *driving*
+        # generation that ``_register_for_fcm_entry`` publishes in
+        # ``_FCM_DRIVING_GENERATION`` around each handshake (finding 4c): a
+        # cancelled-but-unwinding supervisor that fires the callback mid-checkin
+        # is then recognised as superseded, while a live handshake (matching
+        # generation) or an out-of-band refresh (no driving generation -> the
+        # boolean tombstone window only) still writes.
+        self._entry_generation: dict[str, int] = {}
+
+    def _entry_writes_suppressed(
+        self, entry_id: str, generation: int | None = None
+    ) -> bool:
+        """Return True when a per-entry write must be dropped (AP4).
+
+        Two independent conditions suppress a write:
+
+        * The entry is tombstoned by a synchronous teardown (boolean
+          ``_unregistered``); cleared by ``register_coordinator`` on the next
+          setup. This covers the teardown window and the reused FCM client's
+          credentials callback.
+        * A ``generation`` is supplied and no longer matches the entry's current
+          generation, meaning the caller belongs to a superseded supervisor that
+          was cancelled but is still unwinding. This keeps a stale supervisor's
+          writes suppressed even after the tombstone is cleared for a new
+          incarnation (finding 4b).
+
+        Callers without a captured generation (e.g. the credentials callback)
+        pass ``None`` and get the pure tombstone-window behaviour.
+
+        Use this to gate *write* side effects that RE-CREATE per-entry state
+        (token routing, fatal-error publication, cap-fire). For *removal* side
+        effects that are teardown-safe in the tombstone window but harmful only
+        when a stale generation would clobber the live incarnation, gate on
+        ``_entry_generation_superseded`` instead.
+        """
+        if entry_id in self._unregistered:
+            return True
+        return self._entry_generation_superseded(entry_id, generation)
+
+    def _entry_generation_superseded(
+        self, entry_id: str, generation: int | None
+    ) -> bool:
+        """Return True when ``generation`` belongs to a superseded supervisor.
+
+        This checks ONLY the generation-mismatch condition (a stale supervisor
+        that captured an old generation and lost ownership to a live incarnation
+        after a fast reload), NOT the boolean tombstone window. A caller without
+        a captured generation (the public re-register / credentials path) is a
+        live operation and is never "superseded", so it returns False.
+
+        It is the narrow guard for *removal* side effects (clearing the fatal
+        latch, deleting the reauth repair, resetting shared retry counters):
+        those are teardown-safe while an entry is merely tombstoned (it is going
+        away and ``unregister_coordinator`` already reset it), but must be
+        skipped when an old generation would wipe the LIVE generation's
+        diagnostics.
+        """
+        return (
+            generation is not None
+            and generation != self._entry_generation.get(entry_id, 0)
+        )
+
     def _clear_fatal_error_for_entry(
-        self, entry_id: str, *, reason: str | None = None
+        self,
+        entry_id: str,
+        *,
+        reason: str | None = None,
+        force: bool = False,
     ) -> None:
-        """Clear any latched fatal registration error for a config entry."""
+        """Clear any latched fatal registration error for a config entry.
+
+        Also removes the Defense 2 short-run-crash-loop repair issue from the
+        Home Assistant Issue Registry. The fatal-error map and the Issue
+        Registry entry are a CREATE/DELETE pair: any recovery path that clears
+        the in-memory latch must also delete the user-visible UI artefact, or
+        the Repairs panel keeps a stale non-fixable error after the underlying
+        condition is gone (e.g. user re-registers credentials and FCM starts
+        successfully again).
+
+        A hard-reset teardown (``force=True``) additionally releases the
+        short-run cap latch (see below). It deliberately does NOT delete the
+        entry-scoped *fixable* reauth repairs: ``force=True`` is reached from
+        ``unregister_coordinator``, which fires on EVERY unload, including the
+        reload Home Assistant performs right after a successful reauth flow.
+        Deleting them here would dismiss a still-active prompt before the new
+        supervisor has proven recovery. Those repairs are retired by the
+        supervisor success path on reload and by
+        ``async_delete_entry_repair_issues`` on actual entry removal (Codex
+        PR #1104 follow-up).
+
+        Defense 2 iter-8 (Codex second finding): a successful FCM
+        re-registration is NOT a recovery proof for the short-run crash cap.
+        While ``_short_run_cap_latched`` contains *entry_id* this method must
+        protect the cap state (latched fatal message + Repairs UI artefact)
+        from being silently cleared, so users keep seeing the fatal state
+        until a real healthy supervisor run (>= _SHORT_RUN_THRESHOLD_S) drops
+        the latch from the monitor loop. Hard-reset callers (entry unregister,
+        test cleanup, integration teardown) must opt in with ``force=True``.
+
+        Defense 2 iter-10 (Codex follow-up): the latch guard is intentionally
+        narrow. It is a no-op ONLY when the currently stored fatal IS the
+        cap-related message (``FCM short-run crash loop: ...``). Non-cap fatal
+        errors (e.g. a terminal 401/404 from a subsequent re-registration that
+        overwrote ``_fatal_errors[entry_id]``) must clear normally so a
+        credentials recovery is not blocked by an unrelated latch. The cap
+        latch, any cap-related fatal it still protects, and the Repairs UI
+        artefact remain in place in that case; only the unrelated fatal is
+        dropped.
+        """
+
+        if not force and entry_id in self._short_run_cap_latched:
+            current_fatal = self._fatal_errors.get(entry_id)
+            # No fatal stored, or the stored fatal IS the cap message:
+            # preserve everything (latch, message, Repairs UI artefact).
+            if current_fatal is None or current_fatal.startswith(
+                CRASH_LOOP_FATAL_PREFIX
+            ):
+                _LOGGER.debug(
+                    "[entry=%s] Skipping fatal-error clear; short-run cap latch "
+                    "active (reason=%s). Latch will be released by a healthy "
+                    "supervisor run.",
+                    entry_id,
+                    reason or "unspecified",
+                )
+                return
+
+            # Non-cap fatal stored while the cap latch is active. Clear the
+            # unrelated fatal but KEEP the cap latch and Repairs UI artefact
+            # intact, so the user-visible cap warning is not silently
+            # invalidated by an unrelated recovery path.
+            #
+            # Defense 2 iter-16 (Codex follow-up): the per-entry cap-fire
+            # message snapshot (``_short_run_cap_messages``) must be
+            # re-written into ``_fatal_errors`` so the coordinator and the
+            # diagnostic binary sensor continue to see the cap-fatal state
+            # during the recovery/retry window. Otherwise the latch would
+            # silently invalidate the per-entry fatal even though the
+            # in-memory latch and the Repairs UI artefact remain set.
+            _LOGGER.debug(
+                "[entry=%s] Cap latch active; clearing non-cap fatal "
+                "(reason=%s) while preserving cap latch and repair issue",
+                entry_id,
+                reason or "unspecified",
+            )
+            self._fatal_errors.pop(entry_id, None)
+            cap_message = self._short_run_cap_messages.get(entry_id)
+            if cap_message is not None:
+                self._fatal_errors[entry_id] = cap_message
+            self._fatal_error = next(iter(self._fatal_errors.values()), None)
+            return
+
+        if force:
+            self._short_run_cap_latched.discard(entry_id)
+            # Iter-16: drop the cap-fire snapshot in lockstep with the latch
+            # so a forced teardown also retires the message that the
+            # pass-through branch would otherwise restore.
+            self._short_run_cap_messages.pop(entry_id, None)
 
         removed = False
         if entry_id in self._fatal_errors:
@@ -311,6 +638,77 @@ class FcmReceiverHA:
 
         if removed:
             self._fatal_error = next(iter(self._fatal_errors.values()), None)
+
+        self._delete_repair_issues_for_entry(entry_id)
+
+    def _delete_repair_issues_for_entry(self, entry_id: str) -> None:
+        """Retire the transient short-run-crash-loop repair for a cleared entry.
+
+        This is the DELETE half of the ``fcm_short_run_crash_loop_{entry_id}``
+        CREATE/DELETE pair with the fatal-error map: any path that clears the
+        in-memory latch must also delete the user-visible UI artefact, or the
+        Repairs panel keeps a stale non-fixable error after the underlying
+        condition is gone.
+
+        It deliberately does NOT touch the *fixable* reauth repairs
+        (``fcm_reauth_required_{entry_id}`` / legacy ``fcm_stuck_{entry_id}``).
+        Those outlive a reload on purpose and are retired only by the supervisor
+        success path (reload recovery) or
+        ``async_delete_entry_repair_issues`` (actual entry removal). See those
+        for the full lifecycle rationale (Codex PR #1104 follow-up).
+
+        The deletion is best-effort UI cleanup; failures are logged and
+        swallowed so a registry hiccup never blocks the in-memory state reset.
+        """
+        if self._hass is None:
+            return
+
+        try:
+            ir.async_delete_issue(
+                self._hass, DOMAIN, f"fcm_short_run_crash_loop_{entry_id}"
+            )
+        except Exception:  # noqa: BLE001 - best-effort UI cleanup
+            _LOGGER.debug(
+                "[entry=%s] Failed to delete short-run crash-loop repair issue",
+                entry_id,
+                exc_info=True,
+            )
+
+    @staticmethod
+    def async_delete_entry_repair_issues(hass: HomeAssistant, entry_id: str) -> None:
+        """Delete every entry-scoped FCM Repairs issue for a REMOVED config entry.
+
+        Call this ONLY from ``async_remove_entry`` (actual removal). On removal
+        no supervisor will run again, so the entry-scoped repairs must be retired
+        explicitly or they stay pinned in the Repairs panel for a config entry
+        that no longer exists. This covers the *fixable* reauth prompt
+        (``fcm_reauth_required_{entry_id}``), its legacy non-fixable predecessor
+        (``fcm_stuck_{entry_id}``) and the transient short-run crash-loop
+        diagnostic (``fcm_short_run_crash_loop_{entry_id}``).
+
+        A reload must NOT use this: there ``unregister_coordinator`` fires via
+        ``async_on_unload`` while the entry lives on, and the supervisor success
+        path clears the reauth repair once FCM re-registers. Deleting it on
+        reload would dismiss a still-active prompt before the new supervisor has
+        proven recovery (Codex PR #1104 follow-up).
+
+        All deletions are best-effort UI cleanup; failures are swallowed so a
+        registry hiccup never blocks entry removal.
+        """
+        for issue_id in (
+            f"fcm_short_run_crash_loop_{entry_id}",
+            f"fcm_reauth_required_{entry_id}",
+            f"fcm_stuck_{entry_id}",
+        ):
+            try:
+                ir.async_delete_issue(hass, DOMAIN, issue_id)
+            except Exception:  # noqa: BLE001 - best-effort UI cleanup
+                _LOGGER.debug(
+                    "[entry=%s] Failed to delete repair issue %s on removal",
+                    entry_id,
+                    issue_id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _ensure_cache_entry_id(cache: Any, entry_id: str) -> None:
@@ -440,6 +838,26 @@ class FcmReceiverHA:
                     _CACHE_PROVIDER.reset(token)
                 except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("Cache provider reset failed: %s", err)
+
+    @contextmanager
+    def _driving_generation_scope(
+        self, entry_id: str, generation: int | None
+    ) -> Iterator[None]:
+        """Publish the driving supervisor generation for one FCM handshake.
+
+        ``firebase_messaging`` fires ``credentials_updated_callback``
+        synchronously from inside the awaited ``checkin_or_register`` /
+        ``reregister_keeping_identity`` (same task). The callback closure is
+        shared across a fast reload, so it gates on this published generation
+        instead of a stale build-time snapshot. See ``_FCM_DRIVING_GENERATION``
+        for the full rationale (finding 4c). Reset in ``finally`` so a nested or
+        sibling handshake never inherits a leaked value.
+        """
+        token = _FCM_DRIVING_GENERATION.set((entry_id, generation))
+        try:
+            yield
+        finally:
+            _FCM_DRIVING_GENERATION.reset(token)
 
     def _monotonic_from_wall_time(
         self, wall_time: float, monotonic_now: float
@@ -652,35 +1070,120 @@ class FcmReceiverHA:
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
         return True
 
-    async def _ensure_client_for_entry(
+    async def _load_entry_creds_for_build(
         self, entry_id: str, cache: TokenCache | None
+    ) -> tuple[MutableJSONMapping | None, bool]:
+        """Resolve entry creds for a client build (the sole suspension point).
+
+        Returns ``(creds, loaded_from_cache)``. ``creds`` falls back to the
+        in-memory map, then the pending-creds buffer, then is overridden by a
+        successful awaited cache read. ``loaded_from_cache`` is True only when
+        that read produced a fresh credentials dict, so the caller knows it may
+        pop the pending-creds entry as part of its guarded commit.
+
+        The ``await`` here is the only suspension point in
+        ``_ensure_client_for_entry``'s critical section; the caller MUST
+        re-validate ``_entry_writes_suppressed`` after this returns, because a
+        synchronous teardown can land while this coroutine is parked on it.
+        """
+        creds = self.creds.get(entry_id)
+        if creds is None:
+            pending = self._pending_creds.get(entry_id)
+            if isinstance(pending, dict):
+                creds = pending
+        loaded_from_cache = False
+        try:
+            if cache is not None:
+                val = await cache.get("fcm_credentials")
+                if isinstance(val, str):
+                    val = json.loads(val)
+                if isinstance(val, dict):
+                    creds = val
+                    loaded_from_cache = True
+        except Exception as err:  # noqa: BLE001 - best-effort creds load
+            _LOGGER.debug(
+                "Failed to load entry-scoped FCM creds for %s: %s", entry_id, err
+            )
+        return creds, loaded_from_cache
+
+    async def _ensure_client_for_entry(
+        self, entry_id: str, cache: TokenCache | None, generation: int | None = None
     ) -> FcmPushClient[Any] | None:
-        """Create or return the FCM client for the given entry (idempotent)."""
+        """Create or return the FCM client for the given entry (idempotent).
+
+        ``generation`` is the supervisor's captured generation snapshot (or
+        ``None`` for live callers such as manual-locate registration). It gates
+        the *build* path through ``_entry_writes_suppressed`` (finding 5).
+        """
         if cache is not None:
             self._ensure_cache_entry_id(cache, entry_id)
         async with self._lock:
+            # AP6 (finding 5 + finding 6): gate BEFORE the existing-client fast
+            # path. A tombstoned entry or a superseded supervisor generation
+            # must never receive a client handle -- not even an already-built
+            # one. Two races collapse into this single chokepoint:
+            #
+            #   * finding 5 (build path): ``register_coordinator`` dispatches the
+            #     supervisor asynchronously; if ``unregister_coordinator``
+            #     tombstones the entry before that queued coroutine runs
+            #     (unload-before-dispatch), the build below would revive a
+            #     torn-down entry's ``self.pcs``/``self.creds``.
+            #   * finding 6 (read path): after a fast reload the new incarnation
+            #     installs a fresh client under ``entry_id``; a stale supervisor
+            #     (old generation) then calls in here. If the existing-client
+            #     early return ran first it would hand that stale supervisor the
+            #     LIVE client, which it later stops + discards on its own
+            #     suppression branch. ``_discard_own_client`` compares by
+            #     identity, but the handle IS the live client, so the identity
+            #     guard cannot save it -- the new incarnation loses its client.
+            #
+            # The generation guard in ``_register_for_fcm_entry`` fires one step
+            # too late for both. Gating first closes the build path AND the read
+            # path here. The supervisor loop treats this None as terminal (it
+            # built no own client, so there is nothing to clean up).
+            if self._entry_writes_suppressed(entry_id, generation):
+                _LOGGER.debug(
+                    "[entry=%s] Skipping FCM client handover for suppressed entry "
+                    "(tombstoned or superseded generation)",
+                    entry_id,
+                )
+                return None
+
+            # Idempotent read: an already-built client for a live, current
+            # generation is returned as-is (a read, not a re-creation).
             if entry_id in self.pcs:
                 return self.pcs[entry_id]
 
-            # Load entry-scoped credentials if present
-            creds = self.creds.get(entry_id)
-            if creds is None:
-                pending = self._pending_creds.get(entry_id)
-                if isinstance(pending, dict):
-                    creds = pending
-            try:
-                if cache is not None:
-                    val = await cache.get("fcm_credentials")
-                    if isinstance(val, str):
-                        val = json.loads(val)
-                    if isinstance(val, dict):
-                        creds = val
-                        self.creds[entry_id] = creds
-                        self._pending_creds.pop(entry_id, None)
-            except Exception as err:
+            # Resolve entry creds at the sole suspension point (the awaited cache
+            # read). Extracted into a named seam so this build chokepoint stays
+            # within its branch budget and the await is isolated; the store into
+            # ``self.creds[entry_id]`` is deferred to the single guarded commit
+            # below, because writing entry-state mid-method would let a teardown
+            # landing during the await re-create exactly what it just purged.
+            creds, loaded_from_cache = await self._load_entry_creds_for_build(
+                entry_id, cache
+            )
+
+            # AP7 (finding 7): re-validate suppression AFTER the await, BEFORE any
+            # per-entry store. ``self._lock`` is an asyncio lock -- it serialises
+            # other coroutines but does NOT exclude the SYNCHRONOUS
+            # ``unregister_coordinator`` (``async_on_unload``), which takes no
+            # lock. The ``await cache.get(...)`` above is the sole suspension
+            # point in this critical section; while parked there a teardown can
+            # tombstone the entry and ``_purge_entry_tokens`` it, so the first
+            # gate's verdict is stale on resume. Committing the stores below now
+            # would resurrect the purged ``self.pcs``/``self.creds`` -- the
+            # TOCTOU-over-await sibling of the fast-path race the first gate
+            # closes. Drop the handover; live callers treat None gracefully and a
+            # superseded supervisor terminates on it.
+            if self._entry_writes_suppressed(entry_id, generation):
                 _LOGGER.debug(
-                    "Failed to load entry-scoped FCM creds for %s: %s", entry_id, err
+                    "[entry=%s] Dropping FCM client handover after creds load; "
+                    "entry was suppressed (tombstoned or superseded) during the "
+                    "cache await",
+                    entry_id,
                 )
+                return None
 
             # Build register config (shared across entries)
             if not HAVE_FCM_PUSH_CLIENT:
@@ -709,7 +1212,7 @@ class FcmReceiverHA:
                     "CredentialsUpdatedCallable[MutableJSONMapping]",
                     _on_creds_updated_entry,
                 )
-                pc = FcmPushClient(
+                pc = _FcmPushClientFactory(
                     lambda payload,
                     persistent_id,
                     context,
@@ -728,9 +1231,73 @@ class FcmReceiverHA:
                 )
                 return None
 
+            # Single guarded commit: every per-entry store happens here, after
+            # the post-await re-validation -- never mid-method. The pending-creds
+            # pop is part of the commit because it only applies when the cache
+            # load above produced fresh credentials.
             self.pcs[entry_id] = pc
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
+            if loaded_from_cache:
+                self._pending_creds.pop(entry_id, None)
             return pc
+
+    def _discard_own_client(
+        self, entry_id: str, pc: FcmPushClient[Any]
+    ) -> None:
+        """Remove *pc* from ``self.pcs`` only if it is still the live client.
+
+        A supervisor cleans up the client it built by popping ``self.pcs``
+        under ``self._lock``. A key-only ``pop(entry_id)`` is identity-blind:
+        when a fast reload bumps the generation and the new incarnation has
+        already installed a fresh client under the same ``entry_id`` (via
+        ``_ensure_client_for_entry``), a stale supervisor reaching its cleanup
+        would evict the LIVE client, leaving the new generation without an FCM
+        client until its next restart. Comparing by identity ensures each
+        supervisor only discards the client it owns; a superseded supervisor
+        leaves the live client untouched.
+
+        Caller must hold ``self._lock``.
+        """
+        if self.pcs.get(entry_id) is pc:
+            self.pcs.pop(entry_id, None)
+
+    def _async_raise_reauth_issue(self, entry_id: str, *, reason: str) -> None:
+        """Surface a fixable repair that drives the user into the reauth flow.
+
+        All three terminal give-up points collapse into a single issue id
+        (``fcm_reauth_required_{entry_id}``) because the corrective action is
+        identical: re-authenticate / re-register. The fix flow in
+        ``repairs.py`` calls ``entry.async_start_reauth`` on confirmation.
+
+        The escalation thresholds are NOT re-invented here. They are the
+        existing retry caps consumed at the call sites:
+
+        * ``_MAX_FATAL_ENDPOINT_RETRIES`` (7) -- with the ``min(300, 30*n)``
+          backoff this is ~630 s of sustained 404 endpoint exhaustion before
+          give-up; a transient Google endpoint rotation clears well before it.
+        * ``_MAX_FATAL_AUTH_RETRIES`` (3) -- 401 token-renewal exhaustion.
+        * ``_BACKOFF_WARNING_THRESHOLD_S`` (64 s, ~6 failed registrations) --
+          the registration backoff warning point.
+
+        Because the repair hangs off those existing give-up/warning points, a
+        transient failure (count still below the cap) never raises it. The
+        recovery delete on a successful (re-)registration clears it again.
+
+        ``reason`` is a non-localised diagnostic hint forwarded via ``data``
+        so the fix flow / diagnostics can tell the three origins apart; the
+        fix flow itself only consumes ``entry_id``.
+        """
+        if not self._hass:
+            return
+        ir.async_create_issue(
+            self._hass,
+            DOMAIN,
+            f"fcm_reauth_required_{entry_id}",
+            is_fixable=True,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key="fcm_reauth_required",
+            data={"entry_id": entry_id, "reason": reason},
+        )
 
     async def _start_supervisor_for_entry(  # noqa: PLR0915
         self, entry_id: str, cache: TokenCache | None
@@ -739,7 +1306,25 @@ class FcmReceiverHA:
         if entry_id in self.supervisors and not self.supervisors[entry_id].done():
             return
 
-        stop_evt = self._stop_evts.setdefault(entry_id, asyncio.Event())
+        # AP4 (finding 4b): capture the generation current at start. Every
+        # per-entry write below is gated on this snapshot, so once a teardown
+        # bumps the generation this (now superseded) supervisor stops writing
+        # even after ``register_coordinator`` clears the boolean tombstone for
+        # the next incarnation.
+        generation = self._entry_generation.get(entry_id, 0)
+
+        # AP5 (finding 4b): a prior stop (request_stop on unload, or the cap
+        # teardown) leaves the entry's event *set* without installing a fresh
+        # one. The old ``setdefault`` then handed that set event to the new
+        # supervisor, whose ``while not stop_evt.is_set()`` exited immediately
+        # (wedged restart after a reload). Replace the event only when it is
+        # missing or already set; a still-unset event is kept so a deliberately
+        # pre-installed one (and the still-running old supervisor, which holds
+        # its own reference) keeps working.
+        stop_evt = self._stop_evts.get(entry_id)
+        if stop_evt is None or stop_evt.is_set():
+            stop_evt = asyncio.Event()
+            self._stop_evts[entry_id] = stop_evt
 
         async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
             nudge_evt = self._retry_nudge_evts.setdefault(
@@ -756,10 +1341,28 @@ class FcmReceiverHA:
                     return False
 
             backoff = 1.0
+            # Defense 2: per-supervisor closure state for the short-run
+            # crash cap. Kept closure-local (not on ``self``) so a
+            # re-registration that cancels this supervisor and spawns a
+            # new one cannot inherit a stale counter (CA-Audit B1).
+            short_run_counter: int = 0
+            entry_start: float = 0.0
             try:
                 while not stop_evt.is_set():
-                    pc = await self._ensure_client_for_entry(entry_id, cache)
+                    pc = await self._ensure_client_for_entry(
+                        entry_id, cache, generation
+                    )
                     if not pc:
+                        # finding 6: the build chokepoint now returns None for a
+                        # tombstoned entry or a superseded generation BEFORE
+                        # handing out any client. That is terminal for this
+                        # supervisor -- it must stop, not spin: no own client was
+                        # built (nothing to clean up) and the outer finally is
+                        # suppression-aware. A None from a transient build
+                        # failure (push-client support absent, factory error) is
+                        # NOT suppression and keeps retrying with backoff.
+                        if self._entry_writes_suppressed(entry_id, generation):
+                            break
                         nudged = await _nudge_sleep(backoff)
                         if nudged:
                             backoff = 1.0
@@ -768,7 +1371,9 @@ class FcmReceiverHA:
                         continue
 
                     try:
-                        ok_reg = await self._register_for_fcm_entry(entry_id)
+                        ok_reg = await self._register_for_fcm_entry(
+                            entry_id, generation
+                        )
                     except FatalRegistrationError as err:
                         message = str(err) or "FCM registration failed"
                         # Publish to ``_fatal_errors`` only once the retry
@@ -788,7 +1393,7 @@ class FcmReceiverHA:
                             pass
                         finally:
                             async with self._lock:
-                                self.pcs.pop(entry_id, None)
+                                self._discard_own_client(entry_id, pc)
 
                         is_auth = getattr(err, "is_auth_error", False)
                         counter_key = (
@@ -799,6 +1404,21 @@ class FcmReceiverHA:
                         fatal_count = (
                             self._fatal_retry_counts.get(counter_key, 0) + 1
                         )
+                        # AP4 race guard: a teardown or a supersede may have
+                        # purged/re-owned this entry mid-flight. A suppressed
+                        # supervisor is stale for the ENTIRE retry-budget
+                        # handling, not just the counter write below: the give-up
+                        # branches publish ``_fatal_error`` / ``_fatal_errors``
+                        # and raise the reauth repair, and ``fatal_count`` is read
+                        # from the shared ``_fatal_retry_counts`` map the LIVE
+                        # generation may already own after a fast reload. Letting
+                        # a stale generation reach the give-up branches would
+                        # surface a reauth/fatal error against the live entry.
+                        # Bail out entirely; the supervisor terminates via the
+                        # surrounding loop's finally cleanup (the failed client
+                        # was already stopped and popped above).
+                        if self._entry_writes_suppressed(entry_id, generation):
+                            break
                         self._fatal_retry_counts[counter_key] = fatal_count
 
                         if is_auth:
@@ -814,9 +1434,16 @@ class FcmReceiverHA:
                                     entry_id,
                                     fatal_count,
                                 )
+                                # Auth retry budget exhausted
+                                # (``_MAX_FATAL_AUTH_RETRIES``): offer the
+                                # fixable reauth repair instead of giving up
+                                # silently.
+                                self._async_raise_reauth_issue(
+                                    entry_id, reason="auth_401"
+                                )
                                 break
 
-                            await self._invalidate_fcm_tokens(entry_id)
+                            await self._invalidate_fcm_tokens(entry_id, generation)
 
                             delay = 60.0 * fatal_count
                             _LOGGER.warning(
@@ -843,6 +1470,15 @@ class FcmReceiverHA:
                                     entry_id,
                                     fatal_count,
                                 )
+                                # Endpoint retry budget exhausted
+                                # (``_MAX_FATAL_ENDPOINT_RETRIES`` == 7 ⇒
+                                # ~630 s of sustained 404 with the
+                                # ``min(300, 30*n)`` backoff): surface the
+                                # fixable reauth repair. This give-up was
+                                # previously a silent break with no issue.
+                                self._async_raise_reauth_issue(
+                                    entry_id, reason="endpoint_404"
+                                )
                                 break
 
                             delay = min(300.0, 30.0 * fatal_count)
@@ -858,6 +1494,31 @@ class FcmReceiverHA:
                             await asyncio.sleep(delay)
                             continue
 
+                    # AP4 (finding: stale registration success at the caller).
+                    # ``_register_for_fcm_entry`` guards its own per-entry writes,
+                    # but its boolean return cannot tell this caller that the
+                    # generation was superseded (or the entry tombstoned)
+                    # mid-flight. Without this guard a stale supervisor would run
+                    # the success path below -- deleting the LIVE generation's
+                    # reauth repair issue, bumping start metrics and
+                    # (re)starting + monitoring the stale client -- or, on a
+                    # transient ``ok_reg`` False, burn the shared retry budget for
+                    # an entry it no longer owns. Returning False instead would be
+                    # wrong: it routes into the backoff/retry path, but a
+                    # superseded generation must terminate, not retry. Bail out
+                    # like the fatal-retry break above; the surrounding finally
+                    # skips the stale health write under the same suppression
+                    # guard.
+                    if self._entry_writes_suppressed(entry_id, generation):
+                        try:
+                            await pc.stop()
+                        except Exception:
+                            pass
+                        finally:
+                            async with self._lock:
+                                self._discard_own_client(entry_id, pc)
+                        break
+
                     if not ok_reg:
                         try:
                             await pc.stop()
@@ -865,7 +1526,7 @@ class FcmReceiverHA:
                             pass
                         finally:
                             async with self._lock:
-                                self.pcs.pop(entry_id, None)
+                                self._discard_own_client(entry_id, pc)
                         delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
                         if backoff >= _BACKOFF_WARNING_THRESHOLD_S:
                             _LOGGER.warning(
@@ -874,15 +1535,14 @@ class FcmReceiverHA:
                                 entry_id,
                                 delay,
                             )
-                            if self._hass:
-                                ir.async_create_issue(
-                                    self._hass,
-                                    DOMAIN,
-                                    f"fcm_stuck_{entry_id}",
-                                    is_fixable=False,
-                                    severity=ir.IssueSeverity.WARNING,
-                                    translation_key="fcm_connection_stuck",
-                                )
+                            # Registration backoff warning point
+                            # (``_BACKOFF_WARNING_THRESHOLD_S``): escalate to
+                            # the same fixable reauth repair as the 404/401
+                            # give-up paths (was a non-fixable ``fcm_stuck``
+                            # warning offering no action path).
+                            self._async_raise_reauth_issue(
+                                entry_id, reason="registration_backoff"
+                            )
                         else:
                             _LOGGER.info(
                                 "[entry=%s] Re-trying FCM registration in %.1fs",
@@ -898,6 +1558,15 @@ class FcmReceiverHA:
 
                     # Telemetry (aggregate counters)
                     if self._hass:
+                        # A successful (re-)registration resolves the fixable
+                        # reauth repair. Also delete the legacy non-fixable
+                        # ``fcm_stuck`` issue so it does not linger after an
+                        # upgrade from the previous key.
+                        ir.async_delete_issue(
+                            self._hass,
+                            DOMAIN,
+                            f"fcm_reauth_required_{entry_id}",
+                        )
                         ir.async_delete_issue(
                             self._hass, DOMAIN, f"fcm_stuck_{entry_id}"
                         )
@@ -919,15 +1588,69 @@ class FcmReceiverHA:
                             "[entry=%s] FCM client failed to start: %s", entry_id, err
                         )
 
+                    # Defense 2 snapshot: timestamp the entry into the
+                    # monitor loop.
+                    #
+                    # Iter-11 (Codex follow-up): per-run latch tracking
+                    # whether the client ever reached a connected/listening
+                    # state. The cap is meant to detect a poison-message
+                    # crash loop (client connects, decodes, dies, repeat),
+                    # NOT ordinary connectivity outages where ``_listen()``
+                    # exhausts its 5 connection retries (~15-20s) without
+                    # ever reaching ``STARTED``. Without this gate, a normal
+                    # MCS-unreachable / Google outage would cap the
+                    # supervisor after 10 brief connection-failure runs and
+                    # permanently disable FCM push until reload.
+                    entry_start = time.monotonic()
+                    became_started = False
+
                     while not stop_evt.is_set():
                         await asyncio.sleep(max(FCM_MONITOR_INTERVAL_S, 0.5))
                         state = getattr(pc, "run_state", None)
                         do_listen = getattr(pc, "do_listen", False)
                         monotonic_now = time.monotonic()
-                        last_activity = self._update_last_activity_for_entry(
-                            entry_id, pc, monotonic_now
+                        # AP4 (finding 4b, related sweep): a superseded or
+                        # tombstoned supervisor must not refresh per-entry
+                        # activity/health here. Those writes resurrect exactly
+                        # the snapshots ``_purge_entry_tokens`` dropped -- a stale
+                        # ``_entry_health`` makes the first healthy transition of
+                        # the next incarnation look like a no-change and
+                        # suppresses its listener push (the AP2 class named in
+                        # finding 2b). Skip the writes while suppressed; the
+                        # restart decision below still uses ``state`` /
+                        # ``do_listen``.
+                        writes_suppressed = self._entry_writes_suppressed(
+                            entry_id, generation
+                        )
+                        last_activity = (
+                            None
+                            if writes_suppressed
+                            else self._update_last_activity_for_entry(
+                                entry_id, pc, monotonic_now
+                            )
                         )
                         stale_after = max(self._activity_stale_after_s, 0.0)
+                        # Iter-11: track ``became_started`` symmetrically to
+                        # the health probe (same fallback for libraries that
+                        # do not expose a ``run_state`` enum).
+                        if FcmPushClientRunState is None:
+                            if do_listen:
+                                became_started = True
+                        elif state == FcmPushClientRunState.STARTED:
+                            became_started = True
+                        # Iter-12 (Codex follow-up): sampling-gap defense.
+                        # When the full lifecycle ``CREATED -> STARTED ->
+                        # CRASH`` happens between two monitor polls (>=0.5s),
+                        # this loop reads STOPPED/!do_listen and ``became_started``
+                        # would remain false. The vendored client's
+                        # ``__setattr__`` hook latches ``_has_been_started``
+                        # the moment the library assigns ``run_state =
+                        # STARTED``, independent of polling cadence; mirror
+                        # that observation here so the cap branch correctly
+                        # classifies micro-window poison-message crashes.
+                        became_started = became_started or bool(
+                            getattr(pc, "_has_been_started", False)
+                        )
                         healthy = (
                             (
                                 FcmPushClientRunState is None
@@ -940,7 +1663,8 @@ class FcmReceiverHA:
                                 or (monotonic_now - last_activity <= stale_after)
                             )
                         )
-                        self._update_entry_health(entry_id, healthy)
+                        if not writes_suppressed:
+                            self._update_entry_health(entry_id, healthy)
                         if state is None:
                             _LOGGER.info(
                                 "[entry=%s] FCM client state unknown; scheduling restart",
@@ -979,6 +1703,203 @@ class FcmReceiverHA:
                             )
                             break
 
+                    # Defense 2: short-run crash cap. Counts consecutive
+                    # monitor exits with ``run_duration <
+                    # _SHORT_RUN_THRESHOLD_S`` THAT ALSO reached
+                    # ``STARTED`` at least once during the run. After
+                    # ``_MAX_CONSECUTIVE_SHORT_RUNS`` such runs, surface a
+                    # non-fixable repair issue and stop the loop. The
+                    # comparison is strictly ``<`` (a 30.0s run counts as
+                    # healthy and resets the counter).
+                    #
+                    # Iter-11 (Codex follow-up): the ``became_started`` gate
+                    # ensures the cap is specific to the poison-message
+                    # scenario (client connects, decodes, dies, repeat) and
+                    # excludes pre-start connection/login failures. A burst
+                    # of MCS-unreachable failures (5 retries x ~3-4s each)
+                    # would otherwise be counted as short-run crashes and
+                    # permanently disable FCM push after one ordinary
+                    # network outage. Pre-start failures leave the counter
+                    # AND the latch UNTOUCHED so that (a) a poison-message
+                    # cascade interleaved with outages still accumulates
+                    # correctly, and (b) a long pre-start hang does not
+                    # falsely clear a real cap latch (no healthy proof).
+                    run_duration = time.monotonic() - entry_start
+                    credential_error = getattr(pc, "credential_error", None)
+                    if credential_error is not None:
+                        # Finding 1 (Codex): the listener surfaced corrupt FCM
+                        # key material via ``credential_error``. Restarting
+                        # against the same credentials would loop until the
+                        # short-run crash cap fires; instead invalidate the key
+                        # material so the next registration regenerates it
+                        # (a valid GCM identity is preserved, a corrupt one
+                        # dropped) and do NOT
+                        # charge this run to the crash cap -- corrective action
+                        # is being taken, this is not a poison-message loop.
+                        _LOGGER.error(
+                            "[entry=%s] FCM credential material corrupt (%s); "
+                            "invalidating FCM tokens to force re-registration",
+                            entry_id,
+                            credential_error,
+                        )
+                        await self._invalidate_fcm_tokens(entry_id, generation)
+                        short_run_counter = 0
+                    elif not became_started:
+                        # Pre-start failure (no connected/listening state
+                        # observed during this run). Do NOT touch the
+                        # short-run counter or the cap latch.
+                        pass
+                    elif run_duration < _SHORT_RUN_THRESHOLD_S:
+                        short_run_counter += 1
+                        # Test hook: expose the closure counter to stubs
+                        # without leaking it onto ``self``.
+                        observe = getattr(pc, "_observe_counter", None)
+                        if callable(observe):
+                            try:
+                                observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if short_run_counter >= _MAX_CONSECUTIVE_SHORT_RUNS:
+                            message = (
+                                f"{CRASH_LOOP_FATAL_PREFIX} "
+                                f"{_MAX_CONSECUTIVE_SHORT_RUNS} consecutive "
+                                f"runs ended within "
+                                f"{_SHORT_RUN_THRESHOLD_S:.0f}s "
+                                f"(persistent poison message suspected)"
+                            )
+                            _LOGGER.error("[entry=%s] %s", entry_id, message)
+                            # AP4 race guard: a teardown may have purged this
+                            # entry while the monitor loop was running. Skip the
+                            # cap latch / fatal map / Repairs issue so they are
+                            # not resurrected for a dead entry; the terminal
+                            # break below still stops this supervisor.
+                            if not self._entry_writes_suppressed(entry_id, generation):
+                                self._fatal_errors[entry_id] = message
+                                # Defense 2 iter-8: latch the cap state. While
+                                # this latch is set,
+                                # ``_clear_fatal_error_for_entry`` is a no-op
+                                # (registration / credential-update paths cannot
+                                # clear the fatal map or the Repairs issue before
+                                # a real healthy supervisor run proves the poison
+                                # message is gone).
+                                self._short_run_cap_latched.add(entry_id)
+                                # Iter-16 (Codex follow-up): snapshot the
+                                # cap-fire message so the pass-through clear
+                                # branch in ``_clear_fatal_error_for_entry`` can
+                                # restore it after a non-cap fatal overwrote
+                                # ``_fatal_errors[entry_id]``. Released in the
+                                # same two places that release the latch.
+                                self._short_run_cap_messages[entry_id] = message
+                                if self._hass:
+                                    ir.async_create_issue(
+                                        self._hass,
+                                        DOMAIN,
+                                        f"fcm_short_run_crash_loop_{entry_id}",
+                                        is_fixable=False,
+                                        severity=ir.IssueSeverity.ERROR,
+                                        translation_key="fcm_short_run_crash_loop",
+                                    )
+                            # Cleanup the client before breaking out so
+                            # the loop exit doesn't leave a half-stopped pc.
+                            try:
+                                await pc.stop()
+                            except Exception:  # noqa: BLE001
+                                pass
+                            finally:
+                                async with self._lock:
+                                    self._discard_own_client(entry_id, pc)
+                                # AP4 (finding 4b, related sweep): suppress the
+                                # stale-health write for a superseded/tombstoned
+                                # supervisor (resurrection class, finding 2b).
+                                if not self._entry_writes_suppressed(
+                                    entry_id, generation
+                                ):
+                                    self._update_entry_health(entry_id, False)
+                            # Defense 2 iter-9 (Codex follow-up): the cap is
+                            # a TERMINAL state for this supervisor. ``break``
+                            # alone only exits the inner monitor loop and
+                            # falls through to the per-iteration restart
+                            # block (``if not stop_evt.is_set(): ...
+                            # _nudge_sleep(delay)``), which would spawn a
+                            # fresh FCM client and continue the retry
+                            # pressure / log spam the cap is meant to stop.
+                            # Set the stop event so the outer ``while not
+                            # stop_evt.is_set()`` exits, and pop the entry
+                            # from ``_stop_evts`` so a legitimate
+                            # re-registration / reload (which constructs a
+                            # fresh event via ``setdefault``) is not
+                            # short-circuited by the now-consumed event.
+                            stop_evt.set()
+                            self._stop_evts.pop(entry_id, None)
+                            break
+                    else:
+                        short_run_counter = 0  # healthy run resets the counter
+                        observe = getattr(pc, "_observe_counter", None)
+                        if callable(observe):
+                            try:
+                                observe(short_run_counter)
+                            except Exception:  # noqa: BLE001
+                                pass
+                        # Mirror the counter reset in the Issue Registry: if
+                        # the cap had previously fired on a prior supervisor
+                        # incarnation, a healthy run is the user-visible
+                        # signal that the condition is gone.
+                        #
+                        # Defense 2 iter-8: a healthy run is the ONLY proof
+                        # the system has that the poison-message condition is
+                        # gone, so this is also the only callsite that may
+                        # drop the cap latch. After dropping the latch, the
+                        # cap-related ``_fatal_errors`` entry is removed and
+                        # the aggregate ``_fatal_error`` re-derived (so the
+                        # System Health surface stops showing the stale
+                        # message). The Repairs delete below stays inside
+                        # ``self._hass is not None`` and intentionally also
+                        # runs when no latch was set (cheap idempotent UI
+                        # cleanup).
+                        # AP4 (finding 4b, related sweep): a superseded or
+                        # tombstoned supervisor must not release the LIVE
+                        # generation's cap latch / fatal map / Repairs issue.
+                        # This mirrors the cap-FIRE guard above: a stale healthy
+                        # run is not proof the live incarnation's poison-message
+                        # condition is gone, and an old generation finishing a
+                        # healthy run after a fast reload would otherwise wipe the
+                        # new generation's diagnostics. The closure-local
+                        # ``short_run_counter`` reset above stays unguarded (it
+                        # cannot leak across incarnations).
+                        if not self._entry_writes_suppressed(entry_id, generation):
+                            cap_was_latched = (
+                                entry_id in self._short_run_cap_latched
+                            )
+                            if cap_was_latched:
+                                self._short_run_cap_latched.discard(entry_id)
+                                # Iter-16: a healthy run is also the moment to
+                                # retire the cap-fire snapshot so the
+                                # pass-through clear branch cannot re-introduce
+                                # it after the latch is gone.
+                                self._short_run_cap_messages.pop(entry_id, None)
+                                cap_message = self._fatal_errors.get(entry_id)
+                                if cap_message and cap_message.startswith(
+                                    CRASH_LOOP_FATAL_PREFIX
+                                ):
+                                    self._fatal_errors.pop(entry_id, None)
+                                    self._fatal_error = next(
+                                        iter(self._fatal_errors.values()), None
+                                    )
+                                    _LOGGER.info(
+                                        "[entry=%s] FCM short-run cap latch "
+                                        "released by healthy supervisor run",
+                                        entry_id,
+                                    )
+                            if self._hass is not None:
+                                try:
+                                    ir.async_delete_issue(
+                                        self._hass,
+                                        DOMAIN,
+                                        f"fcm_short_run_crash_loop_{entry_id}",
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass
+
                     # Cleanup before restart
                     try:
                         await pc.stop()
@@ -986,8 +1907,12 @@ class FcmReceiverHA:
                         pass
                     finally:
                         async with self._lock:
-                            self.pcs.pop(entry_id, None)
-                        self._update_entry_health(entry_id, False)
+                            self._discard_own_client(entry_id, pc)
+                        # AP4 (finding 4b, related sweep): suppress the
+                        # stale-health write for a superseded/tombstoned
+                        # supervisor (resurrection class, finding 2b).
+                        if not self._entry_writes_suppressed(entry_id, generation):
+                            self._update_entry_health(entry_id, False)
 
                     if not stop_evt.is_set():
                         delay = backoff + random.uniform(0.1, 0.3) * backoff  # nosec B311
@@ -1006,7 +1931,16 @@ class FcmReceiverHA:
                 _LOGGER.error("[entry=%s] FCM supervisor crashed: %s", entry_id, err)
             finally:
                 _LOGGER.info("[entry=%s] FCM supervisor stopped", entry_id)
-                self._update_entry_health(entry_id, False)
+                # AP4 (finding 4b, related sweep): a supervisor cancelled by a
+                # teardown/reload must not write a stale "unhealthy" snapshot
+                # here -- ``_purge_entry_tokens`` just dropped ``_entry_health``
+                # for this entry, and re-creating it as False would suppress the
+                # first healthy transition of the next incarnation (the AP2
+                # resurrection class). Skip the write once this supervisor is
+                # superseded or the entry is tombstoned; a genuine shutdown
+                # (no generation bump, no tombstone) still records it.
+                if not self._entry_writes_suppressed(entry_id, generation):
+                    self._update_entry_health(entry_id, False)
                 self._retry_nudge_evts.pop(entry_id, None)
 
         task = asyncio.create_task(
@@ -1015,22 +1949,100 @@ class FcmReceiverHA:
         self.supervisors[entry_id] = task
         _LOGGER.info("Started FCM supervisor for entry %s", entry_id)
 
-    async def _invalidate_fcm_tokens(self, entry_id: str) -> None:
-        """Clear renewable FCM tokens while preserving GCM device identity.
+    @staticmethod
+    def _is_reregisterable_id(value: Any) -> bool:
+        """Return True when ``value`` survives the reregister path's ``int()``.
 
-        After this, the next registration attempt will use
-        ``reregister_keeping_identity()`` to get fresh FCM tokens with
-        the same android_id/security_token.
+        ``FcmRegister._get_checkin_payload`` re-uses a cached identity only when
+        both fields are truthy *and* ``int()``-convertible (it runs
+        ``int(android_id)`` / ``int(security_token)``). A truthy-but-malformed
+        value — e.g. a non-numeric string ``"sec-tok"`` or a list — passes the
+        truthiness gate but raises ``ValueError``/``TypeError`` on ``int()``,
+        trapping the supervisor in the same retry loop. A corrupted payload may
+        also carry a float infinity (``1e309`` / ``Infinity`` in JSON), which is
+        truthy and not a bool but raises ``OverflowError`` on ``int()`` — the
+        same trap, so it is rejected here too. ``bool`` is rejected explicitly:
+        it is an ``int`` subclass but never a real device identity.
         """
+        if not value or isinstance(value, bool):
+            return False
+        try:
+            int(value)
+        except (ValueError, TypeError, OverflowError):
+            return False
+        return True
+
+    @classmethod
+    def _gcm_identity_is_complete(cls, gcm: dict[str, Any]) -> bool:
+        """Return True when a GCM block carries a re-registerable identity.
+
+        ``FcmRegister.reregister_keeping_identity()`` subscripts
+        ``credentials["gcm"]["android_id"]`` and ``["security_token"]`` *without*
+        guarding (and only falls back to a full register when the ``gcm`` key is
+        entirely absent). A partial block — e.g. an ``android_id`` with no
+        ``security_token`` — raises ``KeyError`` on every retry, and a block
+        whose values are present but not ``int()``-convertible raises
+        ``ValueError``/``TypeError`` instead (see ``_is_reregisterable_id``).
+        Only a block carrying both ``int()``-convertible values can be preserved
+        across an FCM-token invalidation; anything else must be dropped so the
+        next attempt performs a full fresh handshake instead of looping on the
+        same broken identity.
+        """
+        return cls._is_reregisterable_id(gcm.get("android_id")) and cls._is_reregisterable_id(
+            gcm.get("security_token")
+        )
+
+    async def _invalidate_fcm_tokens(
+        self, entry_id: str, generation: int | None = None
+    ) -> None:
+        """Clear renewable FCM tokens, preserving a *usable* GCM identity.
+
+        When the GCM block still carries a complete device identity
+        (android_id + security_token), only the renewable FCM parts are stripped
+        so the next attempt can take the fast ``reregister_keeping_identity()``
+        path. When the identity itself is incomplete/corrupt, the whole ``gcm``
+        block is dropped instead: keeping it would make
+        ``reregister_keeping_identity()`` raise ``KeyError`` forever (Codex
+        follow-up), so dropping it forces ``_register_for_fcm_entry`` onto the
+        full ``checkin_or_register()`` handshake.
+
+        ``generation`` is the supervisor's captured generation (AP4 finding 4b).
+        The public ``async_reregister_fcm`` path is a live operation and passes
+        ``None`` (tombstone-window check only); a supervisor passes its snapshot
+        so a superseded run cannot write back the creds the teardown dropped.
+        """
+        # AP4 race guard: never persist creds for an entry the teardown already
+        # purged (a still-running or superseded supervisor must not write back
+        # the credentials _purge_entry_tokens dropped).
+        if self._entry_writes_suppressed(entry_id, generation):
+            return
         creds = self.creds.get(entry_id)
         if creds and isinstance(creds, dict):
-            # Remove FCM-related parts, keep GCM device identity
+            # Renewable FCM parts always go.
             creds.pop("fcm", None)
             creds.pop("keys", None)
+
             gcm = creds.get("gcm")
-            if isinstance(gcm, dict):
+            if isinstance(gcm, dict) and self._gcm_identity_is_complete(gcm):
+                # Identity is usable: strip only the renewable GCM token parts
+                # and keep android_id/security_token for a fast re-register.
                 gcm.pop("token", None)
                 gcm.pop("app_id", None)
+                _LOGGER.info(
+                    "[entry=%s] Invalidated FCM tokens; "
+                    "android_id/security_token preserved for re-registration",
+                    entry_id,
+                )
+            else:
+                # Identity is missing/partial/corrupt: drop the whole block so
+                # the next attempt does a full registration rather than replaying
+                # the same KeyError-raising creds.
+                creds.pop("gcm", None)
+                _LOGGER.warning(
+                    "[entry=%s] Corrupt or incomplete GCM identity; dropped device "
+                    "identity to force a full FCM re-registration",
+                    entry_id,
+                )
 
             # Persist partial credentials so restarts also trigger re-register
             entry_cache = self._entry_caches.get(entry_id)
@@ -1039,12 +2051,6 @@ class FcmReceiverHA:
                     await entry_cache.set("fcm_credentials", creds)
                 except Exception:
                     pass
-
-            _LOGGER.info(
-                "[entry=%s] Invalidated FCM tokens; "
-                "android_id/security_token preserved for re-registration",
-                entry_id,
-            )
 
     @staticmethod
     def _raise_if_fatal_client_error(
@@ -1117,8 +2123,16 @@ class FcmReceiverHA:
             err,
         )
 
-    async def _register_for_fcm_entry(self, entry_id: str) -> bool:
-        """Single registration attempt for a specific entry."""
+    async def _register_for_fcm_entry(
+        self, entry_id: str, generation: int | None = None
+    ) -> bool:
+        """Single registration attempt for a specific entry.
+
+        ``generation`` is the supervisor's captured generation (AP4 finding 4b);
+        it gates the success-path routing writes so a superseded supervisor
+        cannot resurrect routing state after the boolean tombstone is cleared.
+        Callers outside a supervisor pass ``None`` (tombstone-window check only).
+        """
         pc = self.pcs.get(entry_id)
         if not pc:
             return False
@@ -1131,28 +2145,48 @@ class FcmReceiverHA:
                 and "gcm" in creds
                 and "fcm" not in creds
             )
-            if needs_reregister:
-                _LOGGER.info(
-                    "[entry=%s] Partial credentials detected; "
-                    "re-registering with existing device identity",
-                    entry_id,
-                )
-                token_or_creds = await pc.reregister_keeping_identity()
-            else:
-                token_or_creds = await pc.checkin_or_register()
+            # Publish this supervisor's captured generation for the handshake so
+            # the synchronously-fired credentials callback gates on the driving
+            # generation, not the reused client's stale build-time one (4c).
+            with self._driving_generation_scope(entry_id, generation):
+                if needs_reregister:
+                    _LOGGER.info(
+                        "[entry=%s] Partial credentials detected; "
+                        "re-registering with existing device identity",
+                        entry_id,
+                    )
+                    token_or_creds = await pc.reregister_keeping_identity()
+                else:
+                    token_or_creds = await pc.checkin_or_register()
 
             if token_or_creds:
                 _LOGGER.info("[entry=%s] FCM registered successfully", entry_id)
-                token = self.get_fcm_token(entry_id)
-                if token:
-                    self._update_token_routing(token, {entry_id})
-                    await self._persist_routing_token(entry_id, token)
-                self._clear_fatal_error_for_entry(
-                    entry_id, reason="Registration succeeded"
-                )
-                # Reset fatal retry counters on success
-                self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
-                self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
+                # AP4 race guard (two tiers): a teardown or a supersede may have
+                # purged or re-owned this entry while this attempt was in flight.
+                #
+                # * Routing writes RE-CREATE the per-entry state
+                #   ``_purge_entry_tokens`` removed, so they are skipped whenever
+                #   writes are suppressed (tombstone window OR superseded gen).
+                # * The clears / counter resets only REMOVE state, so they stay
+                #   teardown-safe in the pure-tombstone window (the entry is going
+                #   away and ``unregister_coordinator`` already reset it). But a
+                #   SUPERSEDED generation finishing after a fast reload must NOT
+                #   run them: that would wipe the LIVE generation's fatal latch,
+                #   reauth repair and retry counters (finding: guard all stale
+                #   success side effects). Gate them on the narrow generation
+                #   check so the documented teardown-safe-clear behaviour is kept.
+                if not self._entry_writes_suppressed(entry_id, generation):
+                    token = self.get_fcm_token(entry_id)
+                    if token:
+                        self._update_token_routing(token, {entry_id})
+                        await self._persist_routing_token(entry_id, token)
+                if not self._entry_generation_superseded(entry_id, generation):
+                    self._clear_fatal_error_for_entry(
+                        entry_id, reason="Registration succeeded"
+                    )
+                    # Reset fatal retry counters on success
+                    self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
+                    self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
             return False
@@ -1169,18 +2203,65 @@ class FcmReceiverHA:
             # retry budget (with _invalidate_fcm_tokens) runs.
             self._raise_if_fatal_http_error(entry_id, err)
             return False
-        except (TimeoutError, RuntimeError, Exception) as err:  # noqa: BLE001
-            # Transient errors (TimeoutError, RuntimeError from firebase_messaging)
-            # are logged at info level; other exceptions at error level.
-            if isinstance(err, (TimeoutError, RuntimeError)):
-                _LOGGER.info(
-                    "[entry=%s] FCM registration failed (transient): %s - will retry",
-                    entry_id,
-                    err,
-                )
-            else:
-                _LOGGER.error("[entry=%s] FCM registration error: %s", entry_id, err)
+        except Exception as err:  # noqa: BLE001
+            # AP6 (finding 3a): the previous combined
+            # ``(TimeoutError, RuntimeError, Exception)`` made the specific types
+            # redundant and treated every non-fatal error the same. Delegate the
+            # classification to a dedicated helper (extract-method keeps this
+            # function under PLR0911 and makes the rule unit-testable) and return
+            # a single non-fatal result. Fatal paths
+            # (FatalRegistrationError / ClientError / FcmRegisterHTTPError) are
+            # handled above and never reach here.
+            await self._classify_registration_exception(entry_id, err, generation)
             return False
+
+    async def _classify_registration_exception(
+        self, entry_id: str, err: BaseException, generation: int | None = None
+    ) -> None:
+        """Classify a non-fatal registration exception (AP6, finding 3a).
+
+        Splits the formerly conflated catch-all into three honest classes:
+
+        * ``TimeoutError`` / ``RuntimeError`` — genuinely transient (network
+          timeout, or firebase_messaging "...token missing..."); just retry.
+        * ``KeyError`` / ``ValueError`` / ``TypeError`` — structural credential
+          corruption (``reregister_keeping_identity()`` /
+          ``checkin_or_register()`` raise ``KeyError`` on corrupt
+          ``credentials["gcm"][...]`` and ``ValueError``/``TypeError`` on
+          malformed/JSON-broken creds; ``json.JSONDecodeError`` is a
+          ``ValueError``). NOT transient: retrying replays the same broken creds
+          forever with no visible fatal state. Escalate by invalidating the FCM
+          tokens, which preserves a *complete* GCM identity but drops a
+          partial/corrupt one, so the next attempt performs a fresh handshake
+          instead of looping. Conservative: only these well-defined types.
+        * anything else — unexpected; logged at error (not silently swallowed as
+          benign) but left non-fatal so a single surprise cannot crash the
+          supervisor.
+
+        ``generation`` is the calling supervisor's captured generation (AP4
+        finding 4b); it is forwarded to ``_invalidate_fcm_tokens`` so a
+        superseded supervisor cannot write back the creds a teardown dropped.
+        Callers outside a supervisor pass ``None`` (tombstone-window check only).
+        """
+        if isinstance(err, (TimeoutError, RuntimeError)):
+            _LOGGER.info(
+                "[entry=%s] FCM registration failed (transient): %s - will retry",
+                entry_id,
+                err,
+            )
+        elif isinstance(err, (KeyError, ValueError, TypeError)):
+            _LOGGER.error(
+                "[entry=%s] FCM registration hit corrupt credentials (%s): %s "
+                "- invalidating FCM tokens to force re-registration",
+                entry_id,
+                type(err).__name__,
+                err,
+            )
+            await self._invalidate_fcm_tokens(entry_id, generation)
+        else:
+            _LOGGER.error(
+                "[entry=%s] FCM registration unexpected error: %s", entry_id, err
+            )
 
     # Public entrypoint kept for back-compat (starts supervisors lazily if needed)
     async def _start_listening(self) -> None:
@@ -1213,6 +2294,19 @@ class FcmReceiverHA:
         cache = getattr(coordinator, "cache", None)
         if entry is None:
             return
+
+        # AP4 (finding 4a): a setup (initial or reload) un-tombstones the entry
+        # so the *new* incarnation's writes take effect again. This is the
+        # single reset point: it runs synchronously before the supervisor is
+        # (re)dispatched below. Clearing the boolean tombstone alone would
+        # re-open the race for a prior supervisor that request_stop only
+        # cancelled (not awaited) and which is still unwinding; finding 4b
+        # closes that gap via the generation captured per supervisor, so a
+        # superseded run stays suppressed by generation even though the
+        # tombstone is cleared here. The generation is intentionally NOT reset:
+        # the next supervisor reads the post-teardown value and is allowed,
+        # while the stale one keeps its old (now mismatched) snapshot.
+        self._unregistered.discard(entry.entry_id)
 
         self._entry_to_tokens.setdefault(entry.entry_id, set())
 
@@ -1330,8 +2424,34 @@ class FcmReceiverHA:
                 self._entry_caches[entry_id] = replacement
             else:
                 self._entry_caches.pop(entry_id, None)
+                # AP4 (finding 4a): tombstone the entry BEFORE purging so any
+                # write from the still-running supervisor task (this method is
+                # synchronous and does not await it) is dropped instead of
+                # re-creating the state purged below. Cleared by
+                # register_coordinator on the next setup (reload-safe).
+                self._unregistered.add(entry_id)
+                # AP4 (finding 4b): bump the generation BEFORE the tombstone is
+                # later cleared by ``register_coordinator``. ``request_stop()``
+                # only cancels the prior supervisor without awaiting it, so this
+                # bump is what keeps that cancelled-but-unwinding supervisor's
+                # writes suppressed once the tombstone is gone -- it captured the
+                # old generation, which no longer matches.
+                self._entry_generation[entry_id] = (
+                    self._entry_generation.get(entry_id, 0) + 1
+                )
                 self._purge_entry_tokens(entry_id)
-                self._clear_fatal_error_for_entry(entry_id, reason="Entry unregistered")
+                # Hard-reset on unregister: this fires via ``async_on_unload``
+                # on EVERY unload (reload AND removal), so it only resets the
+                # in-memory state -- the short-run cap latch, the fatal-error
+                # map and the transient short-run crash-loop Repairs issue
+                # (force=True). It must NOT delete the fixable reauth repairs:
+                # on a reauth-success reload the new supervisor still has to
+                # prove recovery first. Those are retired by the supervisor
+                # success path (reload) or ``async_delete_entry_repair_issues``
+                # (actual removal). See ``_clear_fatal_error_for_entry``.
+                self._clear_fatal_error_for_entry(
+                    entry_id, reason="Entry unregistered", force=True
+                )
 
     # -------------------- Incoming notifications --------------------
 
@@ -1938,6 +3058,38 @@ class FcmReceiverHA:
 
     def _on_credentials_updated_for_entry(self, entry_id: str, creds: Any) -> None:
         """Update in-memory creds for the entry and persist asynchronously."""
+        # AP4 race guard (two tiers): the old FCM client is not awaited during
+        # the synchronous teardown in ``unregister_coordinator``, so it can still
+        # fire this credentials-updated callback *after* ``_purge_entry_tokens``
+        # cleared the entry. Without this guard the callback would re-write
+        # ``self.creds[entry_id]``, restore token routing and queue persistence /
+        # pending creds, making a removed entry look known again to
+        # ``async_reregister_fcm``.
+        #
+        # The tombstone alone is insufficient on a fast reload (finding 4c):
+        # ``unregister_coordinator`` bumps the generation but does NOT pop the
+        # reused client, and ``register_coordinator`` clears the tombstone for
+        # the new incarnation while a cancelled-but-unwinding supervisor is still
+        # inside ``checkin_or_register`` on that same client. Its synchronously-
+        # fired callback would then pass a tombstone-only gate and clobber the
+        # LIVE generation's creds, routing and fatal latch -- exactly the writes
+        # ``_register_for_fcm_entry`` guards post-await. Resolve the *driving*
+        # generation published by the supervisor for this handshake and gate on
+        # it: a superseded supervisor is suppressed, a live handshake (matching
+        # generation) and an out-of-band refresh (no driving generation -> pure
+        # tombstone window) still write. ``register_coordinator`` clears the
+        # tombstone on the next setup so a genuine reload still accepts creds.
+        driving = _FCM_DRIVING_GENERATION.get()
+        generation = (
+            driving[1] if driving is not None and driving[0] == entry_id else None
+        )
+        if self._entry_writes_suppressed(entry_id, generation):
+            _LOGGER.debug(
+                "[entry=%s] Ignoring credentials-updated callback for suppressed "
+                "entry (tombstoned or superseded generation)",
+                entry_id,
+            )
+            return
         normalized: Any = creds
         if isinstance(normalized, str):
             try:
@@ -2019,12 +3171,30 @@ class FcmReceiverHA:
     async def async_reregister_fcm(self, entry_id: str) -> bool:
         """Public API: invalidate FCM tokens and re-register for a specific entry.
 
-        Preserves the GCM device identity (android_id/security_token) and
-        obtains fresh GCM + FCM tokens via ``reregister_keeping_identity()``.
+        Preserves a *complete* GCM device identity (android_id/security_token)
+        for a fast ``reregister_keeping_identity()``; a partial/corrupt identity
+        is dropped so the next attempt does a full ``checkin_or_register()``
+        handshake instead of looping on broken creds.
 
         Returns True if re-registration was initiated (supervisor restarted),
         False if the entry is not known to this receiver.
         """
+        # A torn-down entry must never be revived from here. unregister_coordinator
+        # (sync, via async_on_unload) tombstones the entry and purges its creds, but
+        # it cannot await pc.stop(), so the live client lingers in self.pcs until the
+        # cancelled supervisor (or async_stop) drains it. The creds/pcs membership
+        # guard below would still pass on that residual client and restart a
+        # supervisor for an entry mid-teardown (zombie). _unregistered is the single
+        # source of truth for "torn down" (see _entry_writes_suppressed); consult it
+        # first and bail before doing any teardown work. Cleared by
+        # register_coordinator on the next setup.
+        if entry_id in self._unregistered:
+            _LOGGER.debug(
+                "[entry=%s] Cannot re-register FCM: entry torn down (tombstoned)",
+                entry_id,
+            )
+            return False
+
         if entry_id not in self.pcs and entry_id not in self.creds:
             _LOGGER.warning(
                 "[entry=%s] Cannot re-register FCM: entry not known to receiver",
@@ -2114,9 +3284,84 @@ class FcmReceiverHA:
         self.last_stop_monotonic = time.monotonic()
         _LOGGER.info("FCM receiver stopped")
 
+    def _purge_entry_debounce(self, entry_id: str) -> None:
+        """Cancel and drop the debounce trias for *entry_id* (AP7).
+
+        The push-path debounce maps (``_pending`` / ``_pending_targets`` /
+        ``_flush_tasks``) are keyed by ``(source_entry, device_id)`` and are only
+        ever cleaned per key inside ``_flush``. No teardown path iterates them
+        by entry, so a flush task still pending at unregister keeps running and
+        may write to an already-removed coordinator, while ``_pending`` /
+        ``_pending_targets`` leak until the next flush. ``task.cancel()`` is safe
+        from sync code and idempotent.
+
+        Two membership relations matter (Codex follow-up):
+
+        * **Keyed by this entry** (``key[0] == entry_id``): drop the whole trias.
+        * **A recipient of another entry's flush** (``entry_id`` is a member of
+          ``_pending_targets[key]`` for a key owned by a *different* source
+          entry): the debounce key is the source entry, not every recipient, so
+          a fan-out keyed elsewhere can still target this entry. Remove it from
+          those target sets; if that empties the set the flush has no remaining
+          recipients, so cancel and drop it (an empty set fans out to no one,
+          while ``None`` means broadcast). Broadcast fallbacks (target set is
+          ``None``) are device-scoped, not entry-scoped, and are left untouched.
+
+        Without the second relation a reload within the debounce window could
+        deliver a pre-teardown payload to the new coordinator of this entry.
+        """
+        for key in [key for key in self._flush_tasks if key[0] == entry_id]:
+            task = self._flush_tasks.pop(key, None)
+            if task is not None:
+                task.cancel()
+        pending_keys = {
+            key
+            for key in (*self._pending, *self._pending_targets)
+            if key[0] == entry_id
+        }
+        for key in pending_keys:
+            self._pending.pop(key, None)
+            self._pending_targets.pop(key, None)
+
+        # Drop this entry from the target sets of flushes keyed by other
+        # entries. Keys owned by this entry were already removed above, so any
+        # key remaining here is keyed by a different source entry.
+        for key in list(self._pending_targets):
+            targets = self._pending_targets.get(key)
+            if not targets or entry_id not in targets:
+                continue  # broadcast (None) or not a recipient
+            targets.discard(entry_id)
+            if targets:
+                continue  # other recipients remain; keep the flush
+            # No recipients left: cancel and drop the orphaned flush.
+            self._pending_targets.pop(key, None)
+            self._pending.pop(key, None)
+            task = self._flush_tasks.pop(key, None)
+            if task is not None:
+                task.cancel()
+
     def _purge_entry_tokens(self, entry_id: str) -> None:
-        """Remove all routing references for a given entry."""
+        """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
+        # AP1 (finding 2a): fatal retry counters are only cleared on the success
+        # path (registration ok), so they leak per teardown without this.
+        self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
+        self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
+        # AP2 (finding 2b): per-entry health snapshots are written by
+        # _update_entry_health but never purged; a stale snapshot makes the
+        # first healthy transition after a same-id reload look like a no-change
+        # and suppresses its listener push.
+        self._entry_health.pop(entry_id, None)
+        self._entry_last_connected_wall.pop(entry_id, None)
+        # AP3 (finding 2c): in-memory creds keep async_reregister_fcm's guard
+        # (entry_id in self.creds) True after teardown, which can revive a dead
+        # entry (zombie supervisor). The on-disk cache is untouched, so a reload
+        # reloads creds via _ensure_client_for_entry.
+        self.creds.pop(entry_id, None)
+        self._pending_creds.pop(entry_id, None)
+        # AP7 (finding 2d): cancel pending debounce flush tasks and drop their
+        # payloads so a flush cannot fire at an already-removed coordinator.
+        self._purge_entry_debounce(entry_id)
         tokens = self._entry_to_tokens.pop(entry_id, set())
         self._pending_routing_tokens.pop(entry_id, None)
         if not tokens:

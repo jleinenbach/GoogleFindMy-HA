@@ -51,7 +51,7 @@ from collections.abc import (
 )
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from importlib import import_module
 from types import MappingProxyType, ModuleType, SimpleNamespace
 from typing import (
@@ -113,7 +113,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 if TYPE_CHECKING:
@@ -175,7 +175,9 @@ from .const import (
     DEFAULT_OPTIONS,
     DOMAIN,
     FEATURE_FMDN_FINDER_ENABLED,
+    INTEGRATION_VERSION,
     ISSUE_MULTIPLE_CONFIG_ENTRIES,
+    ISSUE_RESTART_REQUIRED_KEY,
     LEGACY_SERVICE_IDENTIFIER,
     OPT_ALLOW_HISTORY_FALLBACK,
     OPT_CONTRIBUTOR_MODE,
@@ -200,6 +202,7 @@ from .const import (
     TRACKER_SUBENTRY_TRANSLATION_KEY,
     TRANSLATION_KEY_CACHE_PURGED,
     TRANSLATION_KEY_DUPLICATE_ACCOUNT,
+    TRANSLATION_KEY_RESTART_REQUIRED,
     TRANSLATION_KEY_UNIQUE_ID_COLLISION,
     coerce_ignored_mapping,
     map_token_hex_digest,
@@ -2383,6 +2386,9 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     nova_refcount: int
     services_lock: asyncio.Lock
     services_registered: bool
+    restart_check_registered: bool
+    restart_check_unsub: Callable[[], None] | None
+    restart_check_initial_unsub: Callable[[], None] | None
     providers_registered: bool
     views_registered: bool
     _subentry_forward_helper_logs: set[str]
@@ -6046,6 +6052,169 @@ async def _ensure_post_migration_consistency(
     return should_setup, normalized_email
 
 
+# --------------------------------------------------------------------------------------
+# Restart-required watchdog
+#
+# HACS writes freshly downloaded integration code to disk while the running process keeps
+# executing the previously imported module. We surface that mismatch as a global,
+# non-fixable Repairs issue so the user knows a *Home Assistant restart* (not merely an
+# integration reload) is required to activate the installed version.
+# --------------------------------------------------------------------------------------
+_RESTART_CHECK_INITIAL_DELAY: float = 30.0
+_RESTART_CHECK_INTERVAL: timedelta = timedelta(hours=1)
+
+
+def _read_installed_version_sync() -> str | None:
+    """Return manifest.json's version from disk (blocking; run inside an executor)."""
+    try:
+        manifest_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "manifest.json"
+        )
+        with open(manifest_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as err:  # IO failure or malformed JSON
+        _LOGGER.debug("Restart check: could not read installed version: %s", err)
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return version if isinstance(version, str) and version else None
+
+
+async def _async_read_installed_version(hass: HomeAssistant) -> str | None:
+    """Return the on-disk manifest version without blocking the event loop."""
+    version: str | None = await hass.async_add_executor_job(_read_installed_version_sync)
+    return version
+
+
+async def _async_check_restart_required(hass: HomeAssistant) -> None:
+    """Raise or clear the global "restart required" Repairs issue.
+
+    The running module carries ``INTEGRATION_VERSION``; the on-disk manifest reflects what
+    HACS has installed. A mismatch means a restart is pending. On equality or any read
+    error the issue is cleared (self-healing, create/delete symmetric). This coroutine
+    never raises into Home Assistant.
+    """
+    try:
+        installed = await _async_read_installed_version(hass)
+        if installed is not None and installed != INTEGRATION_VERSION:
+            # A last-entry teardown may have run during the executor read above
+            # (the only await in this coroutine). If the watchdog has since been
+            # torn down, do not resurrect the issue: no timer would ever clear it
+            # again. The registration flag lives in the global domain bucket and
+            # is popped by _teardown_restart_required_check (Codex-P1 class:
+            # tick firing after unload).
+            if not _domain_data(hass).get("restart_check_registered"):
+                return
+            issue_severity = getattr(ir, "IssueSeverity", None)
+            if issue_severity is not None:
+                severity = getattr(issue_severity, "WARNING", None)
+                if severity is None:
+                    severity = getattr(issue_severity, "ERROR", "warning")
+            else:
+                severity = getattr(ir, "WARNING", "warning")
+            ir.async_create_issue(
+                hass,
+                DOMAIN,
+                ISSUE_RESTART_REQUIRED_KEY,
+                is_fixable=False,
+                severity=severity,
+                translation_key=TRANSLATION_KEY_RESTART_REQUIRED,
+                translation_placeholders={
+                    "running_version": INTEGRATION_VERSION,
+                    "installed_version": installed,
+                },
+            )
+        else:
+            ir.async_delete_issue(hass, DOMAIN, ISSUE_RESTART_REQUIRED_KEY)
+    except Exception as err:  # noqa: BLE001 - watchdog must never raise into HA
+        _LOGGER.debug("Restart check failed: %s", err)
+
+
+@callback
+def _register_restart_required_check(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Register the one-shot + hourly restart watchdog exactly once.
+
+    Both unsub handles (initial ``async_call_later`` and periodic
+    ``async_track_time_interval``) are stored so the last-entry teardown can cancel them,
+    preventing a timer leak or a tick firing after unload (Codex-P1 #1/#2). The initial
+    schedule mirrors the existing awaitable-guard precedent for ``async_call_later``.
+    """
+
+    @callback
+    def _scheduled_check(_now: Any) -> None:
+        _async_create_task(
+            hass,
+            _async_check_restart_required(hass),
+            name=f"{DOMAIN}.restart_required_check",
+        )
+
+    initial_handle = async_call_later(
+        hass, _RESTART_CHECK_INITIAL_DELAY, _scheduled_check
+    )
+    if inspect.isawaitable(initial_handle):
+        # Some HA test stubs return an awaitable instead of an unsub callable.
+        _async_create_task(
+            hass,
+            cast(CoroutineType, initial_handle),
+            name=f"{DOMAIN}.restart_required_initial_schedule",
+        )
+        bucket["restart_check_initial_unsub"] = None
+    else:
+        bucket["restart_check_initial_unsub"] = initial_handle
+
+    bucket["restart_check_unsub"] = async_track_time_interval(
+        hass, _scheduled_check, _RESTART_CHECK_INTERVAL
+    )
+
+
+@callback
+def _teardown_restart_required_check(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Cancel both restart-watchdog timers and clear the issue (last-entry teardown)."""
+    for unsub in (
+        bucket.pop("restart_check_initial_unsub", None),
+        bucket.pop("restart_check_unsub", None),
+    ):
+        if callable(unsub):
+            with suppress(Exception):
+                unsub()
+    bucket.pop("restart_check_registered", None)
+    with suppress(Exception):
+        ir.async_delete_issue(hass, DOMAIN, ISSUE_RESTART_REQUIRED_KEY)
+
+
+async def _async_ensure_restart_required_check(
+    hass: HomeAssistant, bucket: GoogleFindMyDomainData
+) -> None:
+    """Idempotently arm the global restart-required watchdog.
+
+    Called from both ``async_setup`` (component load) and ``async_setup_entry``
+    (each parent entry load). The shared services lock plus the
+    ``restart_check_registered`` idempotent flag keep a single timer pair even
+    across racey startups or multiple config entries (Codex-P1 #6).
+
+    Re-arming from ``async_setup_entry`` is what restores the watchdog after a
+    last-entry reload: ``_teardown_restart_required_check`` cancels the timers and
+    pops the flag on the final unload, but ``async_setup`` does *not* run again on
+    a config-entry reload. Without this re-arm the "updated but not yet restarted"
+    warning would stay hidden until a full Home Assistant restart, defeating the
+    common "reload instead of restart" scenario. This mirrors the EID resolver,
+    the other global singleton that is torn down on last-entry unload and
+    re-created on entry setup.
+    """
+    services_lock: asyncio.Lock = _ensure_services_lock(bucket)
+    async with services_lock:
+        registered = bucket.get("restart_check_registered")
+        if not isinstance(registered, bool):
+            registered = False
+        if not registered:
+            _register_restart_required_check(hass, bucket)
+            bucket["restart_check_registered"] = True
+            _LOGGER.debug("Registered %s restart-required watchdog", DOMAIN)
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the integration namespace and register global services.
 
@@ -6088,6 +6257,10 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
             await async_register_services(hass, svc_ctx)
             bucket["services_registered"] = True
             _LOGGER.debug("Registered %s services at integration level", DOMAIN)
+
+    # Arm the global restart-required watchdog exactly once. async_setup_entry
+    # re-arms it after a last-entry reload tears it down (see helper docstring).
+    await _async_ensure_restart_required_check(hass, bucket)
 
     return True
 
@@ -7142,6 +7315,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     entry.runtime_data = runtime_data
     entries_bucket: dict[str, RuntimeData] = _ensure_entries_bucket(domain_bucket)
     entries_bucket[entry.entry_id] = runtime_data
+
+    # Re-arm the global restart-required watchdog now that an entry is active.
+    # async_setup arms it on component load, but a last-entry reload tears it down
+    # and async_setup does not run again; arming here (the exact inverse of the
+    # `not entries_bucket` teardown trigger) keeps the warning alive across reloads.
+    await _async_ensure_restart_required_check(hass, domain_bucket)
 
     _cloud_discovery_runtime(hass, entry)
 
@@ -8235,6 +8414,12 @@ async def _async_unload_parent_entry(hass: HomeAssistant, entry: MyConfigEntry) 
             else:
                 hass.async_create_task(resolver.async_refresh())
 
+        if not entries_bucket:
+            # Last entry torn down: cancel the global restart watchdog (both timers)
+            # and clear its issue, mirroring how other global singletons are released
+            # here (Codex-P1 #1/#2).
+            _teardown_restart_required_check(hass, bucket)
+
         try:
             await _maybe_close_spot_transport(entries_bucket)
         except Exception as err:  # pragma: no cover - defensive
@@ -8334,6 +8519,20 @@ async def async_remove_entry(hass: HomeAssistant, entry: MyConfigEntry) -> None:
         await _async_release_shared_fcm(hass, entry)
     except Exception as err:
         _LOGGER.debug("FCM release during async_remove_entry raised: %s", err)
+
+    # Retire any entry-scoped FCM Repairs issues now that the entry is actually
+    # being removed. The supervisor success path only deletes them on reload
+    # recovery, and the unload teardown deliberately leaves the fixable reauth
+    # prompt alone; once the entry is gone no supervisor will run again, so the
+    # orphaned repair must be cleaned up here (Codex PR #1104 follow-up).
+    try:
+        from .Auth.fcm_receiver_ha import FcmReceiverHA
+
+        FcmReceiverHA.async_delete_entry_repair_issues(hass, entry.entry_id)
+    except Exception as err:  # pragma: no cover - defensive best-effort cleanup
+        _LOGGER.debug(
+            "Deleting FCM repair issues during async_remove_entry raised: %s", err
+        )
 
     try:
         owner_index = _ensure_device_owner_index(bucket)

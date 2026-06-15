@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import json
 import logging
 import random
@@ -36,7 +37,7 @@ import ssl
 import struct
 import time
 import traceback
-from base64 import urlsafe_b64decode
+from base64 import b64decode
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -84,6 +85,97 @@ http_decrypt: Callable[..., bytes] = http_ece.decrypt
 _logger = logging.getLogger(__name__)
 
 _LEGACY_MCS_PROTOCOL_VERSION = 38
+
+# A run of consecutive ECE (auth-tag / body) decrypt failures with no
+# successful decrypt in between means the stored DH / auth-secret key material
+# no longer matches the server-side registration: every push fails the auth tag
+# even though the credential fields are still syntactically valid base64/DER. A
+# SINGLE failure stays per-message poison (a corrupt individual body, ACK +
+# skip); only a sustained run escalates to ``CredentialDecryptionError`` so the
+# supervisor invalidates the stale tokens and re-registers, instead of ACKing
+# every undecryptable push forever and silently stalling location updates (Codex
+# follow-up on PR #181: "do not ACK every ECE decrypt failure"). This is a
+# DEDICATED counter rather than the connectivity-oriented
+# ``sequential_error_counters`` mechanism, whose escalation action is "stop the
+# listener", not "re-register the credentials".
+_MAX_CONSECUTIVE_DECRYPT_FAILURES = 5
+
+
+class CredentialDecryptionError(ValueError):
+    """Raised when stored FCM credential material cannot be decoded or parsed.
+
+    Subclass of ``ValueError`` for backward-compatibility with external
+    callers that catch broad ``ValueError``. Internal code (notably the
+    listener loop's poison-message defense) discriminates this type via
+    ``isinstance`` to distinguish per-message decode failures (which are
+    safely ACKed and skipped) from credential-corruption failures (which
+    must surface to the supervisor for re-registration).
+
+    Why a typed exception instead of a string-prefix marker: external
+    libraries such as ``cryptography`` and ``http_ece`` raise plain
+    ``ValueError`` without our markers; a ``str.startswith`` catch loses
+    them and silently treats credential corruption as per-message poison.
+    See CA-CRED-VS-MSG-DECRYPT-001 iter-3 lesson.
+    """
+
+
+def _safe_urlsafe_b64decode(value: str | bytes) -> bytes:
+    """Decode URL-safe base64 leniently (Python 3.14 compatibility shim).
+
+    Strips ASCII whitespace and re-appends ``=`` padding before delegating
+    to :func:`base64.b64decode` (``altchars=b"-_"`` for the URL-safe
+    alphabet, ``validate=True``; see below). Python 3.14 switched
+    ``binascii.a2b_base64`` to ``strict_mode=True`` by default, which
+    rejects payloads containing newlines, stray whitespace, or missing
+    padding -- exactly the conditions the wild FCM stream produces. This
+    helper restores the pre-3.14 lenient behaviour locally without altering
+    the global decoder state.
+
+    Defense layer 3 of the three-defense hotfix for the
+    ``fcmpushclient`` poison-message cascade (CA-CASCADING-FAILURE-001).
+    Defense 1 wraps credential-decode errors as
+    :class:`CredentialDecryptionError`; defense 2 caps the supervisor
+    restart loop. This helper closes the root cause: dirty base64 input
+    that the Python 3.14 strict decoder rejects unconditionally.
+
+    Decoding runs in *validating* mode so that input containing characters
+    outside the URL-safe base64 alphabet (after whitespace/padding
+    normalisation) raises ``binascii.Error`` instead of being silently
+    discarded. This is a correctness requirement, not just hygiene: a
+    credential field corrupted to pure non-alphabet punctuation (e.g.
+    ``b"!!!!"``) must reach the ``CredentialDecryptionError`` branch in
+    :meth:`_decrypt_raw_data` and trigger re-registration, rather than
+    decoding to garbage bytes and being mistaken for recoverable
+    per-message poison.
+
+    Raises ``binascii.Error`` when the payload remains undecodable after
+    whitespace removal and padding normalisation -- including any residual
+    non-alphabet character rejected by the validating decoder. Raises
+    ``UnicodeError`` when ``str`` input contains non-ASCII characters
+    (``str.encode("ascii")`` fails before normalisation runs); callers in
+    a credential-decode path must catch both.
+    """
+    if isinstance(value, str):
+        raw = value.encode("ascii")
+    else:
+        raw = bytes(value)
+    # str.split() / bytes.split() with no args collapses every flavour of
+    # ASCII whitespace (space, tab, newline, CR, vtab, formfeed) -- this
+    # is exactly the set Python 3.14 strict mode now rejects.
+    stripped = b"".join(raw.split())
+    padded = stripped + b"=" * (-len(stripped) % 4)
+    # Decode in *validating* mode (``validate=True``). The stdlib's
+    # ``urlsafe_b64decode`` forwards to the non-validating ``b64decode``,
+    # which silently DISCARDS characters outside the base64 alphabet instead
+    # of raising. Corrupt credential fields that degrade to pure punctuation
+    # (e.g. ``b"!!!!"``) would therefore decode to garbage bytes and slip
+    # past the ``CredentialDecryptionError`` branch in ``_decrypt_raw_data``,
+    # causing the listener to treat permanent credential corruption as
+    # recoverable per-message poison (ACK + skip) and never trigger
+    # re-registration. ``altchars=b"-_"`` keeps the URL-safe alphabet;
+    # ``validate=True`` makes any non-alphabet residue raise ``binascii.Error``.
+    return b64decode(padded, altchars=b"-_", validate=True)
+
 
 # MCS Message Types and Tags
 MCS_MESSAGE_TAG = {
@@ -215,6 +307,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
         self.tasks: list[asyncio.Task[None]] = []
+        # Set by ``_listen`` when stored FCM key material is found to be
+        # corrupt/undecodable. The supervisor reads this after the listener
+        # stops to invalidate the bad credentials and force re-registration,
+        # instead of restarting against the same poison key material until the
+        # short-run crash cap fires.
+        self.credential_error: CredentialDecryptionError | None = None
+        # Counts consecutive ECE (auth-tag/body) decrypt failures with no
+        # successful decrypt in between; reset to 0 on every successful decrypt
+        # (``_handle_data_message``). When it reaches
+        # ``_MAX_CONSECUTIVE_DECRYPT_FAILURES`` the poison-message arm escalates
+        # a stale-key run to ``CredentialDecryptionError`` so the supervisor
+        # re-registers, instead of ACKing every undecryptable push indefinitely.
+        self._consecutive_decrypt_failures: int = 0
 
         # Locks
         self.stopping_lock: asyncio.Lock = asyncio.Lock()
@@ -434,21 +539,45 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         salt_str: str,
         raw_data: bytes,
     ) -> bytes:
-        crypto_key = urlsafe_b64decode(crypto_key_str.encode("ascii") + b"=" * (-len(crypto_key_str) % 4))
-        salt = urlsafe_b64decode(salt_str.encode("ascii") + b"=" * (-len(salt_str) % 4))
+        # Header decode (crypto-key / salt) -- per-message surface.
+        # Failures here are per-message poison, not credential corruption:
+        # they fall through to the listener's poison-message defense
+        # (selective-ACK + skip) without going through the credential
+        # try-block below.
+        crypto_key = _safe_urlsafe_b64decode(crypto_key_str)
+        salt = _safe_urlsafe_b64decode(salt_str)
 
         keys_section = credentials.get("keys")
         if not isinstance(keys_section, Mapping):
-            raise ValueError("Credentials missing FCM key material")
+            raise CredentialDecryptionError("Credentials missing FCM key material")
 
         private_value = keys_section.get("private")
         secret_value = keys_section.get("secret")
         if not (isinstance(private_value, str) and isinstance(secret_value, str)):
-            raise ValueError("Invalid key values in credential payload")
+            raise CredentialDecryptionError("Credentials contain invalid key values")
 
-        der_data = urlsafe_b64decode(private_value.encode("ascii") + b"=" * (-len(private_value) % 4))
-        secret = urlsafe_b64decode(secret_value.encode("ascii") + b"=" * (-len(secret_value) % 4))
-        privkey = load_der_private_key(der_data, password=None)
+        try:
+            der_data = _safe_urlsafe_b64decode(private_value)
+            secret = _safe_urlsafe_b64decode(secret_value)
+        except (binascii.Error, UnicodeError) as cred_decode_err:
+            # binascii.Error: corrupt base64 payload.
+            # UnicodeError (covers UnicodeEncodeError/UnicodeDecodeError):
+            # non-ASCII bytes in cached keys.private/keys.secret; .encode("ascii")
+            # raises before urlsafe_b64decode is reached. Both are permanent
+            # credential-corruption faults, not per-message poison.
+            raise CredentialDecryptionError(
+                "Credentials key material failed base64 decode; re-registration required"
+            ) from cred_decode_err
+        try:
+            privkey = load_der_private_key(der_data, password=None)
+        except Exception as der_err:
+            # cryptography raises plain ValueError (corrupt DER), TypeError
+            # (wrong type), or UnsupportedAlgorithm — all permanent and all
+            # requiring re-registration. Broad catch is intentional: the
+            # only successful path is a valid DER private key.
+            raise CredentialDecryptionError(
+                "Credentials key material failed DER private-key parse; re-registration required"
+            ) from der_err
         decrypted = http_decrypt(
             raw_data,
             salt=salt,
@@ -508,8 +637,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             self._app_data_by_key(msg, "encryption"), "salt"
         )
         subtype = self._app_data_by_key(msg, "subtype")
-        if TYPE_CHECKING:
-            assert self.credentials
+        # Guard before dereferencing: ``credentials`` is ``MutableJSONMapping |
+        # None`` and a missing/empty value must short-circuit *before* the
+        # ``["gcm"]["app_id"]`` lookups below, mirroring the defensive check in
+        # ``_decrypt_raw_data`` (see the ``isinstance(self.credentials, dict)``
+        # guard). Previously this guard sat *after* the dereference and was thus
+        # unreachable dead code for the ``None``/``{}`` states it was meant to
+        # protect against.
+        if not self.credentials:
+            return
         if subtype != self.credentials["gcm"]["app_id"]:
             self._log_warn_with_limit(
                 "Subtype %s in data message does not match"
@@ -517,12 +653,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 subtype,
                 self.credentials["gcm"]["app_id"],
             )
-        if not self.credentials:
-            return
 
         decrypted = self._decrypt_raw_data(
             self.credentials, crypto_key, salt, msg.raw_data
         )
+        # A successful decrypt proves the stored DH/auth-secret key material
+        # still matches the server registration: clear the stale-key escalation
+        # counter so a later ISOLATED corrupt body cannot accumulate toward an
+        # unwarranted re-registration. Only an uninterrupted run of decrypt
+        # failures (no success in between) signals stale credentials -- placing
+        # the reset here, gated on a real decrypt success, means heartbeats /
+        # deleted_messages / login traffic (which never reach this line) cannot
+        # falsely reset the counter.
+        self._consecutive_decrypt_failures = 0
 
         # Normalize decrypted payload to a dict (defensive against non-object JSON)
         decrypted_json: Any | None = None
@@ -742,6 +885,107 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             )
         return connected
 
+    async def _ack_or_disconnect(self, persistent_id: str | None) -> bool:
+        """Best-effort selective-ACK for a poison message.
+
+        Returns ``True`` to continue the worker loop; ``False`` if the writer
+        half is dead and the supervisor should reconnect (caller breaks).
+        """
+        if not persistent_id:
+            return True
+        try:
+            await self._send_selective_ack(persistent_id)
+            return True
+        except (OSError, ssl.SSLError, ConnectionError):
+            return False
+
+    async def _process_one_inbound_message(self, msg: MessageProto) -> bool:
+        """Run ``_handle_message`` with poison-message defense.
+
+        Defense 1 (CA-CASCADING-FAILURE-001): per-message decode failures
+        (``binascii.Error`` padding faults under Python 3.14 strict mode,
+        ``RuntimeError`` from ``_app_data_by_key`` key lookups, generic
+        ``ValueError`` from header parsing, and an ISOLATED
+        ``http_ece.ECEException`` from a corrupt encrypted body / failed auth
+        tag) are acknowledged and skipped instead of crashing the worker loop.
+        Credential-material errors (``CredentialDecryptionError``) propagate so
+        ``_listen`` records them and the supervisor invalidates the bad key
+        material and prompts re-registration.
+
+        Stale-key escalation (Codex follow-up on PR #181): a SUSTAINED run of
+        ``http_ece.ECEException`` -- ``_MAX_CONSECUTIVE_DECRYPT_FAILURES`` in a
+        row with no successful decrypt in between -- is no longer per-message
+        poison but evidence that the stored DH/auth-secret keys are stale
+        (syntactically valid yet no longer matching the server registration).
+        The counter is reset on every successful decrypt
+        (``_handle_data_message``); on reaching the threshold this method raises
+        ``CredentialDecryptionError`` so the run escalates through the same
+        re-registration channel instead of ACKing every push indefinitely.
+
+        Returns ``True`` to continue the loop, ``False`` to break (writer
+        half-dead during ack).
+        """
+        try:
+            await self._handle_message(msg)
+            return True
+        except CredentialDecryptionError:
+            # Credential corruption is permanent; let the supervisor see it
+            # (via ``_listen``'s dedicated handler) instead of silently ACKing
+            # every message that follows.
+            raise
+        except (ValueError, RuntimeError, http_ece.ECEException) as decrypt_err:
+            # Per-message poison: the exception-hierarchy UNION of every decode
+            # surface ``_handle_message`` touches.
+            #   * ValueError    -- header-param parse (``_extract_header_param``)
+            #                      plus ``binascii.Error`` padding faults and
+            #                      ``UnicodeError``; both are ValueError
+            #                      subclasses and need no separate arm.
+            #   * RuntimeError  -- ``_app_data_by_key`` missing-key lookup.
+            #   * ECEException  -- ``http_ece`` body decrypt / auth-tag failure.
+            #                      It is a SIBLING of ValueError under Exception
+            #                      (not a subclass), so it must be listed
+            #                      explicitly or it bypasses this poison defense
+            #                      entirely (Exception-Hierarchie-Audit lesson,
+            #                      CA-CASCADING-FAILURE-001). An ISOLATED ECE is
+            #                      ACKed below; a sustained run escalates to
+            #                      re-registration (stale-key branch below).
+            # ``CredentialDecryptionError`` is a ValueError subclass but is
+            # matched by the more specific arm above and re-raised, so it never
+            # reaches here. ACK + skip so the FCM server stops redelivering and
+            # the supervisor's short-run crash cap is not tripped by a single
+            # bad message.
+            persistent_id = getattr(msg, "persistent_id", None)
+            if isinstance(decrypt_err, http_ece.ECEException):
+                # Auth-tag / body-decrypt failure. A single one is a corrupt
+                # individual body (poison, ACK + skip). A sustained run with no
+                # successful decrypt in between means the stored DH/auth-secret
+                # keys no longer match the server registration -- every push
+                # fails the auth tag. Escalate to credential corruption so the
+                # supervisor invalidates the stale tokens and re-registers
+                # (device identity preserved), rather than ACKing every push
+                # forever and silently stalling location updates (Codex
+                # follow-up on PR #181). ``binascii.Error`` (per-message header
+                # decode) and ``RuntimeError`` (``_app_data_by_key`` lookup) are
+                # genuinely per-message and never drive this counter.
+                self._consecutive_decrypt_failures += 1
+                if (
+                    self._consecutive_decrypt_failures
+                    >= _MAX_CONSECUTIVE_DECRYPT_FAILURES
+                ):
+                    self._consecutive_decrypt_failures = 0
+                    raise CredentialDecryptionError(
+                        "FCM auth-tag decrypt failed on "
+                        f"{_MAX_CONSECUTIVE_DECRYPT_FAILURES} consecutive "
+                        "messages; stored key material is stale and requires "
+                        "re-registration"
+                    ) from decrypt_err
+            self._log_warn_with_limit(
+                "Skipping FCM message that failed to decrypt (persistent_id=%s): %s",
+                persistent_id,
+                decrypt_err,
+            )
+            return await self._ack_or_disconnect(persistent_id)
+
     async def _listen(self) -> None:
         """Listens for push notifications until an error or stop() occurs."""
         try:
@@ -760,7 +1004,9 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             while self.do_listen:
                 try:
                     if msg := await self._receive_msg():
-                        await self._handle_message(msg)
+                        if not await self._process_one_inbound_message(msg):
+                            self.do_listen = False
+                            break
 
                 except (ConnectionError, ssl.SSLError) as cex:
                     # Treat stream end/TLS quirks as normal stop; supervisor will restart
@@ -777,6 +1023,19 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         except asyncio.CancelledError:
             self.logger.debug("Listener task cancelled")
             raise
+        except CredentialDecryptionError as cred_err:
+            # Stored FCM key material is corrupt/undecodable. Record it as a
+            # DISTINCT credential fault instead of letting it fall through to
+            # the generic "Unknown error" arm below, so the supervisor can
+            # invalidate the bad key material and re-register rather than
+            # restarting the listener against the same poison credentials
+            # until the short-run crash cap fires.
+            self.logger.error(
+                "FCM credential material is corrupt and requires re-registration: %s",
+                cred_err,
+            )
+            self.credential_error = cred_err
+            self.do_listen = False
         except ConnectionResetError:
             # Log a clean warning without noisy traceback; supervisor will reconnect.
             self.logger.warning(

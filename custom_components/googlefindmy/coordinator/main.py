@@ -69,12 +69,14 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 # Operations classes - currently empty mixins for future method extraction
 from .cache import CacheOperations
 from .helpers.cache import (
-    build_base_snapshot_entry as _build_base_snapshot_entry_impl,
-)
-from .helpers.cache import (
+    SOUND_UUID_MAX_AGE_S,
     determine_location_status,
     epoch_to_datetime_utc,
     is_presence_expired,
+    is_sound_uuid_expired,
+)
+from .helpers.cache import (
+    build_base_snapshot_entry as _build_base_snapshot_entry_impl,
 )
 from .helpers.cache import (
     sanitize_decoder_row as _sanitize_decoder_row,
@@ -223,9 +225,6 @@ _MAX_TRANSIENT_AUTH_FAILURES = 3
 # Guardrails for owner-driven locate cooldown
 _COOLDOWN_OWNER_MIN_S = 60  # at least 1 minute
 _COOLDOWN_OWNER_MAX_S = 15 * 60  # at most 15 minutes
-
-# Sound UUID expiry after restart (prevents phantom re-triggers)
-_SOUND_UUID_MAX_AGE_S = 30 * 60  # 30 minutes
 
 # Minimum position change (meters) to accept location update without timestamp
 _LOCATION_SIGNIFICANT_CHANGE_M = 50.0
@@ -1547,8 +1546,8 @@ class GoogleFindMyCoordinator(
                 return
 
             # FIX: Filter out stale UUIDs to prevent Play Sound re-trigger after restart (#108)
-            # Sound requests older than _SOUND_UUID_MAX_AGE_S are considered expired
-            max_age_seconds = _SOUND_UUID_MAX_AGE_S
+            # Sound requests older than SOUND_UUID_MAX_AGE_S are considered expired
+            max_age_seconds = SOUND_UUID_MAX_AGE_S
             now = time.time()
             loaded_sound_request_uuids: dict[str, str] = {}
             loaded_sound_request_timestamps: dict[str, float] = {}
@@ -1564,7 +1563,7 @@ class GoogleFindMyCoordinator(
                     if not isinstance(uuid_val, str) or not uuid_val:
                         continue
                     # Discard if older than max_age_seconds
-                    if now - float(ts_val) > max_age_seconds:
+                    if is_sound_uuid_expired(ts_val, now, max_age_seconds):
                         _LOGGER.debug(
                             "Discarding expired Play Sound UUID for %s (age: %.0fs)",
                             device_id,

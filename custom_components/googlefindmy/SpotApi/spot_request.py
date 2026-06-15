@@ -66,6 +66,7 @@ from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 from custom_components.googlefindmy.SpotApi.spot_grpc_transport import (
     SPOT_GRPC_TRANSPORT,
     SpotGrpcTransport,
+    is_ssl_transport_teardown_error,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -286,6 +287,27 @@ async def async_spot_request(
                 await _async_sleep(_compute_delay(attempt))
                 continue
             raise SpotNetworkError("Fatal transport error after retries.") from err
+
+        except AttributeError as err:
+            # AP9 (finding 6a): asyncio SSL-transport teardown race. grpclib
+            # wrote to an SSL transport whose protocol was already detached
+            # (idle/serverside close, GOAWAY, or a concurrent reset), raising
+            # ``AttributeError: 'NoneType' ... '_write_appdata'`` from inside
+            # asyncio.sslproto. Treat it like the other transient transport
+            # failures: reset the (possibly poisoned) channel and retry within
+            # budget, converting to SpotNetworkError when exhausted. Any other
+            # AttributeError is a genuine bug in our own stream handling and is
+            # re-raised unchanged.
+            if not is_ssl_transport_teardown_error(err):
+                raise
+            await active_transport.reset()
+            if retries_used < _SPOT_MAX_RETRIES:
+                retries_used += 1
+                await _async_sleep(_compute_delay(attempt))
+                continue
+            raise SpotNetworkError(
+                "SSL transport teardown after retries."
+            ) from err
 
         except TimeoutError as err:
             if retries_used < _SPOT_MAX_RETRIES:

@@ -76,7 +76,11 @@ except ImportError:
         ProtobufDecodeError = Exception  # type: ignore[misc,assignment]
         _RPC_STATUS_AVAILABLE = False
 
-from ..const import DATA_AAS_TOKEN, NOVA_API_USER_AGENT
+from ..const import (
+    DATA_AAS_TOKEN,
+    NOVA_API_USER_AGENT,
+    NOVA_REQUEST_TOTAL_TIMEOUT_S,
+)
 
 if TYPE_CHECKING:
     from bs4 import BeautifulSoup as _BeautifulSoupType
@@ -179,6 +183,32 @@ HTTP_RETRY_ELIGIBLE = frozenset(
         HTTP_GATEWAY_TIMEOUT,
     }
 )
+
+# Status codes after which the server may already have *started executing* the
+# command (and thus a device ring) before answering. The dispatch latch keeps
+# the freshly minted cancel key alive across the rest of the retry sequence for
+# exactly these statuses, so Stop Sound can still target a ring that an earlier
+# attempt may have started.
+#
+# This is deliberately a *subset* of HTTP_RETRY_ELIGIBLE — you only risk a
+# duplicate dispatch on a status you would retry — minus 408 and 429, the two
+# retryable statuses that are refused *before* the backend starts executing:
+#   * 408 Request Timeout: the server gave up waiting for the *inbound* request,
+#     so the command was never fully received.
+#   * 429 Too Many Requests: the request was rate-limited at the gate and
+#     rejected without being processed, so no ring can have started.
+# Latching either would let a never-dispatched failure overwrite the valid
+# cancel key of a parallel, still-ringing play on the same device. Only the
+# transient 5xx codes (500/502/503/504) can be answered *after* the backend
+# began processing the command, so only they are dispatch-ambiguous. Because the
+# latch accumulates monotonically across the retry sequence, an earlier
+# dispatch-ambiguous 5xx still keeps the key alive even if a later attempt only
+# sees a 429. Permanent rejections (4xx) and non-retryable 5xx (501/505/508) are
+# refused before any side effect and are excluded for free by the subset.
+HTTP_DISPATCH_LATCH_ELIGIBLE = HTTP_RETRY_ELIGIBLE - {
+    HTTP_REQUEST_TIMEOUT,
+    HTTP_TOO_MANY_REQUESTS,
+}
 
 RECENT_REFRESH_WINDOW_S = 2.0
 # Maximum number of times the 401 handler will wait for a concurrent refresh
@@ -323,7 +353,34 @@ def _decode_error_response(content: bytes, http_status: int) -> str:
 
 # --- Custom Exceptions ---
 class NovaError(Exception):
-    """Base exception for Nova API errors."""
+    """Base exception for Nova API errors.
+
+    Attributes:
+        dispatched: True when the server may already have processed the request
+            (a side effect such as a device ring could have started), so any
+            client-generated cancel key must be preserved. It is latched True by
+            either of two events: (a) a post-send network failure that provably
+            reached the wire (server disconnect, read timeout, payload error),
+            or (b) a dispatch-eligible HTTP status read
+            (HTTP_DISPATCH_LATCH_ELIGIBLE: transient 5xx 500/502/503/504), which
+            means the backend may have begun processing before it ultimately
+            failed. Pre-dispatch rejections (408/429, permanent 4xx,
+            non-retryable 5xx) do not latch.
+            False (the default) when the request provably never left the client
+            (DNS, connect refused/timeout, or any pre-dispatch error) or was
+            refused *before* any side effect — a permanent 4xx (401/403/404), a
+            non-retryable 5xx (501/505/508), or a 408 whose inbound request never
+            fully arrived. The POST loop latches such a wire-reaching attempt
+            across the *whole* retry sequence and stamps that latch onto every
+            error leaving the loop at a single choke point (the `except NovaError`
+            handler), so once any attempt may have been processed it stays True
+            even if a later attempt fails pre-connect or ends on another HTTP
+            status. Permanent client rejections never latch (they only carry an
+            already-set latch through the choke point). All other Nova errors
+            keep the safe default.
+    """
+
+    dispatched: bool = False
 
 
 class NovaAuthError(NovaError):
@@ -414,6 +471,33 @@ class NovaProtobufDecodeError(NovaError):
         super().__init__(
             f"Failed to decode Google Protobuf response: {detail or 'Unknown error'}"
         )
+
+
+# Network failures that prove the request never reached the wire: a connection
+# was never established (DNS, refused, TLS, proxy) or the *connect* phase timed
+# out. In aiohttp 3.13 these are ClientConnectorError (a ClientOSError subclass)
+# and ConnectionTimeoutError (a ServerTimeoutError subclass). Every other error
+# under (TimeoutError, aiohttp.ClientError) -- ServerDisconnectedError, a
+# read-phase SocketTimeoutError (which shares ServerTimeoutError with the
+# connect-phase ConnectionTimeoutError, hence the *specific* check below),
+# ClientPayloadError, ClientOSError, or a generic total-timeout -- happened at
+# or after dispatch, so the server may have acted on the request.
+_PRE_DISPATCH_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    aiohttp.ClientConnectorError,
+    aiohttp.ConnectionTimeoutError,
+)
+
+
+def _network_failure_reached_wire(exc: BaseException) -> bool:
+    """Return True when a network failure may have been acted on by the server.
+
+    A pre-connect failure (DNS, connect refused/timeout, TLS) provably never
+    left the client. Any other aiohttp/timeout failure occurred at or after the
+    request reached the wire, so a side effect may already have started and the
+    caller must preserve its cancel key. See ``NovaError.dispatched``.
+    """
+
+    return not isinstance(exc, _PRE_DISPATCH_NETWORK_ERRORS)
 
 
 # ------------------------ Optional Home Assistant hooks ------------------------
@@ -1401,10 +1485,20 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
         retries_used = 0
         auth_retries_used = 0  # Counter for 401 retries after token refresh
         deadline_waits = 0  # Circuit breaker for 401 deadline-wait loops
+        # Sticky dispatch latch over the whole retry sequence. Dispatch is a
+        # property of the *sequence*, not of the final attempt: once *any*
+        # attempt reaches the wire, a side effect (a device ring) may already
+        # have started, so the cancel key must be preserved even if a *later*
+        # retry fails before it ever connects. Deriving this from the last
+        # exception alone is wrong (post-send read failure on attempt 1, then a
+        # pre-connect timeout on the last attempt -> still dispatched).
+        reached_wire = False
         while True:
             attempt = retries_used + 1
             try:
-                timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
+                timeout = aiohttp.ClientTimeout(
+                    total=NOVA_REQUEST_TOTAL_TIMEOUT_S, connect=10, sock_read=30
+                )
                 async with session.post(
                     url,
                     headers=headers,
@@ -1418,6 +1512,34 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         "Nova API async request to %s: status=%d", api_scope, status
                     )
 
+                    # Latch dispatch the moment a status is read, but only for
+                    # statuses after which the backend may already have started a
+                    # side effect (a device ring): HTTP_DISPATCH_LATCH_ELIGIBLE
+                    # (transient 5xx 500/502/503/504). For those the cancel key
+                    # must survive the rest of the retry sequence so a later
+                    # pre-connect retry failure cannot clear it. Everything else —
+                    # permanent client rejections (401/403/404), non-retryable 5xx
+                    # (501/505/508), 408 Request Timeout (the inbound request
+                    # never fully arrived) and 429 Too Many Requests (rate-limited
+                    # at the gate, never processed) — is refused *before* any side
+                    # effect, so it must NOT latch: otherwise an undispatched
+                    # failure could overwrite
+                    # the valid cancel key of a still-ringing earlier play on the
+                    # same device.
+                    if status in HTTP_DISPATCH_LATCH_ELIGIBLE:
+                        reached_wire = True
+
+                    # Acceptance boundary: the request is treated as "accepted by
+                    # the server" — and therefore as a possibly-active ring whose
+                    # cancel key must be preserved — ONLY when Google answers 200.
+                    # This is signalled to upper layers purely via the return
+                    # contract: a non-None return reaches the caller exclusively
+                    # here. Every non-200 status raises below, and every
+                    # connection-setup failure (DNS, connect refused, closed
+                    # connector/session, connect timeout) raises on the `async
+                    # with` entry above. Callers therefore derive "accepted" from
+                    # "this function returned" rather than from an out-of-band
+                    # signal that has to be kept in sync with the real status.
                     if status == HTTP_OK:
                         return cast(bytes, content).hex()
 
@@ -1538,7 +1660,9 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                                 _SHORT_COOLDOWN_S,
                             )
                             await asyncio.sleep(_SHORT_COOLDOWN_S)
-                            _LOGGER.info("Nova API: refreshing ADM token (AAS retained).")
+                            _LOGGER.info(
+                                "Nova API: refreshing ADM token (AAS retained)."
+                            )
                             try:
                                 await policy.async_on_401()
                             except NovaAuthPermanentError:
@@ -1633,6 +1757,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
             except asyncio.CancelledError:
                 raise
             except (TimeoutError, aiohttp.ClientError) as e:
+                # Latch dispatch the moment *this* attempt reaches the wire. A
+                # later pre-connect retry failure must never clear it: an earlier
+                # post-send attempt may already have started a ring whose cancel
+                # key has to survive. The latch only ever flips False -> True.
+                if _network_failure_reached_wire(e):
+                    reached_wire = True
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
                     _LOGGER.warning(
@@ -1653,9 +1783,31 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                         retries_used + 1,
                         type(e).__name__,
                     )
+                    # Wrap the final network failure. The sticky dispatch latch
+                    # is stamped onto this — and onto every other NovaError that
+                    # leaves the retry loop — at the single choke point below
+                    # (see the `except NovaError` handler). Deriving dispatch
+                    # per raise-site is exactly the bug this centralization
+                    # removes: HTTP-status exits used to forget the latch.
                     raise NovaError(
                         f"Nova API request failed after retries: {e}"
                     ) from e
+
+    except NovaError as nova_err:
+        # Single choke point for the whole retry sequence: stamp the sticky
+        # dispatch latch onto EVERY NovaError leaving the loop. The latch is set
+        # earlier — on a post-send network failure or on a dispatch-eligible
+        # status read (HTTP_DISPATCH_LATCH_ELIGIBLE: transient 5xx) — so
+        # this point only propagates it. Dispatch is
+        # a property of the *sequence*, not of the final attempt: once any
+        # attempt may have been processed a side effect (a device ring) may
+        # already have started, so the cancel key must survive regardless of how
+        # the sequence finally ended. The latch only ever flips False -> True, so
+        # a sequence of pure permanent rejections (4xx, no wire-reaching attempt)
+        # keeps dispatched=False and still drops the key.
+        if reached_wire:
+            nova_err.dispatched = True
+        raise
 
     finally:
         if ephemeral_session and session:

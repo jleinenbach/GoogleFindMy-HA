@@ -699,6 +699,20 @@
       "title": "FCM push-verbinding mislukt",
       "description": "De achtergrondverbinding met Google is geblokkeerd.\n\n1. Is uitgaande **TCP-poort 5228** toegestaan in je firewall?\n2. Als het netwerk in orde is, probeer dan je `secrets.json` opnieuw te genereren (inloggegevens zijn mogelijk gesplitst/ingetrokken)."
     },
+    "fcm_reauth_required": {
+      "title": "Google Find My Device push needs re-authentication",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Re-authenticate Google Find My Device",
+            "description": "The background push connection to Google failed for an extended period and could not recover on its own. This usually means the stored push credentials were revoked or rotated (for example after a Google password change, or when requests arrive from a new IP address or region). Less commonly, outgoing **TCP port 5228** is blocked by a firewall.\n\nSelect **Submit** to re-authenticate this account. Your device identity is preserved. If the problem persists afterwards, make sure port 5228 is allowed and regenerate your `secrets.json`."
+          }
+        },
+        "abort": {
+          "reauth_started": "Re-authentication has been started. Finish signing in to restore the background push connection. This repair stays open until the connection recovers, so the prompt is not lost if the sign-in is interrupted."
+        }
+      }
+    },
     "multiple_config_entries": {
       "title": "Meerdere configuratie-items gedetecteerd",
       "description": "Google Find My Device ondersteunt nu meerdere configuratie-items, één per Google-account. Als elk item een ander account target, is geen actie vereist. Wanneer hetzelfde account tweemaal wordt toegevoegd, maakt Home Assistant een reparatieprobleem **Dubbele accountitems** aan voor het nieuwe item, zodat je het juiste kunt verwijderen of opnieuw inschakelen."
@@ -714,6 +728,14 @@
     "cache_purged": {
       "title": "Authentication cache cleared",
       "description": "The stored authentication cache for **{entry_title}** was unreadable and has been cleared. Select **Reconfigure** on the integration card to sign in again and restore access."
+    },
+    "fcm_short_run_crash_loop": {
+      "title": "FCM Push crash-lus gedetecteerd",
+      "description": "De FCM push-client verbreekt herhaaldelijk binnen enkele seconden na het verbinden de verbinding (short-run crash-lus). Dit wordt meestal veroorzaakt door een aanhoudende beschadigde melding in de inkomende wachtrij die niet kan worden gedecodeerd.\n\n1. Laad de integratie opnieuw om de looptijdstatus te wissen.\n2. Als het probleem terugkeert, regenereer je `secrets.json` (Google kan de inloggegevens hebben gerouleerd)."
+    },
+    "restart_required": {
+      "title": "Start Home Assistant opnieuw op om de update te voltooien",
+      "description": "Google Find My Hub is op de schijf bijgewerkt naar versie {installed_version}, maar Home Assistant draait nog versie {running_version}. Start Home Assistant opnieuw op om de geïnstalleerde versie te activeren.\n\nDe integratie opnieuw laden is niet voldoende: een volledige herstart van Home Assistant is vereist."
     }
   },
   "exceptions": {

@@ -41,6 +41,46 @@ def enable_real_sockets() -> Iterable[None]:
     yield
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _redirect_ha_test_storage(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterable[None]:
+    """Redirect the bundled HA test config dir to a writable tmp location.
+
+    The HA test plugin ships ``testing_config/`` *inside* site-packages. On
+    shutdown (``hass.async_stop``) the entity/device registry performs a final
+    write into ``<testing_config>/.storage``. When site-packages is read-only
+    (e.g. a root-owned venv driven by a non-root test runner), that write raises
+    ``PermissionError`` and surfaces as a teardown error. Pointing
+    ``get_test_config_dir`` at a writable copy makes the suite environment-
+    independent, mirroring the intent of the plugin's own ``mock_storage``.
+
+    ``common`` is imported lazily *inside* the fixture on purpose: importing it
+    at module scope trips the plugin's ``patch_recorder`` assertion.
+    """
+
+    import os
+    import shutil
+
+    import pytest_homeassistant_custom_component.common as _ph
+
+    original = _ph.get_test_config_dir
+    bundled = original()
+    target = str(tmp_path_factory.mktemp("ha_testing_config"))
+    # Preserve the bundled assets (configuration.yaml, etc.) other tests read,
+    # while making the directory — and thus .storage — writable.
+    shutil.copytree(bundled, target, dirs_exist_ok=True)
+
+    def _writable_test_config_dir(*add: str) -> str:
+        return os.path.join(target, *add)
+
+    _ph.get_test_config_dir = _writable_test_config_dir
+    try:
+        yield
+    finally:
+        _ph.get_test_config_dir = original
+
+
 @pytest.hookimpl(trylast=True)
 def pytest_runtest_setup(item: pytest.Item) -> None:
     """Re-enable sockets after other plugins run setup hooks."""

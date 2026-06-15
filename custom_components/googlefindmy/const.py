@@ -21,7 +21,7 @@ DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
-INTEGRATION_VERSION: str = "1.7.0-6"
+INTEGRATION_VERSION: str = "1.7.1"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -426,6 +426,26 @@ REBUILD_REGISTRY_MODES: tuple[str, str] = (MODE_REBUILD, MODE_MIGRATE)
 # --------------------------------------------------------------------------------------
 LOCATION_REQUEST_TIMEOUT_S: int = 30
 
+# Total budget for a single Nova HTTP round-trip. Single source of truth for the
+# aiohttp ``ClientTimeout(total=...)`` used in NovaApi/nova_request.py. The outer
+# poll guard below budgets against this value, so the two MUST move together;
+# nova_request.py imports this constant instead of repeating the literal.
+NOVA_REQUEST_TOTAL_TIMEOUT_S: int = 30
+
+# Outer per-device poll guard. A single location request runs two *sequential*
+# phases: first the Nova HTTP round-trip (capped at NOVA_REQUEST_TOTAL_TIMEOUT_S),
+# then the FCM wait (capped at LOCATION_REQUEST_TIMEOUT_S). The outer guard must
+# cover BOTH phases plus a small grace, otherwise a slow-but-successful HTTP call
+# pushes the inner FCM wait past the guard and the outer wait_for raises a
+# spurious TimeoutError before the inner request can return its clean empty
+# result (Nygard: stagger nested timeout budgets, decreasing from outer to
+# inner). The +5s grace absorbs scheduling/setup overhead between the phases.
+# Note: this budgets a single HTTP attempt; a multi-retry backoff sequence inside
+# nova_request can still exceed it, in which case the guard correctly intervenes.
+POLL_DEVICE_OUTER_TIMEOUT_S: int = (
+    NOVA_REQUEST_TOTAL_TIMEOUT_S + LOCATION_REQUEST_TIMEOUT_S + 5
+)
+
 # --------------------------------------------------------------------------------------
 # HTTP headers / User-Agent (Nova API)
 # --------------------------------------------------------------------------------------
@@ -473,6 +493,11 @@ ISSUE_MULTIPLE_CONFIG_ENTRIES: str = "multiple_config_entries"
 TRANSLATION_KEY_CACHE_PURGED: str = "cache_purged"
 TRANSLATION_KEY_UNIQUE_ID_COLLISION: str = "unique_id_collision"
 TRANSLATION_KEY_DUPLICATE_ACCOUNT: str = "duplicate_account_entries"
+
+# Global Repairs issue raised when HACS has written new integration code to disk
+# but the running process still executes the previously loaded version.
+ISSUE_RESTART_REQUIRED_KEY: str = "restart_required"
+TRANSLATION_KEY_RESTART_REQUIRED: str = "restart_required"
 
 
 def issue_id_for(entry_id: str) -> str:
@@ -603,6 +628,8 @@ __all__ = [
     "MODE_MIGRATE",
     "REBUILD_REGISTRY_MODES",
     "LOCATION_REQUEST_TIMEOUT_S",
+    "NOVA_REQUEST_TOTAL_TIMEOUT_S",
+    "POLL_DEVICE_OUTER_TIMEOUT_S",
     "NOVA_API_USER_AGENT",
     "FCM_CLIENT_HEARTBEAT_INTERVAL_S",
     "FCM_SERVER_HEARTBEAT_INTERVAL_S",
@@ -618,6 +645,8 @@ __all__ = [
     "TRANSLATION_KEY_CACHE_PURGED",
     "TRANSLATION_KEY_UNIQUE_ID_COLLISION",
     "TRANSLATION_KEY_DUPLICATE_ACCOUNT",
+    "ISSUE_RESTART_REQUIRED_KEY",
+    "TRANSLATION_KEY_RESTART_REQUIRED",
     "issue_id_for",
     "STORAGE_KEY",
     "STORAGE_VERSION",

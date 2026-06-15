@@ -39,6 +39,7 @@ from .subentry import format_epoch_utc, normalize_epoch_seconds
 __all__ = [
     "DEFAULT_SNAPSHOT_FIELDS",
     "LOCATION_FIELDS",
+    "SOUND_UUID_MAX_AGE_S",
     "SOURCE_PRIORITY",
     "STATUS_AGING",
     "STATUS_CURRENT",
@@ -51,6 +52,7 @@ __all__ = [
     "fill_missing_coordinates",
     "get_common_pb2",
     "is_presence_expired",
+    "is_sound_uuid_expired",
     "merge_cache_row",
     "normalize_location_fields",
     "preserve_metadata_fields",
@@ -222,6 +224,40 @@ def is_presence_expired(
     if not last_seen_mono:
         return True
     return (now_mono - float(last_seen_mono)) > ttl_seconds
+
+
+# ---------------------------------------------------------------------------
+# Play Sound UUID Expiry
+# ---------------------------------------------------------------------------
+
+# Stored Play Sound UUIDs older than this are considered stale (#108): a ring
+# auto-stops long before then, so an aged key must not be trusted as a Stop
+# target nor block a fresh cancel key from being cached.
+SOUND_UUID_MAX_AGE_S = 30 * 60  # 30 minutes
+
+
+def is_sound_uuid_expired(
+    ts: float,
+    now: float,
+    max_age_seconds: float,
+) -> bool:
+    """Check if a stored Play Sound UUID has aged out.
+
+    Single source of truth for the sound-UUID expiry so the load path, the
+    store-path overwrite guard, and the Stop read-path all agree on what
+    "stale" means (a divergent inline check caused PR #1106's follow-up bug).
+
+    Args:
+        ts: Epoch timestamp when the UUID was stored (wall-clock seconds).
+            A missing/zero timestamp compares as expired against any positive
+            ``now``, matching the load path's treatment of untimestamped keys.
+        now: Current epoch time (``time.time()``).
+        max_age_seconds: Maximum age before the UUID is considered stale.
+
+    Returns:
+        True if the UUID is older than ``max_age_seconds``, False otherwise.
+    """
+    return (now - float(ts)) > max_age_seconds
 
 
 # ---------------------------------------------------------------------------

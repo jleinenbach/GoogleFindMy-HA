@@ -371,7 +371,10 @@ class _DummyEntry:
         self.data = {"email": "user@example.com"}
         self.reauth_calls = 0
 
-    async def async_start_reauth(self, hass) -> None:  # noqa: D401 - stub signature
+    def async_start_reauth(self, hass) -> None:  # noqa: D401 - stub signature
+        # Mirror the real ``ConfigEntry.async_start_reauth``: a synchronous
+        # ``@callback`` returning ``None``. An async stub would mask a stray
+        # ``await`` in production code (see test_manual_locate_starts_reauth).
         self.reauth_calls += 1
 
 
@@ -458,7 +461,12 @@ async def test_manual_locate_starts_reauth(monkeypatch: pytest.MonkeyPatch) -> N
         AsyncMock(return_value=None),
     )
 
-    with pytest.raises(HomeAssistantError):
+    with pytest.raises(HomeAssistantError) as exc_info:
         await coordinator.async_locate_device("dev-1")
 
     assert entry.reauth_calls == 1
+    # The success branch must report that reauth was started. A stray ``await``
+    # on the synchronous ``@callback`` would raise ``TypeError`` (swallowed by
+    # the defensive ``except``), leaving ``reauth_started`` False and emitting
+    # the "please re-authenticate" message instead. Guard against that.
+    assert "has been started" in str(exc_info.value)

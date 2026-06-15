@@ -45,10 +45,11 @@ from homeassistant.core import Event
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from ..Auth.fcm_receiver_ha import CRASH_LOOP_FATAL_PREFIX
 from ..const import (
     DEVICE_LIST_POLL_INTERVAL,
     DOMAIN,
-    LOCATION_REQUEST_TIMEOUT_S,
+    POLL_DEVICE_OUTER_TIMEOUT_S,
 )
 from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
@@ -79,6 +80,43 @@ from .helpers.update import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Iter-14 (Codex follow-up): re-auth-escalation classification SSOT.
+# The FCM receiver's ``_fatal_errors`` map is a shared channel: it carries
+# both classic auth fatals (401/404 with credentials issues, raise
+# ``ConfigEntryAuthFailed`` immediately or after _FCM_ERROR_RETRY_THRESHOLD
+# cycles) and supervisor-level "short-run crash loop" fatals (poison
+# message defense; user must reload / regenerate credentials per the
+# repair issue, NOT re-authenticate). Without this classification the
+# crash-loop fatal would be reclassified as an auth fatal after 3 cycles
+# and push users into HA's re-auth flow. Keep this as a free function so
+# branch-coverage tests can pin the classification contract without
+# spinning up the full update coroutine.
+_FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED = "crash_loop_excluded"
+_FCM_FATAL_CLASS_AUTH_IMMEDIATE = "auth_immediate"
+_FCM_FATAL_CLASS_AUTH_AFTER_THRESHOLD = "auth_after_threshold"
+
+
+def _classify_fcm_fatal(fatal_error: str) -> str:
+    """Classify a non-empty FCM fatal error for the re-auth escalation.
+
+    Returns one of:
+      - ``_FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED``: supervisor-level
+        short-run cap; excluded from re-auth (repair issue carries the
+        user-visible guidance).
+      - ``_FCM_FATAL_CLASS_AUTH_IMMEDIATE``: classic auth fatal that
+        should raise ``ConfigEntryAuthFailed`` immediately.
+      - ``_FCM_FATAL_CLASS_AUTH_AFTER_THRESHOLD``: unclassified non-cap
+        fatal; count and escalate after _FCM_ERROR_RETRY_THRESHOLD
+        consecutive update cycles.
+    """
+    if fatal_error.startswith(CRASH_LOOP_FATAL_PREFIX):
+        return _FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED
+    if _is_fatal_fcm_auth_error_impl(fatal_error):
+        return _FCM_FATAL_CLASS_AUTH_IMMEDIATE
+    return _FCM_FATAL_CLASS_AUTH_AFTER_THRESHOLD
+
 
 # Cooldown constants for crowdsourced reports
 _COOLDOWN_MIN_IN_ALL_AREAS_S = 10 * 60  # 10 minutes
@@ -118,6 +156,7 @@ class PollingOperations(_MixinBase):
     _fcm_status_changed_at: float | None
     _force_device_list_reason: str | None
     _short_retry_cancel: Callable[[], None] | None
+    _fcm_error_count: int
     _fcm_last_error: str | None
     _last_transient_auth_error: str | None
     _is_polling: bool
@@ -178,6 +217,37 @@ class PollingOperations(_MixinBase):
     def is_fcm_connected(self) -> bool:
         """Convenience boolean for entities relying on push transport availability."""
         return self._fcm_status_state == FcmStatus.CONNECTED
+
+    def _log_idle_poll_diagnostics(
+        self, dev_id: str, dev_name: str, *, source: str
+    ) -> None:
+        """Emit a single DEBUG line per device per cycle to tell an expected
+        idle poll (no reporter in range to relay a BLE tag's location) apart
+        from a possible FCM transport fault.
+
+        Only rendered at DEBUG level, so this stays silent during normal
+        operation and adds no WARNING/INFO noise. ``source`` distinguishes the
+        inner empty result from the outer poll-guard timeout.
+        """
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+        now = time.time()
+        cached = self._device_location_data.get(dev_id) or {}
+        last_seen = cached.get("last_seen")
+        try:
+            report_age = f"{now - float(last_seen):.0f}s" if last_seen else "never"
+        except (TypeError, ValueError):
+            report_age = "unknown"
+        changed_at = self._fcm_status_changed_at
+        fcm_age = f"{now - changed_at:.0f}s" if changed_at else "unknown"
+        _LOGGER.debug(
+            "Idle poll for %s (%s): last report %s ago, FCM status %s for %s",
+            dev_name,
+            source,
+            report_age,
+            self._fcm_status_state,
+            fcm_age,
+        )
 
     @property
     def consecutive_timeouts(self) -> int:
@@ -576,43 +646,65 @@ class PollingOperations(_MixinBase):
                     fatal_error = fatal_by_entry.get(entry_id)
 
             if isinstance(fatal_error, str) and fatal_error:
-                # Check if this is a fatal auth error that should fail immediately
-                # (e.g., 404/401 with credentials issues - no point retrying)
-                is_fatal_auth = _is_fatal_fcm_auth_error_impl(fatal_error)
+                # Iter-14 (Codex follow-up, channel-confusion): the FCM
+                # receiver's supervisor-level "short-run crash loop" cap
+                # publishes its terminal state into the SAME ``_fatal_errors``
+                # map this re-auth escalation consumes. That defense is a
+                # poison-message bulkhead (the user has to reload or
+                # regenerate credentials per the repair issue, NOT
+                # re-authenticate). Classify the fatal first so a cap-fired
+                # listener-lifecycle fatal does not get reclassified as an
+                # auth fatal after _FCM_ERROR_RETRY_THRESHOLD cycles and
+                # push users into Home Assistant's re-auth flow.
+                fatal_class = _classify_fcm_fatal(fatal_error)
 
-                if is_fatal_auth:
-                    # Fatal auth errors - fail immediately, no retry
-                    _LOGGER.error(
-                        "Fatal FCM authentication error: %s. Triggering re-authentication.",
-                        fatal_error,
-                    )
-                    self._set_auth_state(failed=True, reason=fatal_error)
-                    raise ConfigEntryAuthFailed(fatal_error)
-
-                # Track consecutive FCM errors for transient issues
-                if fatal_error != self._fcm_last_error:
-                    # New error type, reset counter
-                    self._fcm_error_count = 1
-                    self._fcm_last_error = fatal_error
+                if fatal_class == _FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED:
+                    # Reset any partial auth-error count so a later,
+                    # unrelated auth fatal starts from zero rather than
+                    # inheriting a stale count from the crash-loop window.
+                    if self._fcm_error_count > 0:
+                        _LOGGER.debug(
+                            "FCM crash-loop fatal observed; resetting auth-"
+                            "error counter (was %d). Repair issue surfaces "
+                            "guidance, no re-auth.",
+                            self._fcm_error_count,
+                        )
+                        self._fcm_error_count = 0
+                        self._fcm_last_error = None
                 else:
-                    self._fcm_error_count += 1
+                    if fatal_class == _FCM_FATAL_CLASS_AUTH_IMMEDIATE:
+                        # Fatal auth errors - fail immediately, no retry
+                        _LOGGER.error(
+                            "Fatal FCM authentication error: %s. Triggering re-authentication.",
+                            fatal_error,
+                        )
+                        self._set_auth_state(failed=True, reason=fatal_error)
+                        raise ConfigEntryAuthFailed(fatal_error)
 
-                # Only trigger re-auth after _FCM_ERROR_RETRY_THRESHOLD consecutive failures
-                if self._fcm_error_count >= _FCM_ERROR_RETRY_THRESHOLD:
-                    _LOGGER.error(
-                        "FCM error persisted after %d attempts: %s. Triggering re-authentication.",
-                        self._fcm_error_count,
-                        fatal_error,
-                    )
-                    self._set_auth_state(failed=True, reason=fatal_error)
-                    raise ConfigEntryAuthFailed(fatal_error)
-                else:
-                    _LOGGER.warning(
-                        "FCM error detected (%d/%d): %s. Will retry before triggering re-auth.",
-                        self._fcm_error_count,
-                        _FCM_ERROR_RETRY_THRESHOLD,
-                        fatal_error,
-                    )
+                    # Track consecutive FCM errors for transient issues
+                    if fatal_error != self._fcm_last_error:
+                        # New error type, reset counter
+                        self._fcm_error_count = 1
+                        self._fcm_last_error = fatal_error
+                    else:
+                        self._fcm_error_count += 1
+
+                    # Only trigger re-auth after _FCM_ERROR_RETRY_THRESHOLD consecutive failures
+                    if self._fcm_error_count >= _FCM_ERROR_RETRY_THRESHOLD:
+                        _LOGGER.error(
+                            "FCM error persisted after %d attempts: %s. Triggering re-authentication.",
+                            self._fcm_error_count,
+                            fatal_error,
+                        )
+                        self._set_auth_state(failed=True, reason=fatal_error)
+                        raise ConfigEntryAuthFailed(fatal_error)
+                    else:
+                        _LOGGER.warning(
+                            "FCM error detected (%d/%d): %s. Will retry before triggering re-auth.",
+                            self._fcm_error_count,
+                            _FCM_ERROR_RETRY_THRESHOLD,
+                            fatal_error,
+                        )
             # No error - reset counter on successful check
             elif self._fcm_error_count > 0:
                 _LOGGER.debug(
@@ -1106,10 +1198,16 @@ class PollingOperations(_MixinBase):
                     )
 
                     try:
-                        # Protect API awaitable with timeout
+                        # Protect API awaitable with an outer guard that is
+                        # strictly larger than the inner FCM wait
+                        # (LOCATION_REQUEST_TIMEOUT_S, see
+                        # NovaApi/.../location_request.py). Equal nested budgets
+                        # make this outer guard win the race and raise a spurious
+                        # TimeoutError before the inner request can return its
+                        # clean empty result (Nygard: stagger nested timeouts).
                         location = await asyncio.wait_for(
                             self.api.async_get_device_location(dev_id, dev_name),
-                            timeout=LOCATION_REQUEST_TIMEOUT_S,
+                            timeout=POLL_DEVICE_OUTER_TIMEOUT_S,
                         )
 
                         # Success path: ensure any previous auth error is cleared
@@ -1124,8 +1222,15 @@ class PollingOperations(_MixinBase):
                             self._last_transient_auth_error = None
 
                         if not location:
-                            _LOGGER.warning(
+                            # Expected for BLE tags with no reporter nearby: the
+                            # inner FCM wait returns an empty result rather than
+                            # raising. This is a healthy idle outcome, not a fault
+                            # (kept at INFO, symmetric with the timeout branch).
+                            _LOGGER.info(
                                 "No location data returned for %s", dev_name
+                            )
+                            self._log_idle_poll_diagnostics(
+                                dev_id, dev_name, source="empty-result"
                             )
                             continue
 
@@ -1332,16 +1437,19 @@ class PollingOperations(_MixinBase):
 
                     except TimeoutError as terr:
                         if self.is_fcm_connected:
-                            _LOGGER.warning(
+                            _LOGGER.info(
                                 "Poll timed out for %s (FCM connected); ignoring error to keep status healthy.",
                                 dev_name,
+                            )
+                            self._log_idle_poll_diagnostics(
+                                dev_id, dev_name, source="outer-timeout"
                             )
                             self.increment_stat("timeouts")
                         else:
                             _LOGGER.info(
                                 "Location request timed out for %s after %s seconds",
                                 dev_name,
-                                LOCATION_REQUEST_TIMEOUT_S,
+                                POLL_DEVICE_OUTER_TIMEOUT_S,
                             )
                             self.increment_stat("timeouts")
                             self._consecutive_timeouts += 1

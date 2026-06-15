@@ -87,11 +87,14 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
         session: Any,
         namespace: str | None,
         cache: DummyCache,
-    ) -> tuple[str, str]:
+        request_uuid: str | None = None,
+    ) -> tuple[str, str | None]:
         submissions.append(
             ("start", device_id, token, namespace, getattr(cache, "entry_id", None))
         )
-        return "ok", f"uuid-{device_id}"
+        # Production-faithful: an accepted command returns a result tuple and the
+        # builder echoes the injected cancel key back.
+        return "ok", request_uuid
 
     async def fake_submit_stop(
         device_id: str,
@@ -137,8 +140,9 @@ def test_actions_use_scoped_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
         ok1, uuid1 = await api_entry_1.async_play_sound("device-1")
         ok2, uuid2 = await api_entry_2.async_play_sound("device-2")
         assert ok1 and ok2
-        assert uuid1 == "uuid-device-1"
-        assert uuid2 == "uuid-device-2"
+        # Each play generates its own client-side cancel key (non-None, distinct).
+        assert uuid1 and uuid2
+        assert uuid1 != uuid2
         assert await api_entry_1.async_stop_sound("device-1")
         assert await api_entry_2.async_stop_sound("device-2")
 
@@ -173,7 +177,8 @@ def test_play_sound_returns_uuid_and_passes_to_stop(
         session: Any,
         namespace: str | None,
         cache: DummyCache,
-    ) -> tuple[str, str]:
+        request_uuid: str | None = None,
+    ) -> tuple[str, str | None]:
         submissions.append(
             (
                 "start",
@@ -183,7 +188,9 @@ def test_play_sound_returns_uuid_and_passes_to_stop(
                 getattr(cache, "entry_id", ""),
             )
         )
-        return "deadbeef", f"uuid-{device_id}"
+        # Production-faithful: an accepted command returns a result tuple and
+        # echoes the injected cancel key back to the caller.
+        return "deadbeef", request_uuid
 
     async def fake_submit_stop(
         device_id: str,
@@ -204,6 +211,12 @@ def test_play_sound_returns_uuid_and_passes_to_stop(
     monkeypatch.setattr(
         "custom_components.googlefindmy.api.async_submit_stop_sound_request",
         fake_submit_stop,
+    )
+
+    # Pin the client-generated cancel key so the play->stop round-trip is exact.
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.generate_random_uuid",
+        lambda: "uuid-device-uuid",
     )
 
     api = GoogleFindMyAPI(cache=DummyCache(entry_id="entry-uuid"))

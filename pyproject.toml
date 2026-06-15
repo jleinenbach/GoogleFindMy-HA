@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.0-6"
+version = "1.7.1"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -20,6 +20,7 @@ beautifulsoup4 = ">=4.12.3"
 cryptography = ">=43.0.3"
 ecdsa = ">=0.19.1"
 gpsoauth = ">=2.0.0"
+grpclib = ">=0.4.7"
 h2 = ">=4.1.0"
 http-ece = ">=1.2.1"
 httpx = { version = ">=0.28.0", extras = ["http2"] }
@@ -49,7 +50,6 @@ pip-audit = ">=2.6"
 
 # Additional dev tools
 pyyaml = ">=6.0.2"
-grpclib = ">=0.4.7"
 pycares = ">=4.4.0"
 certifi = ">=2024.7.4"
 
@@ -343,7 +343,11 @@ skip_covered = true
 # (was 60 in PR #1071 with 64 % headroom). Target remains >= 95 % per
 # quality-scale rule test-coverage; this floor only prevents regressions
 # while incremental test expansion lands (60 -> 63 -> 70 -> 80 -> 90 -> 95).
-fail_under = 63
+# Recalibrated to 67 after forward-porting the stranded Class-A coverage suite:
+# local full run measured 68.33 % scoped (3696 passed); floor = floor(68) - 1 Pp
+# jitter margin, clamped to [63, CI total]. Three local entity tests error on a
+# root-owned .storage path that CI does not hit, so CI total is >= 68.33 %.
+fail_under = 67
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
