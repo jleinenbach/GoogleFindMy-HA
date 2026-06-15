@@ -618,6 +618,76 @@ async def test_ensure_client_does_not_hand_live_client_to_stale_supervisor() -> 
 
 
 @pytest.mark.asyncio
+async def test_ensure_client_drops_handover_on_teardown_during_cache_await(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A teardown during the credential-load await must not resurrect state.
+
+    Slow-cache race (Codex finding 7): ``_ensure_client_for_entry`` holds the
+    asyncio ``self._lock``, but ``unregister_coordinator`` is synchronous and
+    takes no lock, so it runs to completion while this method is suspended on
+    ``await cache.get("fcm_credentials")``. The single suppression check before
+    that await is stale on resume; committing the per-entry stores afterwards
+    would re-create exactly the ``self.pcs``/``self.creds`` state the teardown
+    purged. The post-await re-check drops the handover instead, while the
+    no-teardown path still performs every store the inline writes used to.
+    """
+    built: list[object] = []
+
+    class DummyPushClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            built.append(self)
+            self.run_state = None
+            self.do_listen = False
+
+    monkeypatch.setattr(fcm_receiver_ha, "FcmPushClient", DummyPushClient)
+    monkeypatch.setattr(fcm_receiver_ha, "HAVE_FCM_PUSH_CLIENT", True)
+
+    receiver = FcmReceiverHA()
+    entry_id = "entry-slow-cache-teardown"
+    creds_payload = {"fcm": {"registration": {"token": "creds-from-cache"}}}
+
+    class _TeardownDuringGetCache:
+        """A cache whose awaited ``get`` lets a sync teardown land mid-flight."""
+
+        def __init__(self, *, tombstone: bool) -> None:
+            self.entry_id = entry_id
+            self._tombstone = tombstone
+
+        async def get(self, _key: str) -> dict[str, object]:
+            if self._tombstone:
+                # The synchronous async_on_unload teardown running while this
+                # coroutine is suspended: tombstone the entry exactly as
+                # ``unregister_coordinator`` does before it purges.
+                receiver._unregistered.add(entry_id)
+            return dict(creds_payload)
+
+    # Negative case: teardown lands during the await -> handover dropped, no
+    # per-entry state resurrected, build never reached.
+    receiver._pending_creds[entry_id] = {"stale": "pending"}
+    dropped = await receiver._ensure_client_for_entry(
+        entry_id, _TeardownDuringGetCache(tombstone=True), None
+    )
+    assert dropped is None
+    assert entry_id not in receiver.pcs
+    assert entry_id not in receiver.creds
+    assert built == []  # no client constructed for a torn-down entry
+
+    # Positive control: no teardown -> client built, creds committed from the
+    # cache load, and the consumed pending-creds entry popped. This proves the
+    # deferred single commit still performs every store the inline writes did.
+    receiver._unregistered.discard(entry_id)
+    live = await receiver._ensure_client_for_entry(
+        entry_id, _TeardownDuringGetCache(tombstone=False), None
+    )
+    assert isinstance(live, DummyPushClient)
+    assert receiver.pcs[entry_id] is live
+    assert receiver.creds[entry_id] == creds_payload
+    assert entry_id not in receiver._pending_creds  # loaded_from_cache popped it
+    assert len(built) == 1
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

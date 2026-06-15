@@ -1023,6 +1023,42 @@ class FcmReceiverHA:
         _LOGGER.info("FCM receiver initialized (multi-client ready)")
         return True
 
+    async def _load_entry_creds_for_build(
+        self, entry_id: str, cache: TokenCache | None
+    ) -> tuple[MutableJSONMapping | None, bool]:
+        """Resolve entry creds for a client build (the sole suspension point).
+
+        Returns ``(creds, loaded_from_cache)``. ``creds`` falls back to the
+        in-memory map, then the pending-creds buffer, then is overridden by a
+        successful awaited cache read. ``loaded_from_cache`` is True only when
+        that read produced a fresh credentials dict, so the caller knows it may
+        pop the pending-creds entry as part of its guarded commit.
+
+        The ``await`` here is the only suspension point in
+        ``_ensure_client_for_entry``'s critical section; the caller MUST
+        re-validate ``_entry_writes_suppressed`` after this returns, because a
+        synchronous teardown can land while this coroutine is parked on it.
+        """
+        creds = self.creds.get(entry_id)
+        if creds is None:
+            pending = self._pending_creds.get(entry_id)
+            if isinstance(pending, dict):
+                creds = pending
+        loaded_from_cache = False
+        try:
+            if cache is not None:
+                val = await cache.get("fcm_credentials")
+                if isinstance(val, str):
+                    val = json.loads(val)
+                if isinstance(val, dict):
+                    creds = val
+                    loaded_from_cache = True
+        except Exception as err:  # noqa: BLE001 - best-effort creds load
+            _LOGGER.debug(
+                "Failed to load entry-scoped FCM creds for %s: %s", entry_id, err
+            )
+        return creds, loaded_from_cache
+
     async def _ensure_client_for_entry(
         self, entry_id: str, cache: TokenCache | None, generation: int | None = None
     ) -> FcmPushClient[Any] | None:
@@ -1071,25 +1107,36 @@ class FcmReceiverHA:
             if entry_id in self.pcs:
                 return self.pcs[entry_id]
 
-            # Load entry-scoped credentials if present
-            creds = self.creds.get(entry_id)
-            if creds is None:
-                pending = self._pending_creds.get(entry_id)
-                if isinstance(pending, dict):
-                    creds = pending
-            try:
-                if cache is not None:
-                    val = await cache.get("fcm_credentials")
-                    if isinstance(val, str):
-                        val = json.loads(val)
-                    if isinstance(val, dict):
-                        creds = val
-                        self.creds[entry_id] = creds
-                        self._pending_creds.pop(entry_id, None)
-            except Exception as err:
+            # Resolve entry creds at the sole suspension point (the awaited cache
+            # read). Extracted into a named seam so this build chokepoint stays
+            # within its branch budget and the await is isolated; the store into
+            # ``self.creds[entry_id]`` is deferred to the single guarded commit
+            # below, because writing entry-state mid-method would let a teardown
+            # landing during the await re-create exactly what it just purged.
+            creds, loaded_from_cache = await self._load_entry_creds_for_build(
+                entry_id, cache
+            )
+
+            # AP7 (finding 7): re-validate suppression AFTER the await, BEFORE any
+            # per-entry store. ``self._lock`` is an asyncio lock -- it serialises
+            # other coroutines but does NOT exclude the SYNCHRONOUS
+            # ``unregister_coordinator`` (``async_on_unload``), which takes no
+            # lock. The ``await cache.get(...)`` above is the sole suspension
+            # point in this critical section; while parked there a teardown can
+            # tombstone the entry and ``_purge_entry_tokens`` it, so the first
+            # gate's verdict is stale on resume. Committing the stores below now
+            # would resurrect the purged ``self.pcs``/``self.creds`` -- the
+            # TOCTOU-over-await sibling of the fast-path race the first gate
+            # closes. Drop the handover; live callers treat None gracefully and a
+            # superseded supervisor terminates on it.
+            if self._entry_writes_suppressed(entry_id, generation):
                 _LOGGER.debug(
-                    "Failed to load entry-scoped FCM creds for %s: %s", entry_id, err
+                    "[entry=%s] Dropping FCM client handover after creds load; "
+                    "entry was suppressed (tombstoned or superseded) during the "
+                    "cache await",
+                    entry_id,
                 )
+                return None
 
             # Build register config (shared across entries)
             if not HAVE_FCM_PUSH_CLIENT:
@@ -1137,8 +1184,14 @@ class FcmReceiverHA:
                 )
                 return None
 
+            # Single guarded commit: every per-entry store happens here, after
+            # the post-await re-validation -- never mid-method. The pending-creds
+            # pop is part of the commit because it only applies when the cache
+            # load above produced fresh credentials.
             self.pcs[entry_id] = pc
             self.creds[entry_id] = creds if isinstance(creds, dict) else None
+            if loaded_from_cache:
+                self._pending_creds.pop(entry_id, None)
             return pc
 
     def _discard_own_client(
