@@ -467,15 +467,39 @@ class FcmReceiverHA:
 
         Callers without a captured generation (e.g. the credentials callback)
         pass ``None`` and get the pure tombstone-window behaviour.
+
+        Use this to gate *write* side effects that RE-CREATE per-entry state
+        (token routing, fatal-error publication, cap-fire). For *removal* side
+        effects that are teardown-safe in the tombstone window but harmful only
+        when a stale generation would clobber the live incarnation, gate on
+        ``_entry_generation_superseded`` instead.
         """
         if entry_id in self._unregistered:
             return True
-        if (
+        return self._entry_generation_superseded(entry_id, generation)
+
+    def _entry_generation_superseded(
+        self, entry_id: str, generation: int | None
+    ) -> bool:
+        """Return True when ``generation`` belongs to a superseded supervisor.
+
+        This checks ONLY the generation-mismatch condition (a stale supervisor
+        that captured an old generation and lost ownership to a live incarnation
+        after a fast reload), NOT the boolean tombstone window. A caller without
+        a captured generation (the public re-register / credentials path) is a
+        live operation and is never "superseded", so it returns False.
+
+        It is the narrow guard for *removal* side effects (clearing the fatal
+        latch, deleting the reauth repair, resetting shared retry counters):
+        those are teardown-safe while an entry is merely tombstoned (it is going
+        away and ``unregister_coordinator`` already reset it), but must be
+        skipped when an old generation would wipe the LIVE generation's
+        diagnostics.
+        """
+        return (
             generation is not None
             and generation != self._entry_generation.get(entry_id, 0)
-        ):
-            return True
-        return False
+        )
 
     def _clear_fatal_error_for_entry(
         self,
@@ -1210,14 +1234,22 @@ class FcmReceiverHA:
                         fatal_count = (
                             self._fatal_retry_counts.get(counter_key, 0) + 1
                         )
-                        # AP4 race guard: if the entry was torn down mid-flight,
-                        # do not re-create the fatal-retry counters the purge
-                        # just removed. The count stays effectively 1 while
-                        # suppressed, so the give-up branches below (which write
-                        # _fatal_errors and raise the reauth repair) are never
-                        # reached for a dead entry.
-                        if not self._entry_writes_suppressed(entry_id, generation):
-                            self._fatal_retry_counts[counter_key] = fatal_count
+                        # AP4 race guard: a teardown or a supersede may have
+                        # purged/re-owned this entry mid-flight. A suppressed
+                        # supervisor is stale for the ENTIRE retry-budget
+                        # handling, not just the counter write below: the give-up
+                        # branches publish ``_fatal_error`` / ``_fatal_errors``
+                        # and raise the reauth repair, and ``fatal_count`` is read
+                        # from the shared ``_fatal_retry_counts`` map the LIVE
+                        # generation may already own after a fast reload. Letting
+                        # a stale generation reach the give-up branches would
+                        # surface a reauth/fatal error against the live entry.
+                        # Bail out entirely; the supervisor terminates via the
+                        # surrounding loop's finally cleanup (the failed client
+                        # was already stopped and popped above).
+                        if self._entry_writes_suppressed(entry_id, generation):
+                            break
+                        self._fatal_retry_counts[counter_key] = fatal_count
 
                         if is_auth:
                             # 401: Token renewal while preserving android_id
@@ -1629,36 +1661,49 @@ class FcmReceiverHA:
                         # ``self._hass is not None`` and intentionally also
                         # runs when no latch was set (cheap idempotent UI
                         # cleanup).
-                        cap_was_latched = entry_id in self._short_run_cap_latched
-                        if cap_was_latched:
-                            self._short_run_cap_latched.discard(entry_id)
-                            # Iter-16: a healthy run is also the moment to
-                            # retire the cap-fire snapshot so the
-                            # pass-through clear branch cannot re-introduce
-                            # it after the latch is gone.
-                            self._short_run_cap_messages.pop(entry_id, None)
-                            cap_message = self._fatal_errors.get(entry_id)
-                            if cap_message and cap_message.startswith(
-                                CRASH_LOOP_FATAL_PREFIX
-                            ):
-                                self._fatal_errors.pop(entry_id, None)
-                                self._fatal_error = next(
-                                    iter(self._fatal_errors.values()), None
-                                )
-                                _LOGGER.info(
-                                    "[entry=%s] FCM short-run cap latch released "
-                                    "by healthy supervisor run",
-                                    entry_id,
-                                )
-                        if self._hass is not None:
-                            try:
-                                ir.async_delete_issue(
-                                    self._hass,
-                                    DOMAIN,
-                                    f"fcm_short_run_crash_loop_{entry_id}",
-                                )
-                            except Exception:  # noqa: BLE001
-                                pass
+                        # AP4 (finding 4b, related sweep): a superseded or
+                        # tombstoned supervisor must not release the LIVE
+                        # generation's cap latch / fatal map / Repairs issue.
+                        # This mirrors the cap-FIRE guard above: a stale healthy
+                        # run is not proof the live incarnation's poison-message
+                        # condition is gone, and an old generation finishing a
+                        # healthy run after a fast reload would otherwise wipe the
+                        # new generation's diagnostics. The closure-local
+                        # ``short_run_counter`` reset above stays unguarded (it
+                        # cannot leak across incarnations).
+                        if not self._entry_writes_suppressed(entry_id, generation):
+                            cap_was_latched = (
+                                entry_id in self._short_run_cap_latched
+                            )
+                            if cap_was_latched:
+                                self._short_run_cap_latched.discard(entry_id)
+                                # Iter-16: a healthy run is also the moment to
+                                # retire the cap-fire snapshot so the
+                                # pass-through clear branch cannot re-introduce
+                                # it after the latch is gone.
+                                self._short_run_cap_messages.pop(entry_id, None)
+                                cap_message = self._fatal_errors.get(entry_id)
+                                if cap_message and cap_message.startswith(
+                                    CRASH_LOOP_FATAL_PREFIX
+                                ):
+                                    self._fatal_errors.pop(entry_id, None)
+                                    self._fatal_error = next(
+                                        iter(self._fatal_errors.values()), None
+                                    )
+                                    _LOGGER.info(
+                                        "[entry=%s] FCM short-run cap latch "
+                                        "released by healthy supervisor run",
+                                        entry_id,
+                                    )
+                            if self._hass is not None:
+                                try:
+                                    ir.async_delete_issue(
+                                        self._hass,
+                                        DOMAIN,
+                                        f"fcm_short_run_crash_loop_{entry_id}",
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass
 
                     # Cleanup before restart
                     try:
@@ -1917,23 +1962,32 @@ class FcmReceiverHA:
 
             if token_or_creds:
                 _LOGGER.info("[entry=%s] FCM registered successfully", entry_id)
-                token = self.get_fcm_token(entry_id)
-                # AP4 race guard: a teardown may have purged this entry while
-                # this registration attempt was in flight. The routing writes
-                # below RE-CREATE per-entry state ``_purge_entry_tokens`` just
-                # removed, so skip them while the entry is tombstoned; without
-                # this guard a successful in-flight (re-)registration would
-                # resurrect routable stale tokens for a removed/reloading entry.
-                # The clears below only REMOVE state and stay teardown-safe.
-                if token and not self._entry_writes_suppressed(entry_id, generation):
-                    self._update_token_routing(token, {entry_id})
-                    await self._persist_routing_token(entry_id, token)
-                self._clear_fatal_error_for_entry(
-                    entry_id, reason="Registration succeeded"
-                )
-                # Reset fatal retry counters on success
-                self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
-                self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
+                # AP4 race guard (two tiers): a teardown or a supersede may have
+                # purged or re-owned this entry while this attempt was in flight.
+                #
+                # * Routing writes RE-CREATE the per-entry state
+                #   ``_purge_entry_tokens`` removed, so they are skipped whenever
+                #   writes are suppressed (tombstone window OR superseded gen).
+                # * The clears / counter resets only REMOVE state, so they stay
+                #   teardown-safe in the pure-tombstone window (the entry is going
+                #   away and ``unregister_coordinator`` already reset it). But a
+                #   SUPERSEDED generation finishing after a fast reload must NOT
+                #   run them: that would wipe the LIVE generation's fatal latch,
+                #   reauth repair and retry counters (finding: guard all stale
+                #   success side effects). Gate them on the narrow generation
+                #   check so the documented teardown-safe-clear behaviour is kept.
+                if not self._entry_writes_suppressed(entry_id, generation):
+                    token = self.get_fcm_token(entry_id)
+                    if token:
+                        self._update_token_routing(token, {entry_id})
+                        await self._persist_routing_token(entry_id, token)
+                if not self._entry_generation_superseded(entry_id, generation):
+                    self._clear_fatal_error_for_entry(
+                        entry_id, reason="Registration succeeded"
+                    )
+                    # Reset fatal retry counters on success
+                    self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
+                    self._fatal_retry_counts.pop(f"{entry_id}:endpoint", None)
                 return True
             _LOGGER.warning("[entry=%s] FCM registration returned no token", entry_id)
             return False

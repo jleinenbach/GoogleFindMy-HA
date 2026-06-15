@@ -385,6 +385,63 @@ async def test_register_success_skips_routing_writes_for_tombstoned_entry(
 
 
 @pytest.mark.asyncio
+async def test_register_success_skips_clears_for_superseded_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A success finishing under a SUPERSEDED generation must not clear the
+    LIVE generation's diagnostics (Codex: guard all stale success side effects).
+
+    Distinct from the pure-tombstone case: here the entry is NOT tombstoned (a
+    fast reload already cleared the tombstone and bumped the generation), so the
+    old generation's success would otherwise wipe the new incarnation's fatal
+    latch and retry counters. Both the routing writes AND the clears must be
+    skipped for the stale generation, while the attempt still reports success.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-superseded"
+    # State owned by the LIVE (new) generation after a fast reload.
+    receiver._fatal_errors[entry_id] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+    receiver._fatal_retry_counts[f"{entry_id}:auth"] = 2
+    # The new incarnation bumped the generation; this in-flight attempt still
+    # carries the old (now superseded) snapshot. No tombstone is set.
+    receiver._entry_generation[entry_id] = 5
+    stale_generation = 4
+
+    class _DummyPc:
+        async def checkin_or_register(self) -> dict[str, str]:
+            return {"ok": "true"}
+
+    receiver.pcs[entry_id] = _DummyPc()
+
+    token_routes: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver,
+        "_update_token_routing",
+        lambda token, entries: token_routes.append((token, set(entries))),
+    )
+
+    persisted_tokens: list[tuple[str, str]] = []
+
+    async def _persist(entry_arg: str, token_arg: str) -> None:
+        persisted_tokens.append((entry_arg, token_arg))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _entry_id=None: "token-123")
+
+    result = await receiver._register_for_fcm_entry(entry_id, stale_generation)
+
+    assert result is True
+    # Routing writes stay suppressed for the superseded generation...
+    assert token_routes == []
+    assert persisted_tokens == []
+    # ...and so do the clears: the LIVE generation's diagnostics survive.
+    assert receiver._fatal_errors[entry_id] == "BadAuthentication"
+    assert receiver._fatal_error == "BadAuthentication"
+    assert receiver._fatal_retry_counts[f"{entry_id}:auth"] == 2
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
