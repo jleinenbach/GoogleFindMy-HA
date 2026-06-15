@@ -933,6 +933,7 @@ async def test_classify_registration_exception_branches(
     assert calls == [entry_id, entry_id, entry_id]
 
 
+@pytest.mark.asyncio
 async def test_classify_registration_exception_forwards_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
