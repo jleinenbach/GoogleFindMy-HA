@@ -1782,6 +1782,35 @@ async def test_reregister_returns_false_after_purge() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reregister_returns_false_when_tombstoned_with_residual_client() -> None:
+    """Codex follow-up to AP3: a tombstoned entry whose live client still lingers.
+
+    unregister_coordinator runs synchronously and cannot await ``pc.stop()``, so the
+    client survives in ``self.pcs`` until the cancelled supervisor (or async_stop)
+    drains it. The creds purge alone left the ``entry_id in self.pcs`` half of the
+    reregister guard open, so a reregister in that window restarted a zombie
+    supervisor for an entry mid-teardown. The tombstone (``_unregistered``) is the
+    single source of truth for "torn down" and now blocks the revival.
+
+    Distinct from a tombstoned supervisor that is *already running*: that one is
+    allowed to terminate with its writes suppressed (see
+    ``test_tombstone_suppresses_cap_latch``). Only the external revival path
+    (``async_reregister_fcm``) is refused here.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-zombie-residual"
+    # Post-unregister_coordinator state: creds purged, tombstone set, but the live
+    # client still lingers in self.pcs (sync teardown could not await pc.stop()).
+    receiver._unregistered.add(eid)
+    receiver.pcs[eid] = object()  # residual client; must not be revived
+
+    assert await receiver.async_reregister_fcm(eid) is False
+    # The residual client is left untouched for the running supervisor / async_stop
+    # to drain; the revival path must not have started reconstructing it.
+    assert eid not in receiver.supervisors
+
+
+@pytest.mark.asyncio
 async def test_purge_cancels_pending_debounce_flush_tasks() -> None:
     """AP7 (finding 2d): pending flush tasks are cancelled and the trias dropped."""
     receiver = FcmReceiverHA()

@@ -2909,6 +2909,22 @@ class FcmReceiverHA:
         Returns True if re-registration was initiated (supervisor restarted),
         False if the entry is not known to this receiver.
         """
+        # A torn-down entry must never be revived from here. unregister_coordinator
+        # (sync, via async_on_unload) tombstones the entry and purges its creds, but
+        # it cannot await pc.stop(), so the live client lingers in self.pcs until the
+        # cancelled supervisor (or async_stop) drains it. The creds/pcs membership
+        # guard below would still pass on that residual client and restart a
+        # supervisor for an entry mid-teardown (zombie). _unregistered is the single
+        # source of truth for "torn down" (see _entry_writes_suppressed); consult it
+        # first and bail before doing any teardown work. Cleared by
+        # register_coordinator on the next setup.
+        if entry_id in self._unregistered:
+            _LOGGER.debug(
+                "[entry=%s] Cannot re-register FCM: entry torn down (tombstoned)",
+                entry_id,
+            )
+            return False
+
         if entry_id not in self.pcs and entry_id not in self.creds:
             _LOGGER.warning(
                 "[entry=%s] Cannot re-register FCM: entry not known to receiver",
