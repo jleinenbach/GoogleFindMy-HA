@@ -15,7 +15,7 @@ This limitation was confirmed by the GoogleFindMyTools maintainer:
     "uploading finder reports requires a valid DroidGuard report.
      If you want, you can try to trick DroidGuard, but I was not successful doing so."
 
-    — Leon Böttger, https://github.com/leonboe1/GoogleFindMyTools/issues/19
+    — Leon Boettger, https://github.com/leonboe1/GoogleFindMyTools/issues/19
 
 TECHNICAL DETAILS
 ============================================================================

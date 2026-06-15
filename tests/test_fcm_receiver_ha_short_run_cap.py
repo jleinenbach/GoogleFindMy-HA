@@ -24,6 +24,7 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     DOMAIN,
     FcmReceiverHA,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _MonoClock:
@@ -163,7 +164,7 @@ def _install_supervisor_mocks(
 
     ensure_iter = iter(ensure_clients)
 
-    async def _ensure(entry_id: str, cache):  # noqa: ARG001
+    async def _ensure(entry_id: str, cache, generation=None):  # noqa: ARG001
         # Codex Iter-7 (PR #1086): modelling exhaustion as ``None`` mirrors
         # production's ``if not pc`` path, which is designed to back off and
         # retry **forever**. The non-cap tests (long-run reset,
@@ -293,7 +294,10 @@ async def test_credential_error_invalidates_tokens_and_bypasses_cap(
 
     # Every credential-error run escalated to re-registration ...
     assert invalidate_mock.await_count == _MAX_CONSECUTIVE_SHORT_RUNS + 2
-    invalidate_mock.assert_awaited_with(entry_id)
+    # AP4 (finding 4b): the supervisor passes its captured generation (0 here,
+    # no teardown occurred) so a superseded run cannot write back invalidated
+    # creds after the tombstone is cleared.
+    invalidate_mock.assert_awaited_with(entry_id, 0)
     # ... and NONE of them tripped the short-run crash cap.
     assert create_issue.call_count == 0
     assert entry_id not in receiver._fatal_errors
@@ -1178,7 +1182,7 @@ async def test_cap_fire_terminates_outer_loop_without_helper_safety_net(
     ensure_iter = iter(clients)
     ensure_call_count = 0
 
-    async def _ensure(entry_id_inner: str, cache):  # noqa: ARG001
+    async def _ensure(entry_id_inner: str, cache, generation=None):  # noqa: ARG001
         # NOTE: no StopIteration->stop_evt.set() escape hatch here. If the
         # production cap fails to terminate the supervisor, this returns the
         # 11th client and we explicitly fail the test below.
@@ -1711,3 +1715,421 @@ def test_factory_honours_monkeypatched_fcm_push_client_symbol(
         assert not isinstance(pc, fcm_receiver_ha._ObservableFcmPushClientCls)
     assert captured["args"][0] == "callback"
     assert captured["kwargs"]["http_client_session"] == "session"
+
+
+# --------------------------------------------------------------------------
+# PR A — entry-state purge symmetry (AP1/AP2/AP3/AP7) + race tombstone (AP4)
+# --------------------------------------------------------------------------
+
+
+def test_purge_entry_tokens_clears_fatal_retry_counts() -> None:
+    """AP1 (finding 2a): the teardown purge drops both fatal-retry counters."""
+    receiver = FcmReceiverHA()
+    eid = "entry-purge-counts"
+    receiver._fatal_retry_counts[f"{eid}:auth"] = 4
+    receiver._fatal_retry_counts[f"{eid}:endpoint"] = 2
+    receiver._fatal_retry_counts["other:auth"] = 1  # foreign entry untouched
+
+    receiver._purge_entry_tokens(eid)
+
+    assert f"{eid}:auth" not in receiver._fatal_retry_counts
+    assert f"{eid}:endpoint" not in receiver._fatal_retry_counts
+    assert receiver._fatal_retry_counts["other:auth"] == 1
+
+
+def test_purge_entry_tokens_clears_entry_health() -> None:
+    """AP2 (finding 2b): per-entry health snapshots are purged on teardown."""
+    receiver = FcmReceiverHA()
+    eid = "entry-purge-health"
+    receiver._entry_health[eid] = True
+    receiver._entry_last_connected_wall[eid] = 123.0
+
+    receiver._purge_entry_tokens(eid)
+
+    assert eid not in receiver._entry_health
+    assert eid not in receiver._entry_last_connected_wall
+
+
+def test_purge_entry_tokens_clears_creds() -> None:
+    """AP3 (finding 2c): in-memory creds + pending creds are purged on teardown."""
+    receiver = FcmReceiverHA()
+    eid = "entry-purge-creds"
+    receiver.creds[eid] = {"gcm": {"token": "x"}}
+    receiver._pending_creds[eid] = {"gcm": {"token": "y"}}
+
+    receiver._purge_entry_tokens(eid)
+
+    assert eid not in receiver.creds
+    assert eid not in receiver._pending_creds
+
+
+@pytest.mark.asyncio
+async def test_reregister_returns_false_after_purge() -> None:
+    """AP3 behaviour: a purged entry can no longer be revived via reregister.
+
+    Before the creds purge, ``async_reregister_fcm``'s guard
+    (``entry_id in self.creds``) stayed True after teardown and could restart a
+    zombie supervisor for a dead entry. With the creds purged the guard now
+    correctly rejects the revival.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-zombie"
+    receiver.creds[eid] = {"gcm": {"token": "x"}}
+    # pcs is empty (teardown stopped the client); only creds kept the guard True.
+
+    receiver._purge_entry_tokens(eid)
+
+    assert await receiver.async_reregister_fcm(eid) is False
+
+
+@pytest.mark.asyncio
+async def test_reregister_returns_false_when_tombstoned_with_residual_client() -> None:
+    """Codex follow-up to AP3: a tombstoned entry whose live client still lingers.
+
+    unregister_coordinator runs synchronously and cannot await ``pc.stop()``, so the
+    client survives in ``self.pcs`` until the cancelled supervisor (or async_stop)
+    drains it. The creds purge alone left the ``entry_id in self.pcs`` half of the
+    reregister guard open, so a reregister in that window restarted a zombie
+    supervisor for an entry mid-teardown. The tombstone (``_unregistered``) is the
+    single source of truth for "torn down" and now blocks the revival.
+
+    Distinct from a tombstoned supervisor that is *already running*: that one is
+    allowed to terminate with its writes suppressed (see
+    ``test_tombstone_suppresses_cap_latch``). Only the external revival path
+    (``async_reregister_fcm``) is refused here.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-zombie-residual"
+    # Post-unregister_coordinator state: creds purged, tombstone set, but the live
+    # client still lingers in self.pcs (sync teardown could not await pc.stop()).
+    receiver._unregistered.add(eid)
+    receiver.pcs[eid] = object()  # residual client; must not be revived
+
+    assert await receiver.async_reregister_fcm(eid) is False
+    # The residual client is left untouched for the running supervisor / async_stop
+    # to drain; the revival path must not have started reconstructing it.
+    assert eid not in receiver.supervisors
+
+
+@pytest.mark.asyncio
+async def test_purge_cancels_pending_debounce_flush_tasks() -> None:
+    """AP7 (finding 2d): pending flush tasks are cancelled and the trias dropped."""
+    receiver = FcmReceiverHA()
+    eid = "entry-debounce"
+    key = (eid, "device-1")
+    foreign = ("other-entry", "device-9")
+
+    async def _never() -> None:
+        await asyncio.sleep(60)
+
+    task = asyncio.create_task(_never())
+    foreign_task = asyncio.create_task(_never())
+    receiver._flush_tasks[key] = task
+    receiver._flush_tasks[foreign] = foreign_task
+    receiver._pending[key] = {"payload": 1}
+    receiver._pending_targets[key] = {"target"}
+    receiver._pending[foreign] = {"payload": 2}
+
+    try:
+        receiver._purge_entry_tokens(eid)
+
+        assert key not in receiver._flush_tasks
+        assert key not in receiver._pending
+        assert key not in receiver._pending_targets
+        assert task.cancelled() or task.cancelling()
+        # Foreign entry's debounce state is untouched.
+        assert foreign in receiver._flush_tasks
+        assert foreign in receiver._pending
+    finally:
+        foreign_task.cancel()
+        for t in (task, foreign_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+
+
+def test_unregister_coordinator_tombstones_and_purges() -> None:
+    """AP4 (finding 4a): unregister tombstones the entry and purges its state."""
+    receiver = FcmReceiverHA()
+    eid = "entry-unreg-tombstone"
+    coord = SimpleNamespace(
+        config_entry=make_config_entry(entry_id=eid), cache=None
+    )
+    receiver._fatal_retry_counts[f"{eid}:auth"] = 3
+    receiver._entry_health[eid] = True
+    receiver.creds[eid] = {"gcm": {}}
+
+    receiver.unregister_coordinator(coord)
+
+    assert eid in receiver._unregistered
+    assert f"{eid}:auth" not in receiver._fatal_retry_counts
+    assert eid not in receiver._entry_health
+    assert eid not in receiver.creds
+
+
+def test_register_coordinator_clears_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4a, guard B): a setup un-tombstones the entry."""
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    eid = "entry-reload"
+    receiver._unregistered.add(eid)
+    coord = SimpleNamespace(
+        config_entry=make_config_entry(entry_id=eid), cache=None
+    )
+
+    # The supervisor dispatch is irrelevant here; neutralise it so the test
+    # does not leak an un-awaited coroutine.
+    def _consume(coro: object, *, label: str | None = None) -> None:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+
+    monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _consume)
+
+    receiver.register_coordinator(coord)
+
+    assert eid not in receiver._unregistered
+    assert receiver._entry_writes_suppressed(eid) is False
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_skipped_when_tombstoned() -> None:
+    """AP4 (finding 4a): _invalidate_fcm_tokens does not persist for a dead entry."""
+    receiver = FcmReceiverHA()
+    eid = "entry-invalidate"
+    creds = {"gcm": {"token": "keep"}, "fcm": {"x": 1}}
+    receiver.creds[eid] = creds
+    receiver._unregistered.add(eid)
+
+    await receiver._invalidate_fcm_tokens(eid)
+
+    # Suppressed: creds dict is left exactly as-is (fcm not stripped).
+    assert receiver.creds[eid]["fcm"] == {"x": 1}
+
+
+def test_credentials_callback_suppressed_when_tombstoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4a, Codex follow-up): a late creds callback cannot resurrect.
+
+    The old FCM client is not awaited during ``unregister_coordinator``'s
+    synchronous teardown, so it can still fire ``_on_credentials_updated_for_entry``
+    after ``_purge_entry_tokens`` cleared the entry. While tombstoned the callback
+    must not re-write ``self.creds[entry_id]``, restore routing or queue
+    persistence — otherwise the removed entry looks known to ``async_reregister_fcm``
+    again. Once the tombstone is cleared (a real reload), fresh creds are accepted.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-creds-callback"
+
+    dispatched: list[str | None] = []
+
+    def _capture(coro: object, *, label: str | None = None) -> None:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        dispatched.append(label)
+
+    monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _capture)
+
+    # Tombstoned: the late callback is dropped wholesale.
+    receiver._unregistered.add(eid)
+    receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "late"}})
+
+    assert eid not in receiver.creds
+    assert eid not in receiver._pending_creds
+    assert dispatched == []  # no routing/persistence dispatch happened
+
+    # Real reload clears the tombstone; the next callback is honoured again.
+    receiver._unregistered.discard(eid)
+    receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "fresh"}})
+
+    assert receiver.creds[eid] == {"fcm": {"token": "fresh"}}
+
+
+def test_credentials_callback_gates_on_driving_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4c): a superseded supervisor's mid-handshake callback is dropped.
+
+    On a fast reload ``unregister_coordinator`` bumps the generation but does NOT
+    pop the reused client, and ``register_coordinator`` clears the tombstone for
+    the new incarnation. A cancelled-but-unwinding supervisor still inside
+    ``checkin_or_register`` fires the synchronous credentials callback; the
+    tombstone is already gone, so a tombstone-only gate would let it clobber the
+    LIVE generation's creds and fatal latch. The callback must instead gate on
+    the *driving* generation published by the supervisor for the handshake: a
+    superseded generation is suppressed, the matching live generation writes.
+    """
+    receiver = FcmReceiverHA()
+    eid = "entry-driving-gen"
+
+    dispatched: list[str | None] = []
+
+    def _capture(coro: object, *, label: str | None = None) -> None:
+        if asyncio.iscoroutine(coro):
+            coro.close()
+        dispatched.append(label)
+
+    monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _capture)
+    # Isolate the callback's own effects from the supervisor routing block.
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda _eid=None: None)
+
+    # Live incarnation: tombstone cleared, generation bumped to 1, fatal latched.
+    receiver._unregistered.discard(eid)
+    receiver._entry_generation[eid] = 1
+    receiver._fatal_errors[eid] = "BadAuthentication"
+    receiver._fatal_error = "BadAuthentication"
+
+    # A superseded supervisor (captured generation 0) drives the handshake.
+    with receiver._driving_generation_scope(eid, 0):
+        receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "stale"}})
+
+    # Dropped wholesale: no creds resurrection, no dispatch, LIVE latch survives.
+    assert eid not in receiver.creds
+    assert eid not in receiver._pending_creds
+    assert dispatched == []
+    assert receiver._fatal_errors[eid] == "BadAuthentication"
+    assert receiver._fatal_error == "BadAuthentication"
+
+    # The live supervisor (matching generation 1) is honoured: creds written,
+    # latch cleared, persistence dispatched.
+    with receiver._driving_generation_scope(eid, 1):
+        receiver._on_credentials_updated_for_entry(eid, {"fcm": {"token": "live"}})
+
+    assert receiver.creds[eid] == {"fcm": {"token": "live"}}
+    assert eid not in receiver._fatal_errors
+    assert receiver._fatal_error is None
+    assert dispatched  # save_credentials dispatch happened
+
+
+@pytest.mark.asyncio
+async def test_register_handshake_publishes_generation_for_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4c): the handshake publishes its generation end to end.
+
+    ``firebase_messaging`` fires the credentials callback synchronously from
+    inside ``checkin_or_register``. This pins the wiring: a superseded supervisor
+    running ``_register_for_fcm_entry`` must suppress that mid-handshake callback,
+    while a live supervisor's identical callback writes. A plain instance
+    attribute could not survive firebase's internal awaits without a concurrent
+    task clobbering it; the task-local ContextVar is what makes this hold.
+    """
+    eid = "entry-handshake-gen"
+
+    def _build_receiver() -> FcmReceiverHA:
+        receiver = FcmReceiverHA()
+        monkeypatch.setattr(receiver, "get_fcm_token", lambda _eid=None: None)
+
+        def _capture(coro: object, *, label: str | None = None) -> None:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+
+        monkeypatch.setattr(receiver, "_dispatch_to_hass_loop", _capture)
+        receiver._unregistered.discard(eid)
+        return receiver
+
+    class _FakePc:
+        """Mimics firebase firing the creds callback synchronously mid-checkin."""
+
+        credentials = {"gcm": {"t": 1}, "fcm": {"t": 2}}  # not a re-register path
+
+        def __init__(self, receiver: FcmReceiverHA) -> None:
+            self._receiver = receiver
+
+        async def checkin_or_register(self) -> dict[str, dict[str, str]]:
+            # Yield like the real client so the ContextVar must survive an await.
+            await asyncio.sleep(0)
+            self._receiver._on_credentials_updated_for_entry(
+                eid, {"fcm": {"token": "from-handshake"}}
+            )
+            return {"fcm": {"token": "from-handshake"}}
+
+    # Superseded supervisor (captured generation 0; a reload bumped it to 1).
+    superseded = _build_receiver()
+    superseded._entry_generation[eid] = 1
+    superseded.pcs[eid] = _FakePc(superseded)
+    assert await superseded._register_for_fcm_entry(eid, generation=0) is True
+    assert eid not in superseded.creds  # mid-handshake callback was suppressed
+
+    # Live supervisor (captured generation matches current).
+    live = _build_receiver()
+    live._entry_generation[eid] = 0
+    live.pcs[eid] = _FakePc(live)
+    assert await live._register_for_fcm_entry(eid, generation=0) is True
+    assert live.creds[eid] == {"fcm": {"token": "from-handshake"}}
+
+
+@pytest.mark.asyncio
+async def test_tombstone_suppresses_cap_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4a, guard A): a post-unregister supervisor write is dropped.
+
+    The short-run cap fires while the entry is tombstoned (it was torn down
+    mid-flight). The cap latch, the fatal-error map and the Repairs issue must
+    NOT be (re-)created; the supervisor still terminates.
+    """
+    entry_id = "entry-cap-tombstoned"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    receiver._unregistered.add(entry_id)  # tombstoned before the cap fires
+
+    clock = _MonoClock(step=0.001)
+    clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    create_issue, _ = _install_ir_capture(monkeypatch)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert create_issue.call_count == 0
+    assert entry_id not in receiver._short_run_cap_latched
+    assert entry_id not in receiver._fatal_errors
+    assert entry_id not in receiver._short_run_cap_messages
+
+
+@pytest.mark.asyncio
+async def test_tombstone_suppresses_fatal_retry_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP4 (finding 4a, guard A): the fatal-retry counter is not re-created.
+
+    A tombstoned entry hitting the endpoint-404 fatal path must not repopulate
+    ``_fatal_retry_counts`` (which the teardown just purged).
+    """
+    from custom_components.googlefindmy.exceptions import FatalRegistrationError
+
+    entry_id = "entry-fatal-tombstoned"
+    receiver = FcmReceiverHA()
+    receiver.attach_hass(SimpleNamespace())
+    receiver._unregistered.add(entry_id)
+
+    clock = _MonoClock(step=0.001)
+    clients = [_SupervisorPushClientStub(clock=clock) for _ in range(4)]
+    _install_supervisor_mocks(
+        monkeypatch, receiver, clock=clock, ensure_clients=clients
+    )
+    _install_ir_capture(monkeypatch)
+
+    err = FatalRegistrationError("registration failed")
+    err.is_auth_error = False  # endpoint path
+    register_mock = AsyncMock(side_effect=[err] * 4)
+    monkeypatch.setattr(receiver, "_register_for_fcm_entry", register_mock)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    try:
+        await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+    except TimeoutError:  # pragma: no cover - bounded fallback
+        receiver._stop_evts[entry_id].set()
+        await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
+
+    assert f"{entry_id}:endpoint" not in receiver._fatal_retry_counts
+    assert f"{entry_id}:auth" not in receiver._fatal_retry_counts
