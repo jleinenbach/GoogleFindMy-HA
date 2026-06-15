@@ -1035,29 +1035,41 @@ class FcmReceiverHA:
         if cache is not None:
             self._ensure_cache_entry_id(cache, entry_id)
         async with self._lock:
-            if entry_id in self.pcs:
-                return self.pcs[entry_id]
-
-            # AP6 (finding 5): this is the single client-build chokepoint, and
-            # everything below RE-CREATES per-entry state (``self.creds`` on the
-            # cache load, ``self.pcs``/``self.creds`` on store). Drop the build
-            # when the entry is tombstoned or this supervisor's generation is
-            # superseded. The race: ``register_coordinator`` dispatches the
-            # supervisor asynchronously; if ``unregister_coordinator`` tombstones
-            # the entry before that queued coroutine runs (unload-before-dispatch),
-            # the first loop iteration would otherwise revive a torn-down entry's
-            # ``self.pcs``/``self.creds``. The generation guard in
-            # ``_register_for_fcm_entry`` fires one step too late -- the client is
-            # already stored by then. Placed AFTER the existing-client early
-            # return: returning an already-built client is a read, not a
-            # re-creation, so it stays teardown-safe (idempotent contract).
+            # AP6 (finding 5 + finding 6): gate BEFORE the existing-client fast
+            # path. A tombstoned entry or a superseded supervisor generation
+            # must never receive a client handle -- not even an already-built
+            # one. Two races collapse into this single chokepoint:
+            #
+            #   * finding 5 (build path): ``register_coordinator`` dispatches the
+            #     supervisor asynchronously; if ``unregister_coordinator``
+            #     tombstones the entry before that queued coroutine runs
+            #     (unload-before-dispatch), the build below would revive a
+            #     torn-down entry's ``self.pcs``/``self.creds``.
+            #   * finding 6 (read path): after a fast reload the new incarnation
+            #     installs a fresh client under ``entry_id``; a stale supervisor
+            #     (old generation) then calls in here. If the existing-client
+            #     early return ran first it would hand that stale supervisor the
+            #     LIVE client, which it later stops + discards on its own
+            #     suppression branch. ``_discard_own_client`` compares by
+            #     identity, but the handle IS the live client, so the identity
+            #     guard cannot save it -- the new incarnation loses its client.
+            #
+            # The generation guard in ``_register_for_fcm_entry`` fires one step
+            # too late for both. Gating first closes the build path AND the read
+            # path here. The supervisor loop treats this None as terminal (it
+            # built no own client, so there is nothing to clean up).
             if self._entry_writes_suppressed(entry_id, generation):
                 _LOGGER.debug(
-                    "[entry=%s] Skipping FCM client build for suppressed entry "
+                    "[entry=%s] Skipping FCM client handover for suppressed entry "
                     "(tombstoned or superseded generation)",
                     entry_id,
                 )
                 return None
+
+            # Idempotent read: an already-built client for a live, current
+            # generation is returned as-is (a read, not a re-creation).
+            if entry_id in self.pcs:
+                return self.pcs[entry_id]
 
             # Load entry-scoped credentials if present
             creds = self.creds.get(entry_id)
@@ -1241,6 +1253,16 @@ class FcmReceiverHA:
                         entry_id, cache, generation
                     )
                     if not pc:
+                        # finding 6: the build chokepoint now returns None for a
+                        # tombstoned entry or a superseded generation BEFORE
+                        # handing out any client. That is terminal for this
+                        # supervisor -- it must stop, not spin: no own client was
+                        # built (nothing to clean up) and the outer finally is
+                        # suppression-aware. A None from a transient build
+                        # failure (push-client support absent, factory error) is
+                        # NOT suppression and keeps retrying with backoff.
+                        if self._entry_writes_suppressed(entry_id, generation):
+                            break
                         nudged = await _nudge_sleep(backoff)
                         if nudged:
                             backoff = 1.0

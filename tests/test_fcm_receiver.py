@@ -583,6 +583,41 @@ async def test_ensure_client_skips_build_for_suppressed_entry(
 
 
 @pytest.mark.asyncio
+async def test_ensure_client_does_not_hand_live_client_to_stale_supervisor() -> None:
+    """A stale supervisor must never receive the live incarnation's client.
+
+    Fast-reload race (Codex finding 6): the new incarnation already installed a
+    fresh client under ``entry_id`` (live generation 4). A stale supervisor that
+    captured generation 3 then calls in here. If the existing-client fast path
+    ran before the suppression guard it would hand that stale supervisor the LIVE
+    client, which it later stops + discards on its own suppression branch --
+    ``_discard_own_client`` compares by identity, but the handle IS the live
+    client, so the identity guard cannot save it and the new incarnation loses
+    its client. The build chokepoint therefore gates on
+    ``_entry_writes_suppressed`` BEFORE the existing-client return: the stale
+    supervisor gets ``None`` and the live client stays untouched.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-stale-handover"
+    live_pc = SimpleNamespace(label="live")
+
+    # New incarnation owns the slot at the current (live) generation.
+    receiver.pcs[entry_id] = live_pc
+    receiver._entry_generation[entry_id] = 4
+
+    # Stale supervisor (captured generation 3) must NOT be handed the live client.
+    stale = await receiver._ensure_client_for_entry(entry_id, None, 3)
+    assert stale is None
+    assert receiver.pcs[entry_id] is live_pc  # live client untouched
+
+    # Idempotent read still works for the live, current generation: a matching
+    # caller receives the existing client as-is (no re-creation, no None).
+    current = await receiver._ensure_client_for_entry(entry_id, None, 4)
+    assert current is live_pc
+    assert receiver.pcs[entry_id] is live_pc
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
