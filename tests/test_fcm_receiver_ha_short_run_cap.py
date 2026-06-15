@@ -24,6 +24,7 @@ from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     DOMAIN,
     FcmReceiverHA,
 )
+from tests.helpers.config_entries_stub import make_config_entry
 
 
 class _MonoClock:
@@ -1853,7 +1854,7 @@ def test_unregister_coordinator_tombstones_and_purges() -> None:
     receiver = FcmReceiverHA()
     eid = "entry-unreg-tombstone"
     coord = SimpleNamespace(
-        config_entry=SimpleNamespace(entry_id=eid), cache=None
+        config_entry=make_config_entry(entry_id=eid), cache=None
     )
     receiver._fatal_retry_counts[f"{eid}:auth"] = 3
     receiver._entry_health[eid] = True
@@ -1876,7 +1877,7 @@ def test_register_coordinator_clears_tombstone(
     eid = "entry-reload"
     receiver._unregistered.add(eid)
     coord = SimpleNamespace(
-        config_entry=SimpleNamespace(entry_id=eid), cache=None
+        config_entry=make_config_entry(entry_id=eid), cache=None
     )
 
     # The supervisor dispatch is irrelevant here; neutralise it so the test

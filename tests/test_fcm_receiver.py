@@ -442,6 +442,58 @@ async def test_register_success_skips_clears_for_superseded_generation(
 
 
 @pytest.mark.asyncio
+async def test_supervisor_bails_out_for_superseded_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor whose generation is superseded mid-flight must terminate,
+    not run the caller-level success path (Codex: stale registration success).
+
+    ``_register_for_fcm_entry`` already guards its in-method writes, but its
+    boolean return cannot signal the caller that the generation was superseded.
+    Here a fast reload bumps the generation while registration is in flight, so
+    the (now stale) supervisor must NOT delete the live reauth issue, bump start
+    metrics or (re)start + monitor the old client; it stops the client and exits.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-sup-superseded"
+    # Generation captured by the supervisor at start.
+    receiver._entry_generation[entry_id] = 1
+
+    fake_pc = SimpleNamespace(
+        start=AsyncMock(),
+        stop=AsyncMock(),
+        run_state=None,
+        do_listen=False,
+    )
+
+    async def _ensure(_entry_id: str, _cache: object) -> object:
+        return fake_pc
+
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure)
+
+    async def _register(_entry_id: str, _generation: int | None = None) -> bool:
+        # A live incarnation took over (fast reload) while this attempt ran.
+        receiver._entry_generation[_entry_id] = 2
+        return True
+
+    monkeypatch.setattr(receiver, "_register_for_fcm_entry", _register)
+
+    await receiver._start_supervisor_for_entry(entry_id, None)
+    task = receiver.supervisors[entry_id]
+    # The bail-out terminates the supervisor; without it the stale supervisor
+    # would enter the monitor loop and never finish (so the timeout also pins
+    # the regression).
+    await asyncio.wait_for(task, timeout=2)
+
+    # Caller-level success side effects must NOT have run for the stale gen.
+    fake_pc.start.assert_not_awaited()
+    assert receiver.start_count == 0
+    # The stale client is stopped and dropped on bail-out.
+    fake_pc.stop.assert_awaited()
+    assert entry_id not in receiver.pcs
+
+
+@pytest.mark.asyncio
 async def test_credentials_update_clears_latched_fatal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

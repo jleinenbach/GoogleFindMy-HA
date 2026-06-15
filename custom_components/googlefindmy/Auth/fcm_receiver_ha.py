@@ -1324,6 +1324,31 @@ class FcmReceiverHA:
                             await asyncio.sleep(delay)
                             continue
 
+                    # AP4 (finding: stale registration success at the caller).
+                    # ``_register_for_fcm_entry`` guards its own per-entry writes,
+                    # but its boolean return cannot tell this caller that the
+                    # generation was superseded (or the entry tombstoned)
+                    # mid-flight. Without this guard a stale supervisor would run
+                    # the success path below -- deleting the LIVE generation's
+                    # reauth repair issue, bumping start metrics and
+                    # (re)starting + monitoring the stale client -- or, on a
+                    # transient ``ok_reg`` False, burn the shared retry budget for
+                    # an entry it no longer owns. Returning False instead would be
+                    # wrong: it routes into the backoff/retry path, but a
+                    # superseded generation must terminate, not retry. Bail out
+                    # like the fatal-retry break above; the surrounding finally
+                    # skips the stale health write under the same suppression
+                    # guard.
+                    if self._entry_writes_suppressed(entry_id, generation):
+                        try:
+                            await pc.stop()
+                        except Exception:
+                            pass
+                        finally:
+                            async with self._lock:
+                                self.pcs.pop(entry_id, None)
+                        break
+
                     if not ok_reg:
                         try:
                             await pc.stop()
