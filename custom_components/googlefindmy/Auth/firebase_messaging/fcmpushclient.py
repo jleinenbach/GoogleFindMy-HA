@@ -791,7 +791,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         self.input_stream_id += 1
 
         if isinstance(msg, Close):
-            self._log_warn_with_limit("Server sent Close message; worker stopping")
+            # A server-initiated Close is a normal part of the MCS connection
+            # life-cycle (the endpoint periodically rotates long-lived streams).
+            # Log it at INFO, consistent with the other normal worker-stop paths
+            # below ("FCM stream ended" / "FCM read ended"); the supervisor will
+            # reconnect automatically. Emitting WARNING here produced a recurring
+            # false alarm in the Home Assistant log panel.
+            self.logger.info(
+                "FCM server sent Close; worker stopping (normal, supervisor will reconnect)"
+            )
             self.do_listen = False
             return
 
