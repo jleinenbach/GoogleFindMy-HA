@@ -112,3 +112,31 @@ class FcmHandleSlim:
     _handle_data_message = FcmPushClient._handle_data_message  # type: ignore[assignment]
     _app_data_by_key = FcmPushClient._app_data_by_key  # type: ignore[assignment]
     _extract_header_param = staticmethod(FcmPushClient._extract_header_param)
+
+
+class FcmMessageSlim:
+    """Composition stub binding the real async ``_handle_message``.
+
+    Mirrors only the attributes the ``Close`` branch of ``_handle_message``
+    touches: ``last_message_time``/``input_stream_id`` (the unconditional
+    preamble), ``logger`` (the INFO emission under test), ``do_listen`` (the
+    worker-stop signal) and ``_log_warn_with_limit`` (must NOT be called on
+    this path after the WARNING -> INFO downgrade). Same additive-composition
+    discipline as ``FcmHandleSlim``: the real unbound method runs without the
+    heavy production constructor.
+    """
+
+    def __init__(self) -> None:
+        self.logger = logging.getLogger(__name__ + ".FcmMessageSlim")
+        self.logger.propagate = True
+        self.last_message_time: float = 0.0
+        self.input_stream_id = 0
+        self.do_listen = True
+        # Records any rate-limited warning; the Close path must leave it empty.
+        self.warnings: list[str] = []
+
+    def _log_warn_with_limit(self, msg: str, *args: object) -> None:
+        self.warnings.append(msg)
+        self.logger.warning(msg, *args)
+
+    _handle_message = FcmPushClient._handle_message  # type: ignore[assignment]
