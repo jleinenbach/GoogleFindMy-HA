@@ -208,9 +208,9 @@ def test_strict_normalization_rejects_negative() -> None:
 def test_normalize_rejects_bool_and_non_int() -> None:
     """The u32 counter must reject bool and non-int types (bool is not a counter)."""
 
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="must be int"):
         build_table10_prf_input(True, k=FHNA_K)  # type: ignore[arg-type]
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="must be int"):
         build_table10_prf_input("0x10", k=FHNA_K)  # type: ignore[arg-type]
 
 
@@ -299,7 +299,13 @@ def test_compute_flags_xor_mask_legacy_matches_recomputation() -> None:
 
 
 def test_compute_flags_xor_mask_p256_branch_uses_supplied_order() -> None:
-    """The P-256 branch must reduce mod P256_ORDER and pad to 32 bytes."""
+    """The P-256 branch must reduce mod P256_ORDER and pad to 32 bytes.
+
+    The independent recomputation (``expected``) is the real branch proof: if
+    the function ignored ``curve_byte_len``/``curve_order``, ``actual`` would
+    diverge from the P-256 oracle. The legacy comparison is an additional
+    collapse guard (a different order/padding must yield a different mask).
+    """
 
     expected = _independent_flags_mask(
         SAMPLE_EIK, SAMPLE_COUNTER, MODERN_EID_LENGTH, P256_ORDER
@@ -310,13 +316,13 @@ def test_compute_flags_xor_mask_p256_branch_uses_supplied_order() -> None:
         curve_byte_len=MODERN_EID_LENGTH,
         curve_order=P256_ORDER,
     )
+    legacy = compute_flags_xor_mask(SAMPLE_EIK, SAMPLE_COUNTER)
 
     assert actual == expected
-    # The two curve orders/paddings must generally differ -> guards against a
-    # branch collapse where the P-256 parameters are ignored.
-    legacy = compute_flags_xor_mask(SAMPLE_EIK, SAMPLE_COUNTER)
-    assert (actual, expected) == (expected, actual)  # determinism sanity
-    assert isinstance(legacy, int)
+    # Distinct curve order/padding must produce a distinct mask for these fixed
+    # inputs (legacy=213, p256=16): guards against a branch collapse that would
+    # ignore the supplied P-256 parameters.
+    assert actual != legacy
 
 
 def test_generate_eid_shim_warns_and_matches_variant() -> None:
