@@ -51,6 +51,10 @@ from ..const import (
     DOMAIN,
     POLL_DEVICE_OUTER_TIMEOUT_S,
 )
+from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
+    StaleOwnerKeyError,
+)
 from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
     SpotApiEmptyResponseError,
@@ -127,6 +131,17 @@ _EMPTY_LIST_QUORUM = 2
 
 # Maximum number of transient auth failures before triggering re-auth
 _MAX_TRANSIENT_AUTH_FAILURES = 3
+
+# Maximum consecutive stale/missing shared-key decryption failures before
+# escalating to a reauth flow. Gives the in-decrypt self-heal (force_refresh /
+# blind refresh) a chance first; only a persistently un-decryptable shared key
+# escalates to ConfigEntryAuthFailed.
+_MAX_DECRYPT_FAILURES = 3
+
+# Cooldown between decrypt-triggered reauth escalations (seconds). Once the reauth
+# flow is open, the un-fixable condition persists every cycle; this prevents
+# re-firing the escalation on each poll until the user supplies a fresh bundle.
+_DECRYPT_REAUTH_COOLDOWN_S = 6 * 3600
 
 # FCM error retry threshold before triggering re-auth
 _FCM_ERROR_RETRY_THRESHOLD = 3
@@ -258,6 +273,91 @@ class PollingOperations(_MixinBase):
     def last_poll_result(self) -> str | None:
         """Return the last recorded poll result ("success"/"failed")."""
         return self._last_poll_result
+
+    def note_decrypt_failure(
+        self, *, stale: bool, error: Exception, device: str | None = None
+    ) -> bool:
+        """Record a location-decryption failure and decide whether to escalate.
+
+        Single entry point shared by the poll path and the FCM push path so a
+        push-only setup escalates identically (no second, divergent code path).
+
+        A stale/incompatible or missing shared key is an auth-fatal condition: the
+        bundle can no longer decrypt the server-side owner key, so every location
+        report fails. Home Assistant cannot refresh the shared key itself (it is
+        derived from the user's lock-screen knowledge factor via the interactive
+        browser flow), so the only correct automatic action is to open the reauth
+        flow and let the user supply a fresh secrets.json.
+
+        Args:
+            stale: True for a per-tracker ``StaleOwnerKeyError`` (owner-key version
+                mismatch). Such failures are NOT account-wide and must not drive
+                the account-wide reauth counter -- an account reauth would not fix a
+                single outdated tracker.
+            error: The decryption error, kept for diagnostics/logging.
+            device: Optional device name for log context.
+
+        Returns:
+            True if the caller should escalate to ``ConfigEntryAuthFailed`` now
+            (account-wide shared-key failure persisted past the threshold and the
+            cooldown allows a fresh escalation); False otherwise.
+        """
+        self._last_decrypt_error = f"{type(error).__name__}: {error}"
+
+        if stale:
+            # Per-tracker outdated owner key: log per occurrence, do not touch the
+            # account-wide counter, never escalate to reauth here. The full
+            # user-facing repair issue is added with the diagnostic sensor work.
+            _LOGGER.warning(
+                "Tracker %s is encrypted with an outdated owner key version (%s); "
+                "remove and re-pair this tracker. Other devices are unaffected.",
+                device or "?",
+                type(error).__name__,
+            )
+            return False
+
+        self._consecutive_decrypt_failures += 1
+        if self._consecutive_decrypt_failures < _MAX_DECRYPT_FAILURES:
+            # Below threshold: give the in-decrypt self-heal (force_refresh / blind
+            # refresh) another cycle before escalating to reauth.
+            _LOGGER.warning(
+                "Location decryption failed for %s (%d/%d): %s. Will retry on the "
+                "next cycle before any re-authentication.",
+                device or "?",
+                self._consecutive_decrypt_failures,
+                _MAX_DECRYPT_FAILURES,
+                error,
+            )
+            return False
+
+        now = time.monotonic()
+        if (now - self._last_decrypt_reauth_monotonic) < _DECRYPT_REAUTH_COOLDOWN_S:
+            # Threshold reached but a recent escalation is still cooling down: keep
+            # logging but do not re-fire the reauth flow on every poll cycle.
+            _LOGGER.debug(
+                "Decryption still failing for %s but reauth escalation is in "
+                "cooldown (%.0fs since last).",
+                device or "?",
+                now - self._last_decrypt_reauth_monotonic,
+            )
+            return False
+
+        self._last_decrypt_reauth_monotonic = now
+        self._consecutive_decrypt_failures = 0
+        self._set_auth_state(
+            failed=True,
+            reason=(
+                "Location decryption keeps failing; the shared key is stale and a "
+                "fresh secrets.json (re-authentication) is required"
+            ),
+        )
+        _LOGGER.error(
+            "Location decryption failed %d times in a row (%s); escalating to "
+            "re-authentication. A fresh secrets.json is required.",
+            _MAX_DECRYPT_FAILURES,
+            error,
+        )
+        return True
 
     def _is_on_hass_loop(self) -> bool:
         """Return True if currently executing on the HA event loop thread."""
@@ -1187,6 +1287,13 @@ class PollingOperations(_MixinBase):
             _any_device_got_data = False
             try:
                 cycle_failed = False
+                # Track whether any device hit an account-wide decryption failure
+                # this cycle. The consecutive-decrypt counter is reset only when the
+                # WHOLE cycle was decrypt-clean: in a multi-device account a single
+                # healthy tracker must not mask a persistently un-decryptable shared
+                # key on the others (the condition is account-wide, so the reset
+                # gate must be too).
+                cycle_had_decrypt_failure = False
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -1568,6 +1675,42 @@ class PollingOperations(_MixinBase):
                         self._consecutive_timeouts = 0
                         last_exception = auth_exc
                         raise
+                    except StaleOwnerKeyError as stale_err:
+                        # Per-tracker owner-key version mismatch (D2): an account-wide
+                        # reauth would not help -- only this tracker is outdated. Log
+                        # and keep polling other devices; do NOT touch the
+                        # account-wide decrypt counter (no reauth storm).
+                        self.note_decrypt_failure(
+                            stale=True, error=stale_err, device=dev_name
+                        )
+                        cycle_failed = True
+                        self._consecutive_timeouts = 0
+                        if last_exception is None:
+                            last_exception = stale_err
+                        continue
+                    except DecryptionError as dec_err:
+                        # Account-wide stale/missing shared key: escalate to reauth
+                        # after _MAX_DECRYPT_FAILURES consecutive cycles (with
+                        # cooldown). Below the threshold keep polling so the
+                        # in-decrypt self-heal can still recover an owner-key bump.
+                        cycle_had_decrypt_failure = True
+                        self._consecutive_timeouts = 0
+                        if self.note_decrypt_failure(
+                            stale=False, error=dec_err, device=dev_name
+                        ):
+                            cycle_failed = True
+                            self._last_poll_result = "failed"
+                            reauth_exc = ConfigEntryAuthFailed(
+                                "Location decryption keeps failing: the shared key "
+                                "is stale; a fresh secrets.json (re-authentication) "
+                                "is required"
+                            )
+                            last_exception = reauth_exc
+                            raise reauth_exc from dec_err
+                        cycle_failed = True
+                        if last_exception is None:
+                            last_exception = dec_err
+                        continue
                     except Exception as err:
                         _LOGGER.error(
                             "Failed to get location for %s: %s", dev_name, err
@@ -1583,6 +1726,22 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
+                # Whole cycle was decrypt-clean: clear the consecutive-decrypt
+                # counter so a recovered/healthy shared key (or a successful
+                # self-heal) does not later trip a spurious reauth. Gated on the
+                # entire cycle -- one healthy tracker must not mask a persistently
+                # stale account-wide shared key on the others.
+                if (
+                    not cycle_had_decrypt_failure
+                    and self._consecutive_decrypt_failures > 0
+                ):
+                    _LOGGER.info(
+                        "Location decryption succeeded for all devices; clearing "
+                        "%d decrypt failure(s).",
+                        self._consecutive_decrypt_failures,
+                    )
+                    self._consecutive_decrypt_failures = 0
+                    self._last_decrypt_error = None
             finally:
                 # Update scheduling baseline and clear flag, then push end snapshot.
                 # Always advance the poll baseline to prevent high-frequency

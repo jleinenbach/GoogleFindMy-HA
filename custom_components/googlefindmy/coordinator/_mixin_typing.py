@@ -97,6 +97,9 @@ class _MixinBase:
     _fcm_defer_started_mono: float
     _consecutive_transient_auth_failures: int
     _last_transient_auth_error: str | None
+    _consecutive_decrypt_failures: int
+    _last_decrypt_reauth_monotonic: float
+    _last_decrypt_error: str | None
 
     # Diagnostics / statistics
     stats: dict[str, int]

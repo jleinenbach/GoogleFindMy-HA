@@ -243,7 +243,59 @@ class DecryptionError(RuntimeError):
 
 
 class StaleOwnerKeyError(DecryptionError):
-    """Raised when the tracker was encrypted with an older owner key version."""
+    """Raised when the tracker was encrypted with an older owner key version.
+
+    Per-tracker condition: a single tracker still encrypts reports with an
+    owner-key version that is no longer current. An account-wide re-auth does NOT
+    fix it; the tracker must be removed and re-paired. Kept distinct from the
+    account-wide shared-key failures below so the coordinator can escalate each
+    differently (per-tracker repair issue vs. ConfigEntryAuthFailed).
+    """
+
+
+class SharedKeyMismatchError(DecryptionError):
+    """Raised when the shared key cannot decrypt the owner key (AES-GCM InvalidTag).
+
+    Account-wide: the bundle's shared key is stale or incompatible with the
+    server-side owner key. Only a fresh secrets.json obtained via the interactive
+    browser flow can fix this; force_refresh of the owner key cannot, because the
+    shared key itself is the wrong one.
+    """
+
+
+class SharedKeyMissingError(DecryptionError):
+    """Raised when the shared key is absent or empty (incomplete bundle import).
+
+    Account-wide: the secrets.json did not provide a usable shared key. A complete
+    re-import / fresh secrets.json is required.
+    """
+
+
+def _classify_owner_key_failure(exc: Exception, *, context: str) -> DecryptionError:
+    """Map a low-level owner-key lookup failure to a specific DecryptionError.
+
+    ``async_get_owner_key`` collapses distinct root causes into either an
+    ``InvalidTag`` (wrong/stale shared key) or a ``RuntimeError`` (missing/empty
+    shared key, or a generic failure). This helper restores the discriminator as a
+    typed subclass so the failure class name appears in logs and the coordinator
+    can pick the correct recovery path. The caller preserves the original error
+    via ``raise ... from exc``.
+    """
+    if isinstance(exc, InvalidTag):
+        return SharedKeyMismatchError(
+            f"Owner key decryption failed (InvalidTag) during {context}: the shared "
+            "key is stale or incompatible with this account. A fresh secrets.json "
+            "is required (re-authentication)."
+        )
+    if isinstance(exc, RuntimeError) and "missing or empty" in str(exc):
+        return SharedKeyMissingError(
+            f"Shared key is missing or empty during {context} (incomplete bundle). "
+            "Re-import a complete secrets.json."
+        )
+    return DecryptionError(
+        f"Owner key decryption failed during {context} (shared key may be stale). "
+        "Re-authenticate to refresh crypto keys."
+    )
 
 
 async def _unwrap_encrypted_identity_key(
@@ -378,10 +430,7 @@ async def async_retrieve_identity_key(
     try:
         owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
     except (InvalidTag, RuntimeError) as exc:
-        raise DecryptionError(
-            "Owner key decryption failed (shared key may be stale). "
-            "Re-authenticate with --reauth to refresh crypto keys."
-        ) from exc
+        raise _classify_owner_key_failure(exc, context="initial lookup") from exc
 
     # --- Proactive Owner Key Version Mismatch Check ---
     # If the tracker requires a newer owner key version than what we have cached,
@@ -403,10 +452,7 @@ async def async_retrieve_identity_key(
                 cache=cache, force_refresh=True
             )
         except (InvalidTag, RuntimeError) as exc:
-            raise DecryptionError(
-                "Owner key refresh failed (InvalidTag). "
-                "Re-authenticate with --reauth to refresh crypto keys."
-            ) from exc
+            raise _classify_owner_key_failure(exc, context="forced refresh") from exc
 
     # Build key sources list (matches eid_resolver pattern: try owner + shared)
     key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]

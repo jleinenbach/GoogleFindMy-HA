@@ -5,9 +5,15 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from homeassistant.config_entries import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator.polling import _MAX_DECRYPT_FAILURES
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    SharedKeyMismatchError,
+    StaleOwnerKeyError,
+)
 from tests.helpers.homeassistant import GoogleFindMyConfigEntryStub
 
 
@@ -75,6 +81,9 @@ def _base_coordinator(
     coordinator._consecutive_timeouts = 0
     coordinator._consecutive_transient_auth_failures = 0
     coordinator._last_transient_auth_error = None
+    coordinator._consecutive_decrypt_failures = 0
+    coordinator._last_decrypt_reauth_monotonic = 0.0
+    coordinator._last_decrypt_error = None
     coordinator.location_poll_interval = 0
     coordinator.data = []
     coordinator._last_device_list = []
@@ -289,3 +298,139 @@ async def test_semantic_labels_are_recorded_with_device_ids() -> None:
     observations = coordinator.get_observed_semantic_labels()
     assert [obs.label for obs in observations] == ["Lobby"]
     assert observations[0].devices == {"dev-3"}
+
+
+class _DecryptFailAPI:
+    """API stub whose location lookup always raises the given decryption error.
+
+    Used to drive the coordinator poll loop through the decrypt-failure handlers
+    end to end (the isolated escalation logic is unit-tested separately in
+    tests/test_coordinator_decrypt_reauth_escalation.py).
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_escalates_persistent_decrypt_failure_to_reauth() -> None:
+    """End-to-end: a persistent account-wide stale shared key escalates the poll
+    loop to ConfigEntryAuthFailed after _MAX_DECRYPT_FAILURES cycles, so Home
+    Assistant shows the reauth card. The cycles before the threshold must NOT
+    escalate (self-heal still gets a chance)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+
+    # Below threshold: keep polling, no reauth escalation yet.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert not any(kw.get("failed") for kw in auth_calls)
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # Threshold cycle: escalate to a reauth flow.
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_stale_owner_key_never_escalates() -> None:
+    """End-to-end: a per-tracker StaleOwnerKeyError must never escalate to an
+    account-wide reauth (an account reauth would not fix one outdated tracker) and
+    must not drive the account-wide decrypt counter."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(StaleOwnerKeyError("tracker v1 < v2"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+
+    for _ in range(_MAX_DECRYPT_FAILURES + 2):
+        await coordinator._async_start_poll_cycle([{"id": "tag", "name": "Tag"}])
+
+    assert coordinator._consecutive_decrypt_failures == 0
+    assert not any(kw.get("failed") for kw in auth_calls)
+
+
+class _DecryptThenSucceedAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then succeeds.
+
+    Used to prove the consecutive-decrypt-failure counter resets on a successful
+    cycle (self-heal / recovered shared key), so a later isolated failure does not
+    trip a premature reauth.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        return {}  # success with no decryptable report (still clears the counter)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_decrypt_counter_resets_on_success() -> None:
+    """A successful poll cycle clears the consecutive-decrypt-failure counter, so a
+    recovered shared key (or self-heal) does not later trip a spurious reauth."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenSucceedAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles raise no reauth and accumulate the counter.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # A successful cycle resets the counter back to zero.
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == 0
+
+
+class _PerDeviceDecryptAPI:
+    """Raises a decryption error for one device id, succeeds (empty) for others."""
+
+    def __init__(self, exc: Exception, failing_id: str) -> None:
+        self._exc = exc
+        self._failing = failing_id
+
+    async def async_get_device_location(
+        self, device_id: str, _device_name: str, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
+        if device_id == self._failing:
+            raise self._exc
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_partial_decrypt_failure_still_escalates() -> None:
+    """Multi-device: one tracker decrypts fine while another keeps failing with a
+    stale account-wide shared key. A per-device reset would null the counter every
+    cycle (one healthy tracker masking the others) and never escalate; the
+    cycle-gated reset preserves the count so escalation still fires after the
+    threshold. Regression guard for the independent-review finding."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceDecryptAPI(
+        SharedKeyMismatchError("stale shared key"), failing_id="bad"
+    )
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    devices = [{"id": "good", "name": "Good"}, {"id": "bad", "name": "Bad"}]
+
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle(devices)
+    # The healthy device must NOT have reset the account-wide counter.
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_start_poll_cycle(devices)
+    assert any(kw.get("failed") for kw in auth_calls)

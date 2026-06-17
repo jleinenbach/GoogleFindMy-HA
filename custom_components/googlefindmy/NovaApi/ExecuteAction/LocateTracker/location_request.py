@@ -604,6 +604,15 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     except Exception as err:  # pragma: no cover - defensive logging
         _LOGGER.debug("Failed to persist contributor mode timestamp: %s", err)
 
+    # Bind the decryption exception type locally: this module imports
+    # decrypt_locations lazily (see _import_decrypt_locations_module) to avoid a
+    # heavy import cycle, so the name is not available at module scope. It is used
+    # below to surface an auth-fatal stale-key failure instead of swallowing it.
+    decrypt_module = _import_decrypt_locations_module()
+    DecryptionError = cast(
+        type[Exception], getattr(decrypt_module, "DecryptionError")
+    )
+
     try:
         # Generate request UUID
         request_uuid = generate_random_uuid()
@@ -715,6 +724,14 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 raise ctx.error
             if isinstance(ctx.error, SpotAuthPermanentError):
                 raise ctx.error
+            # A stale/incompatible shared key (SharedKeyMismatchError /
+            # SharedKeyMissingError) or a per-tracker stale owner key
+            # (StaleOwnerKeyError) is an auth-fatal crypto condition, not a
+            # transient miss. Surface it so the API layer and coordinator can
+            # escalate to a reauth flow (or a per-tracker repair issue) instead of
+            # silently returning no location. DecryptionError covers all subclasses.
+            if isinstance(ctx.error, DecryptionError):
+                raise ctx.error
 
         data = ctx.data or []
         if data and data[0].get("canonic_id", "").lower() == canonic_device_id.lower():
@@ -743,6 +760,12 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     except NovaAuthError:
         # Re-raise auth errors (permanent or transient) so api.py can handle appropriately.
         # Transient errors will be tracked by the coordinator; permanent ones trigger reauth.
+        raise
+    except DecryptionError:
+        # Auth-fatal crypto failure surfaced from ctx.error above: must propagate so
+        # the coordinator can escalate (reauth or per-tracker repair). The broad
+        # `except Exception` below would otherwise swallow it back into an empty
+        # result -- that swallow is the original bug this fix removes.
         raise
     except Exception as e:
         _LOGGER.error("Error requesting location for %s: %s", name, e)
