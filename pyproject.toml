@@ -347,7 +347,9 @@ skip_covered = true
 # local full run measured 68.33 % scoped (3696 passed); floor = floor(68) - 1 Pp
 # jitter margin, clamped to [63, CI total]. Three local entity tests error on a
 # root-owned .storage path that CI does not hit, so CI total is >= 68.33 %.
-fail_under = 67
+# Raised to 69 after the crypto-audit test suite (PR #1111) lifted CI total to
+# 69.14 % (measured 2026-06-16); floor tracks the new CI total to lock the gain.
+fail_under = 69
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
