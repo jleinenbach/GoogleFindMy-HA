@@ -110,6 +110,68 @@ def safe_fcm_health_snapshots(receiver: Any) -> dict[str, dict[str, Any]]:
         return {}
 
 
+# Credential keys whose values are base64 / base64url / hex / JWT tokens.
+# Those alphabets never contain a legitimate space, so ALL whitespace (including
+# interior characters introduced by a line-wrapped copy/paste) is stripped from
+# their values. Every other key keeps interior whitespace and is only trimmed at
+# the edges, so values that may legitimately contain spaces (display names,
+# email addresses) are never corrupted.
+_SECRET_WHITELIST_KEYS: frozenset[str] = frozenset(
+    {
+        "owner_key",
+        "shared_key",
+        "aas_token",
+        "oauth_token",
+        "oauthToken",
+        "OAuthToken",
+        "access_token",
+        "token",
+        "adm_token",
+        "admToken",
+        "Auth",
+    }
+)
+
+
+def _normalize_secret_value(key: str, value: str) -> str:
+    """Normalize one string value from a secrets bundle.
+
+    Whitelisted credential keys have *all* whitespace removed; any other key is
+    only stripped of leading/trailing whitespace. See ``_SECRET_WHITELIST_KEYS``
+    for the security rationale behind the asymmetry.
+    """
+    if key in _SECRET_WHITELIST_KEYS:
+        return "".join(value.split())
+    return value.strip()
+
+
+def normalize_secrets_bundle(data: Any) -> Any:
+    """Return a whitespace-normalized deep copy of a secrets.json bundle.
+
+    Copy/paste of ``secrets.json`` into the config flow can inject stray
+    whitespace into credential values (a single space in ``owner_key`` breaks
+    AES-GCM decryption). This walks the bundle recursively and normalizes every
+    string value via :func:`_normalize_secret_value`, descending into nested
+    dicts (e.g. ``fcm_credentials``) and lists.
+
+    The function is idempotent and never mutates its input, so it is safe to
+    apply to ``MappingProxyType``-wrapped structures. Non-string scalars are
+    returned unchanged.
+    """
+    if isinstance(data, Mapping):
+        return {
+            key: (
+                _normalize_secret_value(key, value)
+                if isinstance(value, str)
+                else normalize_secrets_bundle(value)
+            )
+            for key, value in data.items()
+        }
+    if isinstance(data, list):
+        return [normalize_secrets_bundle(item) for item in data]
+    return data
+
+
 def normalize_fcm_entry_snapshot(entry_id: str, snap: dict[str, Any]) -> dict[str, Any]:
     """Normalize a single FCM health snapshot entry.
 
