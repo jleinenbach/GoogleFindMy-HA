@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from custom_components.googlefindmy.coordinator import polling as polling_mod
+from custom_components.googlefindmy.coordinator.helpers.stats import CryptoStatus
 from custom_components.googlefindmy.coordinator.polling import (
     _MAX_DECRYPT_FAILURES,
 )
@@ -214,3 +215,67 @@ def test_note_decrypt_success_is_idempotent_when_no_failures(
     assert stub._consecutive_decrypt_failures == 0
     assert stub._last_decrypt_error is None
     assert "clearing" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "account_wide_failure",
+    [CryptoStatus.SHARED_KEY_INVALID, CryptoStatus.SHARED_KEY_MISSING],
+)
+def test_note_background_decrypt_success_heals_account_wide_failure(
+    account_wide_failure: str,
+) -> None:
+    """A proven background push heals the sensor out of an account-wide failure.
+
+    On push-only setups whose scheduled polls stay idle, the diagnostic
+    encryption-key sensor would otherwise stick on a stale ``shared_key_invalid``
+    / ``shared_key_missing`` status even though real pushes keep decrypting. The
+    background success entry point lifts the account-wide failure to ``OK`` and
+    moves the error class with it (one sensor surface), and still clears the
+    shared reauth budget.
+    """
+    stub = _make_stub()
+    stub._crypto_status_state = account_wide_failure
+    stub._last_decrypt_error = "SharedKeyMismatchError: stale"
+    stub._consecutive_decrypt_failures = 2
+
+    stub.note_background_decrypt_success()
+
+    assert stub._crypto_status_state == CryptoStatus.OK
+    assert stub._last_decrypt_error is None
+    assert stub._consecutive_decrypt_failures == 0
+
+
+def test_note_background_decrypt_success_preserves_tracker_key_outdated() -> None:
+    """A single background decode must NOT wipe a per-tracker stale-key diagnostic.
+
+    A push proves the account-wide shared key, not that a per-tracker outdated
+    owner key has been re-paired (it has no cross-tracker view). So when the
+    sensor reports ``tracker_key_outdated`` the heal must leave both the status
+    and its error class untouched, while still clearing the account-wide budget.
+    This is the anti-widening guard for the round-5 diagnostic invariant.
+    """
+    stub = _make_stub()
+    stub._crypto_status_state = CryptoStatus.TRACKER_KEY_OUTDATED
+    stub._last_decrypt_error = "StaleOwnerKeyError: tracker v1 < v2"
+    stub._consecutive_decrypt_failures = 0
+
+    stub.note_background_decrypt_success()
+
+    assert stub._crypto_status_state == CryptoStatus.TRACKER_KEY_OUTDATED
+    assert stub._last_decrypt_error == "StaleOwnerKeyError: tracker v1 < v2"
+
+
+def test_note_background_decrypt_success_leaves_unknown_untouched() -> None:
+    """With no failure to heal, the push success does not fabricate an ``OK``.
+
+    ``UNKNOWN`` is the initial state before any decrypt signal; the OK semantics
+    stay anchored to an observed account-wide failure being refuted, so a push
+    must not flip a never-failed sensor to OK ahead of the first real proof.
+    """
+    stub = _make_stub()
+    assert stub._crypto_status_state == CryptoStatus.UNKNOWN
+
+    stub.note_background_decrypt_success()
+
+    assert stub._crypto_status_state == CryptoStatus.UNKNOWN
+    assert stub._last_decrypt_error is None
