@@ -1,3 +1,4 @@
+# tests/test_decrypt_owner_key_discriminator.py
 """Discriminator for stale-vs-missing shared key in owner-key decryption.
 
 When ``async_get_owner_key`` fails, the root cause (wrong shared key vs. missing

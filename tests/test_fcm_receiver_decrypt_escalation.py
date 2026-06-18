@@ -1,3 +1,4 @@
+# tests/test_fcm_receiver_decrypt_escalation.py
 """Background-push decrypt-failure escalation in :class:`FcmReceiverHA`.
 
 A push-only setup must escalate to a reauth flow identically to the poll path.

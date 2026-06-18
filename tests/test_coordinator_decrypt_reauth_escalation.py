@@ -1,3 +1,4 @@
+# tests/test_coordinator_decrypt_reauth_escalation.py
 """Decrypt-failure escalation in the polling coordinator.
 
 These tests prove the bug fix for the "stale shared key" condition: repeated

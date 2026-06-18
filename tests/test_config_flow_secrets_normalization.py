@@ -1,3 +1,4 @@
+# tests/test_config_flow_secrets_normalization.py
 """Tests for whitespace normalization of pasted secrets.json bundles.
 
 Copy/paste of a ``secrets.json`` into the config flow can inject stray
