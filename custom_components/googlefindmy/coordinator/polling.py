@@ -330,15 +330,18 @@ class PollingOperations(_MixinBase):
             )
             return False
 
-        now = time.monotonic()
-        if (now - self._last_decrypt_reauth_monotonic) < _DECRYPT_REAUTH_COOLDOWN_S:
-            # Threshold reached but a recent escalation is still cooling down: keep
-            # logging but do not re-fire the reauth flow on every poll cycle.
+        now = self._monotonic()
+        last = self._last_decrypt_reauth_monotonic
+        if last is not None and (now - last) < _DECRYPT_REAUTH_COOLDOWN_S:
+            # A previous escalation exists and is still cooling down: keep logging
+            # but do not re-fire the reauth flow on every poll cycle. The first
+            # escalation (last is None) never enters this branch, so it can never
+            # be suppressed by the host's process uptime.
             _LOGGER.debug(
                 "Decryption still failing for %s but reauth escalation is in "
                 "cooldown (%.0fs since last).",
                 device or "?",
-                now - self._last_decrypt_reauth_monotonic,
+                now - last,
             )
             return False
 

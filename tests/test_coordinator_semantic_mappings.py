@@ -82,8 +82,13 @@ def _base_coordinator(
     coordinator._consecutive_transient_auth_failures = 0
     coordinator._last_transient_auth_error = None
     coordinator._consecutive_decrypt_failures = 0
-    coordinator._last_decrypt_reauth_monotonic = 0.0
+    coordinator._last_decrypt_reauth_monotonic = None
     coordinator._last_decrypt_error = None
+    # Deliberately low monotonic value: simulates a freshly booted runner (process
+    # uptime below the reauth cooldown). With the None sentinel the first escalation
+    # must fire regardless, so this pins the whole loop-test class against the
+    # uptime-dependent flake that slipped through CI.
+    coordinator._monotonic = lambda: 100.0
     coordinator.location_poll_interval = 0
     coordinator.data = []
     coordinator._last_device_list = []

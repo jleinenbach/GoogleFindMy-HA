@@ -8,13 +8,17 @@ while a single transient failure or a successful self-heal must NOT trigger it.
 The escalation decision lives in ``PollingOperations.note_decrypt_failure`` (a
 synchronous, side-effect-light method), so it is exercised directly via the
 ``PollingStub`` mixin harness. Cross-mixin ``_set_auth_state`` is mocked.
+
+The cooldown gate reads the clock through the injectable ``_monotonic`` seam
+instead of the ambient ``time.monotonic``; tests drive it deterministically so
+the outcome never depends on the host's process uptime (the bug that slipped
+through CI: a 0.0 sentinel made the first escalation uptime-dependent).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from unittest.mock import MagicMock
-
-import pytest
 
 from custom_components.googlefindmy.coordinator import polling as polling_mod
 from custom_components.googlefindmy.coordinator.polling import (
@@ -30,27 +34,32 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 from .helpers.polling_mixin_stub import PollingStub
 
 
-def _make_stub() -> PollingStub:
-    """Return a PollingStub seeded with the decrypt-escalation state fields."""
+def _make_stub(monotonic: Callable[[], float] | None = None) -> PollingStub:
+    """Return a PollingStub seeded with the decrypt-escalation state fields.
+
+    Args:
+        monotonic: Optional clock callable for the cooldown gate. Defaults to a
+            fixed value far past any cooldown so the threshold is the only gate;
+            pass a mutable clock to exercise the cooldown window itself.
+    """
     stub = PollingStub()
     stub._consecutive_decrypt_failures = 0
-    stub._last_decrypt_reauth_monotonic = 0.0
+    # None == "never escalated yet"; the first escalation must never consult the
+    # cooldown gate (and therefore never depend on the clock value).
+    stub._last_decrypt_reauth_monotonic = None
     stub._last_decrypt_error = None
+    stub._monotonic = monotonic if monotonic is not None else (lambda: 1_000_000.0)
     stub._set_auth_state = MagicMock()
     return stub
 
 
-def test_t4_escalates_after_threshold_consecutive_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_t4_escalates_after_threshold_consecutive_failures() -> None:
     """T4: the Nth consecutive account-wide decrypt failure escalates to reauth.
 
     Failures 1..N-1 only warn and return False (keep polling, let self-heal try);
     failure N returns True and marks the auth state as failed so the caller raises
     ConfigEntryAuthFailed.
     """
-    # Freeze monotonic clock far past any cooldown so the threshold is the only gate.
-    monkeypatch.setattr(polling_mod.time, "monotonic", lambda: 1_000_000.0)
     stub = _make_stub()
     err = SharedKeyMismatchError("stale shared key")
 
@@ -68,12 +77,9 @@ def test_t4_escalates_after_threshold_consecutive_failures(
     assert stub._consecutive_decrypt_failures == 0
 
 
-def test_t5_success_reset_prevents_premature_escalation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_t5_success_reset_prevents_premature_escalation() -> None:
     """T5: a reset (successful cycle) clears the counter, so later failures must
     again reach the full threshold before escalating."""
-    monkeypatch.setattr(polling_mod.time, "monotonic", lambda: 1_000_000.0)
     stub = _make_stub()
     err = DecryptionError("boom")
 
@@ -90,12 +96,9 @@ def test_t5_success_reset_prevents_premature_escalation(
     stub._set_auth_state.assert_not_called()
 
 
-def test_t6_stale_owner_key_does_not_escalate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_t6_stale_owner_key_does_not_escalate() -> None:
     """T6: a per-tracker StaleOwnerKeyError never drives the account-wide counter
     and never escalates to an account reauth (it needs a per-tracker re-pair)."""
-    monkeypatch.setattr(polling_mod.time, "monotonic", lambda: 1_000_000.0)
     stub = _make_stub()
     stale = StaleOwnerKeyError("tracker v1 < v2")
 
@@ -106,12 +109,11 @@ def test_t6_stale_owner_key_does_not_escalate(
     stub._set_auth_state.assert_not_called()
 
 
-def test_t8_cooldown_suppresses_refire(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_t8_cooldown_suppresses_refire() -> None:
     """T8: once escalated, the reauth flow is not re-fired on every poll while the
     cooldown window is open (the un-fixable condition persists each cycle)."""
     clock = {"now": 1_000_000.0}
-    monkeypatch.setattr(polling_mod.time, "monotonic", lambda: clock["now"])
-    stub = _make_stub()
+    stub = _make_stub(lambda: clock["now"])
     err = SharedKeyMissingError("missing")
 
     # Reach the threshold -> first escalation.
@@ -133,3 +135,30 @@ def test_t8_cooldown_suppresses_refire(monkeypatch: pytest.MonkeyPatch) -> None:
     clock["now"] += polling_mod._DECRYPT_REAUTH_COOLDOWN_S + 1.0
     assert stub.note_decrypt_failure(stale=False, error=err) is True
     assert stub._set_auth_state.call_count == 2
+
+
+def test_t9_first_escalation_is_independent_of_process_uptime() -> None:
+    """T9 (regression): the first escalation must fire on a freshly booted host.
+
+    Reproduces the CI flake/production bug: with a 0.0 sentinel the cooldown gate
+    computed ``monotonic() - 0.0 < cooldown`` and, while process uptime was below
+    the cooldown window, wrongly suppressed the very first reauth escalation. With
+    the None sentinel the first escalation skips the cooldown gate entirely, so a
+    low monotonic value (simulated fresh boot) must still escalate.
+    """
+    # Monotonic far below the 6h cooldown window -> a fresh-boot runner.
+    fresh_boot_clock = 100.0
+    assert fresh_boot_clock < polling_mod._DECRYPT_REAUTH_COOLDOWN_S
+    stub = _make_stub(lambda: fresh_boot_clock)
+    err = SharedKeyMismatchError("stale shared key")
+
+    results = [
+        stub.note_decrypt_failure(stale=False, error=err, device="dev")
+        for _ in range(_MAX_DECRYPT_FAILURES)
+    ]
+
+    # Failures 1..N-1 hold, failure N escalates -- regardless of the low clock.
+    assert results == [False] * (_MAX_DECRYPT_FAILURES - 1) + [True]
+    stub._set_auth_state.assert_called_once()
+    # The escalation timestamp is now recorded (no longer the None sentinel).
+    assert stub._last_decrypt_reauth_monotonic == fresh_boot_clock
