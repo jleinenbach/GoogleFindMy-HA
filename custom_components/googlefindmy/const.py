@@ -21,7 +21,7 @@ DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
 # Keep the integration version aligned across the project (match manifest.json)
-INTEGRATION_VERSION: str = "1.7.1"
+INTEGRATION_VERSION: str = "1.7.2"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
