@@ -765,6 +765,85 @@ async def test_async_nova_request_raises_on_connection_setup_failure(
     assert session.calls  # post() *was* attempted (and retried), only entry failed
 
 
+async def test_async_nova_request_network_retry_uses_tiered_log_level(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The network-exception retry path logs the first attempt at INFO, not WARNING.
+
+    A single transient network blip is not actionable, so attempt 1 must be INFO
+    to avoid log noise, while repeated failures (attempt 2+) escalate to WARNING.
+    This mirrors the tiered severity already used by the HTTP-status retry path in
+    the same function. The previous code logged WARNING from the very first
+    attempt, which spammed the log on momentary connectivity hiccups that the
+    built-in retry recovered from on its own.
+    """
+
+    class _ConnFailingResponse:
+        """Context manager that raises on entry, mimicking a connect failure."""
+
+        async def __aenter__(self) -> Any:
+            raise aiohttp.ConnectionTimeoutError
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    class _ConnFailingSession:
+        """Session stub whose every POST fails during connection setup."""
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def post(self, *_args: object, **_kwargs: object) -> _ConnFailingResponse:
+            self.calls.append({"args": _args, "kwargs": _kwargs})
+            return _ConnFailingResponse()
+
+    cache = _StubCache()
+    session = _ConnFailingSession()
+
+    async def _fake_get_adm_token(
+        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+    ) -> str:
+        return "resolved-token"
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.NovaApi.nova_request.async_get_adm_token_api",
+        _fake_get_adm_token,
+    )
+
+    # Collapse the retry backoff so the test stays fast across NOVA_MAX_RETRIES.
+    async def _instant_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
+    caplog.set_level(
+        logging.INFO, logger="custom_components.googlefindmy.NovaApi.nova_request"
+    )
+
+    # Exhaust the retries: every attempt fails pre-connect, so the loop logs the
+    # first retry, then escalates, then raises once retries are spent.
+    with pytest.raises(NovaError):
+        await async_nova_request(
+            "testScope",
+            "00",
+            username="user@example.com",
+            cache=cache,
+            session=session,
+        )
+
+    retry_records = [r for r in caplog.records if "Retrying in" in r.getMessage()]
+    first_attempt = [r for r in retry_records if "(Attempt 1/" in r.getMessage()]
+    later_attempts = [r for r in retry_records if "(Attempt 2/" in r.getMessage()]
+
+    # Mutation sentinel: the first retry is INFO. If the tiering is removed and
+    # the code logs WARNING from attempt 1 again, this assertion turns red.
+    assert len(first_attempt) == 1
+    assert first_attempt[0].levelno == logging.INFO
+    # Escalation still works: a repeated failure surfaces at WARNING.
+    assert later_attempts
+    assert all(r.levelno == logging.WARNING for r in later_attempts)
+
+
 async def test_async_nova_request_marks_read_phase_failure_dispatched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

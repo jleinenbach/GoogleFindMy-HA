@@ -1765,7 +1765,12 @@ async def async_nova_request(  # noqa: PLR0913,PLR0912,PLR0915
                     reached_wire = True
                 if retries_used < NOVA_MAX_RETRIES:
                     delay = _compute_delay(attempt, None)
-                    _LOGGER.warning(
+                    # Tiered severity, mirroring the HTTP-status retry path above:
+                    # a single transient network blip (attempt 1) is INFO, not log
+                    # noise; repeated failures (attempt 2+) escalate to WARNING;
+                    # exhaustion after all retries is ERROR (see the else branch).
+                    log_fn = _LOGGER.info if retries_used == 0 else _LOGGER.warning
+                    log_fn(
                         "Nova API request failed (Attempt %d/%d): %s for %s. Retrying in %.2f seconds...",
                         retries_used + 1,
                         NOVA_MAX_RETRIES + 1,
