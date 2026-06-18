@@ -86,6 +86,7 @@ from .helpers.geo import (
 )
 from .helpers.stats import (
     ApiStatus,
+    CryptoStatus,
     DiagnosticsBuffer,
     FcmStatus,
     format_recent_errors,
@@ -768,6 +769,12 @@ class GoogleFindMyCoordinator(
         self._fcm_status_state: str = FcmStatus.UNKNOWN
         self._fcm_status_reason: str | None = None
         self._fcm_status_changed_at: float | None = None
+        # End-to-end location decryption health (drives the diagnostic enum
+        # sensor and mirrors the reauth escalation; initial UNKNOWN -> HA renders
+        # "unknown" until the first decryption is attempted).
+        self._crypto_status_state: str = CryptoStatus.UNKNOWN
+        self._crypto_status_reason: str | None = None
+        self._crypto_status_changed_at: float | None = None
 
         # Performance metrics (timestamps, durations) & recent errors (bounded)
         self.performance_metrics: dict[str, float] = {}
@@ -806,6 +813,25 @@ class GoogleFindMyCoordinator(
         # Google's backend is temporarily slow to propagate refreshed tokens.
         self._consecutive_transient_auth_failures: int = 0
         self._last_transient_auth_error: str | None = None
+
+        # Stale/missing shared-key decryption failures escalate to a reauth flow
+        # only after several consecutive cycles, with a cooldown so the flow is not
+        # re-fired on every poll once it is already open. Mirrors the transient-auth
+        # counter above; the in-decrypt self-heal (force_refresh / blind refresh)
+        # gets the first chance to recover an owner-key version bump without reauth.
+        self._consecutive_decrypt_failures: int = 0
+        # None means "never escalated yet". A real monotonic timestamp is only
+        # recorded after the first escalation, so the cooldown gate is skipped
+        # entirely on the first one. Using 0.0 as the sentinel was a bug: it is a
+        # valid monotonic value, so on a freshly booted host (process uptime below
+        # the cooldown window) ``monotonic() - 0.0 < cooldown`` would wrongly
+        # suppress the very first reauth escalation for up to the cooldown period.
+        self._last_decrypt_reauth_monotonic: float | None = None
+        self._last_decrypt_error: str | None = None
+        # Injectable monotonic-clock seam. Defaults to ``time.monotonic`` in
+        # production; tests override it to drive the decrypt cooldown gate
+        # deterministically (no dependency on the host's process uptime).
+        self._monotonic: Callable[[], float] = time.monotonic
 
         # Reload guard: defer core subentry repairs once after reload-driven attach
         self._skip_repair_during_reload_refresh: bool = False

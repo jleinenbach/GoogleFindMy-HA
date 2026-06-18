@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import types
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -49,6 +50,67 @@ def test_normalize_and_validate_discovery_payload() -> None:
     assert "aas_et/DISCOVERY" in tokens
     assert "manually/PERSIST" in tokens
     assert result.secrets_bundle is not None
+
+
+def test_discovery_mapping_payload_normalizes_credential_whitespace() -> None:
+    """Already-parsed mapping discovery payloads must normalize credential whitespace.
+
+    In-repo cloud discovery (discovery.py) forwards the secrets bundle as an
+    already-parsed dict via ``DATA_SECRET_BUNDLE``, so it never passes through the
+    str-decode branch. A stray space in ``owner_key``/``shared_key`` breaks
+    AES-GCM decryption, so the mapping branch must apply the same whitespace
+    normalization as the string branch.
+    """
+
+    payload = {
+        DATA_SECRET_BUNDLE: {
+            "google_email": "DiscoveryUser@example.com",
+            "aas_token": "aas_et/DISCOVERY",
+            "owner_key": "AAAA BBBB",
+            # Tab and newline reproduce a line-wrapped copy/paste, the real
+            # trigger for whitespace-broken credential material.
+            "shared_key": "CC\tCC\nDD DD",
+        }
+    }
+
+    result = config_flow._normalize_and_validate_discovery_payload(payload)
+
+    assert result.secrets_bundle is not None
+    assert result.secrets_bundle["owner_key"] == "AAAABBBB"
+    assert result.secrets_bundle["shared_key"] == "CCCCDDDD"
+
+
+def test_discovery_string_payload_still_normalizes_after_refactor() -> None:
+    """String secrets payloads must keep normalizing after the chokepoint move.
+
+    Normalization moved out of the str-decode branch into the shared mapping
+    branch. This guards that a JSON-string bundle (the manual-paste shape) still
+    gets credential whitespace stripped, so the refactor is behavior-preserving.
+    """
+
+    payload = {
+        "secrets_json": json.dumps(
+            {
+                "google_email": "DiscoveryUser@example.com",
+                "aas_token": "aas_et/DISCOVERY",
+                "owner_key": "EEEE FFFF",
+            }
+        )
+    }
+
+    result = config_flow._normalize_and_validate_discovery_payload(payload)
+
+    assert result.secrets_bundle is not None
+    assert result.secrets_bundle["owner_key"] == "EEEEFFFF"
+
+
+def test_discovery_invalid_json_secrets_still_raises() -> None:
+    """A malformed JSON-string bundle must still raise after the chokepoint move."""
+
+    payload = {"secrets_json": "{not-valid-json"}
+
+    with pytest.raises(config_flow.DiscoveryFlowError):
+        config_flow._normalize_and_validate_discovery_payload(payload)
 
 
 def test_async_step_discovery_new_entry(

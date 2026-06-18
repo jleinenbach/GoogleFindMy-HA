@@ -3,11 +3,28 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.config_entries import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    CryptoStatus,
+    GoogleFindMyCoordinator,
+)
+from custom_components.googlefindmy.coordinator.polling import (
+    _MAX_DECRYPT_FAILURES,
+    _MAX_TRANSIENT_AUTH_FAILURES,
+)
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    SharedKeyMismatchError,
+    StaleOwnerKeyError,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    NovaAuthError,
+    NovaAuthPermanentError,
+)
 from tests.helpers.homeassistant import GoogleFindMyConfigEntryStub
 
 
@@ -75,6 +92,17 @@ def _base_coordinator(
     coordinator._consecutive_timeouts = 0
     coordinator._consecutive_transient_auth_failures = 0
     coordinator._last_transient_auth_error = None
+    coordinator._consecutive_decrypt_failures = 0
+    coordinator._last_decrypt_reauth_monotonic = None
+    coordinator._last_decrypt_error = None
+    coordinator._crypto_status_state = CryptoStatus.UNKNOWN
+    coordinator._crypto_status_reason = None
+    coordinator._crypto_status_changed_at = None
+    # Deliberately low monotonic value: simulates a freshly booted runner (process
+    # uptime below the reauth cooldown). With the None sentinel the first escalation
+    # must fire regardless, so this pins the whole loop-test class against the
+    # uptime-dependent flake that slipped through CI.
+    coordinator._monotonic = lambda: 100.0
     coordinator.location_poll_interval = 0
     coordinator.data = []
     coordinator._last_device_list = []
@@ -289,3 +317,614 @@ async def test_semantic_labels_are_recorded_with_device_ids() -> None:
     observations = coordinator.get_observed_semantic_labels()
     assert [obs.label for obs in observations] == ["Lobby"]
     assert observations[0].devices == {"dev-3"}
+
+
+class _DecryptFailAPI:
+    """API stub whose location lookup always raises the given decryption error.
+
+    Used to drive the coordinator poll loop through the decrypt-failure handlers
+    end to end (the isolated escalation logic is unit-tested separately in
+    tests/test_coordinator_decrypt_reauth_escalation.py).
+    """
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_escalates_persistent_decrypt_failure_to_reauth() -> None:
+    """End-to-end: a persistent account-wide stale shared key escalates the poll
+    loop to ConfigEntryAuthFailed after _MAX_DECRYPT_FAILURES cycles, so Home
+    Assistant shows the reauth card. The cycles before the threshold must NOT
+    escalate (self-heal still gets a chance)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+
+    # Below threshold: keep polling, no reauth escalation yet.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert not any(kw.get("failed") for kw in auth_calls)
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # Threshold cycle: escalate to a reauth flow. The poll cycle runs as a
+    # fire-and-forget task, so it starts the entry reauth flow directly rather
+    # than raising (a raised ConfigEntryAuthFailed would never reach the awaited
+    # coordinator refresh and HA's automatic reauth would never fire).
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_stale_owner_key_never_escalates() -> None:
+    """End-to-end: a per-tracker StaleOwnerKeyError must never escalate to an
+    account-wide reauth (an account reauth would not fix one outdated tracker) and
+    must not drive the account-wide decrypt counter."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(StaleOwnerKeyError("tracker v1 < v2"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+
+    for _ in range(_MAX_DECRYPT_FAILURES + 2):
+        await coordinator._async_start_poll_cycle([{"id": "tag", "name": "Tag"}])
+
+    assert coordinator._consecutive_decrypt_failures == 0
+    assert not any(kw.get("failed") for kw in auth_calls)
+
+
+class _DecryptThenSucceedAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then succeeds.
+
+    Used to prove the consecutive-decrypt-failure counter resets on a successful
+    cycle (self-heal / recovered shared key), so a later isolated failure does not
+    trip a premature reauth.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        # A genuinely decryptable report: positive proof the account-wide shared
+        # key works again. Only such a real decrypt clears the counter -- an empty
+        # / no-reporter response (falsy) is an idle outcome and must NOT (see
+        # test_poll_cycle_idle_does_not_reset_decrypt_counter).
+        return {"latitude": 1.0, "longitude": 2.0, "accuracy": 5.0}
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_decrypt_counter_resets_on_success() -> None:
+    """A successful poll cycle clears the consecutive-decrypt-failure counter, so a
+    recovered shared key (or self-heal) does not later trip a spurious reauth."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenSucceedAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles raise no reauth and accumulate the counter.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # A successful cycle resets the counter back to zero.
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == 0
+    # No per-tracker stale key was seen, so the OK gate also clears the diagnostic
+    # error class (status and error class move together). Mutation guard: dropping
+    # the OK-gate ``_last_decrypt_error = None`` leaves the stale class behind.
+    assert coordinator._last_decrypt_error is None
+    assert coordinator.crypto_status.state == CryptoStatus.OK
+
+
+class _DecryptThenIdleAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns
+    an empty (no-reporter) result.
+
+    Models an intermittently reporting BLE tracker: failing decrypt cycles are
+    interleaved with idle cycles that simply return no location data. Such idle
+    cycles carry no positive proof the shared key recovered and must therefore
+    NOT clear the accumulated decrypt-failure counter.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        return []  # idle: no reporter in range, nothing decrypted this cycle
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_idle_does_not_reset_decrypt_counter() -> None:
+    """An idle cycle (empty/no-reporter result) must NOT clear accumulated decrypt
+    failures: without a real successful decrypt there is no proof the stale shared
+    key recovered. Otherwise an intermittently reporting BLE tracker would let idle
+    cycles perpetually reset the counter, so the reauth threshold is never reached
+    and the user stays stuck with no location updates and no reauth prompt
+    (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenIdleAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # An idle cycle in between must leave the counter intact (not reset to zero).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+
+class _DecryptThenMetadataOnlyAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns a
+    ``metadata_only`` sentinel row.
+
+    Models a device whose secrets bundle still yields key *material* (so a
+    metadata_only row is emitted) while no encrypted report decrypts. The sentinel
+    is truthy but proves nothing about the shared key, so such a cycle must NOT
+    clear the accumulated decrypt-failure counter (Codex finding on PR #182).
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        # metadata_only sentinel: key material from the secrets bundle, no decrypt.
+        return {"metadata_only": True, "owner_key_version": 7}
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_metadata_only_does_not_reset_decrypt_counter() -> None:
+    """A metadata_only cycle must NOT clear accumulated decrypt failures: the
+    sentinel row carries key material from the secrets bundle, not an authenticated
+    decrypt, so it is no proof the stale shared key recovered. Otherwise a
+    report-less device emitting metadata_only could let such cycles perpetually
+    reset the counter, the reauth threshold is never reached, and the user stays
+    stuck with no location updates and no reauth prompt (Codex finding on PR
+    #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenMetadataOnlyAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # A metadata_only cycle in between must leave the counter intact (not reset).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+
+class _DecryptThenSemanticAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns a
+    SEMANTIC-shaped record (no coordinates).
+
+    Models a device whose server response is a semantic location ("Home") rather
+    than an encrypted fix. The decode layer appends SEMANTIC rows with
+    ``decrypted_location=b""`` and skips the crypto path, so the record carries a
+    ``semantic_name`` and ``last_seen`` but ``latitude``/``longitude`` are ``None``
+    and no ``metadata_only`` flag. It is truthy yet authenticates nothing, so such a
+    cycle must NOT clear the accumulated decrypt-failure counter (Codex finding on
+    PR #182): a denylist on ``metadata_only`` alone would let it through.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        return {
+            "last_seen": 123.0,
+            "semantic_name": "Home",
+            "status": "semantic",
+            "latitude": None,
+            "longitude": None,
+        }
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_semantic_only_does_not_reset_decrypt_counter() -> None:
+    """A SEMANTIC-only cycle must NOT clear accumulated decrypt failures: the row
+    skips the crypto path (``decrypted_location=b""``) and carries no coordinates,
+    so it is no proof the stale shared key recovered. It also lacks the
+    ``metadata_only`` flag, so the previous denylist predicate would have wrongly
+    reset the counter and could strand a stale key below the reauth threshold
+    (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenSemanticAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # A SEMANTIC-only cycle in between must leave the counter intact (not reset).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+
+class _DecryptThenHiddenProofAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns a
+    SEMANTIC-shaped record that still carries the full-list decrypt proof.
+
+    Models the Codex round-8 finding: the same Nova response decrypted a real
+    coordinate report, but ``api._select_best_location`` ranked a newer report-less
+    SEMANTIC row first and returned it. ``async_get_device_location`` preserves the
+    full-list verdict in the internal ``_decrypt_proven`` hint, so even though the
+    visible record has no coordinates the cycle DID prove the shared key and the
+    accumulated decrypt-failure counter must reset.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        # Display-selected SEMANTIC row (newest last_seen, no coordinates) but the
+        # response decrypted a sibling coordinate fix -> hint records the proof.
+        return {
+            "last_seen": 200.0,
+            "semantic_name": "Home",
+            "status": "semantic",
+            "latitude": None,
+            "longitude": None,
+            "_decrypt_proven": True,
+        }
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_hidden_decrypt_proof_resets_counter() -> None:
+    """A real decrypt hidden behind a newer SEMANTIC row still clears the budget.
+
+    The display selector collapses the response to a report-less SEMANTIC record,
+    but the full-list ``_decrypt_proven`` hint shows a coordinate report decrypted.
+    The cycle must therefore reset the consecutive-decrypt-failure counter; without
+    carrying the full-list proof the success would be lost and a later transient
+    failure could trip a spurious reauth (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenHiddenProofAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # The hidden-proof cycle resets the counter back to zero.
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == 0
+    # The internal hint must not leak into the cached payload.
+    cached = coordinator._device_location_data.get("dev-1")
+    if isinstance(cached, dict):
+        assert "_decrypt_proven" not in cached
+
+
+class _PerDeviceDecryptAPI:
+    """Raises a decryption error for one device id, succeeds (empty) for others."""
+
+    def __init__(self, exc: Exception, failing_id: str) -> None:
+        self._exc = exc
+        self._failing = failing_id
+
+    async def async_get_device_location(
+        self, device_id: str, _device_name: str, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
+        if device_id == self._failing:
+            raise self._exc
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_partial_decrypt_failure_still_escalates() -> None:
+    """Multi-device: one tracker decrypts fine while another keeps failing with a
+    stale account-wide shared key. A per-device reset would null the counter every
+    cycle (one healthy tracker masking the others) and never escalate; the
+    cycle-gated reset preserves the count so escalation still fires after the
+    threshold. Regression guard for the independent-review finding."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _PerDeviceDecryptAPI(
+        SharedKeyMismatchError("stale shared key"), failing_id="bad"
+    )
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    devices = [{"id": "good", "name": "Good"}, {"id": "bad", "name": "Bad"}]
+
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle(devices)
+    # The healthy device must NOT have reset the account-wide counter.
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    await coordinator._async_start_poll_cycle(devices)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_counts_multi_device_decrypt_failure_once() -> None:
+    """Codex P2 regression: one poll cycle in which several trackers all hit the
+    same account-wide stale shared key must advance the consecutive-failure counter
+    exactly ONCE, not once per device.
+
+    Counting per device let a multi-device account cross _MAX_DECRYPT_FAILURES
+    within the first cycle and escalate to reauth immediately, defeating the
+    documented "N consecutive cycles" budget that gives the in-decrypt self-heal a
+    few cycles before re-authentication."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    # More failing trackers in a single cycle than the escalation threshold: a
+    # per-device counter would already escalate here.
+    devices = [
+        {"id": "dev-1", "name": "One"},
+        {"id": "dev-2", "name": "Two"},
+        {"id": "dev-3", "name": "Three"},
+    ]
+    assert len(devices) >= _MAX_DECRYPT_FAILURES
+
+    # First cycle: counter advances by one, no escalation despite 3 failing devices.
+    await coordinator._async_start_poll_cycle(devices)
+    assert coordinator._consecutive_decrypt_failures == 1
+    assert not any(kw.get("failed") for kw in auth_calls)
+
+    # Second cycle: still below threshold (2/3).
+    await coordinator._async_start_poll_cycle(devices)
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+    assert not any(kw.get("failed") for kw in auth_calls)
+
+    # Third consecutive cycle reaches the threshold -> escalate exactly once.
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    await coordinator._async_start_poll_cycle(devices)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_nova_permanent_auth_starts_reauth() -> None:
+    """A permanent Nova auth failure in the background poll cycle starts the entry
+    reauth flow directly. The cycle runs as a fire-and-forget task
+    (``hass.async_create_task``), so a raised ConfigEntryAuthFailed would never reach
+    the awaited coordinator refresh and HA's automatic reauth would never fire."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthPermanentError(401, "perm"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_transient_nova_auth_starts_reauth_after_threshold() -> None:
+    """A transient Nova auth failure escalates only after
+    _MAX_TRANSIENT_AUTH_FAILURES consecutive cycles, then starts the entry reauth
+    flow directly (the fire-and-forget poll task cannot raise into HA)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthError(401, "transient"))
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    # Below threshold: keep polling, no reauth escalation yet.
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_not_called()
+
+    # Threshold cycle escalates exactly once.
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_reauth_noop_without_config_entry() -> None:
+    """Defensive guard: with no config entry bound the poll cycle cannot start
+    reauth, but it must not crash (``_request_poll_reauth`` no-entry branch)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry = None
+
+    # Drive to the escalation threshold; the helper hits its no-entry guard.
+    for _ in range(_MAX_DECRYPT_FAILURES):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    # No crash, and the auth state was still flagged at the threshold cycle.
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_direct_config_entry_auth_failed_starts_reauth() -> None:
+    """A ConfigEntryAuthFailed raised directly by the API (e.g. HTTP 401/403 in
+    async_get_device_location) reaches the poll loop's ConfigEntryAuthFailed handler
+    without passing through the typed SpotAuth/NovaAuth handlers. It must start the
+    entry reauth flow directly rather than re-raising into the fire-and-forget poll
+    task, where the exception would never reach HA."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(ConfigEntryAuthFailed("session expired"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+class _MixedDecryptAPI:
+    """API stub that fails for one device id and returns a payload for others.
+
+    Drives a single poll cycle that contains both a per-tracker stale key and a
+    healthy, decrypting device, to prove the crypto sensor does not flicker the
+    tracker_key_outdated state to OK when a sibling decrypts successfully.
+    """
+
+    def __init__(self, fail_id: str, exc: Exception, ok_payload: dict[str, Any]) -> None:
+        self._fail_id = fail_id
+        self._exc = exc
+        self._ok_payload = ok_payload
+
+    async def async_get_device_location(
+        self, device_id: str, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
+        if device_id == self._fail_id:
+            raise self._exc
+        return dict(self._ok_payload)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_successful_decrypt_sets_crypto_ok() -> None:
+    """A cycle that decrypts usable location data reports crypto OK (D6 source)."""
+
+    coordinator = _polling_coordinator(
+        {}, _TrackingFilter(), {"latitude": 1.0, "longitude": 2.0, "last_seen": 100}
+    )
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.crypto_status.state == CryptoStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_shared_key_failure_sets_crypto_invalid() -> None:
+    """An account-wide SharedKeyMismatchError surfaces as shared_key_invalid."""
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.crypto_status.state == CryptoStatus.SHARED_KEY_INVALID
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_stale_key_sets_tracker_outdated() -> None:
+    """A per-tracker StaleOwnerKeyError surfaces as tracker_key_outdated."""
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(StaleOwnerKeyError("tracker v1 < v2"))
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_timeout_only_does_not_clear_prior_failure() -> None:
+    """A cycle without any successful decrypt must NOT downgrade a prior
+    shared_key_invalid to OK -- absence of an error is not proof of health.
+
+    Mutation guard for the ``cycle_had_successful_decrypt`` gate: replacing it
+    with the weaker ``devices`` condition turns the second assertion red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    # Cycle 1: account-wide failure -> shared_key_invalid (below threshold).
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator.crypto_status.state == CryptoStatus.SHARED_KEY_INVALID
+
+    # Cycle 2: idle (empty location, no successful decrypt) -> state unchanged.
+    coordinator.api = _DummyAPI({})
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator.crypto_status.state == CryptoStatus.SHARED_KEY_INVALID
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_mixed_stale_and_success_keeps_tracker_outdated() -> None:
+    """A healthy sibling in a cycle that also hit a stale key must NOT flicker the
+    sensor to OK.
+
+    Mutation guard for the ``not cycle_had_stale_key`` gate: dropping it lets the
+    successful sibling overwrite tracker_key_outdated with OK and turns this red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _MixedDecryptAPI(
+        "dev-stale",
+        StaleOwnerKeyError("tracker v1 < v2"),
+        {"latitude": 1.0, "longitude": 2.0, "last_seen": 100},
+    )
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-stale", "name": "Old"}, {"id": "dev-ok", "name": "Hub"}]
+    )
+
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_mixed_stale_and_success_keeps_last_decrypt_error() -> None:
+    """The stale-key diagnostic must survive a sibling's successful decrypt.
+
+    Same mixed cycle as above, but asserting the *error class* the encryption-key
+    status sensor exposes (``last_decrypt_error_class`` from ``_last_decrypt_error``).
+    The successful sibling clears the account-wide reauth budget via the shared
+    success entry point, yet the per-tracker StaleOwnerKeyError diagnostic must
+    stay so the sensor can still report which class is outdated.
+
+    Regression guard for the Codex finding: clearing ``_last_decrypt_error``
+    unconditionally in ``note_decrypt_success()`` (or gating it only on the
+    counter) wipes this on the very cycle a sibling decrypts and turns this red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _MixedDecryptAPI(
+        "dev-stale",
+        StaleOwnerKeyError("tracker v1 < v2"),
+        {"latitude": 1.0, "longitude": 2.0, "last_seen": 100},
+    )
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-stale", "name": "Old"}, {"id": "dev-ok", "name": "Hub"}]
+    )
+
+    # Status stays outdated AND the error class behind it survives for triage.
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+    assert coordinator._last_decrypt_error is not None
+    assert coordinator._last_decrypt_error.split(":", 1)[0] == "StaleOwnerKeyError"

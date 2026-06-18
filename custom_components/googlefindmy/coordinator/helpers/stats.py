@@ -42,6 +42,38 @@ class FcmStatus:
     DISCONNECTED = "disconnected"
 
 
+class CryptoStatus:
+    """String constants describing end-to-end location decryption health.
+
+    These mirror the diagnostic enum sensor's ``options`` exactly (one Home
+    Assistant enum state per constant). The values are driven from a single
+    source -- the coordinator's ``note_decrypt_failure`` hook (failure states)
+    and the decrypt-clean outcomes (``OK``: a poll cycle, or a proven
+    background-push decrypt that refutes an account-wide failure) -- so the
+    sensor never drifts from the reauth escalation behaviour it visualizes.
+
+    States:
+        UNKNOWN: No decryption has been attempted yet (initial state).
+        OK: The most recent poll cycle decrypted without an account-wide failure,
+            or a background push proved the account-wide shared key still works
+            and cleared a prior ``SHARED_KEY_INVALID`` / ``SHARED_KEY_MISSING``.
+        SHARED_KEY_INVALID: The shared key no longer matches the server-side
+            owner key (``SharedKeyMismatchError`` / ``InvalidTag``); account-wide
+            reauthentication is required.
+        SHARED_KEY_MISSING: The pasted bundle is incomplete and lacks a usable
+            shared key (``SharedKeyMissingError``).
+        TRACKER_KEY_OUTDATED: A single tracker is encrypted with an outdated
+            owner-key version (``StaleOwnerKeyError``); re-pair that tracker. This
+            is per-tracker and never triggers an account-wide reauth.
+    """
+
+    UNKNOWN = "unknown"
+    OK = "ok"
+    SHARED_KEY_INVALID = "shared_key_invalid"
+    SHARED_KEY_MISSING = "shared_key_missing"
+    TRACKER_KEY_OUTDATED = "tracker_key_outdated"
+
+
 # ---------------------------------------------------------------------------
 # Status Snapshot
 # ---------------------------------------------------------------------------

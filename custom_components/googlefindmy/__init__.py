@@ -6921,6 +6921,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         elif isinstance(raw_secrets, Mapping):
             secrets_bundle = dict(raw_secrets)
 
+        if secrets_bundle:  # pragma: no cover - legacy one-time migration path
+            # Legacy bundles (migrated from entry.data/file) may carry copy/paste
+            # whitespace in credential values; normalize before extraction and
+            # before this path persists the bundle to the cache. Idempotent.
+            # The decryption-critical normalization is also enforced downstream by
+            # _async_save_secrets_data (covered by tests); this is defense-in-depth
+            # on the legacy one-time migration branch, which the unit harness does
+            # not drive.
+            from .shared_helpers import normalize_secrets_bundle
+
+            secrets_bundle = normalize_secrets_bundle(secrets_bundle)
+
         oauth_token_maybe = entry.data.get(CONF_OAUTH_TOKEN)
         if not isinstance(oauth_token_maybe, str):
             oauth_token_maybe = secrets_bundle.get(CONF_OAUTH_TOKEN)
@@ -7672,6 +7684,15 @@ async def _async_save_secrets_data(
         - Store JSON-serializable values *as-is*. TokenCache validates and normalizes.
         - Uses the *entry-local* cache instance (no global facade).
     """
+    from .shared_helpers import normalize_secrets_bundle
+
+    # Defense-in-depth: the config flow already normalizes bundles on entry, but
+    # this is the universal cache-write choke point. A bundle persisted by an
+    # older version or migrated from a file may still carry copy/paste whitespace
+    # in credential values (a stray space in owner_key/shared_key breaks AES-GCM
+    # decryption). normalize_secrets_bundle is idempotent, so re-normalizing an
+    # already-clean bundle is a no-op.
+    secrets_data = normalize_secrets_bundle(dict(secrets_data))
     enhanced_data = dict(secrets_data)
 
     # Normalize username key across old/new secrets variants

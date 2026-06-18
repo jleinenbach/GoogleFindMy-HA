@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import grpclib.client as grpclib_client
 import grpclib.exceptions
@@ -382,7 +382,11 @@ def _prepare_coordinator(loop: asyncio.AbstractEventLoop) -> GoogleFindMyCoordin
     hass = _DummyHass(loop)
     coordinator = GoogleFindMyCoordinator(hass, cache=_DummyCacheProtocol())
     coordinator.config_entry = SimpleNamespace(
-        entry_id="entry-id", options={}, data={}, title="Test Entry"
+        entry_id="entry-id",
+        options={},
+        data={},
+        title="Test Entry",
+        async_start_reauth=Mock(),
     )
     coordinator._get_google_home_filter = lambda: None
     coordinator._is_fcm_ready_soft = lambda: True
@@ -409,7 +413,14 @@ def _prepare_coordinator(loop: asyncio.AbstractEventLoop) -> GoogleFindMyCoordin
 def test_poll_spot_auth_error_triggers_config_entry_auth_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SpotAuthPermanentError should propagate as ConfigEntryAuthFailed in polling."""
+    """SpotAuthPermanentError in polling should start the entry reauth flow.
+
+    The poll cycle runs as a fire-and-forget task (``hass.async_create_task``), so a
+    raised ``ConfigEntryAuthFailed`` would never reach the awaited coordinator
+    refresh and HA's automatic reauth would never fire. The cycle therefore starts
+    the entry-scoped reauth flow directly and still records ``last_exception`` so
+    the ``finally`` block marks the update failed.
+    """
 
     loop = asyncio.new_event_loop()
     hass_coordinator = _prepare_coordinator(loop)
@@ -420,17 +431,19 @@ def test_poll_spot_auth_error_triggers_config_entry_auth_failed(
         AsyncMock(return_value=None),
     )
 
-    with pytest.raises(ConfigEntryAuthFailed):
-        try:
-            loop.run_until_complete(
-                hass_coordinator._async_start_poll_cycle(
-                    [{"id": "dev-1", "name": "Device"}], force=True
-                )
+    try:
+        loop.run_until_complete(
+            hass_coordinator._async_start_poll_cycle(
+                [{"id": "dev-1", "name": "Device"}], force=True
             )
-        finally:
-            drain_loop(loop)
-            loop.close()
+        )
+    finally:
+        drain_loop(loop)
+        loop.close()
 
+    hass_coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        hass_coordinator.hass
+    )
     assert isinstance(hass_coordinator.last_exception, ConfigEntryAuthFailed)
 
 

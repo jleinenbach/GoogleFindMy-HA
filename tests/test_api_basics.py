@@ -40,6 +40,11 @@ from custom_components.googlefindmy.const import (
     DEFAULT_CONTRIBUTOR_MODE,
 )
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
+    SharedKeyMismatchError,
+    StaleOwnerKeyError,
+)
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaError,
@@ -1110,6 +1115,26 @@ class TestAsyncDeviceLocationErrorMapping:
         self._patch_request(monkeypatch, RuntimeError("other"))
         api = _make_api_with_session()
         assert run_coro(api.async_get_device_location("d", "name")) == {}
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            SharedKeyMismatchError("stale shared key"),
+            StaleOwnerKeyError("tracker key outdated"),
+            DecryptionError("generic decrypt failure"),
+        ],
+    )
+    def test_decryption_error_is_reraised_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch, exc: DecryptionError
+    ) -> None:
+        """Audit finding A1: ``DecryptionError`` is a ``RuntimeError`` subclass, so the
+        broad ``except RuntimeError`` / ``except Exception`` handlers would otherwise
+        swallow an auth-fatal stale-shared-key failure into an empty dict. It must
+        propagate instead so the coordinator can escalate to a reauth flow."""
+        self._patch_request(monkeypatch, exc)
+        api = _make_api_with_session()
+        with pytest.raises(DecryptionError):
+            run_coro(api.async_get_device_location("d", "name"))
 
     def test_unexpected_exception_returns_empty_dict(
         self, monkeypatch: pytest.MonkeyPatch

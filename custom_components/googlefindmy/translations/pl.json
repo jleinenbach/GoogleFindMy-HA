@@ -452,7 +452,7 @@
         "name": "Odpytywanie"
       },
       "connectivity": {
-        "name": "Status połączenia",
+        "name": "Status połączenia FCM",
         "state_attributes": {
           "last_poll_result": {
             "name": "Wynik ostatniego odpytywania"
@@ -666,6 +666,15 @@
       },
       "semantic_labels": {
         "name": "Etykiety semantyczne"
+      },
+      "encryption_key_status": {
+        "name": "Stan klucza szyfrowania",
+        "state": {
+          "ok": "OK",
+          "shared_key_invalid": "Nieprawidłowy (wymagane ponowne uwierzytelnienie)",
+          "shared_key_missing": "Brak (niekompletny pakiet)",
+          "tracker_key_outdated": "Nieaktualny klucz lokalizatora"
+        }
       },
       "stat_background_updates": {
         "name": "Aktualizacje w tle"

@@ -243,7 +243,59 @@ class DecryptionError(RuntimeError):
 
 
 class StaleOwnerKeyError(DecryptionError):
-    """Raised when the tracker was encrypted with an older owner key version."""
+    """Raised when the tracker was encrypted with an older owner key version.
+
+    Per-tracker condition: a single tracker still encrypts reports with an
+    owner-key version that is no longer current. An account-wide re-auth does NOT
+    fix it; the tracker must be removed and re-paired. Kept distinct from the
+    account-wide shared-key failures below so the coordinator can escalate each
+    differently (per-tracker repair issue vs. ConfigEntryAuthFailed).
+    """
+
+
+class SharedKeyMismatchError(DecryptionError):
+    """Raised when the shared key cannot decrypt the owner key (AES-GCM InvalidTag).
+
+    Account-wide: the bundle's shared key is stale or incompatible with the
+    server-side owner key. Only a fresh secrets.json obtained via the interactive
+    browser flow can fix this; force_refresh of the owner key cannot, because the
+    shared key itself is the wrong one.
+    """
+
+
+class SharedKeyMissingError(DecryptionError):
+    """Raised when the shared key is absent or empty (incomplete bundle import).
+
+    Account-wide: the secrets.json did not provide a usable shared key. A complete
+    re-import / fresh secrets.json is required.
+    """
+
+
+def _classify_owner_key_failure(exc: Exception, *, context: str) -> DecryptionError:
+    """Map a low-level owner-key lookup failure to a specific DecryptionError.
+
+    ``async_get_owner_key`` collapses distinct root causes into either an
+    ``InvalidTag`` (wrong/stale shared key) or a ``RuntimeError`` (missing/empty
+    shared key, or a generic failure). This helper restores the discriminator as a
+    typed subclass so the failure class name appears in logs and the coordinator
+    can pick the correct recovery path. The caller preserves the original error
+    via ``raise ... from exc``.
+    """
+    if isinstance(exc, InvalidTag):
+        return SharedKeyMismatchError(
+            f"Owner key decryption failed (InvalidTag) during {context}: the shared "
+            "key is stale or incompatible with this account. A fresh secrets.json "
+            "is required (re-authentication)."
+        )
+    if isinstance(exc, RuntimeError) and "missing or empty" in str(exc):
+        return SharedKeyMissingError(
+            f"Shared key is missing or empty during {context} (incomplete bundle). "
+            "Re-import a complete secrets.json."
+        )
+    return DecryptionError(
+        f"Owner key decryption failed during {context} (shared key may be stale). "
+        "Re-authenticate to refresh crypto keys."
+    )
 
 
 async def _unwrap_encrypted_identity_key(
@@ -378,10 +430,7 @@ async def async_retrieve_identity_key(
     try:
         owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
     except (InvalidTag, RuntimeError) as exc:
-        raise DecryptionError(
-            "Owner key decryption failed (shared key may be stale). "
-            "Re-authenticate with --reauth to refresh crypto keys."
-        ) from exc
+        raise _classify_owner_key_failure(exc, context="initial lookup") from exc
 
     # --- Proactive Owner Key Version Mismatch Check ---
     # If the tracker requires a newer owner key version than what we have cached,
@@ -403,10 +452,7 @@ async def async_retrieve_identity_key(
                 cache=cache, force_refresh=True
             )
         except (InvalidTag, RuntimeError) as exc:
-            raise DecryptionError(
-                "Owner key refresh failed (InvalidTag). "
-                "Re-authenticate with --reauth to refresh crypto keys."
-            ) from exc
+            raise _classify_owner_key_failure(exc, context="forced refresh") from exc
 
     # Build key sources list (matches eid_resolver pattern: try owner + shared)
     key_sources: list[tuple[str, bytes]] = [("owner", owner_key_info.key)]
@@ -522,7 +568,12 @@ async def async_retrieve_identity_key(
         )
         raise
     except Exception as meta_exc:  # best-effort diagnostics
-        _LOGGER.warning(
+        # Downgraded to debug: this metadata fetch is a non-actionable,
+        # best-effort diagnostic aid. Its failure (e.g. transient network
+        # timeout or SSL teardown) is swallowed and the regular decrypt
+        # error path continues unaffected, so it must not surface as a
+        # user-facing WARNING.
+        _LOGGER.debug(
             "Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc
         )
 
@@ -828,6 +879,52 @@ def _infer_report_hint(status_value: Any) -> str | None:
     return None
 
 
+def is_real_location_record(record: dict[str, Any] | None) -> bool:
+    """Return True only for an authenticated, decrypted *coordinate* report.
+
+    Clearing the shared decrypt-failure (reauth) budget requires positive proof
+    that the account-wide shared key still decrypts. Decrypted coordinates are
+    that proof: they are produced exclusively by the authenticated crypto path
+    (own/foreign AES-GCM decrypt, then lat/lon validation below). Requiring a real
+    coordinate pair is therefore an allowlist for genuine reports and rejects every
+    truthy-but-unauthenticated record shape, including:
+
+    - ``metadata_only=True`` sentinel rows -- only secrets-bundle key *material*,
+      emitted when no encrypted report decrypts (e.g. a phone without a fresh fix).
+    - ``SEMANTIC`` rows -- appended with ``decrypted_location=b""`` and ``continue``d
+      before the crypto path, so they carry a server-provided ``semantic_name`` and
+      a ``last_seen`` timestamp but ``latitude``/``longitude`` are ``None``.
+
+    Neither shape carries coordinates, so neither may clear the budget; a denylist
+    on a single known sentinel (``metadata_only``) would miss the others. ``is not
+    None`` (not truthiness) preserves legitimate ``0.0`` coordinates. The metadata
+    merges below only ever write key-material/date keys, never ``latitude``/
+    ``longitude``, so they cannot make a sentinel/SEMANTIC row look authenticated.
+    """
+    if not record:
+        return False
+    return record.get("latitude") is not None and record.get("longitude") is not None
+
+
+def any_real_location_record(records: list[dict[str, Any]] | None) -> bool:
+    """Return True if ANY record in a response authenticates a coordinate report.
+
+    The decrypt proof -- positive evidence that the account-wide shared key still
+    decrypts -- is a property of the WHOLE response, not of any single record. A
+    display selector that ranks by newest ``last_seen`` (see
+    ``api._select_best_location``) can hand back a report-less SEMANTIC/metadata
+    row even when a sibling coordinate report decrypted successfully in the same
+    response. Evaluating only that collapsed record would discard the proof and
+    let a later transient failure trip a spurious reauth. Both automatic paths
+    (poll and background push) must therefore run the FULL candidate list through
+    this one predicate so a hidden success is never lost. See
+    ``is_real_location_record`` for the per-record allowlist.
+    """
+    if not records:
+        return False
+    return any(is_real_location_record(record) for record in records)
+
+
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     device_update_protobuf: DeviceUpdateProto, *, cache: TokenCache
@@ -840,6 +937,12 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
       preventing bad data from leaking into higher layers (HA Platinum quality).
     - Robust against partial/invalid reports (log and continue).
     - No prints or process termination; errors bubble or are logged with context.
+
+    Raises:
+        DecryptionError: if the device has its own encrypted reports and every
+            one of them fails authentication (no own-report success). This is an
+            account-wide stale-key signal; foreign/crowdsourced failures and
+            report-less devices never raise (they return ``[]``/metadata-only).
 
     Args:
         device_update_protobuf: Raw protobuf payload containing encrypted locations.
@@ -1206,6 +1309,14 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     wrapped: list[WrappedLocation] = []
     _auth_failures = 0  # Track MAC / InvalidTag failures across all reports
     _encrypted_report_count = 0  # Count non-SEMANTIC reports attempted
+    # Diff-Review #1: Own-report-only failure tracking. Unlike the mixed
+    # counters above (which include foreign/crowdsourced reports that legitimately
+    # fail when decrypted with another account's key), these track ONLY the
+    # device's own reports (public_key_random == b""). Exhausting every own report
+    # is the one account-wide auth signal that warrants reauth escalation.
+    _own_encrypted_report_count = 0  # Own (Owner-key) reports attempted
+    _own_auth_failures = 0  # Own-report MAC / InvalidTag failures
+    _own_report_success = False  # At least one own report authenticated OK
 
     # FIX #155: Prepare all identity key candidates for multi-candidate retry.
     # async_retrieve_identity_key can return multiple candidates (MCU bit-flip
@@ -1264,11 +1375,22 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             public_key_random = enc.publicKeyRandom
 
             if public_key_random == b"":  # Own report
+                _own_encrypted_report_count += 1
                 if active_identity_key is None:
+                    # Unreachable in practice: a None identity_key already raised
+                    # DecryptionError at function entry, and active_identity_key
+                    # falls back to the non-None identity_key. Kept as a defensive
+                    # guard. Intentionally a ValueError (config error, not an auth
+                    # signal) so it is NOT counted as an own auth failure and does
+                    # not trigger stale-key reauth escalation.
                     raise ValueError("No identity key available for own-report decryption")
                 decrypted_location_raw = await _offload_decrypt_aes(
                     active_identity_key, encrypted_location
                 )
+                # Authentication passed: the cached identity key still matches the
+                # server's own reports. One success proves the key is healthy, so
+                # foreign-report failures must not trigger account-wide escalation.
+                _own_report_success = True
             else:
                 # FIX #155: Foreign/crowdsourced reports use ECDH + AES-EAX
                 # with a different key derivation path than own reports.
@@ -1341,6 +1463,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         except InvalidTag:
             # InvalidTag means AES-GCM authentication failed during decryption.
             _auth_failures += 1
+            if public_key_random == b"":  # Own-report auth failure
+                _own_auth_failures += 1
             _LOGGER.warning(
                 "Decryption auth failed (InvalidTag) for %s report "
                 "(time_offset=%s, key_len=%s, candidates=%d): "
@@ -1358,6 +1482,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             # meaning to InvalidTag from the cryptography library.
             if "mac" in str(ve).lower():
                 _auth_failures += 1
+                if public_key_random == b"":  # Own-report auth failure
+                    _own_auth_failures += 1
                 _LOGGER.warning(
                     "Decryption auth failed (MAC check) for %s report "
                     "(time_offset=%s, key_len=%s, candidates=%d): %s",
@@ -1413,6 +1539,25 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 "derivation may be failing. Re-authenticate the account.",
                 _auth_failures,
             )
+
+    # Diff-Review #1: When the device HAS its own encrypted reports and EVERY
+    # one of them failed authentication (with not a single own-report success),
+    # the cached identity key no longer matches the server's reports. This is a
+    # genuine account-wide auth failure, distinct from the masked retrieve path
+    # above and from foreign/crowdsourced failures (which legitimately fail with
+    # other accounts' keys and must NOT escalate). Raise DecryptionError so the
+    # existing escalation machinery (coordinator poll/locate handlers and the FCM
+    # push handler, all gated by per-cycle counting + cooldown) can surface a
+    # reauth repair instead of silently returning empty every cycle.
+    if (
+        _own_encrypted_report_count > 0
+        and _own_auth_failures >= _own_encrypted_report_count
+        and not _own_report_success
+    ):
+        raise DecryptionError(
+            "All own-report decryptions failed; the cached identity key no "
+            "longer matches the server reports."
+        )
 
     if not wrapped:
         _LOGGER.info("[DecryptLocations] No locations found.")

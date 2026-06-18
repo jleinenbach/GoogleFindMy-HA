@@ -27,7 +27,7 @@ Each ``RL-*`` test pins one member of the eight bug families distilled from the
     RL-12  missing/empty shared_key -> RuntimeError
     RL-13  missing encryptedOwnerKeyAndMetadata -> RuntimeError
     RL-14  missing/empty encryptedOwnerKey -> RuntimeError
-    RL-15  InvalidTag from decrypt -> RuntimeError (actionable message)
+    RL-15  InvalidTag from decrypt -> propagated unwrapped (discriminator)
     RL-16  decrypted owner_key empty/wrong type -> RuntimeError
     RL-17  hex happy path -> OwnerKeyInfo(32 bytes, version)
     RL-18  base64url fallback + self-heal: cache normalized to hex
@@ -366,14 +366,21 @@ async def test_rl14_missing_encrypted_owner_key_raises(
         )
 
 
-async def test_rl15_invalid_tag_maps_to_runtime_error(
+async def test_rl15_invalid_tag_propagates_unwrapped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """RL-15: an AES-GCM InvalidTag during owner-key decryption propagates
+    unchanged instead of being wrapped into RuntimeError.
+
+    decrypt_locations relies on the unwrapped InvalidTag to map the failure to
+    SharedKeyMismatchError and distinguish a wrong/stale shared key from a missing
+    one. Wrapping it here would erase that discriminator.
+    """
     monkeypatch.setattr(
         gok, "decrypt_owner_key", MagicMock(side_effect=gok.InvalidTag())
     )
     cache = _FakeCache()
-    with pytest.raises(RuntimeError, match="InvalidTag"):
+    with pytest.raises(gok.InvalidTag):
         await gok.async_get_owner_key(
             cache=cache, username="g@acct.example.com", **_getters()
         )

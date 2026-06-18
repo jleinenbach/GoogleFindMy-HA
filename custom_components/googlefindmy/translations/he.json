@@ -452,7 +452,7 @@
         "name": "סריקה פעילה"
       },
       "connectivity": {
-        "name": "מצב חיבור",
+        "name": "מצב חיבור FCM",
         "state_attributes": {
           "last_poll_result": {
             "name": "תוצאת סריקה אחרונה"
@@ -666,6 +666,15 @@
       },
       "semantic_labels": {
         "name": "תוויות סמנטיות"
+      },
+      "encryption_key_status": {
+        "name": "סטטוס מפתח ההצפנה",
+        "state": {
+          "ok": "תקין",
+          "shared_key_invalid": "לא תקף (נדרש אימות מחדש)",
+          "shared_key_missing": "חסר (חבילה לא שלמה)",
+          "tracker_key_outdated": "מפתח העוקב מיושן"
+        }
       },
       "stat_background_updates": {
         "name": "עדכונים ברקע"

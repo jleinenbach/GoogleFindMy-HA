@@ -7,6 +7,7 @@ import asyncio
 import logging
 
 import pytest
+from cryptography.exceptions import InvalidTag
 
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
@@ -396,3 +397,354 @@ async def test_pair_date_microseconds_normalization_and_future_rejection(
     )
 
     assert future_pair_date is None
+
+
+# ---------------------------------------------------------------------------
+# Diff-Review #1 (Variant C): own-report exhaustion escalates to DecryptionError,
+# while foreign-only failures and report-less devices never escalate.
+# ---------------------------------------------------------------------------
+
+
+def _valid_location_bytes() -> bytes:
+    """Serialize a small, in-bounds Location proto for a successful decrypt."""
+
+    loc = DeviceUpdate_pb2.Location()
+    loc.latitude = int(48.0 * 1e7)
+    loc.longitude = int(11.0 * 1e7)
+    loc.altitude = ALTITUDE_METERS
+    return loc.SerializeToString()
+
+
+def _add_report(
+    update: DeviceUpdate_pb2.DeviceUpdate,
+    *,
+    public_key_random: bytes,
+    encrypted_location: bytes,
+    is_own_report: bool,
+    base_now: float,
+) -> None:
+    """Append one encrypted report; empty public_key_random marks an own report."""
+
+    reports = (
+        update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
+    )
+    network_location = reports.networkLocations.add()
+    network_location.status = Common_pb2.Status.LAST_KNOWN
+    network_location.geoLocation.accuracy = ACCURACY_METERS
+    enc = network_location.geoLocation.encryptedReport
+    enc.publicKeyRandom = public_key_random
+    enc.encryptedLocation = encrypted_location
+    enc.isOwnReport = is_own_report
+    # A matching timestamp is required, otherwise the report is dropped before
+    # the decrypt attempt (zip_longest pads missing timestamps with None).
+    reports.networkLocationTimestamps.add().seconds = int(base_now - 10)
+
+
+async def test_all_own_reports_failing_auth_raises_decryption_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1: every own report fails authentication → escalate via DecryptionError.
+
+    This is the account-wide stale-key signal: the cached identity key no longer
+    matches the server's own reports, so the function must raise instead of
+    silently returning empty (which the coordinator would never escalate).
+    """
+
+    base_now = 1_700_000_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-ciphertext",
+        is_own_report=True,
+        base_now=base_now,
+    )
+
+    with pytest.raises(decrypt_locations.DecryptionError):
+        await decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+
+
+async def test_foreign_failures_with_own_success_do_not_escalate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D2: own report succeeds, foreign reports fail → no escalation.
+
+    Foreign/crowdsourced reports legitimately fail with another account's key.
+    A single own-report success proves the key is healthy, so they must not
+    raise an account-wide DecryptionError (regression guard for Befund #2/#4).
+    """
+
+    base_now = 1_700_000_500.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        return _valid_location_bytes()
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        raise ValueError("MAC check failed")
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-ok",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    _add_report(
+        update,
+        public_key_random=b"\x10\x11\x12\x13",
+        encrypted_location=b"foreign-bad",
+        is_own_report=False,
+        base_now=base_now,
+    )
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    # Own report decoded; no exception despite the foreign auth failure.
+    assert any(entry.get("metadata_only") is not True for entry in result)
+
+
+async def test_foreign_only_failure_does_not_escalate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D3: device with no own reports → never escalate, even if foreign fails.
+
+    With ``_own_encrypted_report_count == 0`` the own-exhaustion gate is closed,
+    so a failing foreign-only report returns gracefully instead of raising.
+    """
+
+    base_now = 1_700_001_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        raise ValueError("MAC check failed")
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"\x20\x21\x22\x23",
+        encrypted_location=b"foreign-bad",
+        is_own_report=False,
+        base_now=base_now,
+    )
+
+    # Must not raise: no own reports means no account-wide signal.
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+    assert isinstance(result, list)
+
+
+async def test_partial_own_success_self_heals_without_escalation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D4: one own report fails but another succeeds → no escalation.
+
+    A single own-report success means the key still works, so a transient
+    per-report failure must self-heal rather than escalate.
+    """
+
+    base_now = 1_700_001_500.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    calls = {"n": 0}
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise InvalidTag
+        return _valid_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-bad",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-ok",
+        is_own_report=True,
+        base_now=base_now,
+    )
+
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    # The successful own report suppresses escalation entirely.
+    assert any(entry.get("metadata_only") is not True for entry in result)
+
+
+async def test_own_report_mac_valueerror_counts_as_own_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D5: an own-report MAC ValueError counts as an own failure and escalates.
+
+    Own reports use AES-GCM (which raises InvalidTag), but the MAC-ValueError
+    handler is mirrored defensively for any future own-report path that surfaces
+    a PyCryptodome-style ``ValueError("MAC check failed")``. This guards that the
+    defensive symmetry still feeds the own-only escalation counter.
+    """
+
+    base_now = 1_700_002_000.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise ValueError("MAC check failed")
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-mac-fail",
+        is_own_report=True,
+        base_now=base_now,
+    )
+
+    with pytest.raises(decrypt_locations.DecryptionError):
+        await decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        # Authenticated coordinate report -> positive proof of the shared key.
+        ({"last_seen": 123.0, "latitude": 1.0, "longitude": 2.0}, True),
+        # Coordinates win regardless of an explicit metadata_only=False flag.
+        ({"latitude": 1.0, "longitude": 2.0, "metadata_only": False}, True),
+        # 0.0 coordinates are valid (is-None check, not truthiness).
+        ({"latitude": 0.0, "longitude": 0.0}, True),
+        # SEMANTIC-shaped row: last_seen + semantic_name but no coordinates and no
+        # metadata_only flag -> skipped the crypto path, so it proves nothing.
+        (
+            {
+                "last_seen": 123.0,
+                "semantic_name": "Home",
+                "status": "semantic",
+                "latitude": None,
+                "longitude": None,
+            },
+            False,
+        ),
+        # Partial coordinates (only one axis) -> not an authenticated fix.
+        ({"latitude": 1.0, "longitude": None}, False),
+        # metadata_only sentinel -> secrets-bundle key material, no decrypt.
+        ({"metadata_only": True, "owner_key_version": 7}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+async def test_is_real_location_record(record: object, expected: bool) -> None:
+    """Only an authenticated coordinate report proves the shared key.
+
+    Decrypted coordinates are produced solely by the authenticated crypto path, so
+    requiring a real ``latitude``/``longitude`` pair is an allowlist for genuine
+    reports. Truthy-but-unauthenticated shapes -- ``metadata_only=True`` sentinels
+    and SEMANTIC rows (no coordinates, crypto path skipped) -- must return False, or
+    they would clear the shared decrypt-failure budget and mask a stale key.
+    """
+    assert decrypt_locations.is_real_location_record(record) is expected
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        # Empty / falsy inputs -> no proof.
+        (None, False),
+        ([], False),
+        # Only report-less rows -> no record authenticates a coordinate report.
+        (
+            [
+                {"metadata_only": True, "owner_key_version": 7},
+                {"last_seen": 9.0, "semantic_name": "Home", "latitude": None},
+            ],
+            False,
+        ),
+        # A real coordinate report anywhere in the list proves the shared key,
+        # even when a report-less SEMANTIC row would outrank it in the selector.
+        (
+            [
+                {"last_seen": 5.0, "latitude": 1.0, "longitude": 2.0},
+                {"last_seen": 9.0, "semantic_name": "Home", "latitude": None},
+            ],
+            True,
+        ),
+    ],
+)
+async def test_any_real_location_record(records: object, expected: bool) -> None:
+    """The decrypt proof is a full-list property, not a single-record property.
+
+    ``any_real_location_record`` must return True when ANY record authenticates a
+    coordinate report, so a successfully decrypted fix hidden behind a newer
+    report-less SEMANTIC/metadata row is never lost. Empty inputs and lists of only
+    report-less rows must return False so they cannot clear the reauth budget.
+    """
+    assert decrypt_locations.any_real_location_record(records) is expected

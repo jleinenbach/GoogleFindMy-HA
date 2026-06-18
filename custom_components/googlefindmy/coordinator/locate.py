@@ -25,6 +25,10 @@ from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
 from ..const import DEFAULT_MIN_POLL_INTERVAL
+from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
+    StaleOwnerKeyError,
+)
 from ..NovaApi.nova_request import (
     NovaAuthError,
     NovaHTTPError,
@@ -319,6 +323,13 @@ class LocateOperations(_MixinBase):
                 if not location_data:
                     return {}
 
+                # Manual locate is upward-only for the reauth budget and never
+                # consumes the poll-only decrypt-proof hint; drop it here (after the
+                # empty guard, so location_data is a non-empty dict) so it cannot
+                # leak into the cached payload or the returned dict (mirrors the
+                # _report_hint stripping discipline).
+                location_data.pop("_decrypt_proven", None)
+
                 self._record_semantic_label(location_data, device_id=device_id)
 
                 cached_loc = self._device_location_data.get(device_id)
@@ -571,6 +582,69 @@ class LocateOperations(_MixinBase):
                 )
                 self.note_error(decode_err, where="async_locate_device", device=name)
                 return {}
+            except StaleOwnerKeyError as stale_err:
+                # Per-tracker outdated owner key: an account-wide reauth would not
+                # fix a single outdated tracker. Record it through the shared entry
+                # point (per-tracker log, no account counter) and return an empty
+                # result rather than a generic HomeAssistantError. Must precede the
+                # DecryptionError handler below -- it is a subclass.
+                self.note_decrypt_failure(stale=True, error=stale_err, device=name)
+                self.note_error(stale_err, where="async_locate_device", device=name)
+                return {}
+            except DecryptionError as dec_err:
+                # Account-wide stale/missing shared key. Feed the SAME escalation
+                # counter as the poll and push paths (single source of truth) so a
+                # user clicking "Locate" contributes to -- and can trigger -- the
+                # reauth flow instead of silently swallowing into a generic error.
+                # Below threshold: graceful empty result, like the poll path keeps
+                # polling. At threshold: start reauth (HA cannot refresh the shared
+                # key itself; the user must supply a fresh secrets.json).
+                #
+                # This path only advances the shared counter, never resets it: the
+                # authoritative reset is the poll loop's whole-cycle decrypt-clean
+                # gate. A manual locate cannot prove the key is healthy (an empty
+                # result means "no pending report", which decrypts nothing), so
+                # resetting here could mask a genuinely stale key. The next clean
+                # poll cycle reconciles the counter. Locate is an additional upward
+                # evidence source, not a reset surface.
+                should_reauth = self.note_decrypt_failure(
+                    stale=False, error=dec_err, device=name
+                )
+                self.note_error(dec_err, where="async_locate_device", device=name)
+                if not should_reauth:
+                    return {}
+                self._set_auth_state(
+                    failed=True,
+                    reason=(
+                        "Location decryption keeps failing during manual locate; "
+                        "the shared key is stale and a fresh secrets.json "
+                        "(re-authentication) is required"
+                    ),
+                )
+                entry = getattr(self, "config_entry", None)
+                reauth_started = False
+                if entry is not None:
+                    try:
+                        # async_start_reauth is a synchronous @callback returning
+                        # None (it schedules the flow); awaiting it would raise on
+                        # the None result. Call it without await, mirroring the
+                        # SpotAuthPermanentError handler above.
+                        entry.async_start_reauth(self.hass)
+                        reauth_started = True
+                    except Exception as reauth_err:  # pragma: no cover - defensive
+                        _LOGGER.debug(
+                            "Failed to start reauth flow after manual locate "
+                            "decryption failure: %s",
+                            reauth_err,
+                        )
+                message = (
+                    "Google Find My Device can no longer decrypt locations "
+                    "(the shared key is stale); re-authentication has been started."
+                    if reauth_started
+                    else "Google Find My Device can no longer decrypt locations "
+                    "(the shared key is stale); please re-authenticate."
+                )
+                raise HomeAssistantError(message) from dec_err
             except Exception as err:
                 short_err = self._short_error_message(err)
                 _LOGGER.error("Manual locate for %s failed: %s", name, short_err)

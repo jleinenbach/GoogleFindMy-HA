@@ -452,7 +452,7 @@
         "name": "Interrogazione"
       },
       "connectivity": {
-        "name": "Stato della connessione",
+        "name": "Stato della connessione FCM",
         "state_attributes": {
           "last_poll_result": {
             "name": "Risultato dell'ultimo sondaggio"
@@ -666,6 +666,15 @@
       },
       "semantic_labels": {
         "name": "Etichette semantiche"
+      },
+      "encryption_key_status": {
+        "name": "Stato della chiave di crittografia",
+        "state": {
+          "ok": "OK",
+          "shared_key_invalid": "Non valida (riautenticazione necessaria)",
+          "shared_key_missing": "Mancante (bundle incompleto)",
+          "tracker_key_outdated": "Chiave del tracker obsoleta"
+        }
       },
       "stat_background_updates": {
         "name": "Aggiornamenti in background"

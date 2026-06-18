@@ -452,7 +452,7 @@
         "name": "Polling"
       },
       "connectivity": {
-        "name": "Verbindingsstatus",
+        "name": "FCM-verbindingsstatus",
         "state_attributes": {
           "last_poll_result": {
             "name": "Laatste pollresultaat"
@@ -666,6 +666,15 @@
       },
       "semantic_labels": {
         "name": "Semantische labels"
+      },
+      "encryption_key_status": {
+        "name": "Status versleutelingssleutel",
+        "state": {
+          "ok": "OK",
+          "shared_key_invalid": "Ongeldig (herauthenticatie vereist)",
+          "shared_key_missing": "Ontbreekt (onvolledige bundel)",
+          "tracker_key_outdated": "Trackersleutel verouderd"
+        }
       },
       "stat_background_updates": {
         "name": "Achtergrondupdates"
