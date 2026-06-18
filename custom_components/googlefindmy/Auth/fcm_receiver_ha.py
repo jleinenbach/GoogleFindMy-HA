@@ -2963,6 +2963,35 @@ class FcmReceiverHA:
 
     # -------------------- Decode helper --------------------
 
+    def _note_decrypt_failure_for_entry(
+        self, entry_id: str, *, stale: bool, error: Exception
+    ) -> None:
+        """Feed a background-path decryption failure into the matching coordinator(s).
+
+        Mirrors the poll path so a push-only setup escalates to re-authentication
+        identically (one shared counter, no second divergent code path). Because the
+        background decode runs outside a coordinator update cycle, an escalation
+        cannot be surfaced by raising ``ConfigEntryAuthFailed`` here; instead the
+        entry's reauth flow is started directly -- the same synchronous ``@callback``
+        mechanism repairs.py and coordinator/locate.py already use. It is idempotent:
+        Home Assistant does not duplicate an already-open reauth flow.
+
+        This must never break the push path, so all failures are swallowed to debug.
+        """
+        hass = self._hass
+        for coordinator in self._coordinators_for_entries({entry_id}):
+            try:
+                escalate = coordinator.note_decrypt_failure(stale=stale, error=error)
+            except Exception as err:  # noqa: BLE001 - never break the push path
+                _LOGGER.debug(
+                    "note_decrypt_failure failed for entry %s: %s", entry_id, err
+                )
+                continue
+            if escalate and hass is not None:
+                entry = getattr(coordinator, "config_entry", None)
+                if entry is not None:
+                    entry.async_start_reauth(hass)
+
     async def _decode_background_location_async(  # noqa: PLR0911
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
@@ -2991,18 +3020,25 @@ class FcmReceiverHA:
                     raw_locations = await async_decrypt_location_response_locations(
                         device_update, cache=cache
                     )
-                except StaleOwnerKeyError:
+                except StaleOwnerKeyError as stale_err:
                     _LOGGER.info(
-                        "Background location update skipped (stale key) for entry %s",
+                        "Background location update skipped (stale tracker key) for "
+                        "entry %s",
                         entry_id,
+                    )
+                    self._note_decrypt_failure_for_entry(
+                        entry_id, stale=True, error=stale_err
                     )
                     return {}
                 except DecryptionError as dec_err:
                     _LOGGER.warning(
                         "Background location decryption failed for entry %s: %s. "
-                        "This may resolve after re-authentication or key refresh.",
+                        "Escalates to re-authentication if it persists.",
                         entry_id,
                         dec_err,
+                    )
+                    self._note_decrypt_failure_for_entry(
+                        entry_id, stale=False, error=dec_err
                     )
                     return {}
                 except InvalidTag:

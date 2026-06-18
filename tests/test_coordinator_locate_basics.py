@@ -14,10 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import math
+from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 
 from custom_components.googlefindmy.const import DEFAULT_MIN_POLL_INTERVAL
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
+    SharedKeyMismatchError,
+    StaleOwnerKeyError,
+)
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.helpers.locate_mixin_stub import LocateStub
 
@@ -252,6 +259,77 @@ class TestAsyncLocateDeviceGating:
         }
         result = await coord.async_locate_device("dev-1")
         assert result == {}
+
+
+class TestAsyncLocateDeviceDecryptFailure:
+    """Codex P2: manual locate must handle stale/missing shared-key failures the
+    same way the poll path does (feed the shared escalation counter, start reauth),
+    not swallow ``DecryptionError`` into a generic ``HomeAssistantError``."""
+
+    @pytest.fixture(autouse=True)
+    def _pass_cooldown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Move the clock past every cooldown gate so the Nova call is reached."""
+        monkeypatch.setattr(
+            "custom_components.googlefindmy.coordinator.locate.time.monotonic",
+            lambda: 1000.0,
+        )
+
+    async def test_stale_owner_key_records_per_tracker_no_reauth(
+        self, coord: LocateStub
+    ) -> None:
+        """A per-tracker StaleOwnerKeyError feeds note_decrypt_failure(stale=True),
+        never starts an account reauth, and returns an empty result."""
+        coord.note_decrypt_failure = MagicMock(return_value=False)
+        coord.config_entry.async_start_reauth = MagicMock()
+        coord.api.async_get_device_location.side_effect = StaleOwnerKeyError(
+            "tracker v1 < v2"
+        )
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        coord.note_decrypt_failure.assert_called_once()
+        assert coord.note_decrypt_failure.call_args.kwargs.get("stale") is True
+        coord.config_entry.async_start_reauth.assert_not_called()
+
+    async def test_decrypt_failure_below_threshold_returns_empty(
+        self, coord: LocateStub
+    ) -> None:
+        """Below the escalation threshold the manual locate degrades gracefully to
+        an empty result (mirrors the poll path that keeps polling), and must not
+        start a reauth flow."""
+        coord.note_decrypt_failure = MagicMock(return_value=False)
+        coord.config_entry.async_start_reauth = MagicMock()
+        coord.api.async_get_device_location.side_effect = SharedKeyMismatchError(
+            "stale shared key"
+        )
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        coord.note_decrypt_failure.assert_called_once()
+        assert coord.note_decrypt_failure.call_args.kwargs.get("stale") is False
+        coord.config_entry.async_start_reauth.assert_not_called()
+
+    async def test_decrypt_failure_at_threshold_starts_reauth(
+        self, coord: LocateStub
+    ) -> None:
+        """When the shared counter says escalate (note_decrypt_failure True), manual
+        locate marks the auth state failed, starts the reauth flow, and surfaces a
+        user-facing HomeAssistantError instead of an empty result."""
+        coord.note_decrypt_failure = MagicMock(return_value=True)
+        coord.config_entry.async_start_reauth = MagicMock()
+        coord.api.async_get_device_location.side_effect = DecryptionError(
+            "shared key gone"
+        )
+
+        with pytest.raises(HomeAssistantError) as excinfo:
+            await coord.async_locate_device("dev-1")
+
+        assert "re-authentication has been started" in str(excinfo.value)
+        coord._set_auth_state.assert_called_once()
+        assert coord._set_auth_state.call_args.kwargs.get("failed") is True
+        coord.config_entry.async_start_reauth.assert_called_once()
 
 
 class TestAsyncPlaySoundGating:

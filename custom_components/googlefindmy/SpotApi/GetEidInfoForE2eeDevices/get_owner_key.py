@@ -195,11 +195,13 @@ async def _retrieve_owner_key(
         owner_key: Any = await _run_in_executor(
             decrypt_owner_key, shared_key, encrypted_owner_key
         )
-    except InvalidTag as exc:
-        raise RuntimeError(
-            "Owner key decryption failed (InvalidTag): the shared key may be "
-            "stale or incompatible. Try re-authenticating with --reauth."
-        ) from exc
+    except InvalidTag:
+        # Propagate InvalidTag unchanged. The caller (decrypt_locations) maps it to
+        # SharedKeyMismatchError to distinguish "shared key wrong/stale" from
+        # "shared key missing" (RuntimeError). Wrapping it into RuntimeError here
+        # would erase that discriminator and collapse both root causes into one
+        # opaque message, which is exactly what hid the real cause from users.
+        raise
     owner_key_version = getattr(metadata, "ownerKeyVersion", None)
 
     if not isinstance(owner_key, (bytes, bytearray)) or len(owner_key) == 0:

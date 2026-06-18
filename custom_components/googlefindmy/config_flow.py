@@ -129,6 +129,7 @@ from .integration_modules import (
     import_integration_api_module,
     import_integration_package,
 )
+from .shared_helpers import normalize_secrets_bundle
 
 _ResolveEntryEmailCallable = Callable[[ConfigEntry], tuple[str | None, str | None]]
 _CoalesceCallable = Callable[
@@ -1417,6 +1418,7 @@ def _interpret_credentials_choice(
             parsed = json.loads(secrets_json)
             if not isinstance(parsed, dict):
                 raise TypeError()
+            parsed = normalize_secrets_bundle(parsed)
         except (json.JSONDecodeError, TypeError):
             return "secrets", None, None, "invalid_json"
 
@@ -1460,6 +1462,7 @@ def _interpret_reauth_choice(
             parsed = json.loads(secrets_raw)
             if not isinstance(parsed, dict):
                 raise TypeError()
+            parsed = normalize_secrets_bundle(parsed)
         except (json.JSONDecodeError, TypeError):
             return None, None, "invalid_json"
 
@@ -1677,7 +1680,7 @@ def _normalize_and_validate_discovery_payload(
     )
     if isinstance(secrets_raw, str):
         try:
-            secrets_raw = json.loads(secrets_raw)
+            secrets_raw = normalize_secrets_bundle(json.loads(secrets_raw))
         except json.JSONDecodeError as err:
             raise DiscoveryFlowError("invalid_discovery_info") from err
 
@@ -2836,7 +2839,7 @@ class ConfigFlow(
             try:
                 parsed_candidate = json.loads(raw)
                 if isinstance(parsed_candidate, dict):
-                    parsed_secrets = parsed_candidate
+                    parsed_secrets = normalize_secrets_bundle(parsed_candidate)
                 else:
                     raise TypeError()
             except (json.JSONDecodeError, TypeError):
@@ -5833,6 +5836,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                 parsed = json.loads(user_input["new_secrets_json"])
                                 if not isinstance(parsed, dict):
                                     raise TypeError()
+                                parsed = normalize_secrets_bundle(parsed)
                             except Exception:
                                 errors["new_secrets_json"] = "invalid_json"
                             else:
@@ -5899,7 +5903,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     except Exception as err2:  # noqa: BLE001
                         if _is_multi_entry_guard_error(err2):
                             entry = self.config_entry
-                            parsed = json.loads(user_input["new_secrets_json"])
+                            parsed = normalize_secrets_bundle(
+                                json.loads(user_input["new_secrets_json"])
+                            )
                             cands = _extract_oauth_candidates_from_secrets(parsed)
                             token_first = cands[0][1] if cands else ""
                             updated_data = {

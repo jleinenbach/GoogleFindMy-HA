@@ -320,7 +320,13 @@ async def test_non_teardown_attribute_error_is_reraised(
 
 
 def test_polling_path_translates_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """SpotAuthPermanentError from the API should surface as ConfigEntryAuthFailed."""
+    """SpotAuthPermanentError from the API should start the entry reauth flow.
+
+    The poll cycle runs as a fire-and-forget task, so it starts the entry-scoped
+    reauth flow directly rather than raising (a raised ``ConfigEntryAuthFailed``
+    would never reach the awaited coordinator refresh). It still records
+    ``last_exception`` so the ``finally`` block marks the update failed.
+    """
 
     loop = asyncio.new_event_loop()
     hass_coordinator = _prepare_coordinator(loop)
@@ -331,19 +337,21 @@ def test_polling_path_translates_auth_error(monkeypatch: pytest.MonkeyPatch) -> 
         AsyncMock(return_value=None),
     )
 
-    with pytest.raises(ConfigEntryAuthFailed):
-        try:
-            loop.run_until_complete(
-                hass_coordinator._async_start_poll_cycle(
-                    [{"id": "dev-1", "name": "Device"}], force=True
-                )
+    try:
+        loop.run_until_complete(
+            hass_coordinator._async_start_poll_cycle(
+                [{"id": "dev-1", "name": "Device"}], force=True
             )
-        finally:
-            from tests.helpers import drain_loop
+        )
+    finally:
+        from tests.helpers import drain_loop
 
-            drain_loop(loop)
-            loop.close()
+        drain_loop(loop)
+        loop.close()
 
+    hass_coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        hass_coordinator.hass
+    )
     assert isinstance(hass_coordinator.last_exception, ConfigEntryAuthFailed)
 
 

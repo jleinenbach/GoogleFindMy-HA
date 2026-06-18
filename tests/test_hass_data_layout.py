@@ -530,7 +530,9 @@ async def test_async_setup_entry_hijacks_legacy_credentials_when_cache_empty(
     cache = harness.cache
     username_key = integration.username_string
     assert cache.values[username_key] == "legacyuser@example.com"
-    assert cache.values[DATA_SECRET_BUNDLE]["email"] == "LegacyUser@Example.com "
+    # The secrets-bundle normalizer edge-trims non-credential fields (case is
+    # preserved, only the pasted trailing space is removed).
+    assert cache.values[DATA_SECRET_BUNDLE]["email"] == "LegacyUser@Example.com"
     assert cache.values[CONF_OAUTH_TOKEN] == "outer-oauth-token"
     assert cache.values[DATA_AAS_TOKEN] == "legacy-aas-token"
 

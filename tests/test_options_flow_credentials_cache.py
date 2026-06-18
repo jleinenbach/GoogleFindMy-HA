@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -21,6 +22,7 @@ from custom_components.googlefindmy.const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     DATA_AAS_TOKEN,
+    DATA_SECRET_BUNDLE,
     DOMAIN,
     SERVICE_SUBENTRY_KEY,
     SUBENTRY_TYPE_SERVICE,
@@ -419,5 +421,127 @@ def test_play_stop_sound_uses_entry_cache(  # noqa: PLR0915
         assert cache_primary.get_calls[-1] == "entry-one:ttl2"
         await stop_set("ttl2", "value2")
         assert ("entry-one:ttl2", "value2") in cache_primary.set_calls
+
+    asyncio.run(_exercise())
+
+
+def test_options_flow_secrets_reauth_strips_owner_key_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Options reauth with a pasted secrets bundle strips owner_key whitespace."""
+
+    async def _exercise() -> None:
+        cache = _MemoryCache()
+        entry = _DummyEntry(
+            entry_id="entry-1",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+            },
+            cache=cache,
+        )
+        hass = _DummyHass(entry, cache)
+
+        flow = config_flow.OptionsFlowHandler()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.config_entry = entry  # type: ignore[attr-defined]
+
+        async def _fake_pick(
+            hass: Any,
+            email: str,
+            candidates: list[tuple[str, str]],
+            *,
+            secrets_bundle: dict[str, Any] | None = None,
+        ) -> str | None:
+            # The bundle handed downstream is already whitespace-normalized.
+            assert secrets_bundle is not None
+            assert secrets_bundle["owner_key"] == "AABBCC"
+            return candidates[0][1] if candidates else None
+
+        monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+        payload = {
+            "google_email": "user@example.com",
+            "oauth_token": "oauth-token-from-secrets-123456",
+            "owner_key": "AA BB\nCC ",
+            "username": "  Keep Me  ",
+        }
+        result = await flow.async_step_credentials(
+            {"new_secrets_json": json.dumps(payload), "subentry": TRACKER_SUBENTRY_KEY}
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        assert isinstance(result, dict)
+
+        updated = hass.config_entries.updated_payloads[-1]
+        bundle = updated[DATA_SECRET_BUNDLE]
+        assert bundle["owner_key"] == "AABBCC"
+        assert bundle["username"] == "Keep Me"
+        await hass.drain_tasks()
+
+    asyncio.run(_exercise())
+
+
+def test_options_flow_secrets_reauth_guard_error_fallback_normalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The multi-entry-guard fallback path also normalizes the bundle."""
+
+    async def _exercise() -> None:
+        cache = _MemoryCache()
+        entry = _DummyEntry(
+            entry_id="entry-1",
+            data={
+                CONF_GOOGLE_EMAIL: "user@example.com",
+                CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+            },
+            cache=cache,
+        )
+        hass = _DummyHass(entry, cache)
+
+        # Force the first update to raise a multi-entry guard error so the
+        # fallback branch (which re-parses and re-normalizes) is exercised.
+        calls = {"n": 0}
+        original_update = hass.config_entries.async_update_entry
+
+        def _maybe_raise(entry_: Any, *, data: dict[str, Any]) -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("Multiple config entries active for this domain")
+            original_update(entry_, data=data)
+
+        hass.config_entries.async_update_entry = _maybe_raise  # type: ignore[assignment]
+
+        flow = config_flow.OptionsFlowHandler()
+        flow.hass = hass  # type: ignore[assignment]
+        flow.config_entry = entry  # type: ignore[attr-defined]
+
+        async def _fake_pick(
+            hass: Any,
+            email: str,
+            candidates: list[tuple[str, str]],
+            *,
+            secrets_bundle: dict[str, Any] | None = None,
+        ) -> str | None:
+            return candidates[0][1] if candidates else None
+
+        monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+        payload = {
+            "google_email": "user@example.com",
+            "oauth_token": "oauth-token-from-secrets-123456",
+            "owner_key": "AA BB CC",
+        }
+        result = await flow.async_step_credentials(
+            {"new_secrets_json": json.dumps(payload), "subentry": TRACKER_SUBENTRY_KEY}
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        assert isinstance(result, dict)
+        # First update raised, fallback re-attempted the update.
+        assert calls["n"] >= 2
+        updated = hass.config_entries.updated_payloads[-1]
+        assert updated[DATA_SECRET_BUNDLE]["owner_key"] == "AABBCC"
+        await hass.drain_tasks()
 
     asyncio.run(_exercise())

@@ -142,6 +142,62 @@ def disable_http_server() -> Iterable[None]:
         yield
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown() -> None:
+    """Heal the lazy ``GoogleFindMyCoordinator`` symbol after each test.
+
+    The integration package binds ``GoogleFindMyCoordinator`` lazily: it starts
+    as a placeholder class and ``_ensure_runtime_imports()`` swaps in the real
+    class while flipping ``_RUNTIME_IMPORTS_LOADED`` to ``True`` (a direct global
+    assignment, invisible to ``monkeypatch``). Several tests ``monkeypatch`` that
+    symbol while it is still the placeholder; if real runtime imports run during
+    the test, teardown restores the *placeholder* as the symbol's value while
+    ``_RUNTIME_IMPORTS_LOADED`` stays ``True``. The guard then never rebinds the
+    real class, so every later ``isinstance(obj, GoogleFindMyCoordinator)`` check
+    silently fails. Under xdist this leaks across tests in a worker and breaks
+    unrelated ones (observed: ``test_device_identifier_normalization`` skipping
+    its purge_device branch).
+
+    This runs as a ``trylast`` teardown hook (not a fixture) so it executes after
+    every fixture finalizer, in particular after ``monkeypatch`` has restored the
+    placeholder. It detects the inconsistent state (guard set, yet any lazily
+    bound symbol is still a placeholder) and clears the guard so the next
+    ``_ensure_runtime_imports()`` rebinds the real classes. All four lazily bound
+    classes are checked, not only the coordinator, because the same monkeypatch
+    trap applies symmetrically to ``DiscoveryManager`` and the two map views.
+    """
+
+    integration = sys.modules.get("custom_components.googlefindmy")
+    if integration is None:
+        return
+    if not getattr(integration, "_RUNTIME_IMPORTS_LOADED", False):
+        return
+
+    lazy_symbols = (
+        "GoogleFindMyCoordinator",
+        "DiscoveryManager",
+        "GoogleFindMyMapView",
+        "GoogleFindMyMapRedirectView",
+    )
+    any_placeholder = any(
+        "Placeholder" in getattr(getattr(integration, name, None), "__name__", "")
+        for name in lazy_symbols
+    )
+    if not any_placeholder:
+        return
+
+    # Open the guard so the real classes get rebound. If rebinding fails (e.g. a
+    # test left an incomplete submodule stub in sys.modules), the state stays
+    # {loaded=False, placeholder}, which is consistent and self-heals on the next
+    # _ensure_runtime_imports() call; swallowing avoids reddening an unrelated
+    # test's teardown over that benign, recoverable condition.
+    integration._RUNTIME_IMPORTS_LOADED = False
+    try:
+        integration._ensure_runtime_imports()
+    except Exception:  # noqa: BLE001 - see comment above; left state is consistent
+        integration._RUNTIME_IMPORTS_LOADED = False
+
+
 _CONST_MODULE = load_googlefindmy_const_module()
 _SERVICE_DEVICE_NAME: str = getattr(
     _CONST_MODULE, "SERVICE_DEVICE_NAME", "Google Find My Integration"

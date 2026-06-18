@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import FrozenInstanceError, dataclass, field
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import Platform
@@ -166,6 +167,7 @@ class GoogleFindMyConfigEntryStub:
         "source",
         "version",
         "minor_version",
+        "async_start_reauth",
         "_unload_callbacks",
     )
 
@@ -205,6 +207,10 @@ class GoogleFindMyConfigEntryStub:
         self.source = source
         self.version = 1
         self.minor_version = 1
+        # Mirror the real ``ConfigEntry.async_start_reauth`` (synchronous @callback
+        # returning None). A Mock lets poll-cycle tests assert the reauth flow was
+        # started; tests may also re-assign their own Mock to this slot.
+        self.async_start_reauth = Mock()
         self._unload_callbacks: list[Callable[[], None]] = []
 
     def async_on_unload(self, callback: Callable[[], None]) -> None:
