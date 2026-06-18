@@ -1680,12 +1680,17 @@ def _normalize_and_validate_discovery_payload(
     )
     if isinstance(secrets_raw, str):
         try:
-            secrets_raw = normalize_secrets_bundle(json.loads(secrets_raw))
+            secrets_raw = json.loads(secrets_raw)
         except json.JSONDecodeError as err:
             raise DiscoveryFlowError("invalid_discovery_info") from err
 
     if isinstance(secrets_raw, Mapping):
-        secrets_dict = dict(secrets_raw)
+        # Normalize whitespace here -- not only in the str-decode branch above --
+        # so already-parsed mapping payloads from in-repo cloud discovery
+        # (discovery.py forwards DATA_SECRET_BUNDLE as a dict) receive the same
+        # cleanup. A stray space in owner_key/shared_key breaks AES-GCM
+        # decryption. normalize_secrets_bundle is idempotent and copies its input.
+        secrets_dict = dict(normalize_secrets_bundle(secrets_raw))
         secrets_bundle = MappingProxyType(secrets_dict)
         email_from_secrets = _extract_email_from_secrets(secrets_dict)
         if email_from_secrets:
