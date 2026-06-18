@@ -178,6 +178,9 @@ class _MixinBase:
     def note_decrypt_success(self) -> None:
         raise NotImplementedError
 
+    def note_background_decrypt_success(self) -> None:
+        raise NotImplementedError
+
     def _short_error_message(self, exc: Exception | str) -> str:
         raise NotImplementedError
 

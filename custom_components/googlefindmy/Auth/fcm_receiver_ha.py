@@ -3002,15 +3002,21 @@ class FcmReceiverHA:
         clean poll cycle does. Without this, push-only accounts whose scheduled
         polls stay idle could accumulate a couple of *non-consecutive* background
         decrypt failures up to the reauth threshold even though real locations
-        keep arriving and decrypting -- a spurious reauth prompt. Swallowed to
-        debug so it never breaks the push path.
+        keep arriving and decrypting -- a spurious reauth prompt. The same idle
+        push-only condition would also strand the diagnostic encryption-key
+        sensor on a stale ``shared_key_invalid`` / ``shared_key_missing`` status,
+        so this proven decrypt heals the account-wide sensor state too via
+        :meth:`note_background_decrypt_success`. Swallowed to debug so it never
+        breaks the push path.
         """
         for coordinator in self._coordinators_for_entries({entry_id}):
             try:
-                coordinator.note_decrypt_success()
+                coordinator.note_background_decrypt_success()
             except Exception as err:  # noqa: BLE001 - never break the push path
                 _LOGGER.debug(
-                    "note_decrypt_success failed for entry %s: %s", entry_id, err
+                    "note_background_decrypt_success failed for entry %s: %s",
+                    entry_id,
+                    err,
                 )
 
     async def _decode_background_location_async(  # noqa: PLR0911

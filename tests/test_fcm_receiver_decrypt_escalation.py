@@ -157,7 +157,7 @@ async def test_decode_background_location_clears_counter_on_success(
     result = await receiver._decode_background_location_async("entry-1", "deadbeef")
 
     assert result.get("last_seen") == 123.0
-    coordinator.note_decrypt_success.assert_called_once_with()
+    coordinator.note_background_decrypt_success.assert_called_once_with()
     coordinator.note_decrypt_failure.assert_not_called()
     entry.async_start_reauth.assert_not_called()
 
@@ -197,7 +197,7 @@ async def test_decode_background_location_metadata_only_does_not_clear_counter(
     # Metadata still flows downstream ...
     assert result.get("metadata_only") is True
     # ... but the budget is NOT cleared (no authenticated decrypt happened).
-    coordinator.note_decrypt_success.assert_not_called()
+    coordinator.note_background_decrypt_success.assert_not_called()
     coordinator.note_decrypt_failure.assert_not_called()
     entry.async_start_reauth.assert_not_called()
 
@@ -245,7 +245,7 @@ async def test_decode_background_location_semantic_only_does_not_clear_counter(
     # Semantic data still flows downstream ...
     assert result.get("semantic_name") == "Home"
     # ... but the budget is NOT cleared (no authenticated decrypt happened).
-    coordinator.note_decrypt_success.assert_not_called()
+    coordinator.note_background_decrypt_success.assert_not_called()
     coordinator.note_decrypt_failure.assert_not_called()
     entry.async_start_reauth.assert_not_called()
 
@@ -254,12 +254,12 @@ def test_note_decrypt_success_for_entry_swallows_coordinator_errors() -> None:
     """The push success path must never break: a misbehaving coordinator is
     swallowed exactly like the failure path."""
     receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
-    coordinator.note_decrypt_success = MagicMock(side_effect=RuntimeError("boom"))
+    coordinator.note_background_decrypt_success = MagicMock(side_effect=RuntimeError("boom"))
 
     # Must not raise.
     receiver._note_decrypt_success_for_entry("entry-1")
 
-    coordinator.note_decrypt_success.assert_called_once_with()
+    coordinator.note_background_decrypt_success.assert_called_once_with()
 
 
 def test_note_decrypt_success_for_entry_unknown_entry_is_noop() -> None:
@@ -268,4 +268,4 @@ def test_note_decrypt_success_for_entry_unknown_entry_is_noop() -> None:
 
     receiver._note_decrypt_success_for_entry("other-entry")
 
-    coordinator.note_decrypt_success.assert_not_called()
+    coordinator.note_background_decrypt_success.assert_not_called()

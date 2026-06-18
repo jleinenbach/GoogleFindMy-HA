@@ -223,7 +223,9 @@ class PollingOperations(_MixinBase):
         Mirrors ``_set_fcm_status`` exactly. This is the single writer for the
         diagnostic encryption-key sensor: failure states come from
         ``note_decrypt_failure`` (one mapping for poll, push and manual locate),
-        the ``OK`` state from a decrypt-clean poll cycle. Keeping one writer
+        the ``OK`` state from a decrypt-clean poll cycle or a proven
+        background-push decrypt (``note_background_decrypt_success``, account-wide
+        states only). Keeping one writer
         guarantees the sensor never diverges from the reauth escalation.
         """
         if status == self._crypto_status_state and reason == self._crypto_status_reason:
@@ -432,9 +434,10 @@ class PollingOperations(_MixinBase):
         sensor while deliberately leaving this counter at zero, so clearing that
         field here would erase a still-relevant diagnostic on the very cycle a
         sibling tracker decrypts. A single background decode likewise has no
-        cross-tracker cycle view, so it only clears the account-wide reauth budget
-        here and leaves the sensor (status and error class together) to the poll
-        loop.
+        cross-tracker cycle view, so this shared entry point only clears the
+        account-wide reauth budget and leaves the per-tracker sensor surface to
+        the poll loop. The push path heals the *account-wide* failure states via
+        :meth:`note_background_decrypt_success`, which wraps this method.
         """
         if self._consecutive_decrypt_failures > 0:
             _LOGGER.info(
@@ -442,6 +445,38 @@ class PollingOperations(_MixinBase):
                 self._consecutive_decrypt_failures,
             )
             self._consecutive_decrypt_failures = 0
+
+    def note_background_decrypt_success(self) -> None:
+        """Clear the reauth budget and heal the account-wide sensor from a push.
+
+        Called only from the FCM background-push decode on positive proof of an
+        authenticated coordinate (see ``_note_decrypt_success_for_entry``). It
+        first clears the shared reauth budget via :meth:`note_decrypt_success`,
+        then lifts the diagnostic encryption-key sensor out of the *account-wide*
+        failure states (``SHARED_KEY_INVALID`` / ``SHARED_KEY_MISSING``) that the
+        proof refutes: a successful decrypt with the account owner key proves the
+        shared key works regardless of any single cycle's cross-tracker view, so
+        push-only setups whose scheduled polls stay idle no longer leave the
+        sensor stuck on a stale-key status the account has already recovered from.
+
+        It deliberately does NOT touch ``TRACKER_KEY_OUTDATED``: a single
+        background decode cannot prove a per-tracker outdated owner key has been
+        re-paired (no cross-tracker view), so that per-tracker state -- and its
+        error class -- stays owned by the poll cycle, which alone observes the
+        absence of a stale key across all trackers. ``UNKNOWN`` is left untouched
+        too: there is no failure to heal and the OK semantics stay anchored to
+        observed account-wide proof, not fabricated before the first real signal.
+        Routes through the single ``_set_crypto_status`` writer, so the sensor
+        never diverges from the reauth escalation it visualizes.
+        """
+        self.note_decrypt_success()
+        if self._crypto_status_state in (
+            CryptoStatus.SHARED_KEY_INVALID,
+            CryptoStatus.SHARED_KEY_MISSING,
+        ):
+            # Move status and error class together: they are one sensor surface.
+            self._set_crypto_status(CryptoStatus.OK)
+            self._last_decrypt_error = None
 
     def _is_on_hass_loop(self) -> bool:
         """Return True if currently executing on the HA event loop thread."""
