@@ -452,7 +452,7 @@
         "name": "Sondeo"
       },
       "connectivity": {
-        "name": "Estado de conexión",
+        "name": "Estado de conexión FCM",
         "state_attributes": {
           "last_poll_result": {
             "name": "Resultado de la última consulta"
@@ -666,6 +666,15 @@
       },
       "semantic_labels": {
         "name": "Etiquetas semánticas"
+      },
+      "encryption_key_status": {
+        "name": "Estado de la clave de cifrado",
+        "state": {
+          "ok": "OK",
+          "shared_key_invalid": "No válida (se requiere reautenticación)",
+          "shared_key_missing": "Ausente (paquete incompleto)",
+          "tracker_key_outdated": "Clave del rastreador obsoleta"
+        }
       },
       "stat_background_updates": {
         "name": "Actualizaciones en segundo plano"

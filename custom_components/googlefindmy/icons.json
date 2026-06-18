@@ -60,6 +60,9 @@
       "semantic_labels": {
         "default": "mdi:format-list-text"
       },
+      "encryption_key_status": {
+        "default": "mdi:key-alert"
+      },
       "stat_background_updates": {
         "default": "mdi:cloud-download"
       },

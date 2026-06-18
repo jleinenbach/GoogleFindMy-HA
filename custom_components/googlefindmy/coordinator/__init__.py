@@ -35,6 +35,7 @@ from . import helpers
 # Re-export stats classes from helpers (commonly needed)
 from .helpers.stats import (
     ApiStatus,
+    CryptoStatus,
     DiagnosticsBuffer,
     FcmStatus,
     StatusSnapshot,
@@ -95,6 +96,7 @@ __all__ = [
     "_PREDICTION_BUFFER_S",
     # Stats classes
     "ApiStatus",
+    "CryptoStatus",
     "DiagnosticsBuffer",
     "FcmStatus",
     "StatusSnapshot",

@@ -31,6 +31,7 @@ from unittest.mock import MagicMock
 
 from custom_components.googlefindmy.coordinator.helpers.stats import (
     ApiStatus,
+    CryptoStatus,
     FcmStatus,
 )
 from custom_components.googlefindmy.coordinator.polling import PollingOperations
@@ -83,6 +84,9 @@ class PollingStub(PollingOperations):
         self._fcm_status_state: str = FcmStatus.UNKNOWN
         self._fcm_status_reason: str | None = None
         self._fcm_status_changed_at: float | None = None
+        self._crypto_status_state: str = CryptoStatus.UNKNOWN
+        self._crypto_status_reason: str | None = None
+        self._crypto_status_changed_at: float | None = None
 
         self._consecutive_timeouts: int = 0
         self._last_poll_result: str | None = None

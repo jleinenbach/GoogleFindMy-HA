@@ -1816,6 +1816,7 @@ def _stub_homeassistant() -> None:
     class SensorDeviceClass:  # pragma: no cover - stub values
         TIMESTAMP = "timestamp"
         BATTERY = "battery"
+        ENUM = "enum"
 
     class SensorStateClass:  # pragma: no cover - stub values
         TOTAL_INCREASING = "total_increasing"
