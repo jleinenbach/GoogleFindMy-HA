@@ -397,7 +397,11 @@ class _DecryptThenSucceedAPI:
         self.calls += 1
         if self.calls <= self._fail:
             raise self._exc
-        return {}  # success with no decryptable report (still clears the counter)
+        # A genuinely decryptable report: positive proof the account-wide shared
+        # key works again. Only such a real decrypt clears the counter -- an empty
+        # / no-reporter response (falsy) is an idle outcome and must NOT (see
+        # test_poll_cycle_idle_does_not_reset_decrypt_counter).
+        return {"latitude": 1.0, "longitude": 2.0, "accuracy": 5.0}
 
 
 @pytest.mark.asyncio
@@ -417,6 +421,51 @@ async def test_poll_cycle_decrypt_counter_resets_on_success() -> None:
     # A successful cycle resets the counter back to zero.
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
     assert coordinator._consecutive_decrypt_failures == 0
+
+
+class _DecryptThenIdleAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns
+    an empty (no-reporter) result.
+
+    Models an intermittently reporting BLE tracker: failing decrypt cycles are
+    interleaved with idle cycles that simply return no location data. Such idle
+    cycles carry no positive proof the shared key recovered and must therefore
+    NOT clear the accumulated decrypt-failure counter.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        return []  # idle: no reporter in range, nothing decrypted this cycle
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_idle_does_not_reset_decrypt_counter() -> None:
+    """An idle cycle (empty/no-reporter result) must NOT clear accumulated decrypt
+    failures: without a real successful decrypt there is no proof the stale shared
+    key recovered. Otherwise an intermittently reporting BLE tracker would let idle
+    cycles perpetually reset the counter, so the reauth threshold is never reached
+    and the user stays stuck with no location updates and no reauth prompt
+    (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenIdleAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # An idle cycle in between must leave the counter intact (not reset to zero).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
 
 class _PerDeviceDecryptAPI:

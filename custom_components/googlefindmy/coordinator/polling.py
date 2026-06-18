@@ -1865,14 +1865,28 @@ class PollingOperations(_MixinBase):
                         # timeouts/transient errors leaves the prior state intact
                         # rather than flickering a stale key to OK.
                         self._set_crypto_status(CryptoStatus.OK)
-                    if self._consecutive_decrypt_failures > 0:
-                        # Clear the consecutive-decrypt counter so a recovered/
-                        # healthy shared key (or a successful self-heal) does not
-                        # later trip a spurious reauth. Gated on the entire cycle --
-                        # one healthy tracker must not mask a persistently stale
-                        # account-wide shared key on the others.
+                    if cycle_had_successful_decrypt and self._consecutive_decrypt_failures > 0:
+                        # Clear the consecutive-decrypt counter only on POSITIVE
+                        # proof that the account-wide shared key works (at least one
+                        # device decrypted this cycle), mirroring the CryptoStatus.OK
+                        # gate above. An idle cycle that only saw empty/no-reporter
+                        # results (cycle_had_successful_decrypt == False) must NOT
+                        # reset the counter: intermittently reporting BLE trackers
+                        # would otherwise let idle cycles between two failing decrypt
+                        # cycles perpetually clear the budget, so the reauth threshold
+                        # could never be reached and the user would stay stuck with a
+                        # stale key and no reauth prompt.
+                        #
+                        # Unlike the OK gate this intentionally does NOT also require
+                        # ``not cycle_had_stale_key``: this counter tracks the
+                        # account-wide shared key, while a per-tracker outdated owner
+                        # key (cycle_had_stale_key) is a separate, device-local
+                        # concern that never advances this counter (see
+                        # note_decrypt_failure(stale=True)). Proof that the account
+                        # key works must be allowed to clear it even when one tracker
+                        # still carries an outdated key.
                         _LOGGER.info(
-                            "Location decryption succeeded for all devices; clearing "
+                            "Location decryption succeeded this cycle; clearing "
                             "%d decrypt failure(s).",
                             self._consecutive_decrypt_failures,
                         )

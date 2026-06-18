@@ -71,6 +71,29 @@ def test_nested_fcm_token_normalized() -> None:
     assert result["fcm_credentials"]["fcm"]["registration"]["token"] == "registration"
 
 
+def test_nested_gcm_identity_normalized() -> None:
+    """The numeric GCM identity (android_id / security_token under
+    fcm_credentials.gcm) loses ALL whitespace: both are fed to int() on the FCM
+    login path, so an interior space from a wrapped paste would break push
+    registration (Codex finding on PR #182)."""
+    bundle = {
+        "fcm_credentials": {
+            "gcm": {
+                "android_id": "1234 5678 9012 3456",
+                "security_token": " 9876\n543210 ",
+                "app_id": "app-1",
+            }
+        }
+    }
+    result = normalize_secrets_bundle(bundle)
+    gcm = result["fcm_credentials"]["gcm"]
+    assert gcm["android_id"] == "1234567890123456"
+    assert gcm["security_token"] == "9876543210"
+    # app_id is a structured identifier (not numeric/token credential material)
+    # and is not in the whitelist: only edge-trimmed, interior preserved.
+    assert gcm["app_id"] == "app-1"
+
+
 def test_idempotent() -> None:
     """Applying the normalization twice yields the same result."""
     bundle = {
