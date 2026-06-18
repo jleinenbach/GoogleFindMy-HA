@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from homeassistant.config_entries import ConfigEntryAuthFailed
@@ -147,7 +147,11 @@ def test_poll_auth_failure_raises_auth_failed(monkeypatch: pytest.MonkeyPatch) -
 
     coordinator = GoogleFindMyCoordinator(hass, cache=_DummyCache())
     coordinator.config_entry = SimpleNamespace(
-        entry_id="entry-id", options={}, data={}, title="Test Entry"
+        entry_id="entry-id",
+        options={},
+        data={},
+        title="Test Entry",
+        async_start_reauth=Mock(),
     )
     coordinator.api = _AuthFailureAPI()
     coordinator._get_google_home_filter = lambda: None
@@ -171,16 +175,20 @@ def test_poll_auth_failure_raises_auth_failed(monkeypatch: pytest.MonkeyPatch) -
     coordinator.async_set_update_error = _set_update_error
     coordinator.async_set_updated_data = _set_updated_data
 
-    with pytest.raises(ConfigEntryAuthFailed):
-        try:
-            loop.run_until_complete(
-                coordinator._async_start_poll_cycle(
-                    [{"id": "dev-1", "name": "Device"}], force=True
-                )
+    # The poll cycle runs as a fire-and-forget task, so it starts the entry reauth
+    # flow directly rather than raising (a raised ConfigEntryAuthFailed would never
+    # reach the awaited coordinator refresh). It still records last_exception so the
+    # finally block marks the update failed.
+    try:
+        loop.run_until_complete(
+            coordinator._async_start_poll_cycle(
+                [{"id": "dev-1", "name": "Device"}], force=True
             )
-        finally:
-            drain_loop(loop)
+        )
+    finally:
+        drain_loop(loop)
 
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
     assert coordinator.last_update_success is False
     assert isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
 

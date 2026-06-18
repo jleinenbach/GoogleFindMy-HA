@@ -3,16 +3,24 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.config_entries import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
-from custom_components.googlefindmy.coordinator.polling import _MAX_DECRYPT_FAILURES
+from custom_components.googlefindmy.coordinator.polling import (
+    _MAX_DECRYPT_FAILURES,
+    _MAX_TRANSIENT_AUTH_FAILURES,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     SharedKeyMismatchError,
     StaleOwnerKeyError,
+)
+from custom_components.googlefindmy.NovaApi.nova_request import (
+    NovaAuthError,
+    NovaAuthPermanentError,
 )
 from tests.helpers.homeassistant import GoogleFindMyConfigEntryStub
 
@@ -339,9 +347,13 @@ async def test_poll_cycle_escalates_persistent_decrypt_failure_to_reauth() -> No
     assert not any(kw.get("failed") for kw in auth_calls)
     assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
-    # Threshold cycle: escalate to a reauth flow.
-    with pytest.raises(ConfigEntryAuthFailed):
-        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    # Threshold cycle: escalate to a reauth flow. The poll cycle runs as a
+    # fire-and-forget task, so it starts the entry reauth flow directly rather
+    # than raising (a raised ConfigEntryAuthFailed would never reach the awaited
+    # coordinator refresh and HA's automatic reauth would never fire).
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -436,8 +448,9 @@ async def test_poll_cycle_partial_decrypt_failure_still_escalates() -> None:
     # The healthy device must NOT have reset the account-wide counter.
     assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
-    with pytest.raises(ConfigEntryAuthFailed):
-        await coordinator._async_start_poll_cycle(devices)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    await coordinator._async_start_poll_cycle(devices)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -475,6 +488,81 @@ async def test_poll_cycle_counts_multi_device_decrypt_failure_once() -> None:
     assert not any(kw.get("failed") for kw in auth_calls)
 
     # Third consecutive cycle reaches the threshold -> escalate exactly once.
-    with pytest.raises(ConfigEntryAuthFailed):
-        await coordinator._async_start_poll_cycle(devices)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+    await coordinator._async_start_poll_cycle(devices)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_nova_permanent_auth_starts_reauth() -> None:
+    """A permanent Nova auth failure in the background poll cycle starts the entry
+    reauth flow directly. The cycle runs as a fire-and-forget task
+    (``hass.async_create_task``), so a raised ConfigEntryAuthFailed would never reach
+    the awaited coordinator refresh and HA's automatic reauth would never fire."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthPermanentError(401, "perm"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_transient_nova_auth_starts_reauth_after_threshold() -> None:
+    """A transient Nova auth failure escalates only after
+    _MAX_TRANSIENT_AUTH_FAILURES consecutive cycles, then starts the entry reauth
+    flow directly (the fire-and-forget poll task cannot raise into HA)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(NovaAuthError(401, "transient"))
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    # Below threshold: keep polling, no reauth escalation yet.
+    for _ in range(_MAX_TRANSIENT_AUTH_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_not_called()
+
+    # Threshold cycle escalates exactly once.
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_reauth_noop_without_config_entry() -> None:
+    """Defensive guard: with no config entry bound the poll cycle cannot start
+    reauth, but it must not crash (``_request_poll_reauth`` no-entry branch)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry = None
+
+    # Drive to the escalation threshold; the helper hits its no-entry guard.
+    for _ in range(_MAX_DECRYPT_FAILURES):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    # No crash, and the auth state was still flagged at the threshold cycle.
+    assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_direct_config_entry_auth_failed_starts_reauth() -> None:
+    """A ConfigEntryAuthFailed raised directly by the API (e.g. HTTP 401/403 in
+    async_get_device_location) reaches the poll loop's ConfigEntryAuthFailed handler
+    without passing through the typed SpotAuth/NovaAuth handlers. It must start the
+    entry reauth flow directly rather than re-raising into the fire-and-forget poll
+    task, where the exception would never reach HA."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(ConfigEntryAuthFailed("session expired"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
     assert any(kw.get("failed") for kw in auth_calls)

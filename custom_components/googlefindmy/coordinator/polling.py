@@ -1229,6 +1229,38 @@ class PollingOperations(_MixinBase):
             _LOGGER.exception("Unexpected error during coordinator update")
             raise UpdateFailed(f"{type(err).__name__}: {err}") from err
 
+    def _request_poll_reauth(self, reauth_exc: ConfigEntryAuthFailed) -> None:
+        """Start the config-entry reauth flow from the background poll cycle.
+
+        ``_async_start_poll_cycle`` runs via ``hass.async_create_task`` (fire and
+        forget), so a raised ``ConfigEntryAuthFailed`` never reaches the awaited
+        coordinator refresh and Home Assistant's automatic reauth
+        (``_async_refresh`` -> ``ConfigEntry.async_start_reauth``) is never
+        triggered. Start the entry-scoped reauth flow directly instead, mirroring
+        the manual-locate (``locate.py``) and FCM-receiver paths. The caller still
+        records ``reauth_exc`` as ``last_exception`` so the ``finally`` block marks
+        the update failed via ``async_set_update_error``.
+        """
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            _LOGGER.debug(
+                "Cannot start reauth from poll cycle: no config entry bound."
+            )
+            return
+        try:
+            # ``ConfigEntry.async_start_reauth`` is a synchronous @callback that
+            # returns None and schedules the flow itself; awaiting it would raise
+            # TypeError. Call it without await (mirrors locate.py and
+            # fcm_receiver_ha.py).
+            entry.async_start_reauth(self.hass)
+            _LOGGER.warning(
+                "Poll cycle triggered re-authentication: %s", reauth_exc
+            )
+        except Exception as reauth_err:  # pragma: no cover - defensive
+            _LOGGER.debug(
+                "Failed to start reauth flow from poll cycle: %s", reauth_err
+            )
+
     # ---------------------------- Polling Cycle -----------------------------
     async def _async_start_poll_cycle(
         self,
@@ -1574,7 +1606,7 @@ class PollingOperations(_MixinBase):
                                     f"Location request timed out for {dev_name}"
                                 )
                                 last_exception.__cause__ = terr
-                    except SpotAuthPermanentError as auth_err:
+                    except SpotAuthPermanentError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
                             dev_name,
@@ -1590,7 +1622,8 @@ class PollingOperations(_MixinBase):
                             "Google session invalid; re-authentication required"
                         )
                         last_exception = reauth_exc
-                        raise reauth_exc from auth_err
+                        self._request_poll_reauth(reauth_exc)
+                        return
                     except SpotApiEmptyResponseError:
                         _LOGGER.warning(
                             "Authentication failed for %s; triggering reauth flow.",
@@ -1607,7 +1640,8 @@ class PollingOperations(_MixinBase):
                             "Google session invalid; re-authentication required"
                         )
                         last_exception = reauth_exc
-                        raise reauth_exc
+                        self._request_poll_reauth(reauth_exc)
+                        return
                     except NovaAuthPermanentError as perm_err:
                         # Permanent auth failure (AAS token invalid) - immediate reauth
                         _LOGGER.error(
@@ -1627,7 +1661,8 @@ class PollingOperations(_MixinBase):
                             "Google credentials invalid; re-authentication required"
                         )
                         last_exception = reauth_exc
-                        raise reauth_exc from perm_err
+                        self._request_poll_reauth(reauth_exc)
+                        return
                     except NovaAuthError as transient_err:
                         # Transient auth failure - may self-heal in subsequent poll cycles.
                         # Only trigger reauth after multiple consecutive failures.
@@ -1656,7 +1691,8 @@ class PollingOperations(_MixinBase):
                                 f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
                             )
                             last_exception = reauth_exc
-                            raise reauth_exc from transient_err
+                            self._request_poll_reauth(reauth_exc)
+                            return
 
                         # Not yet at threshold - log warning and continue to next device
                         _LOGGER.warning(
@@ -1672,7 +1708,14 @@ class PollingOperations(_MixinBase):
                             last_exception = transient_err
                         continue  # Try next device instead of aborting entire cycle
                     except ConfigEntryAuthFailed as auth_exc:
-                        # Mark auth failures to HA; abort remaining devices by re-raising.
+                        # A pre-converted ConfigEntryAuthFailed (e.g. raised directly
+                        # by api.async_get_device_location on HTTP 401/403 or a
+                        # permanent Nova auth failure) reaches here without going
+                        # through the typed SpotAuth/NovaAuth handlers above. Mark
+                        # auth failed and abort remaining devices. Start reauth
+                        # directly instead of re-raising: this poll cycle runs as a
+                        # fire-and-forget task, so a re-raise would never reach the
+                        # awaited coordinator refresh and HA's reauth would not fire.
                         self._set_auth_state(
                             failed=True,
                             reason=f"Auth failed during poll for {dev_name}: {auth_exc}",
@@ -1681,7 +1724,8 @@ class PollingOperations(_MixinBase):
                         self._last_poll_result = "failed"
                         self._consecutive_timeouts = 0
                         last_exception = auth_exc
-                        raise
+                        self._request_poll_reauth(auth_exc)
+                        return
                     except StaleOwnerKeyError as stale_err:
                         # Per-tracker owner-key version mismatch (D2): an account-wide
                         # reauth would not help -- only this tracker is outdated. Log
@@ -1746,7 +1790,8 @@ class PollingOperations(_MixinBase):
                             "is required"
                         )
                         last_exception = reauth_exc
-                        raise reauth_exc from cycle_decrypt_error
+                        self._request_poll_reauth(reauth_exc)
+                        return
                 elif self._consecutive_decrypt_failures > 0:
                     # Whole cycle was decrypt-clean: clear the consecutive-decrypt
                     # counter so a recovered/healthy shared key (or a successful
