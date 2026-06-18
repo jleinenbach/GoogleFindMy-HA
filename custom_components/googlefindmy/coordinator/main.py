@@ -86,6 +86,7 @@ from .helpers.geo import (
 )
 from .helpers.stats import (
     ApiStatus,
+    CryptoStatus,
     DiagnosticsBuffer,
     FcmStatus,
     format_recent_errors,
@@ -768,6 +769,12 @@ class GoogleFindMyCoordinator(
         self._fcm_status_state: str = FcmStatus.UNKNOWN
         self._fcm_status_reason: str | None = None
         self._fcm_status_changed_at: float | None = None
+        # End-to-end location decryption health (drives the diagnostic enum
+        # sensor and mirrors the reauth escalation; initial UNKNOWN -> HA renders
+        # "unknown" until the first decryption is attempted).
+        self._crypto_status_state: str = CryptoStatus.UNKNOWN
+        self._crypto_status_reason: str | None = None
+        self._crypto_status_changed_at: float | None = None
 
         # Performance metrics (timestamps, durations) & recent errors (bounded)
         self.performance_metrics: dict[str, float] = {}

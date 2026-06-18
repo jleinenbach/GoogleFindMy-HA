@@ -53,6 +53,7 @@ from ..const import (
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    SharedKeyMissingError,
     StaleOwnerKeyError,
 )
 from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
@@ -62,7 +63,7 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
-from .helpers.stats import ApiStatus, FcmStatus, StatusSnapshot
+from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
 from .helpers.update import (
     calculate_presence_ttl as _calculate_presence_ttl_impl,
@@ -169,6 +170,9 @@ class PollingOperations(_MixinBase):
     _fcm_status_state: str
     _fcm_status_reason: str | None
     _fcm_status_changed_at: float | None
+    _crypto_status_state: str
+    _crypto_status_reason: str | None
+    _crypto_status_changed_at: float | None
     _force_device_list_reason: str | None
     _short_retry_cancel: Callable[[], None] | None
     _fcm_error_count: int
@@ -210,6 +214,29 @@ class PollingOperations(_MixinBase):
         except Exception:
             pass
 
+    def _set_crypto_status(
+        self, status: str, *, reason: str | None = None
+    ) -> None:
+        """Update the location-decryption status while avoiding noisy churn.
+
+        Mirrors ``_set_fcm_status`` exactly. This is the single writer for the
+        diagnostic encryption-key sensor: failure states come from
+        ``note_decrypt_failure`` (one mapping for poll, push and manual locate),
+        the ``OK`` state from a decrypt-clean poll cycle. Keeping one writer
+        guarantees the sensor never diverges from the reauth escalation.
+        """
+        if status == self._crypto_status_state and reason == self._crypto_status_reason:
+            return
+
+        self._crypto_status_state = status
+        self._crypto_status_reason = reason
+        self._crypto_status_changed_at = time.time()
+
+        try:
+            self.async_set_updated_data(self.data)
+        except Exception:
+            pass
+
     @property
     def api_status(self) -> StatusSnapshot:
         """Return a snapshot describing the current API polling health."""
@@ -226,6 +253,15 @@ class PollingOperations(_MixinBase):
             state=self._fcm_status_state,
             reason=self._fcm_status_reason,
             changed_at=self._fcm_status_changed_at,
+        )
+
+    @property
+    def crypto_status(self) -> StatusSnapshot:
+        """Return a snapshot describing end-to-end location decryption health."""
+        return StatusSnapshot(
+            state=self._crypto_status_state,
+            reason=self._crypto_status_reason,
+            changed_at=self._crypto_status_changed_at,
         )
 
     @property
@@ -308,6 +344,7 @@ class PollingOperations(_MixinBase):
             # Per-tracker outdated owner key: log per occurrence, do not touch the
             # account-wide counter, never escalate to reauth here. The full
             # user-facing repair issue is added with the diagnostic sensor work.
+            self._set_crypto_status(CryptoStatus.TRACKER_KEY_OUTDATED)
             _LOGGER.warning(
                 "Tracker %s is encrypted with an outdated owner key version (%s); "
                 "remove and re-pair this tracker. Other devices are unaffected.",
@@ -315,6 +352,15 @@ class PollingOperations(_MixinBase):
                 type(error).__name__,
             )
             return False
+
+        # Account-wide shared-key failure: map the concrete error to the
+        # diagnostic state from the SAME signal that drives the escalation below
+        # (D6, single source -- no second, divergent state for the sensor).
+        self._set_crypto_status(
+            CryptoStatus.SHARED_KEY_MISSING
+            if isinstance(error, SharedKeyMissingError)
+            else CryptoStatus.SHARED_KEY_INVALID
+        )
 
         self._consecutive_decrypt_failures += 1
         if self._consecutive_decrypt_failures < _MAX_DECRYPT_FAILURES:
@@ -1333,6 +1379,16 @@ class PollingOperations(_MixinBase):
                 # fires, so the remaining trackers still get one (failing) Nova call.
                 # That is the rare end-state cost of per-cycle counting.
                 cycle_decrypt_error: DecryptionError | None = None
+                # True if any device hit a per-tracker StaleOwnerKeyError this
+                # cycle. Such cycles must NOT be reported as crypto OK even when
+                # the account-wide key is healthy, so the diagnostic sensor does
+                # not flicker away the tracker_key_outdated state.
+                cycle_had_stale_key = False
+                # True once a device returns usable location data without a
+                # DecryptionError: positive proof the shared key works. Crypto OK
+                # requires this proof, not merely the absence of a decrypt error
+                # (a cycle of pure timeouts must not flicker a stale key to OK).
+                cycle_had_successful_decrypt = False
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -1379,6 +1435,11 @@ class PollingOperations(_MixinBase):
                                 dev_id, dev_name, source="empty-result"
                             )
                             continue
+
+                        # A device returned usable location data without raising a
+                        # DecryptionError: positive proof the account-wide shared
+                        # key still decrypts. Gate the crypto OK state on this.
+                        cycle_had_successful_decrypt = True
 
                         self._record_semantic_label(location, device_id=dev_id)
                         raw_semantic_name = (
@@ -1735,6 +1796,7 @@ class PollingOperations(_MixinBase):
                             stale=True, error=stale_err, device=dev_name
                         )
                         cycle_failed = True
+                        cycle_had_stale_key = True
                         self._consecutive_timeouts = 0
                         if last_exception is None:
                             last_exception = stale_err
@@ -1792,19 +1854,30 @@ class PollingOperations(_MixinBase):
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
                         return
-                elif self._consecutive_decrypt_failures > 0:
-                    # Whole cycle was decrypt-clean: clear the consecutive-decrypt
-                    # counter so a recovered/healthy shared key (or a successful
-                    # self-heal) does not later trip a spurious reauth. Gated on the
-                    # entire cycle -- one healthy tracker must not mask a
-                    # persistently stale account-wide shared key on the others.
-                    _LOGGER.info(
-                        "Location decryption succeeded for all devices; clearing "
-                        "%d decrypt failure(s).",
-                        self._consecutive_decrypt_failures,
-                    )
-                    self._consecutive_decrypt_failures = 0
-                    self._last_decrypt_error = None
+                else:
+                    # Whole cycle finished without an account-wide decrypt failure.
+                    if cycle_had_successful_decrypt and not cycle_had_stale_key:
+                        # At least one device actually decrypted location data this
+                        # cycle (positive proof, not just the absence of an error)
+                        # and no per-tracker stale key was seen: the account-wide
+                        # shared key is healthy. Reflect that into the diagnostic
+                        # sensor (D6 OK source, single writer). A cycle of pure
+                        # timeouts/transient errors leaves the prior state intact
+                        # rather than flickering a stale key to OK.
+                        self._set_crypto_status(CryptoStatus.OK)
+                    if self._consecutive_decrypt_failures > 0:
+                        # Clear the consecutive-decrypt counter so a recovered/
+                        # healthy shared key (or a successful self-heal) does not
+                        # later trip a spurious reauth. Gated on the entire cycle --
+                        # one healthy tracker must not mask a persistently stale
+                        # account-wide shared key on the others.
+                        _LOGGER.info(
+                            "Location decryption succeeded for all devices; clearing "
+                            "%d decrypt failure(s).",
+                            self._consecutive_decrypt_failures,
+                        )
+                        self._consecutive_decrypt_failures = 0
+                        self._last_decrypt_error = None
             finally:
                 # Update scheduling baseline and clear flag, then push end snapshot.
                 # Always advance the poll baseline to prevent high-frequency

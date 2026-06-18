@@ -452,7 +452,7 @@
         "name": "Consulta"
       },
       "connectivity": {
-        "name": "Status de conexão",
+        "name": "Status de conexão FCM",
         "state_attributes": {
           "last_poll_result": {
             "name": "Resultado da última consulta"
@@ -666,6 +666,15 @@
       },
       "semantic_labels": {
         "name": "Rótulos semânticos"
+      },
+      "encryption_key_status": {
+        "name": "Estado da chave de encriptação",
+        "state": {
+          "ok": "OK",
+          "shared_key_invalid": "Inválida (reautenticação necessária)",
+          "shared_key_missing": "Em falta (pacote incompleto)",
+          "tracker_key_outdated": "Chave do localizador desatualizada"
+        }
       },
       "stat_background_updates": {
         "name": "Atualizações em segundo plano"

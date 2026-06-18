@@ -9,7 +9,10 @@ import pytest
 from homeassistant.config_entries import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
-from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+from custom_components.googlefindmy.coordinator import (
+    CryptoStatus,
+    GoogleFindMyCoordinator,
+)
 from custom_components.googlefindmy.coordinator.polling import (
     _MAX_DECRYPT_FAILURES,
     _MAX_TRANSIENT_AUTH_FAILURES,
@@ -92,6 +95,9 @@ def _base_coordinator(
     coordinator._consecutive_decrypt_failures = 0
     coordinator._last_decrypt_reauth_monotonic = None
     coordinator._last_decrypt_error = None
+    coordinator._crypto_status_state = CryptoStatus.UNKNOWN
+    coordinator._crypto_status_reason = None
+    coordinator._crypto_status_changed_at = None
     # Deliberately low monotonic value: simulates a freshly booted runner (process
     # uptime below the reauth cooldown). With the None sentinel the first escalation
     # must fire regardless, so this pins the whole loop-test class against the
@@ -566,3 +572,110 @@ async def test_poll_cycle_direct_config_entry_auth_failed_starts_reauth() -> Non
 
     coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
     assert any(kw.get("failed") for kw in auth_calls)
+
+
+class _MixedDecryptAPI:
+    """API stub that fails for one device id and returns a payload for others.
+
+    Drives a single poll cycle that contains both a per-tracker stale key and a
+    healthy, decrypting device, to prove the crypto sensor does not flicker the
+    tracker_key_outdated state to OK when a sibling decrypts successfully.
+    """
+
+    def __init__(self, fail_id: str, exc: Exception, ok_payload: dict[str, Any]) -> None:
+        self._fail_id = fail_id
+        self._exc = exc
+        self._ok_payload = ok_payload
+
+    async def async_get_device_location(
+        self, device_id: str, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
+        if device_id == self._fail_id:
+            raise self._exc
+        return dict(self._ok_payload)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_successful_decrypt_sets_crypto_ok() -> None:
+    """A cycle that decrypts usable location data reports crypto OK (D6 source)."""
+
+    coordinator = _polling_coordinator(
+        {}, _TrackingFilter(), {"latitude": 1.0, "longitude": 2.0, "last_seen": 100}
+    )
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.crypto_status.state == CryptoStatus.OK
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_shared_key_failure_sets_crypto_invalid() -> None:
+    """An account-wide SharedKeyMismatchError surfaces as shared_key_invalid."""
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.crypto_status.state == CryptoStatus.SHARED_KEY_INVALID
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_stale_key_sets_tracker_outdated() -> None:
+    """A per-tracker StaleOwnerKeyError surfaces as tracker_key_outdated."""
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(StaleOwnerKeyError("tracker v1 < v2"))
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_timeout_only_does_not_clear_prior_failure() -> None:
+    """A cycle without any successful decrypt must NOT downgrade a prior
+    shared_key_invalid to OK -- absence of an error is not proof of health.
+
+    Mutation guard for the ``cycle_had_successful_decrypt`` gate: replacing it
+    with the weaker ``devices`` condition turns the second assertion red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    # Cycle 1: account-wide failure -> shared_key_invalid (below threshold).
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator.crypto_status.state == CryptoStatus.SHARED_KEY_INVALID
+
+    # Cycle 2: idle (empty location, no successful decrypt) -> state unchanged.
+    coordinator.api = _DummyAPI({})
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator.crypto_status.state == CryptoStatus.SHARED_KEY_INVALID
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_mixed_stale_and_success_keeps_tracker_outdated() -> None:
+    """A healthy sibling in a cycle that also hit a stale key must NOT flicker the
+    sensor to OK.
+
+    Mutation guard for the ``not cycle_had_stale_key`` gate: dropping it lets the
+    successful sibling overwrite tracker_key_outdated with OK and turns this red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _MixedDecryptAPI(
+        "dev-stale",
+        StaleOwnerKeyError("tracker v1 < v2"),
+        {"latitude": 1.0, "longitude": 2.0, "last_seen": 100},
+    )
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-stale", "name": "Old"}, {"id": "dev-ok", "name": "Hub"}]
+    )
+
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED

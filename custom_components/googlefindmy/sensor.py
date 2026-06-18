@@ -42,8 +42,10 @@ from .const import (
     SUBENTRY_TYPE_SERVICE,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
+    TRANSLATION_KEY_ENCRYPTION_KEY_STATUS,
 )
 from .coordinator import (
+    CryptoStatus,
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
     _as_ha_attributes,
@@ -93,6 +95,24 @@ SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
     translation_key="semantic_labels",
     icon="mdi:format-list-text",
 )
+
+ENCRYPTION_KEY_STATUS_DESCRIPTION = SensorEntityDescription(
+    key=TRANSLATION_KEY_ENCRYPTION_KEY_STATUS,
+    translation_key=TRANSLATION_KEY_ENCRYPTION_KEY_STATUS,
+    device_class=SensorDeviceClass.ENUM,
+    icon="mdi:key-alert",
+)
+
+# The concrete enum states exposed by the encryption-key-status sensor. HA
+# requires ``native_value`` to be one of ``options`` or ``None``; CryptoStatus
+# UNKNOWN is deliberately omitted because it maps to HA's "unknown" (None), not
+# an explicit option. Single source for the sensor and its tests.
+ENCRYPTION_KEY_STATUS_OPTIONS: list[str] = [
+    CryptoStatus.OK,
+    CryptoStatus.SHARED_KEY_INVALID,
+    CryptoStatus.SHARED_KEY_MISSING,
+    CryptoStatus.TRACKER_KEY_OUTDATED,
+]
 
 BLE_BATTERY_DESCRIPTION = SensorEntityDescription(
     key="ble_battery",
@@ -345,6 +365,24 @@ async def async_setup_entry(
             if isinstance(semantic_unique_id, str):
                 added_unique_ids.add(semantic_unique_id)
             service_entities.append(semantic_sensor)
+
+        # Third diagnostic axis (E2EE key health). Always created alongside the
+        # semantic-label sensor, independent of the stats toggle, because the
+        # encryption-key status is a core diagnostic like Nova auth / FCM
+        # connectivity, not an optional counter.
+        crypto_sensor = GoogleFindMyEncryptionKeyStatusSensor(
+            coordinator,
+            subentry_key=scope.subentry_key,
+            subentry_identifier=identifier,
+        )
+        crypto_unique_id = getattr(crypto_sensor, "unique_id", None)
+        if not isinstance(crypto_unique_id, str) or (
+            isinstance(crypto_unique_id, str)
+            and crypto_unique_id not in added_unique_ids
+        ):
+            if isinstance(crypto_unique_id, str):
+                added_unique_ids.add(crypto_unique_id)
+            service_entities.append(crypto_sensor)
 
         if not enable_stats:
             _schedule_service_entities(service_entities, True)
@@ -900,6 +938,97 @@ class GoogleFindMySemanticLabelSensor(GoogleFindMyEntity, SensorEntity):
             )
 
         return {"labels": [item["label"] for item in attrs], "observations": attrs}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Attach to the service device for diagnostic grouping."""
+
+        return self.service_device_info(include_subentry_identifier=True)
+
+
+class GoogleFindMyEncryptionKeyStatusSensor(GoogleFindMyEntity, SensorEntity):
+    """Diagnostic ENUM sensor exposing end-to-end location decryption health.
+
+    This is the third diagnostic axis next to Nova auth (outgoing) and the FCM
+    connection (incoming): the E2EE key used to decrypt location reports. Its
+    state is read straight from ``coordinator.crypto_status``, which the poll,
+    push and manual-locate paths all feed through the single
+    ``note_decrypt_failure`` writer, so the sensor never diverges from the reauth
+    escalation behaviour it visualizes. Lives on the per-entry service device
+    (account-wide, like the shared key it reflects).
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_options = ENCRYPTION_KEY_STATUS_OPTIONS
+    entity_description = ENCRYPTION_KEY_STATUS_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the encryption-key-status sensor."""
+
+        super().__init__(
+            coordinator,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+        )
+        entry_id = self.entry_id or "default"
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            TRANSLATION_KEY_ENCRYPTION_KEY_STATUS,
+            separator="_",
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the current decryption state, or None for HA's "unknown".
+
+        HA's ENUM device class requires the value to be one of ``_attr_options``
+        or ``None``. CryptoStatus.UNKNOWN (no decryption attempted yet) is mapped
+        to ``None`` so HA renders the native "unknown" state instead of a fifth
+        explicit option.
+        """
+
+        snapshot = getattr(self.coordinator, "crypto_status", None)
+        state = getattr(snapshot, "state", None)
+        if not isinstance(state, str) or state == CryptoStatus.UNKNOWN:
+            return None
+        return state
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose how close the account is to a decrypt-driven reauth.
+
+        Sourced from the same coordinator fields that drive the escalation, so
+        there is no second, divergent state. ``threshold`` is intentionally not
+        exposed here to avoid coupling the entity to a private coordinator
+        constant; ``consecutive_decrypt_failures`` already shows the progress.
+        """
+
+        attributes: dict[str, Any] = {}
+
+        snapshot = getattr(self.coordinator, "crypto_status", None)
+        changed_at = getattr(snapshot, "changed_at", None)
+        if isinstance(changed_at, (int, float)):
+            attributes["changed_at"] = changed_at
+
+        failures = getattr(self.coordinator, "_consecutive_decrypt_failures", None)
+        if isinstance(failures, int):
+            attributes["consecutive_decrypt_failures"] = failures
+
+        last_error = getattr(self.coordinator, "_last_decrypt_error", None)
+        if isinstance(last_error, str) and last_error:
+            # Stored as "ClassName: message"; expose just the class for triage.
+            attributes["last_decrypt_error_class"] = last_error.split(":", 1)[0]
+
+        return attributes or None
 
     @property
     def device_info(self) -> DeviceInfo:

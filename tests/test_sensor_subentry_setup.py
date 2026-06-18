@@ -108,6 +108,7 @@ async def test_setup_iterates_sensor_subentries(stub_coordinator_factory: Any) -
     assert configs == {service_subentry.subentry_id, tracker_subentry.subentry_id}
     assert {entity.unique_id for entity, _ in added} == {
         f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_semantic_labels",
+        f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_encryption_key_status",
         f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_background_updates",
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_last_seen",
     }
@@ -169,8 +170,10 @@ async def test_dispatcher_adds_new_tracker_subentries(
     configs = [config for _, config in added]
     assert configs.count(tracker_subentry.subentry_id) == 1
     assert configs.count(new_subentry.subentry_id) == 1
-    assert configs.count(service_subentry.subentry_id) == 2
-    assert len({entity.unique_id for entity, _ in added}) == 4
+    # Service scope now emits three diagnostic sensors: semantic_labels,
+    # encryption_key_status (AP-10) and the background_updates stat.
+    assert configs.count(service_subentry.subentry_id) == 3
+    assert len({entity.unique_id for entity, _ in added}) == 5
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
 
 
@@ -222,7 +225,9 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
     async_dispatcher_send(hass, signal, service_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    assert len(added) == initial_count == 3
+    # Four entities: service semantic_labels + encryption_key_status (AP-10) +
+    # background_updates stat, plus the tracker last_seen sensor.
+    assert len(added) == initial_count == 4
     assert {config for _, config in added} == {
         service_subentry.subentry_id,
         tracker_subentry.subentry_id,
@@ -273,6 +278,7 @@ async def test_hidden_tracker_sensors_skip_invisible_devices(
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_visible-device_last_seen",
         f"{DOMAIN}_{entry.entry_id}_service_background_updates",
         f"{DOMAIN}_{entry.entry_id}_service_semantic_labels",
+        f"{DOMAIN}_{entry.entry_id}_service_encryption_key_status",
     }
     config_by_unique_id = {entity.unique_id: config for entity, config in added}
     assert (

@@ -485,6 +485,9 @@ EVENT_AUTH_OK: str = f"{DOMAIN}.authentication_ok"
 # Translation key for the dedicated auth-status binary_sensor entity.
 TRANSLATION_KEY_AUTH_STATUS: str = "nova_auth_status"
 
+# Translation key for the dedicated encryption-key-status (ENUM) sensor entity.
+TRANSLATION_KEY_ENCRYPTION_KEY_STATUS: str = "encryption_key_status"
+
 # Issue key used for Repairs (translations use the same key).
 ISSUE_AUTH_EXPIRED_KEY: str = "auth_expired"
 
@@ -640,6 +643,7 @@ __all__ = [
     "EVENT_AUTH_ERROR",
     "EVENT_AUTH_OK",
     "TRANSLATION_KEY_AUTH_STATUS",
+    "TRANSLATION_KEY_ENCRYPTION_KEY_STATUS",
     "ISSUE_AUTH_EXPIRED_KEY",
     "ISSUE_MULTIPLE_CONFIG_ENTRIES",
     "TRANSLATION_KEY_CACHE_PURGED",
