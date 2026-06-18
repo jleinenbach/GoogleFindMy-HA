@@ -162,6 +162,46 @@ async def test_decode_background_location_clears_counter_on_success(
     entry.async_start_reauth.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_decode_background_location_metadata_only_does_not_clear_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A metadata_only decode result must NOT clear the shared reauth budget.
+
+    The decode layer returns a single ``metadata_only`` sentinel row (key material
+    from the secrets bundle, no authenticated decrypt) when no encrypted report
+    decrypts. That row is non-empty, but it is no positive proof the shared key
+    works, so report-less pushes interleaved with real failures must not keep a
+    stale key below the reauth threshold (Codex finding on PR #182). The metadata
+    must still pass through downstream.
+    """
+    receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
+    receiver._entry_caches["entry-1"] = MagicMock()
+
+    monkeypatch.setattr(
+        fcm_receiver_ha.decoder_module,
+        "parse_device_update_protobuf",
+        MagicMock(return_value=MagicMock()),
+    )
+    # Decrypt yields only a metadata_only sentinel (no usable location report).
+    monkeypatch.setattr(
+        fcm_receiver_ha,
+        "async_decrypt_location_response_locations",
+        AsyncMock(
+            return_value=[{"metadata_only": True, "owner_key_version": 7}]
+        ),
+    )
+
+    result = await receiver._decode_background_location_async("entry-1", "deadbeef")
+
+    # Metadata still flows downstream ...
+    assert result.get("metadata_only") is True
+    # ... but the budget is NOT cleared (no authenticated decrypt happened).
+    coordinator.note_decrypt_success.assert_not_called()
+    coordinator.note_decrypt_failure.assert_not_called()
+    entry.async_start_reauth.assert_not_called()
+
+
 def test_note_decrypt_success_for_entry_swallows_coordinator_errors() -> None:
     """The push success path must never break: a misbehaving coordinator is
     swallowed exactly like the failure path."""

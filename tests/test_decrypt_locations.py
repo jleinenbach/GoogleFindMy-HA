@@ -671,3 +671,24 @@ async def test_own_report_mac_valueerror_counts_as_own_failure(
         await decrypt_locations.async_decrypt_location_response_locations(
             update, cache=object()
         )
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        ({"last_seen": 123.0, "latitude": 1.0, "longitude": 2.0}, True),
+        ({"last_seen": 123.0, "metadata_only": False}, True),
+        ({"last_seen": 123.0, "metadata_only": None}, True),
+        ({"metadata_only": True, "owner_key_version": 7}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+async def test_is_real_location_record(record: object, expected: bool) -> None:
+    """Only a non-sentinel record proves the shared key.
+
+    ``metadata_only=True`` rows carry secrets-bundle key material, not a successful
+    decrypt, so they must not be treated as positive proof (which would let them
+    clear the shared decrypt-failure budget and mask a stale key).
+    """
+    assert decrypt_locations.is_real_location_record(record) is expected

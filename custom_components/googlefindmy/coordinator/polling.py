@@ -55,6 +55,7 @@ from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
+    is_real_location_record,
 )
 from ..NovaApi.nova_request import NovaAuthError, NovaAuthPermanentError
 from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
@@ -1473,7 +1474,12 @@ class PollingOperations(_MixinBase):
                         # A device returned usable location data without raising a
                         # DecryptionError: positive proof the account-wide shared
                         # key still decrypts. Gate the crypto OK state on this.
-                        cycle_had_successful_decrypt = True
+                        # A metadata_only sentinel row (key material from the secrets
+                        # bundle, no authenticated decrypt) is truthy but proves
+                        # nothing, so one report-less device must not mask another
+                        # device's stale key for the whole cycle.
+                        if is_real_location_record(location):
+                            cycle_had_successful_decrypt = True
 
                         self._record_semantic_label(location, device_id=dev_id)
                         raw_semantic_name = (

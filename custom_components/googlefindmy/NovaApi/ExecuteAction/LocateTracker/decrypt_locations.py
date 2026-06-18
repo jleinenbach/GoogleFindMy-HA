@@ -879,6 +879,25 @@ def _infer_report_hint(status_value: Any) -> str | None:
     return None
 
 
+def is_real_location_record(record: dict[str, Any] | None) -> bool:
+    """Return True if a decoded record authenticates the account-wide shared key.
+
+    ``async_decrypt_location_response_locations`` returns a single ``metadata_only``
+    sentinel row (``metadata_only=True``, produced below when no encrypted report
+    decrypts but the secrets bundle still yields key material, e.g. a phone without
+    a fresh fix) so such devices still surface their key metadata downstream. That
+    row carries key *material* parsed from the bundle, not the result of a
+    successful E2EE decrypt, so it must never be treated as positive proof that the
+    shared key still works. Only a non-sentinel record counts as a real,
+    authenticated location report and may clear the shared decrypt-failure (reauth)
+    budget. ``metadata_only=True`` is set in exactly one place (the no-decrypt
+    branch), so this flag is the authoritative discriminator.
+    """
+    if not record:
+        return False
+    return record.get("metadata_only") is not True
+
+
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     device_update_protobuf: DeviceUpdateProto, *, cache: TokenCache

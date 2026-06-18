@@ -89,6 +89,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
     DecryptionError,
     StaleOwnerKeyError,
     async_decrypt_location_response_locations,
+    is_real_location_record,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     _CACHE_PROVIDER,
@@ -3076,18 +3077,23 @@ class FcmReceiverHA:
             if not locations:
                 return {}
 
-            # Usable decrypted records: positive proof the account-wide shared key
-            # still works (mirrors the poll cycle's cycle_had_successful_decrypt
-            # gate). Clear the shared reauth budget so non-consecutive background
-            # failures interleaved with successful pushes cannot strand a healthy
-            # account at the reauth threshold.
+            # Clear the shared reauth budget only on positive proof: at least one
+            # *authenticated* location report. A metadata_only sentinel row is
+            # non-empty but carries only secrets-bundle key material (no successful
+            # decrypt), so it must NOT clear the budget -- otherwise report-less
+            # pushes interleaved with failures could keep a stale key below the
+            # reauth threshold. This mirrors the poll cycle's
+            # cycle_had_successful_decrypt gate, which excludes the same sentinel,
+            # and lets non-consecutive background failures interleaved with genuine
+            # pushes avoid stranding a healthy account at the reauth threshold.
             # Keyed on the source entry_id -- the cache that actually performed
             # this decrypt -- and symmetric with the failure paths above. Routed
             # fan-out targets share the source's FCM registration token, hence the
             # same account-wide owner_key, so the source success already proves
             # their key; clearing the routed target set instead would break the
             # source entry's own reset invariant.
-            self._note_decrypt_success_for_entry(entry_id)
+            if any(is_real_location_record(record) for record in locations):
+                self._note_decrypt_success_for_entry(entry_id)
 
             best_record: Mapping[str, Any] | None = None
             best_key: tuple[float, int, int] | None = None

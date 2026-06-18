@@ -473,6 +473,53 @@ async def test_poll_cycle_idle_does_not_reset_decrypt_counter() -> None:
     assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
 
+class _DecryptThenMetadataOnlyAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns a
+    ``metadata_only`` sentinel row.
+
+    Models a device whose secrets bundle still yields key *material* (so a
+    metadata_only row is emitted) while no encrypted report decrypts. The sentinel
+    is truthy but proves nothing about the shared key, so such a cycle must NOT
+    clear the accumulated decrypt-failure counter (Codex finding on PR #182).
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        # metadata_only sentinel: key material from the secrets bundle, no decrypt.
+        return {"metadata_only": True, "owner_key_version": 7}
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_metadata_only_does_not_reset_decrypt_counter() -> None:
+    """A metadata_only cycle must NOT clear accumulated decrypt failures: the
+    sentinel row carries key material from the secrets bundle, not an authenticated
+    decrypt, so it is no proof the stale shared key recovered. Otherwise a
+    report-less device emitting metadata_only could let such cycles perpetually
+    reset the counter, the reauth threshold is never reached, and the user stays
+    stuck with no location updates and no reauth prompt (Codex finding on PR
+    #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenMetadataOnlyAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # A metadata_only cycle in between must leave the counter intact (not reset).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+
 class _PerDeviceDecryptAPI:
     """Raises a decryption error for one device id, succeeds (empty) for others."""
 
