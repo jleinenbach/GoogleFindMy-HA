@@ -421,6 +421,11 @@ async def test_poll_cycle_decrypt_counter_resets_on_success() -> None:
     # A successful cycle resets the counter back to zero.
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
     assert coordinator._consecutive_decrypt_failures == 0
+    # No per-tracker stale key was seen, so the OK gate also clears the diagnostic
+    # error class (status and error class move together). Mutation guard: dropping
+    # the OK-gate ``_last_decrypt_error = None`` leaves the stale class behind.
+    assert coordinator._last_decrypt_error is None
+    assert coordinator.crypto_status.state == CryptoStatus.OK
 
 
 class _DecryptThenIdleAPI:
@@ -728,3 +733,36 @@ async def test_poll_cycle_mixed_stale_and_success_keeps_tracker_outdated() -> No
     )
 
     assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_mixed_stale_and_success_keeps_last_decrypt_error() -> None:
+    """The stale-key diagnostic must survive a sibling's successful decrypt.
+
+    Same mixed cycle as above, but asserting the *error class* the encryption-key
+    status sensor exposes (``last_decrypt_error_class`` from ``_last_decrypt_error``).
+    The successful sibling clears the account-wide reauth budget via the shared
+    success entry point, yet the per-tracker StaleOwnerKeyError diagnostic must
+    stay so the sensor can still report which class is outdated.
+
+    Regression guard for the Codex finding: clearing ``_last_decrypt_error``
+    unconditionally in ``note_decrypt_success()`` (or gating it only on the
+    counter) wipes this on the very cycle a sibling decrypts and turns this red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _MixedDecryptAPI(
+        "dev-stale",
+        StaleOwnerKeyError("tracker v1 < v2"),
+        {"latitude": 1.0, "longitude": 2.0, "last_seen": 100},
+    )
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-stale", "name": "Old"}, {"id": "dev-ok", "name": "Hub"}]
+    )
+
+    # Status stays outdated AND the error class behind it survives for triage.
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+    assert coordinator._last_decrypt_error is not None
+    assert coordinator._last_decrypt_error.split(":", 1)[0] == "StaleOwnerKeyError"

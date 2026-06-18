@@ -422,12 +422,18 @@ class PollingOperations(_MixinBase):
         from one source accumulate to the threshold and trip a spurious reauth.
         Idempotent and cheap when the counter is already zero.
 
-        Intentionally does NOT touch :class:`CryptoStatus`: that diagnostic state
-        is owned by the poll cycle, whose OK transition is additionally gated on
+        Intentionally touches ONLY the account-wide counter, not the diagnostic
+        sensor surface (:class:`CryptoStatus` and ``_last_decrypt_error``): those
+        are owned by the poll cycle, whose OK transition is additionally gated on
         the absence of a per-tracker stale key so it never flickers
-        ``tracker_key_outdated`` away. A single background decode has no
-        cross-tracker cycle view, so it only clears the account-wide reauth
-        budget here and leaves the sensor to the poll loop.
+        ``tracker_key_outdated`` -- nor the error class behind it -- away. A
+        per-tracker ``StaleOwnerKeyError`` records ``_last_decrypt_error`` for the
+        sensor while deliberately leaving this counter at zero, so clearing that
+        field here would erase a still-relevant diagnostic on the very cycle a
+        sibling tracker decrypts. A single background decode likewise has no
+        cross-tracker cycle view, so it only clears the account-wide reauth budget
+        here and leaves the sensor (status and error class together) to the poll
+        loop.
         """
         if self._consecutive_decrypt_failures > 0:
             _LOGGER.info(
@@ -435,7 +441,6 @@ class PollingOperations(_MixinBase):
                 self._consecutive_decrypt_failures,
             )
             self._consecutive_decrypt_failures = 0
-        self._last_decrypt_error = None
 
     def _is_on_hass_loop(self) -> bool:
         """Return True if currently executing on the HA event loop thread."""
@@ -1894,6 +1899,14 @@ class PollingOperations(_MixinBase):
                         # timeouts/transient errors leaves the prior state intact
                         # rather than flickering a stale key to OK.
                         self._set_crypto_status(CryptoStatus.OK)
+                        # Clear the diagnostic error class together with the OK
+                        # status: both are the same sensor surface and must move
+                        # as one. Gating it on the same ``not cycle_had_stale_key``
+                        # condition keeps a per-tracker StaleOwnerKeyError's error
+                        # class intact while its tracker_key_outdated status
+                        # persists -- note_decrypt_success() no longer wipes this
+                        # field blindly from the shared (poll + push) entry point.
+                        self._last_decrypt_error = None
                     if cycle_had_successful_decrypt:
                         # Clear the consecutive-decrypt counter only on POSITIVE
                         # proof that the account-wide shared key works (at least one

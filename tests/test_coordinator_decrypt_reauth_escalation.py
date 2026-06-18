@@ -93,7 +93,9 @@ def test_t5_success_reset_prevents_premature_escalation() -> None:
     assert stub._consecutive_decrypt_failures == 2
     stub.note_decrypt_success()  # the real success path reset
     assert stub._consecutive_decrypt_failures == 0
-    assert stub._last_decrypt_error is None
+    # The shared entry point clears only the account-wide counter; the diagnostic
+    # error class is owned by the poll loop's OK gate, so it survives this call.
+    assert stub._last_decrypt_error is not None
 
     # Two fresh failures must NOT escalate (threshold is 3, not 1).
     assert stub.note_decrypt_failure(stale=False, error=err) is False
@@ -177,8 +179,11 @@ def test_note_decrypt_success_clears_accumulated_failures(
     This is the symmetric counterpart of ``note_decrypt_failure`` that both the
     poll cycle and the FCM background-push decode call on a proven decrypt. Two
     non-escalating failures leave the counter at 2; a single success must reset
-    it to 0 (and drop the stale last-error), so a later failure starts the
-    threshold count fresh instead of escalating one step early.
+    it to 0, so a later failure starts the threshold count fresh instead of
+    escalating one step early. The diagnostic ``_last_decrypt_error`` is NOT
+    cleared here: it is part of the sensor surface owned by the poll loop's OK
+    gate (which alone knows whether a per-tracker stale key must keep it), so
+    this shared entry point leaves it intact.
     """
     stub = _make_stub()
     err = DecryptionError("boom")
@@ -191,7 +196,8 @@ def test_note_decrypt_success_clears_accumulated_failures(
         stub.note_decrypt_success()
 
     assert stub._consecutive_decrypt_failures == 0
-    assert stub._last_decrypt_error is None
+    # Counter cleared, diagnostic preserved (owned by the poll OK gate).
+    assert stub._last_decrypt_error is not None
     assert "clearing 2 decrypt failure(s)" in caplog.text
 
 
