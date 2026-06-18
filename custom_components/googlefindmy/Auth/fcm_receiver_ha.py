@@ -3081,6 +3081,12 @@ class FcmReceiverHA:
             # gate). Clear the shared reauth budget so non-consecutive background
             # failures interleaved with successful pushes cannot strand a healthy
             # account at the reauth threshold.
+            # Keyed on the source entry_id -- the cache that actually performed
+            # this decrypt -- and symmetric with the failure paths above. Routed
+            # fan-out targets share the source's FCM registration token, hence the
+            # same account-wide owner_key, so the source success already proves
+            # their key; clearing the routed target set instead would break the
+            # source entry's own reset invariant.
             self._note_decrypt_success_for_entry(entry_id)
 
             best_record: Mapping[str, Any] | None = None
