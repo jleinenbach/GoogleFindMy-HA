@@ -520,6 +520,60 @@ async def test_poll_cycle_metadata_only_does_not_reset_decrypt_counter() -> None
     assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
 
+class _DecryptThenSemanticAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns a
+    SEMANTIC-shaped record (no coordinates).
+
+    Models a device whose server response is a semantic location ("Home") rather
+    than an encrypted fix. The decode layer appends SEMANTIC rows with
+    ``decrypted_location=b""`` and skips the crypto path, so the record carries a
+    ``semantic_name`` and ``last_seen`` but ``latitude``/``longitude`` are ``None``
+    and no ``metadata_only`` flag. It is truthy yet authenticates nothing, so such a
+    cycle must NOT clear the accumulated decrypt-failure counter (Codex finding on
+    PR #182): a denylist on ``metadata_only`` alone would let it through.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        return {
+            "last_seen": 123.0,
+            "semantic_name": "Home",
+            "status": "semantic",
+            "latitude": None,
+            "longitude": None,
+        }
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_semantic_only_does_not_reset_decrypt_counter() -> None:
+    """A SEMANTIC-only cycle must NOT clear accumulated decrypt failures: the row
+    skips the crypto path (``decrypted_location=b""``) and carries no coordinates,
+    so it is no proof the stale shared key recovered. It also lacks the
+    ``metadata_only`` flag, so the previous denylist predicate would have wrongly
+    reset the counter and could strand a stale key below the reauth threshold
+    (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenSemanticAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # A SEMANTIC-only cycle in between must leave the counter intact (not reset).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+
 class _PerDeviceDecryptAPI:
     """Raises a decryption error for one device id, succeeds (empty) for others."""
 

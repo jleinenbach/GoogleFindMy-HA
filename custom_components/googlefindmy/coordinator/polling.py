@@ -1471,13 +1471,14 @@ class PollingOperations(_MixinBase):
                             )
                             continue
 
-                        # A device returned usable location data without raising a
-                        # DecryptionError: positive proof the account-wide shared
-                        # key still decrypts. Gate the crypto OK state on this.
-                        # A metadata_only sentinel row (key material from the secrets
-                        # bundle, no authenticated decrypt) is truthy but proves
-                        # nothing, so one report-less device must not mask another
-                        # device's stale key for the whole cycle.
+                        # A device returned an authenticated coordinate report
+                        # without raising a DecryptionError: positive proof the
+                        # account-wide shared key still decrypts. Gate the crypto OK
+                        # state on this. Truthy-but-unauthenticated rows -- a
+                        # metadata_only sentinel (secrets-bundle key material) or a
+                        # SEMANTIC row (no decrypted coordinates) -- prove nothing, so
+                        # one report-less device must not mask another device's stale
+                        # key for the whole cycle.
                         if is_real_location_record(location):
                             cycle_had_successful_decrypt = True
 

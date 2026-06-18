@@ -880,22 +880,30 @@ def _infer_report_hint(status_value: Any) -> str | None:
 
 
 def is_real_location_record(record: dict[str, Any] | None) -> bool:
-    """Return True if a decoded record authenticates the account-wide shared key.
+    """Return True only for an authenticated, decrypted *coordinate* report.
 
-    ``async_decrypt_location_response_locations`` returns a single ``metadata_only``
-    sentinel row (``metadata_only=True``, produced below when no encrypted report
-    decrypts but the secrets bundle still yields key material, e.g. a phone without
-    a fresh fix) so such devices still surface their key metadata downstream. That
-    row carries key *material* parsed from the bundle, not the result of a
-    successful E2EE decrypt, so it must never be treated as positive proof that the
-    shared key still works. Only a non-sentinel record counts as a real,
-    authenticated location report and may clear the shared decrypt-failure (reauth)
-    budget. ``metadata_only=True`` is set in exactly one place (the no-decrypt
-    branch), so this flag is the authoritative discriminator.
+    Clearing the shared decrypt-failure (reauth) budget requires positive proof
+    that the account-wide shared key still decrypts. Decrypted coordinates are
+    that proof: they are produced exclusively by the authenticated crypto path
+    (own/foreign AES-GCM decrypt, then lat/lon validation below). Requiring a real
+    coordinate pair is therefore an allowlist for genuine reports and rejects every
+    truthy-but-unauthenticated record shape, including:
+
+    - ``metadata_only=True`` sentinel rows -- only secrets-bundle key *material*,
+      emitted when no encrypted report decrypts (e.g. a phone without a fresh fix).
+    - ``SEMANTIC`` rows -- appended with ``decrypted_location=b""`` and ``continue``d
+      before the crypto path, so they carry a server-provided ``semantic_name`` and
+      a ``last_seen`` timestamp but ``latitude``/``longitude`` are ``None``.
+
+    Neither shape carries coordinates, so neither may clear the budget; a denylist
+    on a single known sentinel (``metadata_only``) would miss the others. ``is not
+    None`` (not truthiness) preserves legitimate ``0.0`` coordinates. The metadata
+    merges below only ever write key-material/date keys, never ``latitude``/
+    ``longitude``, so they cannot make a sentinel/SEMANTIC row look authenticated.
     """
     if not record:
         return False
-    return record.get("metadata_only") is not True
+    return record.get("latitude") is not None and record.get("longitude") is not None
 
 
 # ----------------------------- Main decryptor ---------------------------------

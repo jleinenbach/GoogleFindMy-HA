@@ -676,19 +676,39 @@ async def test_own_report_mac_valueerror_counts_as_own_failure(
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
+        # Authenticated coordinate report -> positive proof of the shared key.
         ({"last_seen": 123.0, "latitude": 1.0, "longitude": 2.0}, True),
-        ({"last_seen": 123.0, "metadata_only": False}, True),
-        ({"last_seen": 123.0, "metadata_only": None}, True),
+        # Coordinates win regardless of an explicit metadata_only=False flag.
+        ({"latitude": 1.0, "longitude": 2.0, "metadata_only": False}, True),
+        # 0.0 coordinates are valid (is-None check, not truthiness).
+        ({"latitude": 0.0, "longitude": 0.0}, True),
+        # SEMANTIC-shaped row: last_seen + semantic_name but no coordinates and no
+        # metadata_only flag -> skipped the crypto path, so it proves nothing.
+        (
+            {
+                "last_seen": 123.0,
+                "semantic_name": "Home",
+                "status": "semantic",
+                "latitude": None,
+                "longitude": None,
+            },
+            False,
+        ),
+        # Partial coordinates (only one axis) -> not an authenticated fix.
+        ({"latitude": 1.0, "longitude": None}, False),
+        # metadata_only sentinel -> secrets-bundle key material, no decrypt.
         ({"metadata_only": True, "owner_key_version": 7}, False),
         ({}, False),
         (None, False),
     ],
 )
 async def test_is_real_location_record(record: object, expected: bool) -> None:
-    """Only a non-sentinel record proves the shared key.
+    """Only an authenticated coordinate report proves the shared key.
 
-    ``metadata_only=True`` rows carry secrets-bundle key material, not a successful
-    decrypt, so they must not be treated as positive proof (which would let them
-    clear the shared decrypt-failure budget and mask a stale key).
+    Decrypted coordinates are produced solely by the authenticated crypto path, so
+    requiring a real ``latitude``/``longitude`` pair is an allowlist for genuine
+    reports. Truthy-but-unauthenticated shapes -- ``metadata_only=True`` sentinels
+    and SEMANTIC rows (no coordinates, crypto path skipped) -- must return False, or
+    they would clear the shared decrypt-failure budget and mask a stale key.
     """
     assert decrypt_locations.is_real_location_record(record) is expected

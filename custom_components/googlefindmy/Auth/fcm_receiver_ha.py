@@ -3078,12 +3078,13 @@ class FcmReceiverHA:
                 return {}
 
             # Clear the shared reauth budget only on positive proof: at least one
-            # *authenticated* location report. A metadata_only sentinel row is
-            # non-empty but carries only secrets-bundle key material (no successful
-            # decrypt), so it must NOT clear the budget -- otherwise report-less
-            # pushes interleaved with failures could keep a stale key below the
-            # reauth threshold. This mirrors the poll cycle's
-            # cycle_had_successful_decrypt gate, which excludes the same sentinel,
+            # *authenticated* coordinate report. Truthy-but-unauthenticated rows --
+            # a metadata_only sentinel (only secrets-bundle key material) or a
+            # SEMANTIC row (no decrypted coordinates) -- are non-empty but carry no
+            # successful decrypt, so they must NOT clear the budget -- otherwise
+            # report-less pushes interleaved with failures could keep a stale key
+            # below the reauth threshold. This mirrors the poll cycle's
+            # cycle_had_successful_decrypt gate, which excludes the same shapes,
             # and lets non-consecutive background failures interleaved with genuine
             # pushes avoid stranding a healthy account at the reauth threshold.
             # Keyed on the source entry_id -- the cache that actually performed
