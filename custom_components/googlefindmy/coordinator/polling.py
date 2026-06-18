@@ -408,6 +408,35 @@ class PollingOperations(_MixinBase):
         )
         return True
 
+    def note_decrypt_success(self) -> None:
+        """Record a proven location decryption and clear the reauth budget.
+
+        Shared success entry point that mirrors :meth:`note_decrypt_failure`. The
+        account-wide ``_consecutive_decrypt_failures`` counter is *fed* from more
+        than one source -- the poll cycle and the FCM background-push decode both
+        increment it through ``note_decrypt_failure`` -- so the symmetric clear
+        must be reachable from every automatic source that can observe positive
+        proof the shared key still decrypts. A successful own/crowd location
+        decrypt is exactly that proof, so it resets the counter that drives
+        ``ConfigEntryAuthFailed`` escalation; otherwise non-consecutive failures
+        from one source accumulate to the threshold and trip a spurious reauth.
+        Idempotent and cheap when the counter is already zero.
+
+        Intentionally does NOT touch :class:`CryptoStatus`: that diagnostic state
+        is owned by the poll cycle, whose OK transition is additionally gated on
+        the absence of a per-tracker stale key so it never flickers
+        ``tracker_key_outdated`` away. A single background decode has no
+        cross-tracker cycle view, so it only clears the account-wide reauth
+        budget here and leaves the sensor to the poll loop.
+        """
+        if self._consecutive_decrypt_failures > 0:
+            _LOGGER.info(
+                "Location decryption succeeded; clearing %d decrypt failure(s).",
+                self._consecutive_decrypt_failures,
+            )
+            self._consecutive_decrypt_failures = 0
+        self._last_decrypt_error = None
+
     def _is_on_hass_loop(self) -> bool:
         """Return True if currently executing on the HA event loop thread."""
         loop = self.hass.loop
@@ -1865,7 +1894,7 @@ class PollingOperations(_MixinBase):
                         # timeouts/transient errors leaves the prior state intact
                         # rather than flickering a stale key to OK.
                         self._set_crypto_status(CryptoStatus.OK)
-                    if cycle_had_successful_decrypt and self._consecutive_decrypt_failures > 0:
+                    if cycle_had_successful_decrypt:
                         # Clear the consecutive-decrypt counter only on POSITIVE
                         # proof that the account-wide shared key works (at least one
                         # device decrypted this cycle), mirroring the CryptoStatus.OK
@@ -1885,13 +1914,12 @@ class PollingOperations(_MixinBase):
                         # note_decrypt_failure(stale=True)). Proof that the account
                         # key works must be allowed to clear it even when one tracker
                         # still carries an outdated key.
-                        _LOGGER.info(
-                            "Location decryption succeeded this cycle; clearing "
-                            "%d decrypt failure(s).",
-                            self._consecutive_decrypt_failures,
-                        )
-                        self._consecutive_decrypt_failures = 0
-                        self._last_decrypt_error = None
+                        #
+                        # Clear via the shared success entry point so this poll path
+                        # and the FCM background-push decode cannot drift apart again:
+                        # both sources feed the counter, both must be able to clear it
+                        # (the asymmetry that previously stranded a healthy account).
+                        self.note_decrypt_success()
             finally:
                 # Update scheduling baseline and clear flag, then push end snapshot.
                 # Always advance the poll baseline to prevent high-frequency
