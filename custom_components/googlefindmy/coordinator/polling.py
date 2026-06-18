@@ -1290,13 +1290,17 @@ class PollingOperations(_MixinBase):
             _any_device_got_data = False
             try:
                 cycle_failed = False
-                # Track whether any device hit an account-wide decryption failure
-                # this cycle. The consecutive-decrypt counter is reset only when the
-                # WHOLE cycle was decrypt-clean: in a multi-device account a single
-                # healthy tracker must not mask a persistently un-decryptable shared
-                # key on the others (the condition is account-wide, so the reset
-                # gate must be too).
-                cycle_had_decrypt_failure = False
+                # First account-wide decryption error seen this cycle (None == the
+                # cycle was decrypt-clean). The account-wide failure counter is a
+                # per-cycle quantity: it is advanced exactly once after the device
+                # loop, never per device. In a multi-device account a single healthy
+                # tracker must not mask a persistently un-decryptable shared key on
+                # the others, so both the escalation and the reset gate are
+                # cycle-scoped. Consequence (deliberate): in the escalation cycle the
+                # whole device loop runs to completion before the single escalation
+                # fires, so the remaining trackers still get one (failing) Nova call.
+                # That is the rare end-state cost of per-cycle counting.
+                cycle_decrypt_error: DecryptionError | None = None
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
                     dev_name = dev.get("name", dev_id)
@@ -1692,25 +1696,18 @@ class PollingOperations(_MixinBase):
                             last_exception = stale_err
                         continue
                     except DecryptionError as dec_err:
-                        # Account-wide stale/missing shared key: escalate to reauth
-                        # after _MAX_DECRYPT_FAILURES consecutive cycles (with
-                        # cooldown). Below the threshold keep polling so the
-                        # in-decrypt self-heal can still recover an owner-key bump.
-                        cycle_had_decrypt_failure = True
+                        # Account-wide stale/missing shared key. Only FLAG the cycle
+                        # here -- the account-wide failure counter is advanced exactly
+                        # once per cycle after the device loop (see below). Counting
+                        # per device would let a multi-device account cross
+                        # _MAX_DECRYPT_FAILURES within a single cycle and escalate on
+                        # the first poll, defeating the documented "consecutive
+                        # cycles" budget that gives the in-decrypt self-heal a few
+                        # cycles to recover an owner-key bump.
                         self._consecutive_timeouts = 0
-                        if self.note_decrypt_failure(
-                            stale=False, error=dec_err, device=dev_name
-                        ):
-                            cycle_failed = True
-                            self._last_poll_result = "failed"
-                            reauth_exc = ConfigEntryAuthFailed(
-                                "Location decryption keeps failing: the shared key "
-                                "is stale; a fresh secrets.json (re-authentication) "
-                                "is required"
-                            )
-                            last_exception = reauth_exc
-                            raise reauth_exc from dec_err
                         cycle_failed = True
+                        if cycle_decrypt_error is None:
+                            cycle_decrypt_error = dec_err
                         if last_exception is None:
                             last_exception = dec_err
                         continue
@@ -1729,15 +1726,33 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
-                # Whole cycle was decrypt-clean: clear the consecutive-decrypt
-                # counter so a recovered/healthy shared key (or a successful
-                # self-heal) does not later trip a spurious reauth. Gated on the
-                # entire cycle -- one healthy tracker must not mask a persistently
-                # stale account-wide shared key on the others.
-                if (
-                    not cycle_had_decrypt_failure
-                    and self._consecutive_decrypt_failures > 0
-                ):
+                if cycle_decrypt_error is not None:
+                    # Account-wide decrypt failure persisted this cycle: advance the
+                    # consecutive-cycle counter exactly ONCE (not once per device)
+                    # and escalate to a reauth flow when it crosses the threshold
+                    # (with cooldown). Counting once per cycle keeps a multi-device
+                    # account on the same "N consecutive cycles" budget as a
+                    # single-device account. Raised here (still inside the outer
+                    # try, before its finally) so it propagates exactly like the
+                    # former in-loop raise.
+                    if self.note_decrypt_failure(
+                        stale=False, error=cycle_decrypt_error, device=None
+                    ):
+                        cycle_failed = True
+                        self._last_poll_result = "failed"
+                        reauth_exc = ConfigEntryAuthFailed(
+                            "Location decryption keeps failing: the shared key "
+                            "is stale; a fresh secrets.json (re-authentication) "
+                            "is required"
+                        )
+                        last_exception = reauth_exc
+                        raise reauth_exc from cycle_decrypt_error
+                elif self._consecutive_decrypt_failures > 0:
+                    # Whole cycle was decrypt-clean: clear the consecutive-decrypt
+                    # counter so a recovered/healthy shared key (or a successful
+                    # self-heal) does not later trip a spurious reauth. Gated on the
+                    # entire cycle -- one healthy tracker must not mask a
+                    # persistently stale account-wide shared key on the others.
                     _LOGGER.info(
                         "Location decryption succeeded for all devices; clearing "
                         "%d decrypt failure(s).",

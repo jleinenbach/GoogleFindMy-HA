@@ -439,3 +439,42 @@ async def test_poll_cycle_partial_decrypt_failure_still_escalates() -> None:
     with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_start_poll_cycle(devices)
     assert any(kw.get("failed") for kw in auth_calls)
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_counts_multi_device_decrypt_failure_once() -> None:
+    """Codex P2 regression: one poll cycle in which several trackers all hit the
+    same account-wide stale shared key must advance the consecutive-failure counter
+    exactly ONCE, not once per device.
+
+    Counting per device let a multi-device account cross _MAX_DECRYPT_FAILURES
+    within the first cycle and escalate to reauth immediately, defeating the
+    documented "N consecutive cycles" budget that gives the in-decrypt self-heal a
+    few cycles before re-authentication."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    auth_calls: list[dict[str, Any]] = []
+    coordinator._set_auth_state = lambda **kwargs: auth_calls.append(kwargs)
+    # More failing trackers in a single cycle than the escalation threshold: a
+    # per-device counter would already escalate here.
+    devices = [
+        {"id": "dev-1", "name": "One"},
+        {"id": "dev-2", "name": "Two"},
+        {"id": "dev-3", "name": "Three"},
+    ]
+    assert len(devices) >= _MAX_DECRYPT_FAILURES
+
+    # First cycle: counter advances by one, no escalation despite 3 failing devices.
+    await coordinator._async_start_poll_cycle(devices)
+    assert coordinator._consecutive_decrypt_failures == 1
+    assert not any(kw.get("failed") for kw in auth_calls)
+
+    # Second cycle: still below threshold (2/3).
+    await coordinator._async_start_poll_cycle(devices)
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+    assert not any(kw.get("failed") for kw in auth_calls)
+
+    # Third consecutive cycle reaches the threshold -> escalate exactly once.
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_start_poll_cycle(devices)
+    assert any(kw.get("failed") for kw in auth_calls)

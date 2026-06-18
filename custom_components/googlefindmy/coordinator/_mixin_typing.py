@@ -170,6 +170,11 @@ class _MixinBase:
     ) -> None:
         raise NotImplementedError
 
+    def note_decrypt_failure(
+        self, *, stale: bool, error: Exception, device: str | None = None
+    ) -> bool:
+        raise NotImplementedError
+
     def _short_error_message(self, exc: Exception | str) -> str:
         raise NotImplementedError
 
