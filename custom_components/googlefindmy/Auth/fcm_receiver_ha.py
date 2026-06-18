@@ -88,8 +88,8 @@ from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     StaleOwnerKeyError,
+    any_real_location_record,
     async_decrypt_location_response_locations,
-    is_real_location_record,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
     _CACHE_PROVIDER,
@@ -3093,7 +3093,7 @@ class FcmReceiverHA:
             # same account-wide owner_key, so the source success already proves
             # their key; clearing the routed target set instead would break the
             # source entry's own reset invariant.
-            if any(is_real_location_record(record) for record in locations):
+            if any_real_location_record(locations):
                 self._note_decrypt_success_for_entry(entry_id)
 
             best_record: Mapping[str, Any] | None = None

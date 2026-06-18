@@ -323,6 +323,13 @@ class LocateOperations(_MixinBase):
                 if not location_data:
                     return {}
 
+                # Manual locate is upward-only for the reauth budget and never
+                # consumes the poll-only decrypt-proof hint; drop it here (after the
+                # empty guard, so location_data is a non-empty dict) so it cannot
+                # leak into the cached payload or the returned dict (mirrors the
+                # _report_hint stripping discipline).
+                location_data.pop("_decrypt_proven", None)
+
                 self._record_semantic_label(location_data, device_id=device_id)
 
                 cached_loc = self._device_location_data.get(device_id)

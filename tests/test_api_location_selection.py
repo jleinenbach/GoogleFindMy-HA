@@ -285,3 +285,74 @@ def test_api_forwards_contributor_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert captured["mode"] == "high_traffic"
     assert captured["switch"] == 1_700_000_000
+
+
+def test_async_get_device_location_marks_decrypt_proof_hidden_by_semantic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A coordinate fix hidden behind a newer SEMANTIC row still proves the key.
+
+    ``_select_best_location`` ranks by newest ``last_seen``, so a report-less
+    SEMANTIC row outranks an older coordinate report and becomes the returned
+    record. The full-list decrypt proof must survive that collapse via the internal
+    ``_decrypt_proven`` hint, otherwise the poll loop would miss the successful
+    decrypt and let a later transient failure trip a spurious reauth.
+    """
+
+    async def fake_get_location_data_for_device(
+        device_id: str,
+        device_name: str,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return [
+            # Older coordinate report: a genuine decrypted fix.
+            {"last_seen": 100.0, "latitude": 1.0, "longitude": 2.0},
+            # Newer SEMANTIC row: outranks the fix in the selector, no coordinates.
+            {"last_seen": 200.0, "semantic_name": "Home", "latitude": None},
+        ]
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.get_location_data_for_device",
+        fake_get_location_data_for_device,
+    )
+
+    async def _run() -> dict[str, Any]:
+        api = GoogleFindMyAPI(cache=_StubCache())
+        return await api.async_get_device_location("dev-1", "Tracker")
+
+    best = asyncio.run(_run())
+
+    # The display selector returned the newer, report-less SEMANTIC row...
+    assert best.get("semantic_name") == "Home"
+    assert best.get("latitude") is None
+    # ...but the full-list proof was carried, so the budget can still be cleared.
+    assert best.get("_decrypt_proven") is True
+
+
+def test_async_get_device_location_marks_no_proof_for_reportless_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response without any coordinate report carries a False decrypt proof."""
+
+    async def fake_get_location_data_for_device(
+        device_id: str,
+        device_name: str,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"last_seen": 100.0, "metadata_only": True, "owner_key_version": 7},
+            {"last_seen": 200.0, "semantic_name": "Home", "latitude": None},
+        ]
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.api.get_location_data_for_device",
+        fake_get_location_data_for_device,
+    )
+
+    async def _run() -> dict[str, Any]:
+        api = GoogleFindMyAPI(cache=_StubCache())
+        return await api.async_get_device_location("dev-1", "Tracker")
+
+    best = asyncio.run(_run())
+
+    assert best.get("_decrypt_proven") is False

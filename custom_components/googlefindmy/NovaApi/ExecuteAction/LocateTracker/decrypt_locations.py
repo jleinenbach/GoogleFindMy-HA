@@ -906,6 +906,25 @@ def is_real_location_record(record: dict[str, Any] | None) -> bool:
     return record.get("latitude") is not None and record.get("longitude") is not None
 
 
+def any_real_location_record(records: list[dict[str, Any]] | None) -> bool:
+    """Return True if ANY record in a response authenticates a coordinate report.
+
+    The decrypt proof -- positive evidence that the account-wide shared key still
+    decrypts -- is a property of the WHOLE response, not of any single record. A
+    display selector that ranks by newest ``last_seen`` (see
+    ``api._select_best_location``) can hand back a report-less SEMANTIC/metadata
+    row even when a sibling coordinate report decrypted successfully in the same
+    response. Evaluating only that collapsed record would discard the proof and
+    let a later transient failure trip a spurious reauth. Both automatic paths
+    (poll and background push) must therefore run the FULL candidate list through
+    this one predicate so a hidden success is never lost. See
+    ``is_real_location_record`` for the per-record allowlist.
+    """
+    if not records:
+        return False
+    return any(is_real_location_record(record) for record in records)
+
+
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     device_update_protobuf: DeviceUpdateProto, *, cache: TokenCache

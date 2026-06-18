@@ -1479,7 +1479,19 @@ class PollingOperations(_MixinBase):
                         # SEMANTIC row (no decrypted coordinates) -- prove nothing, so
                         # one report-less device must not mask another device's stale
                         # key for the whole cycle.
-                        if is_real_location_record(location):
+                        #
+                        # The proof is a property of the WHOLE response, but
+                        # api.async_get_device_location collapses it to a single
+                        # display record (newest last_seen) that can be a report-less
+                        # SEMANTIC row even when a sibling coordinate report decrypted.
+                        # It therefore carries the full-list verdict in the internal
+                        # _decrypt_proven hint; pop it here (leak-safe, like
+                        # _report_hint) and prefer it. Fall back to the collapsed
+                        # record only when the hint is absent (legacy/mocked stubs).
+                        decrypt_proven = location.pop("_decrypt_proven", None)
+                        if decrypt_proven is None:
+                            decrypt_proven = is_real_location_record(location)
+                        if decrypt_proven:
                             cycle_had_successful_decrypt = True
 
                         self._record_semantic_label(location, device_id=dev_id)

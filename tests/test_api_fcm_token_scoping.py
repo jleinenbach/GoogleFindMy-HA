@@ -266,8 +266,20 @@ def test_async_get_device_location_uses_scoped_cache(
         loc1 = await api_entry_1.async_get_device_location("device-1", "Device 1")
         loc2 = await api_entry_2.async_get_device_location("device-2", "Device 2")
 
-        assert loc1 == {"canonic_id": "device-1", "latitude": 1}
-        assert loc2 == {"canonic_id": "device-2", "latitude": 1}
+        # async_get_device_location annotates the returned record with the
+        # internal full-list decrypt-proof hint (False here: latitude only, no
+        # longitude, so no authenticated coordinate report). Consumers pop it
+        # before caching, like _report_hint.
+        assert loc1 == {
+            "canonic_id": "device-1",
+            "latitude": 1,
+            "_decrypt_proven": False,
+        }
+        assert loc2 == {
+            "canonic_id": "device-2",
+            "latitude": 1,
+            "_decrypt_proven": False,
+        }
 
     asyncio.run(_exercise())
 

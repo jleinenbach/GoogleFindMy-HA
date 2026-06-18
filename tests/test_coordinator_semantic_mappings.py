@@ -574,6 +574,67 @@ async def test_poll_cycle_semantic_only_does_not_reset_decrypt_counter() -> None
     assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
 
+class _DecryptThenHiddenProofAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns a
+    SEMANTIC-shaped record that still carries the full-list decrypt proof.
+
+    Models the Codex round-8 finding: the same Nova response decrypted a real
+    coordinate report, but ``api._select_best_location`` ranked a newer report-less
+    SEMANTIC row first and returned it. ``async_get_device_location`` preserves the
+    full-list verdict in the internal ``_decrypt_proven`` hint, so even though the
+    visible record has no coordinates the cycle DID prove the shared key and the
+    accumulated decrypt-failure counter must reset.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        # Display-selected SEMANTIC row (newest last_seen, no coordinates) but the
+        # response decrypted a sibling coordinate fix -> hint records the proof.
+        return {
+            "last_seen": 200.0,
+            "semantic_name": "Home",
+            "status": "semantic",
+            "latitude": None,
+            "longitude": None,
+            "_decrypt_proven": True,
+        }
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_hidden_decrypt_proof_resets_counter() -> None:
+    """A real decrypt hidden behind a newer SEMANTIC row still clears the budget.
+
+    The display selector collapses the response to a report-less SEMANTIC record,
+    but the full-list ``_decrypt_proven`` hint shows a coordinate report decrypted.
+    The cycle must therefore reset the consecutive-decrypt-failure counter; without
+    carrying the full-list proof the success would be lost and a later transient
+    failure could trip a spurious reauth (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenHiddenProofAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # The hidden-proof cycle resets the counter back to zero.
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == 0
+    # The internal hint must not leak into the cached payload.
+    cached = coordinator._device_location_data.get("dev-1")
+    if isinstance(cached, dict):
+        assert "_decrypt_proven" not in cached
+
+
 class _PerDeviceDecryptAPI:
     """Raises a decryption error for one device id, succeeds (empty) for others."""
 
