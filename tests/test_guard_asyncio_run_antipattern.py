@@ -13,7 +13,6 @@ import pytest
 LEGACY_ALLOWLIST: set[str] = {
     "tests/test_adm_token_retrieval.py",
     "tests/test_api_fcm_token_scoping.py",
-    "tests/test_api_location_selection.py",
     "tests/test_cli_entry_selection.py",
     "tests/test_cli_sound_request_entry_selection.py",
     "tests/test_config_flow_discovery.py",

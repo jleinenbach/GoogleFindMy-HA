@@ -160,18 +160,18 @@ def test_sync_wrappers_execute_without_running_loop() -> None:
     ]
 
 
-def test_sync_wrappers_guard_when_loop_running() -> None:
+async def test_sync_wrappers_guard_when_loop_running() -> None:
     """Sync helpers refuse to run when an event loop is already active."""
 
     api = _SyncHarness()
 
-    async def _runner() -> None:
-        assert api.get_basic_device_list() == []
-        assert api.get_device_location("dev-1", "Device 1") == {}
-        assert api.play_sound("dev-2") is False
-        assert api.stop_sound("dev-3") is False
+    # Running inside pytest-asyncio's managed loop is exactly the guarded
+    # condition: the sync wrappers must detect the active loop and refuse.
+    assert api.get_basic_device_list() == []
+    assert api.get_device_location("dev-1", "Device 1") == {}
+    assert api.play_sound("dev-2") is False
+    assert api.stop_sound("dev-3") is False
 
-    asyncio.run(_runner())
     assert api.calls == []
 
 
@@ -247,7 +247,7 @@ def test_process_device_list_response_deduplicates_canonic_ids(
     ]
 
 
-def test_api_forwards_contributor_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_api_forwards_contributor_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Contributor mode settings are passed to the location request helper."""
 
     captured: dict[str, Any] = {}
@@ -272,22 +272,19 @@ def test_api_forwards_contributor_mode(monkeypatch: pytest.MonkeyPatch) -> None:
         fake_get_location_data_for_device,
     )
 
-    async def _run() -> None:
-        api = GoogleFindMyAPI(
-            cache=_StubCache(),
-            contributor_mode="high_traffic",
-            contributor_mode_switch_epoch=1_700_000_000,
-        )
+    api = GoogleFindMyAPI(
+        cache=_StubCache(),
+        contributor_mode="high_traffic",
+        contributor_mode_switch_epoch=1_700_000_000,
+    )
 
-        await api.async_get_device_location("dev-1", "Tracker")
-
-    asyncio.run(_run())
+    await api.async_get_device_location("dev-1", "Tracker")
 
     assert captured["mode"] == "high_traffic"
     assert captured["switch"] == 1_700_000_000
 
 
-def test_async_get_device_location_marks_decrypt_proof_hidden_by_semantic(
+async def test_async_get_device_location_marks_decrypt_proof_hidden_by_semantic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A coordinate fix hidden behind a newer SEMANTIC row still proves the key.
@@ -316,11 +313,8 @@ def test_async_get_device_location_marks_decrypt_proof_hidden_by_semantic(
         fake_get_location_data_for_device,
     )
 
-    async def _run() -> dict[str, Any]:
-        api = GoogleFindMyAPI(cache=_StubCache())
-        return await api.async_get_device_location("dev-1", "Tracker")
-
-    best = asyncio.run(_run())
+    api = GoogleFindMyAPI(cache=_StubCache())
+    best = await api.async_get_device_location("dev-1", "Tracker")
 
     # The display selector returned the newer, report-less SEMANTIC row...
     assert best.get("semantic_name") == "Home"
@@ -329,7 +323,7 @@ def test_async_get_device_location_marks_decrypt_proof_hidden_by_semantic(
     assert best.get("_decrypt_proven") is True
 
 
-def test_async_get_device_location_marks_no_proof_for_reportless_only(
+async def test_async_get_device_location_marks_no_proof_for_reportless_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A response without any coordinate report carries a False decrypt proof."""
@@ -349,10 +343,7 @@ def test_async_get_device_location_marks_no_proof_for_reportless_only(
         fake_get_location_data_for_device,
     )
 
-    async def _run() -> dict[str, Any]:
-        api = GoogleFindMyAPI(cache=_StubCache())
-        return await api.async_get_device_location("dev-1", "Tracker")
-
-    best = asyncio.run(_run())
+    api = GoogleFindMyAPI(cache=_StubCache())
+    best = await api.async_get_device_location("dev-1", "Tracker")
 
     assert best.get("_decrypt_proven") is False
