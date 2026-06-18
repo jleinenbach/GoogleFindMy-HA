@@ -568,7 +568,12 @@ async def async_retrieve_identity_key(
         )
         raise
     except Exception as meta_exc:  # best-effort diagnostics
-        _LOGGER.warning(
+        # Downgraded to debug: this metadata fetch is a non-actionable,
+        # best-effort diagnostic aid. Its failure (e.g. transient network
+        # timeout or SSL teardown) is swallowed and the regular decrypt
+        # error path continues unaffected, so it must not surface as a
+        # user-facing WARNING.
+        _LOGGER.debug(
             "Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc
         )
 

@@ -10,6 +10,8 @@ that keeps every existing ``except DecryptionError`` handler working.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from cryptography.exceptions import InvalidTag
 
@@ -75,6 +77,61 @@ async def test_owner_key_invalid_tag_propagates_as_shared_key_mismatch(
 
     with pytest.raises(SharedKeyMismatchError):
         await _dl.async_retrieve_identity_key(registration, cache=object())
+
+
+@pytest.mark.asyncio
+async def test_e2ee_metadata_diagnostic_failure_logs_at_debug_not_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The best-effort E2EE metadata fetch is a non-actionable diagnostic aid.
+
+    When it fails (e.g. transient network timeout or SSL teardown), the failure
+    is swallowed and the regular decrypt error path continues unaffected, so it
+    must be logged at DEBUG, not WARNING, to avoid user-facing log noise.
+    """
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+        OwnerKeyInfo,
+    )
+
+    async def _owner_ok(
+        *, cache: object, force_refresh: bool = False, **_kw: object
+    ) -> object:
+        # Owner-key acquisition succeeds, so the flow reaches the decrypt attempt.
+        return OwnerKeyInfo(key=b"\x00" * 32, version=1)
+
+    async def _meta_boom(**_kwargs: object) -> object:
+        raise TimeoutError("Timeout after retries.")
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", _owner_ok)
+    monkeypatch.setattr(_dl, "async_get_eid_info", _meta_boom)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    # Garbage identity key: decryption fails, so the flow falls through to the
+    # best-effort metadata fetch (which we force to fail). ownerKeyVersion stays
+    # 0, so no forced refresh short-circuits the path beforehand.
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 60
+
+    caplog.set_level(logging.DEBUG, logger=_dl.__name__)
+
+    # The decrypt itself still fails; the metadata fetch is only a diagnostic aside.
+    # _retry=False keeps the path deterministic (single, non-recursive emission;
+    # avoids the blind-refresh branch and its unrelated WARNING).
+    with pytest.raises(DecryptionError):
+        await _dl.async_retrieve_identity_key(
+            registration, cache=object(), _retry=False
+        )
+
+    diagnostic_records = [
+        record
+        for record in caplog.records
+        if "Failed to retrieve E2EE metadata for diagnostics" in record.getMessage()
+    ]
+    assert diagnostic_records, "expected the best-effort diagnostic log line to be emitted"
+    # Mutation-sharp: reverting debug -> warning flips levelno and fails this assertion.
+    assert all(record.levelno == logging.DEBUG for record in diagnostic_records)
+    assert not any(record.levelno == logging.WARNING for record in diagnostic_records)
 
 
 @pytest.mark.asyncio
