@@ -44,7 +44,10 @@ from .const import (
     DEFAULT_CONTRIBUTOR_MODE,
 )
 from .NovaApi import nova_request
-from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import DecryptionError
+from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    DecryptionError,
+    any_real_location_record,
+)
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
     get_location_data_for_device,
 )
@@ -1240,6 +1243,13 @@ class GoogleFindMyAPI:
                     device_name,
                     len(records),
                 )
+                # _select_best_location ranks by newest last_seen and may return a
+                # report-less SEMANTIC/metadata row, hiding a sibling coordinate
+                # report that decrypted successfully. Carry the FULL-list decrypt
+                # proof as an internal hint so the poll loop's reauth-budget gate
+                # is not fooled by the collapsed view (consumers pop it before
+                # caching, like _report_hint). See any_real_location_record.
+                best["_decrypt_proven"] = any_real_location_record(records)
                 return best
             _LOGGER.debug("API v3.0 Async: No location data for %s", device_name)
             return {}

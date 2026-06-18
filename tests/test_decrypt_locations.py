@@ -671,3 +671,80 @@ async def test_own_report_mac_valueerror_counts_as_own_failure(
         await decrypt_locations.async_decrypt_location_response_locations(
             update, cache=object()
         )
+
+
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        # Authenticated coordinate report -> positive proof of the shared key.
+        ({"last_seen": 123.0, "latitude": 1.0, "longitude": 2.0}, True),
+        # Coordinates win regardless of an explicit metadata_only=False flag.
+        ({"latitude": 1.0, "longitude": 2.0, "metadata_only": False}, True),
+        # 0.0 coordinates are valid (is-None check, not truthiness).
+        ({"latitude": 0.0, "longitude": 0.0}, True),
+        # SEMANTIC-shaped row: last_seen + semantic_name but no coordinates and no
+        # metadata_only flag -> skipped the crypto path, so it proves nothing.
+        (
+            {
+                "last_seen": 123.0,
+                "semantic_name": "Home",
+                "status": "semantic",
+                "latitude": None,
+                "longitude": None,
+            },
+            False,
+        ),
+        # Partial coordinates (only one axis) -> not an authenticated fix.
+        ({"latitude": 1.0, "longitude": None}, False),
+        # metadata_only sentinel -> secrets-bundle key material, no decrypt.
+        ({"metadata_only": True, "owner_key_version": 7}, False),
+        ({}, False),
+        (None, False),
+    ],
+)
+async def test_is_real_location_record(record: object, expected: bool) -> None:
+    """Only an authenticated coordinate report proves the shared key.
+
+    Decrypted coordinates are produced solely by the authenticated crypto path, so
+    requiring a real ``latitude``/``longitude`` pair is an allowlist for genuine
+    reports. Truthy-but-unauthenticated shapes -- ``metadata_only=True`` sentinels
+    and SEMANTIC rows (no coordinates, crypto path skipped) -- must return False, or
+    they would clear the shared decrypt-failure budget and mask a stale key.
+    """
+    assert decrypt_locations.is_real_location_record(record) is expected
+
+
+@pytest.mark.parametrize(
+    ("records", "expected"),
+    [
+        # Empty / falsy inputs -> no proof.
+        (None, False),
+        ([], False),
+        # Only report-less rows -> no record authenticates a coordinate report.
+        (
+            [
+                {"metadata_only": True, "owner_key_version": 7},
+                {"last_seen": 9.0, "semantic_name": "Home", "latitude": None},
+            ],
+            False,
+        ),
+        # A real coordinate report anywhere in the list proves the shared key,
+        # even when a report-less SEMANTIC row would outrank it in the selector.
+        (
+            [
+                {"last_seen": 5.0, "latitude": 1.0, "longitude": 2.0},
+                {"last_seen": 9.0, "semantic_name": "Home", "latitude": None},
+            ],
+            True,
+        ),
+    ],
+)
+async def test_any_real_location_record(records: object, expected: bool) -> None:
+    """The decrypt proof is a full-list property, not a single-record property.
+
+    ``any_real_location_record`` must return True when ANY record authenticates a
+    coordinate report, so a successfully decrypted fix hidden behind a newer
+    report-less SEMANTIC/metadata row is never lost. Empty inputs and lists of only
+    report-less rows must return False so they cannot clear the reauth budget.
+    """
+    assert decrypt_locations.any_real_location_record(records) is expected

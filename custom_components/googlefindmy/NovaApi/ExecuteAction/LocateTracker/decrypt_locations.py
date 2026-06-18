@@ -879,6 +879,52 @@ def _infer_report_hint(status_value: Any) -> str | None:
     return None
 
 
+def is_real_location_record(record: dict[str, Any] | None) -> bool:
+    """Return True only for an authenticated, decrypted *coordinate* report.
+
+    Clearing the shared decrypt-failure (reauth) budget requires positive proof
+    that the account-wide shared key still decrypts. Decrypted coordinates are
+    that proof: they are produced exclusively by the authenticated crypto path
+    (own/foreign AES-GCM decrypt, then lat/lon validation below). Requiring a real
+    coordinate pair is therefore an allowlist for genuine reports and rejects every
+    truthy-but-unauthenticated record shape, including:
+
+    - ``metadata_only=True`` sentinel rows -- only secrets-bundle key *material*,
+      emitted when no encrypted report decrypts (e.g. a phone without a fresh fix).
+    - ``SEMANTIC`` rows -- appended with ``decrypted_location=b""`` and ``continue``d
+      before the crypto path, so they carry a server-provided ``semantic_name`` and
+      a ``last_seen`` timestamp but ``latitude``/``longitude`` are ``None``.
+
+    Neither shape carries coordinates, so neither may clear the budget; a denylist
+    on a single known sentinel (``metadata_only``) would miss the others. ``is not
+    None`` (not truthiness) preserves legitimate ``0.0`` coordinates. The metadata
+    merges below only ever write key-material/date keys, never ``latitude``/
+    ``longitude``, so they cannot make a sentinel/SEMANTIC row look authenticated.
+    """
+    if not record:
+        return False
+    return record.get("latitude") is not None and record.get("longitude") is not None
+
+
+def any_real_location_record(records: list[dict[str, Any]] | None) -> bool:
+    """Return True if ANY record in a response authenticates a coordinate report.
+
+    The decrypt proof -- positive evidence that the account-wide shared key still
+    decrypts -- is a property of the WHOLE response, not of any single record. A
+    display selector that ranks by newest ``last_seen`` (see
+    ``api._select_best_location``) can hand back a report-less SEMANTIC/metadata
+    row even when a sibling coordinate report decrypted successfully in the same
+    response. Evaluating only that collapsed record would discard the proof and
+    let a later transient failure trip a spurious reauth. Both automatic paths
+    (poll and background push) must therefore run the FULL candidate list through
+    this one predicate so a hidden success is never lost. See
+    ``is_real_location_record`` for the per-record allowlist.
+    """
+    if not records:
+        return False
+    return any(is_real_location_record(record) for record in records)
+
+
 # ----------------------------- Main decryptor ---------------------------------
 async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     device_update_protobuf: DeviceUpdateProto, *, cache: TokenCache

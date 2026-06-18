@@ -88,6 +88,7 @@ from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
     StaleOwnerKeyError,
+    any_real_location_record,
     async_decrypt_location_response_locations,
 )
 from custom_components.googlefindmy.NovaApi.nova_request import (
@@ -3076,18 +3077,24 @@ class FcmReceiverHA:
             if not locations:
                 return {}
 
-            # Usable decrypted records: positive proof the account-wide shared key
-            # still works (mirrors the poll cycle's cycle_had_successful_decrypt
-            # gate). Clear the shared reauth budget so non-consecutive background
-            # failures interleaved with successful pushes cannot strand a healthy
-            # account at the reauth threshold.
+            # Clear the shared reauth budget only on positive proof: at least one
+            # *authenticated* coordinate report. Truthy-but-unauthenticated rows --
+            # a metadata_only sentinel (only secrets-bundle key material) or a
+            # SEMANTIC row (no decrypted coordinates) -- are non-empty but carry no
+            # successful decrypt, so they must NOT clear the budget -- otherwise
+            # report-less pushes interleaved with failures could keep a stale key
+            # below the reauth threshold. This mirrors the poll cycle's
+            # cycle_had_successful_decrypt gate, which excludes the same shapes,
+            # and lets non-consecutive background failures interleaved with genuine
+            # pushes avoid stranding a healthy account at the reauth threshold.
             # Keyed on the source entry_id -- the cache that actually performed
             # this decrypt -- and symmetric with the failure paths above. Routed
             # fan-out targets share the source's FCM registration token, hence the
             # same account-wide owner_key, so the source success already proves
             # their key; clearing the routed target set instead would break the
             # source entry's own reset invariant.
-            self._note_decrypt_success_for_entry(entry_id)
+            if any_real_location_record(locations):
+                self._note_decrypt_success_for_entry(entry_id)
 
             best_record: Mapping[str, Any] | None = None
             best_key: tuple[float, int, int] | None = None
