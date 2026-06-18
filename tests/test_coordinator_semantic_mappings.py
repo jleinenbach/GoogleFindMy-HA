@@ -397,7 +397,11 @@ class _DecryptThenSucceedAPI:
         self.calls += 1
         if self.calls <= self._fail:
             raise self._exc
-        return {}  # success with no decryptable report (still clears the counter)
+        # A genuinely decryptable report: positive proof the account-wide shared
+        # key works again. Only such a real decrypt clears the counter -- an empty
+        # / no-reporter response (falsy) is an idle outcome and must NOT (see
+        # test_poll_cycle_idle_does_not_reset_decrypt_counter).
+        return {"latitude": 1.0, "longitude": 2.0, "accuracy": 5.0}
 
 
 @pytest.mark.asyncio
@@ -417,6 +421,56 @@ async def test_poll_cycle_decrypt_counter_resets_on_success() -> None:
     # A successful cycle resets the counter back to zero.
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
     assert coordinator._consecutive_decrypt_failures == 0
+    # No per-tracker stale key was seen, so the OK gate also clears the diagnostic
+    # error class (status and error class move together). Mutation guard: dropping
+    # the OK-gate ``_last_decrypt_error = None`` leaves the stale class behind.
+    assert coordinator._last_decrypt_error is None
+    assert coordinator.crypto_status.state == CryptoStatus.OK
+
+
+class _DecryptThenIdleAPI:
+    """Raises a decryption error for the first ``fail_times`` calls, then returns
+    an empty (no-reporter) result.
+
+    Models an intermittently reporting BLE tracker: failing decrypt cycles are
+    interleaved with idle cycles that simply return no location data. Such idle
+    cycles carry no positive proof the shared key recovered and must therefore
+    NOT clear the accumulated decrypt-failure counter.
+    """
+
+    def __init__(self, exc: Exception, fail_times: int) -> None:
+        self._exc = exc
+        self._fail = fail_times
+        self.calls = 0
+
+    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise self._exc
+        return []  # idle: no reporter in range, nothing decrypted this cycle
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_idle_does_not_reset_decrypt_counter() -> None:
+    """An idle cycle (empty/no-reporter result) must NOT clear accumulated decrypt
+    failures: without a real successful decrypt there is no proof the stale shared
+    key recovered. Otherwise an intermittently reporting BLE tracker would let idle
+    cycles perpetually reset the counter, so the reauth threshold is never reached
+    and the user stays stuck with no location updates and no reauth prompt
+    (Codex finding on PR #182)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptThenIdleAPI(
+        SharedKeyMismatchError("transient stale"), fail_times=_MAX_DECRYPT_FAILURES - 1
+    )
+
+    # Below-threshold failing cycles accumulate the counter without escalating.
+    for _ in range(_MAX_DECRYPT_FAILURES - 1):
+        await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
+
+    # An idle cycle in between must leave the counter intact (not reset to zero).
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+    assert coordinator._consecutive_decrypt_failures == _MAX_DECRYPT_FAILURES - 1
 
 
 class _PerDeviceDecryptAPI:
@@ -679,3 +733,36 @@ async def test_poll_cycle_mixed_stale_and_success_keeps_tracker_outdated() -> No
     )
 
     assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_mixed_stale_and_success_keeps_last_decrypt_error() -> None:
+    """The stale-key diagnostic must survive a sibling's successful decrypt.
+
+    Same mixed cycle as above, but asserting the *error class* the encryption-key
+    status sensor exposes (``last_decrypt_error_class`` from ``_last_decrypt_error``).
+    The successful sibling clears the account-wide reauth budget via the shared
+    success entry point, yet the per-tracker StaleOwnerKeyError diagnostic must
+    stay so the sensor can still report which class is outdated.
+
+    Regression guard for the Codex finding: clearing ``_last_decrypt_error``
+    unconditionally in ``note_decrypt_success()`` (or gating it only on the
+    counter) wipes this on the very cycle a sibling decrypts and turns this red.
+    """
+
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _MixedDecryptAPI(
+        "dev-stale",
+        StaleOwnerKeyError("tracker v1 < v2"),
+        {"latitude": 1.0, "longitude": 2.0, "last_seen": 100},
+    )
+    coordinator._set_auth_state = lambda **_kwargs: None
+
+    await coordinator._async_start_poll_cycle(
+        [{"id": "dev-stale", "name": "Old"}, {"id": "dev-ok", "name": "Hub"}]
+    )
+
+    # Status stays outdated AND the error class behind it survives for triage.
+    assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
+    assert coordinator._last_decrypt_error is not None
+    assert coordinator._last_decrypt_error.split(":", 1)[0] == "StaleOwnerKeyError"

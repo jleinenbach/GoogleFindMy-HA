@@ -110,12 +110,14 @@ def safe_fcm_health_snapshots(receiver: Any) -> dict[str, dict[str, Any]]:
         return {}
 
 
-# Credential keys whose values are base64 / base64url / hex / JWT tokens.
-# Those alphabets never contain a legitimate space, so ALL whitespace (including
-# interior characters introduced by a line-wrapped copy/paste) is stripped from
-# their values. Every other key keeps interior whitespace and is only trimmed at
-# the edges, so values that may legitimately contain spaces (display names,
-# email addresses) are never corrupted.
+# Credential keys whose values are base64 / base64url / hex / JWT tokens, or the
+# numeric GCM identity material (``android_id`` / ``security_token``, both parsed
+# via ``int(...)`` on the FCM login path). Those alphabets never contain a
+# legitimate space, so ALL whitespace (including interior characters introduced
+# by a line-wrapped copy/paste) is stripped from their values. Every other key
+# keeps interior whitespace and is only trimmed at the edges, so values that may
+# legitimately contain spaces (display names, email addresses) are never
+# corrupted.
 _SECRET_WHITELIST_KEYS: frozenset[str] = frozenset(
     {
         "owner_key",
@@ -129,6 +131,11 @@ _SECRET_WHITELIST_KEYS: frozenset[str] = frozenset(
         "adm_token",
         "admToken",
         "Auth",
+        # GCM device identity under ``fcm_credentials.gcm`` -- numeric values fed
+        # to ``int(android_id)`` / ``int(security_token)`` during push
+        # registration; an interior space from a wrapped paste breaks login.
+        "android_id",
+        "security_token",
     }
 )
 

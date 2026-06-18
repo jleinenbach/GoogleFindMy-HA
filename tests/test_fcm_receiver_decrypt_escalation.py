@@ -123,3 +123,61 @@ async def test_decode_background_location_feeds_counter_on_decrypt_error(
     assert result == {}
     coordinator.note_decrypt_failure.assert_called_once()
     assert entry.async_start_reauth.called is expect_reauth
+
+
+@pytest.mark.asyncio
+async def test_decode_background_location_clears_counter_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful background decrypt must clear the shared reauth budget.
+
+    The background path feeds decrypt *failures* into the coordinator's
+    account-wide counter, so a successful background decrypt has to clear it too
+    (symmetry with the poll cycle). Otherwise non-consecutive push failures
+    interleaved with healthy pushes could accumulate to the reauth threshold and
+    trip a spurious reauth for a perfectly healthy account.
+    """
+    receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
+    receiver._entry_caches["entry-1"] = MagicMock()
+
+    monkeypatch.setattr(
+        fcm_receiver_ha.decoder_module,
+        "parse_device_update_protobuf",
+        MagicMock(return_value=MagicMock()),
+    )
+    # Decrypt succeeds and yields one usable record (positive proof of the key).
+    monkeypatch.setattr(
+        fcm_receiver_ha,
+        "async_decrypt_location_response_locations",
+        AsyncMock(
+            return_value=[{"last_seen": 123.0, "latitude": 1.0, "longitude": 2.0}]
+        ),
+    )
+
+    result = await receiver._decode_background_location_async("entry-1", "deadbeef")
+
+    assert result.get("last_seen") == 123.0
+    coordinator.note_decrypt_success.assert_called_once_with()
+    coordinator.note_decrypt_failure.assert_not_called()
+    entry.async_start_reauth.assert_not_called()
+
+
+def test_note_decrypt_success_for_entry_swallows_coordinator_errors() -> None:
+    """The push success path must never break: a misbehaving coordinator is
+    swallowed exactly like the failure path."""
+    receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
+    coordinator.note_decrypt_success = MagicMock(side_effect=RuntimeError("boom"))
+
+    # Must not raise.
+    receiver._note_decrypt_success_for_entry("entry-1")
+
+    coordinator.note_decrypt_success.assert_called_once_with()
+
+
+def test_note_decrypt_success_for_entry_unknown_entry_is_noop() -> None:
+    """Unknown entry id: nothing to clear, no crash."""
+    receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
+
+    receiver._note_decrypt_success_for_entry("other-entry")
+
+    coordinator.note_decrypt_success.assert_not_called()

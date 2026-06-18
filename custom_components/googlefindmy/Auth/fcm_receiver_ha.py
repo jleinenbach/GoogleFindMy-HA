@@ -2992,6 +2992,26 @@ class FcmReceiverHA:
                 if entry is not None:
                     entry.async_start_reauth(hass)
 
+    def _note_decrypt_success_for_entry(self, entry_id: str) -> None:
+        """Feed a background-path decryption success into the matching coordinator(s).
+
+        Symmetric counterpart of :meth:`_note_decrypt_failure_for_entry`. The
+        background decode shares the coordinator's account-wide decrypt-failure
+        counter, so a successful background decrypt must clear it just like a
+        clean poll cycle does. Without this, push-only accounts whose scheduled
+        polls stay idle could accumulate a couple of *non-consecutive* background
+        decrypt failures up to the reauth threshold even though real locations
+        keep arriving and decrypting -- a spurious reauth prompt. Swallowed to
+        debug so it never breaks the push path.
+        """
+        for coordinator in self._coordinators_for_entries({entry_id}):
+            try:
+                coordinator.note_decrypt_success()
+            except Exception as err:  # noqa: BLE001 - never break the push path
+                _LOGGER.debug(
+                    "note_decrypt_success failed for entry %s: %s", entry_id, err
+                )
+
     async def _decode_background_location_async(  # noqa: PLR0911
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
@@ -3055,6 +3075,19 @@ class FcmReceiverHA:
             )
             if not locations:
                 return {}
+
+            # Usable decrypted records: positive proof the account-wide shared key
+            # still works (mirrors the poll cycle's cycle_had_successful_decrypt
+            # gate). Clear the shared reauth budget so non-consecutive background
+            # failures interleaved with successful pushes cannot strand a healthy
+            # account at the reauth threshold.
+            # Keyed on the source entry_id -- the cache that actually performed
+            # this decrypt -- and symmetric with the failure paths above. Routed
+            # fan-out targets share the source's FCM registration token, hence the
+            # same account-wide owner_key, so the source success already proves
+            # their key; clearing the routed target set instead would break the
+            # source entry's own reset invariant.
+            self._note_decrypt_success_for_entry(entry_id)
 
             best_record: Mapping[str, Any] | None = None
             best_key: tuple[float, int, int] | None = None

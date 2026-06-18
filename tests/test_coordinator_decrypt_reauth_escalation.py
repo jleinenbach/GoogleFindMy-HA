@@ -18,8 +18,11 @@ through CI: a 0.0 sentinel made the first escalation uptime-dependent).
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from unittest.mock import MagicMock
+
+import pytest
 
 from custom_components.googlefindmy.coordinator import polling as polling_mod
 from custom_components.googlefindmy.coordinator.polling import (
@@ -88,8 +91,11 @@ def test_t5_success_reset_prevents_premature_escalation() -> None:
     stub.note_decrypt_failure(stale=False, error=err)
     stub.note_decrypt_failure(stale=False, error=err)
     assert stub._consecutive_decrypt_failures == 2
-    stub._consecutive_decrypt_failures = 0  # success path reset
-    stub._last_decrypt_error = None
+    stub.note_decrypt_success()  # the real success path reset
+    assert stub._consecutive_decrypt_failures == 0
+    # The shared entry point clears only the account-wide counter; the diagnostic
+    # error class is owned by the poll loop's OK gate, so it survives this call.
+    assert stub._last_decrypt_error is not None
 
     # Two fresh failures must NOT escalate (threshold is 3, not 1).
     assert stub.note_decrypt_failure(stale=False, error=err) is False
@@ -163,3 +169,48 @@ def test_t9_first_escalation_is_independent_of_process_uptime() -> None:
     stub._set_auth_state.assert_called_once()
     # The escalation timestamp is now recorded (no longer the None sentinel).
     assert stub._last_decrypt_reauth_monotonic == fresh_boot_clock
+
+
+def test_note_decrypt_success_clears_accumulated_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The shared success entry point clears a partial decrypt-failure budget.
+
+    This is the symmetric counterpart of ``note_decrypt_failure`` that both the
+    poll cycle and the FCM background-push decode call on a proven decrypt. Two
+    non-escalating failures leave the counter at 2; a single success must reset
+    it to 0, so a later failure starts the threshold count fresh instead of
+    escalating one step early. The diagnostic ``_last_decrypt_error`` is NOT
+    cleared here: it is part of the sensor surface owned by the poll loop's OK
+    gate (which alone knows whether a per-tracker stale key must keep it), so
+    this shared entry point leaves it intact.
+    """
+    stub = _make_stub()
+    err = DecryptionError("boom")
+    stub.note_decrypt_failure(stale=False, error=err)
+    stub.note_decrypt_failure(stale=False, error=err)
+    assert stub._consecutive_decrypt_failures == 2
+    assert stub._last_decrypt_error is not None
+
+    with caplog.at_level(logging.INFO, logger=polling_mod.__name__):
+        stub.note_decrypt_success()
+
+    assert stub._consecutive_decrypt_failures == 0
+    # Counter cleared, diagnostic preserved (owned by the poll OK gate).
+    assert stub._last_decrypt_error is not None
+    assert "clearing 2 decrypt failure(s)" in caplog.text
+
+
+def test_note_decrypt_success_is_idempotent_when_no_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With an empty budget the success entry point is a cheap no-op: it clears
+    nothing and stays silent (no misleading "clearing 0 failure(s)" log)."""
+    stub = _make_stub()
+
+    with caplog.at_level(logging.INFO, logger=polling_mod.__name__):
+        stub.note_decrypt_success()
+
+    assert stub._consecutive_decrypt_failures == 0
+    assert stub._last_decrypt_error is None
+    assert "clearing" not in caplog.text
