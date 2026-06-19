@@ -1263,3 +1263,63 @@ async def test_classify_registration_exception_forwards_generation(
     )
 
     assert seen == [7]
+
+
+@pytest.mark.asyncio
+async def test_reload_reacquire_repopulates_receiver_store() -> None:
+    """Issue #183: a reload re-acquire must repopulate the per-entry store.
+
+    Reproduces the full settings-change reload cycle on the real acquire/release
+    path: acquire -> release down to refcount 0 (empties ``fcm_receivers`` and
+    unregisters providers) -> re-acquire. The re-acquire must register a fresh
+    receiver back into the per-entry store and re-register providers, so the
+    provider (and therefore ``is_push_ready``) can resolve it again without a
+    full Home Assistant restart.
+
+    Before the fix the refcount->0 release stranded a healthy receiver in the
+    legacy ``fcm_receiver`` alias while emptying the per-entry dict; the
+    re-acquire then reused that stale singleton and skipped the store/provider
+    (re)registration, leaving ``fcm_receivers`` empty so the connection sensor
+    stayed "Disconnected" until a restart.
+    """
+
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    entry = make_config_entry(entry_id="entry-reload")
+    creds = {"fcm": {"registration": {"token": "token-reload"}}}
+    cache = _DummyCache(entry.entry_id, creds)
+
+    receiver = await _async_acquire_shared_fcm(
+        hass,
+        entry=entry,
+        cache=cache,
+        entry_resolver=lambda: entry.entry_id,
+    )
+    bucket = hass.data[DOMAIN]
+    assert _get_fcm_receivers(bucket).get(entry.entry_id) is receiver
+    assert bucket.get("fcm_receiver") is receiver
+    assert bucket.get("providers_registered") is True
+
+    # Reload: release down to refcount 0 (settings-change unload).
+    await _async_release(receiver, hass, entry)
+    assert _get_fcm_receivers(bucket) == {}
+    # The legacy alias must not survive an empty per-entry dict (root fix).
+    assert bucket.get("fcm_receiver") is None
+    assert bucket.get("providers_registered") is False
+
+    # Re-acquire (reload setup): must rebuild the per-entry store and providers.
+    receiver_2 = await _async_acquire_shared_fcm(
+        hass,
+        entry=entry,
+        cache=cache,
+        entry_resolver=lambda: entry.entry_id,
+    )
+    assert receiver_2 is not receiver
+    receivers = _get_fcm_receivers(bucket)
+    assert receivers.get(entry.entry_id) is receiver_2
+    assert bucket.get("fcm_receiver") is receiver_2
+    assert bucket.get("providers_registered") is True
+    # The provider resolves the freshly registered receiver -> readiness input
+    # is restored without a Home Assistant restart.
+    assert _domain_fcm_provider(hass, entry.entry_id) is receiver_2
+
+    await _async_release(receiver_2, hass, entry)

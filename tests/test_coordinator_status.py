@@ -876,3 +876,50 @@ def test_push_updated_excludes_ignored_devices_from_merge(
     assert ids == {"dev-new"}, (
         f"merged snapshot must contain only the non-ignored push target; got {ids}"
     )
+
+
+def test_issue_183_status_stuck_on_false_readiness_then_recovers(
+    coordinator: GoogleFindMyCoordinator,
+    dummy_api: _DummyAPI,
+) -> None:
+    """Issue #183: a false-negative readiness pins fcm_status, a true one heals.
+
+    Discriminates the candidate root causes at the coordinator-status layer:
+
+    * H2 (false readiness): while ``api.is_push_ready()`` returns ``False`` the
+      poll-top recovery never promotes the status, so it stays non-CONNECTED
+      across cycles even though the receiver is healthy -- the "Disconnected
+      until restart" symptom.
+    * H1 (frozen cache) refuted: the moment readiness returns ``True`` a single
+      poll cycle restores CONNECTED, so the status is re-evaluated, not frozen.
+    * H3 (receiver down) refuted: only the readiness signal is toggled here; the
+      coordinator recovers without any change to the receiver itself.
+    """
+
+    loop = coordinator.hass.loop
+    coordinator._async_build_device_snapshot_with_fallbacks.return_value = []
+    # A real device lets the poll cycle complete (avoids the cold-start guard);
+    # the assertions below only inspect the status set by the recovery block.
+    dummy_api.device_list = [{"id": "dev-1", "name": "Device"}]
+    coordinator._enabled_poll_device_ids = {"dev-1"}
+
+    # Use the real soft-check so it consults ``api.is_push_ready`` (the desync
+    # victim in issue #183), instead of the fixture's hard-wired ``True``.
+    coordinator._is_fcm_ready_soft = type(coordinator)._is_fcm_ready_soft.__get__(
+        coordinator
+    )
+
+    # Reload start state: a healthy receiver, but readiness reports False.
+    dummy_api.is_push_ready = lambda: False
+
+    loop.run_until_complete(coordinator._async_update_data())
+    assert coordinator.fcm_status.state != FcmStatus.CONNECTED
+
+    # A second cycle keeps it stuck (does not self-heal while readiness is False).
+    loop.run_until_complete(coordinator._async_update_data())
+    assert coordinator.fcm_status.state != FcmStatus.CONNECTED
+
+    # Readiness becomes correct again -> the very next cycle recovers.
+    dummy_api.is_push_ready = lambda: True
+    loop.run_until_complete(coordinator._async_update_data())
+    assert coordinator.fcm_status.state == FcmStatus.CONNECTED
