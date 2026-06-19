@@ -2900,18 +2900,39 @@ def _sync_legacy_fcm_receiver_alias(bucket: GoogleFindMyDomainData) -> None:
 
     receiver_cls = _resolve_fcm_receiver_class()
     receivers_obj = bucket.get("fcm_receivers")
-    if isinstance(receivers_obj, dict) and receivers_obj:
+    if isinstance(receivers_obj, dict):
+        # ``fcm_receivers`` is the single source of truth once it exists.
+        # Mirror a valid receiver into the legacy ``fcm_receiver`` alias, or
+        # drop the alias when no active receiver remains (e.g. after the
+        # refcount->0 release path empties the dict on reload). Keeping a
+        # healthy alias here while the per-entry dict is empty is exactly the
+        # issue #183 desync: ``is_push_ready()`` resolves the (empty) per-entry
+        # store and reports False, while diagnostics read the surviving
+        # singleton and still report the receiver as healthy/connected.
         default_entry_id = bucket.get("default_fcm_entry_id")
         preferred = (
             receivers_obj.get(default_entry_id)
             if isinstance(default_entry_id, str)
             else None
         )
-        receiver = preferred or next(iter(receivers_obj.values()))
-        if isinstance(receiver, receiver_cls):
+        if not isinstance(preferred, receiver_cls):
+            preferred = None
+        receiver = preferred or next(
+            (
+                candidate
+                for candidate in receivers_obj.values()
+                if isinstance(candidate, receiver_cls)
+            ),
+            None,
+        )
+        if receiver is not None:
             bucket["fcm_receiver"] = receiver
-            return
+        else:
+            bucket.pop("fcm_receiver", None)
+        return
 
+    # ``fcm_receivers`` is absent entirely: preserve the legacy migration path
+    # that ``_get_fcm_receivers`` relies on, only dropping a wrong-type alias.
     legacy_receiver = bucket.get("fcm_receiver")
     if legacy_receiver is not None and not isinstance(legacy_receiver, receiver_cls):
         bucket.pop("fcm_receiver", None)
