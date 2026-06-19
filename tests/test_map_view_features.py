@@ -423,3 +423,536 @@ async def test_redirect_uses_relative_location(monkeypatch: pytest.MonkeyPatch) 
         ctx.value.location
         == "/api/googlefindmy/map/device123?token=abc&start=2024-01-01T00%3A00%3A00Z"
     )
+
+
+def _install_multi_history_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    entity_id: str,
+    states: list[_StubState],
+) -> None:
+    """Install a recorder history stub returning multiple states for one entity."""
+
+    history_module = ModuleType("homeassistant.components.recorder.history")
+
+    def _get_significant_states(
+        _hass: Any, _start: Any, _end: Any, _entity_ids: list[str]
+    ) -> dict[str, list[_StubState]]:
+        return {entity_id: list(states)}
+
+    history_module.get_significant_states = _get_significant_states  # type: ignore[attr-defined]
+
+    recorder_module = ModuleType("homeassistant.components.recorder")
+    recorder_module.history = history_module
+    components_module = ModuleType("homeassistant.components")
+    components_module.recorder = recorder_module
+
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.recorder.history", history_module
+    )
+    monkeypatch.setitem(
+        sys.modules, "homeassistant.components.recorder", recorder_module
+    )
+    monkeypatch.setitem(sys.modules, "homeassistant.components", components_module)
+
+
+async def _render_map_with_states(
+    monkeypatch: pytest.MonkeyPatch,
+    states: list[_StubState],
+    query_extra: dict[str, str],
+) -> Any:
+    """Render the map view for the given history states and extra query params."""
+
+    device_id = "device123"
+    coordinator = SimpleNamespace(data=[{"id": device_id, "name": "Test Device"}])
+    entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
+    hass = _StubHass([entry])
+
+    monkeypatch.setattr(
+        map_view, "_resolve_coordinator_class", lambda: SimpleNamespace
+    )
+
+    registry_entry = _StubRegistryEntry(
+        entity_id="device_tracker.device123",
+        unique_id=f"{entry.entry_id}:{device_id}",
+        config_entry_id=entry.entry_id,
+    )
+    registry = _StubEntityRegistry([registry_entry])
+    monkeypatch.setattr(map_view.er, "async_get", lambda _hass: registry)
+
+    _install_multi_history_stub(monkeypatch, registry_entry.entity_id, states)
+
+    ha_uuid = hass.data["core.uuid"]
+    secret = map_token_secret_seed(ha_uuid, entry.entry_id, False)
+    token = map_token_hex_digest(secret)
+
+    query = {"token": token, **query_extra}
+    return await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query=query),
+        device_id=device_id,
+    )
+
+
+def _precise_and_coarse_states() -> list[_StubState]:
+    """One precise point (5 m) and one coarse point (150 m), distinct timestamps."""
+
+    precise = _StubState(latitude=10.0, longitude=20.0)
+    precise.attributes["gps_accuracy"] = 5
+    precise.attributes["last_seen"] = 1704067200.0
+
+    coarse = _StubState(latitude=50.0, longitude=60.0)
+    coarse.attributes["gps_accuracy"] = 150
+    coarse.attributes["last_seen"] = 1704067260.0
+
+    return [precise, coarse]
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_worse_than_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A point coarser than the requested accuracy must not be rendered."""
+
+    response = await _render_map_with_states(
+        monkeypatch, _precise_and_coarse_states(), {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 1 points" in response.text.lower()
+    assert '"lat": 10.0' in response.text
+    assert '"lat": 50.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_zero_keeps_all_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default threshold of 0 disables the filter and keeps every point."""
+
+    response = await _render_map_with_states(
+        monkeypatch, _precise_and_coarse_states(), {"accuracy": "0"}
+    )
+
+    assert response.status == 200
+    assert "showing 2 points" in response.text.lower()
+    assert '"lat": 10.0' in response.text
+    assert '"lat": 50.0' in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_missing_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A point without gps_accuracy is corrupted data and must be dropped.
+
+    Missing accuracy is normalized to the conservative fallback radius
+    (safe_accuracy), so it can no longer masquerade as a best-possible 0.0m
+    point and slip past a tighter slider threshold.
+    """
+
+    unknown = _StubState(latitude=33.0, longitude=44.0)
+    unknown.attributes.pop("gps_accuracy", None)
+    unknown.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [unknown], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_zero_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reported gps_accuracy of 0.0m is the Android error code, not a fix."""
+
+    zeroed = _StubState(latitude=33.0, longitude=44.0)
+    zeroed.attributes["gps_accuracy"] = 0.0
+    zeroed.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [zeroed], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_negative_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A negative gps_accuracy is corrupted; the raw value would wrongly pass.
+
+    Before normalization ``-5 > 10`` is ``False`` so the point slipped through;
+    safe_accuracy maps it to the fallback radius and the slider now drops it.
+    """
+
+    negative = _StubState(latitude=33.0, longitude=44.0)
+    negative.attributes["gps_accuracy"] = -5.0
+    negative.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [negative], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_nan_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN gps_accuracy must be dropped; ``NaN > threshold`` is always False.
+
+    Without normalization the comparison silently admits NaN points under any
+    slider; safe_accuracy rejects non-finite values to the fallback radius.
+    """
+
+    nan_state = _StubState(latitude=33.0, longitude=44.0)
+    nan_state.attributes["gps_accuracy"] = float("nan")
+    nan_state.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [nan_state], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_accuracy_rendered_as_fallback_when_filter_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the filter off, an invalid point is kept but shown at the fallback.
+
+    The point is no longer advertised as a pinpoint 0.0m fix; it carries the
+    conservative 200m fallback radius, matching the live entity's accuracy.
+    """
+
+    unknown = _StubState(latitude=33.0, longitude=44.0)
+    unknown.attributes.pop("gps_accuracy", None)
+    unknown.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [unknown], {"accuracy": "0"}
+    )
+
+    assert response.status == 200
+    assert "showing 1 points" in response.text.lower()
+    assert '"lat": 33.0' in response.text
+    assert '"accuracy": 200.0' in response.text
+    assert '"accuracy": 0.0' not in response.text
+
+
+# --------------------------------------------------------------------------- #
+# Full-coverage suite: token buckets, coordinator resolution, name resolution, #
+# query-filter parsing and per-state fallbacks.                                #
+# --------------------------------------------------------------------------- #
+
+
+async def _render_view(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    runtime_data: Any,
+    states: list[_StubState],
+    query_extra: dict[str, str] | None = None,
+    registry: Any = None,
+    entity_id: str = "device_tracker.device123",
+    device_id: str = "device123",
+) -> Any:
+    """Render the map view with full control over runtime data and registry.
+
+    The helper authorizes with a static token, installs a recorder history
+    stub for ``entity_id`` and resolves the coordinator class to
+    ``SimpleNamespace`` so callers can drive the device-name resolution and
+    history-parsing branches with hand-built stubs.
+    """
+
+    entry = make_config_entry(entry_id="entry-id", runtime_data=runtime_data)
+    hass = _StubHass([entry])
+
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", lambda: SimpleNamespace)
+
+    if registry is None:
+        registry = _StubEntityRegistry(
+            [
+                _StubRegistryEntry(
+                    entity_id=entity_id,
+                    unique_id=f"{entry.entry_id}:{device_id}",
+                    config_entry_id=entry.entry_id,
+                )
+            ]
+        )
+    monkeypatch.setattr(map_view.er, "async_get", lambda _hass: registry)
+
+    _install_multi_history_stub(monkeypatch, entity_id, states)
+
+    token = map_token_hex_digest(
+        map_token_secret_seed(hass.data["core.uuid"], entry.entry_id, False)
+    )
+    query = {"token": token, **(query_extra or {})}
+    return await map_view.GoogleFindMyMapView(hass).get(
+        SimpleNamespace(query=query),
+        device_id=device_id,
+    )
+
+
+def test_entry_accept_tokens_weekly_returns_two_buckets() -> None:
+    """Weekly tokens accept both the current and the previous bucket."""
+
+    hass = _StubHass([])
+
+    weekly = map_view._entry_accept_tokens(hass, "entry-id", True)
+    static = map_view._entry_accept_tokens(hass, "entry-id", False)
+
+    assert len(weekly) == 2  # current and previous week
+    assert len(static) == 1
+    assert weekly.isdisjoint(static)
+
+
+def test_resolve_coordinator_class_returns_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A populated cache short-circuits the lazy import."""
+
+    monkeypatch.setattr(map_view, "_COORDINATOR_CLASS", SimpleNamespace)
+
+    assert map_view._resolve_coordinator_class() is SimpleNamespace
+
+
+@pytest.mark.asyncio
+async def test_device_name_skipped_when_runtime_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without runtime data the coordinator name lookup is skipped."""
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=None,
+        states=[_StubState(latitude=10.0, longitude=20.0)],
+    )
+
+    assert response.status == 200
+    assert "Unknown Device" in response.text
+
+
+@pytest.mark.asyncio
+async def test_device_name_skipped_when_runtime_not_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runtime object without a coordinator attribute resolves no name."""
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=object(),
+        states=[_StubState(latitude=10.0, longitude=20.0)],
+    )
+
+    assert response.status == 200
+    assert "Unknown Device" in response.text
+
+
+@pytest.mark.asyncio
+async def test_device_name_loop_skips_non_matching_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coordinator scan ignores other devices before the match."""
+
+    coordinator = SimpleNamespace(
+        data=[
+            {"id": "other-device", "name": "Other"},
+            {"id": "device123", "name": "Real Device"},
+        ]
+    )
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=coordinator,
+        states=[_StubState(latitude=10.0, longitude=20.0)],
+    )
+
+    assert response.status == 200
+    assert "Real Device" in response.text
+
+
+@pytest.mark.asyncio
+async def test_entity_entry_refetched_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolved entity_id without a registry entry still drives history."""
+
+    class _GhostEntityRegistry:
+        """Resolves an entity_id but never returns a registry entry object."""
+
+        entities: dict[str, Any] = {}
+
+        def async_get_entity_id(
+            self, _domain: str, _platform: str, _unique_id: str
+        ) -> str:
+            return "device_tracker.ghost"
+
+        def async_get(self, _entity_id: str) -> None:
+            return None
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=None,
+        states=[_StubState(latitude=12.0, longitude=21.0)],
+        registry=_GhostEntityRegistry(),
+        entity_id="device_tracker.ghost",
+    )
+
+    assert response.status == 200
+    assert "showing 1 points" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_time_filters_parsed_from_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid ISO start/end values populate the filter controls."""
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=SimpleNamespace(data=[{"id": "device123", "name": "Test"}]),
+        states=[_StubState(latitude=10.0, longitude=20.0)],
+        query_extra={
+            "start": "2024-03-15T08:00:00Z",
+            "end": "2024-03-16T09:30:00Z",
+        },
+    )
+
+    assert response.status == 200
+    assert 'value="2024-03-15T08:00"' in response.text
+    assert 'value="2024-03-16T09:30"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_time_filters_invalid_fall_back_to_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unparseable start value is swallowed and defaults are kept."""
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=SimpleNamespace(data=[{"id": "device123", "name": "Test"}]),
+        states=[_StubState(latitude=10.0, longitude=20.0)],
+        query_extra={"start": "not-a-date"},
+    )
+
+    assert response.status == 200
+    assert 'value="not-a-date"' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_naive_time_filters_get_utc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timezone-naive start/end values are coerced to UTC."""
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=SimpleNamespace(data=[{"id": "device123", "name": "Test"}]),
+        states=[_StubState(latitude=10.0, longitude=20.0)],
+        query_extra={
+            "start": "2024-06-01T00:00:00",
+            "end": "2024-06-02T00:00:00",
+        },
+    )
+
+    assert response.status == 200
+    assert 'value="2024-06-01T00:00"' in response.text
+    assert 'value="2024-06-02T00:00"' in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_invalid_defaults_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-numeric accuracy value disables the filter."""
+
+    response = await _render_map_with_states(
+        monkeypatch, _precise_and_coarse_states(), {"accuracy": "abc"}
+    )
+
+    assert response.status == 200
+    assert "showing 2 points" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_last_seen_non_string_falls_back_to_state_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-string last_seen is ignored and the state time is used."""
+
+    state = _StubState(latitude=10.0, longitude=20.0)
+    state.attributes["last_seen"] = ["not", "a", "scalar"]
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=SimpleNamespace(data=[{"id": "device123", "name": "Test"}]),
+        states=[state],
+    )
+
+    assert response.status == 200
+    assert "showing 1 points" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_last_seen_unparseable_string_falls_back_to_state_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A last_seen string that is neither float nor ISO is ignored."""
+
+    state = _StubState(latitude=10.0, longitude=20.0)
+    state.attributes["last_seen"] = "definitely-not-a-timestamp"
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=SimpleNamespace(data=[{"id": "device123", "name": "Test"}]),
+        states=[state],
+    )
+
+    assert response.status == 200
+    assert "showing 1 points" in response.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_invalid_state_is_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state with a non-numeric coordinate is skipped, valid ones survive."""
+
+    invalid = _StubState(latitude=None, longitude=20.0)
+    valid = _StubState(latitude=77.0, longitude=88.0)
+
+    response = await _render_view(
+        monkeypatch,
+        runtime_data=SimpleNamespace(data=[{"id": "device123", "name": "Test"}]),
+        states=[invalid, valid],
+    )
+
+    assert response.status == 200
+    assert "showing 1 points" in response.text.lower()
+    assert '"lat": 77.0' in response.text
+
+
+@pytest.mark.asyncio
+async def test_redirect_missing_token_returns_bad_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The redirect view rejects requests without a token via HTTP 400."""
+
+    view = map_view.GoogleFindMyMapRedirectView(_StubHass([]))
+
+    response = await view.get(SimpleNamespace(query={}), device_id="device123")
+
+    assert response.status == 400
