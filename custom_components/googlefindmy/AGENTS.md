@@ -32,6 +32,16 @@ When reusing the shared grpclib transport (`SpotGrpcTransport`), keep SSL contex
 When adding new guidance, prefer creating another `agents/<topic>/AGENTS.md` file instead of expanding this index. This keeps
 updates like the subentry unload reminder easy to place without scrolling through unrelated instructions.
 
+### Version bump touches two files (manifest.json + const.py)
+
+The integration version lives in **two** places that MUST be bumped together on every release:
+`manifest.json` `"version"` and `const.py` `INTEGRATION_VERSION` (the latter feeds diagnostics,
+device `sw_version`, and logs). `manifest.json` is strict JSON validated by hassfest, so it cannot
+carry an inline cross-reference comment or an extra key; this note is the canonical anchor for the
+manifest side, while `const.py` carries the reverse reference in a code comment. A release that bumps
+only one file ships an inconsistent version string. Before tagging a release, grep both:
+`git grep -nE '"version"|INTEGRATION_VERSION' custom_components/googlefindmy/manifest.json custom_components/googlefindmy/const.py`.
+
 ### Quick-start reminder: avoid false-positive tracker discovery
 
 When restoring `device_tracker` entities on startup, confirm the cloud discovery trigger only fires for **truly new** tracker
