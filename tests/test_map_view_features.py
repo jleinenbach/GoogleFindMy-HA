@@ -539,10 +539,15 @@ async def test_accuracy_filter_zero_keeps_all_points(
 
 
 @pytest.mark.asyncio
-async def test_accuracy_filter_keeps_points_without_accuracy(
+async def test_accuracy_filter_drops_points_with_missing_accuracy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A point without gps_accuracy is treated as best-possible and passes."""
+    """A point without gps_accuracy is corrupted data and must be dropped.
+
+    Missing accuracy is normalized to the conservative fallback radius
+    (safe_accuracy), so it can no longer masquerade as a best-possible 0.0m
+    point and slip past a tighter slider threshold.
+    """
 
     unknown = _StubState(latitude=33.0, longitude=44.0)
     unknown.attributes.pop("gps_accuracy", None)
@@ -553,8 +558,98 @@ async def test_accuracy_filter_keeps_points_without_accuracy(
     )
 
     assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_zero_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reported gps_accuracy of 0.0m is the Android error code, not a fix."""
+
+    zeroed = _StubState(latitude=33.0, longitude=44.0)
+    zeroed.attributes["gps_accuracy"] = 0.0
+    zeroed.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [zeroed], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_negative_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A negative gps_accuracy is corrupted; the raw value would wrongly pass.
+
+    Before normalization ``-5 > 10`` is ``False`` so the point slipped through;
+    safe_accuracy maps it to the fallback radius and the slider now drops it.
+    """
+
+    negative = _StubState(latitude=33.0, longitude=44.0)
+    negative.attributes["gps_accuracy"] = -5.0
+    negative.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [negative], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_accuracy_filter_drops_points_with_nan_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NaN gps_accuracy must be dropped; ``NaN > threshold`` is always False.
+
+    Without normalization the comparison silently admits NaN points under any
+    slider; safe_accuracy rejects non-finite values to the fallback radius.
+    """
+
+    nan_state = _StubState(latitude=33.0, longitude=44.0)
+    nan_state.attributes["gps_accuracy"] = float("nan")
+    nan_state.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [nan_state], {"accuracy": "10"}
+    )
+
+    assert response.status == 200
+    assert "showing 0 points" in response.text.lower()
+    assert '"lat": 33.0' not in response.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_accuracy_rendered_as_fallback_when_filter_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the filter off, an invalid point is kept but shown at the fallback.
+
+    The point is no longer advertised as a pinpoint 0.0m fix; it carries the
+    conservative 200m fallback radius, matching the live entity's accuracy.
+    """
+
+    unknown = _StubState(latitude=33.0, longitude=44.0)
+    unknown.attributes.pop("gps_accuracy", None)
+    unknown.attributes["last_seen"] = 1704067300.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [unknown], {"accuracy": "0"}
+    )
+
+    assert response.status == 200
     assert "showing 1 points" in response.text.lower()
     assert '"lat": 33.0' in response.text
+    assert '"accuracy": 200.0' in response.text
+    assert '"accuracy": 0.0' not in response.text
 
 
 # --------------------------------------------------------------------------- #

@@ -44,6 +44,27 @@ def _resolve_coordinator_class() -> type[Any]:
     return _COORDINATOR_CLASS
 
 
+_SAFE_ACCURACY: Any = None
+
+
+def _resolve_safe_accuracy() -> Any:
+    """Import the canonical GPS accuracy normalizer lazily.
+
+    ``safe_accuracy`` lives under the coordinator package, which map_view
+    deliberately avoids importing at module load time (see
+    ``_resolve_coordinator_class``). Resolving and caching it on first use
+    preserves the same import-time guarantees while letting the map reuse the
+    integration-wide accuracy policy instead of duplicating it.
+    """
+
+    global _SAFE_ACCURACY
+    if _SAFE_ACCURACY is None:
+        from .coordinator.helpers.geo import safe_accuracy as _safe_accuracy
+
+        _SAFE_ACCURACY = _safe_accuracy
+    return _SAFE_ACCURACY
+
+
 # ------------------------------- HTML Helpers -------------------------------
 
 
@@ -257,6 +278,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         # 5. Fetch History from Recorder
         locations: list[dict[str, Any]] = []
         seen_timestamps: set[float] = set()
+        safe_accuracy = _resolve_safe_accuracy()
         if entity_id:
             try:
                 from homeassistant.components.recorder import get_instance
@@ -279,14 +301,22 @@ class GoogleFindMyMapView(HomeAssistantView):
                         try:
                             lat = float(state.attributes.get("latitude"))
                             lon = float(state.attributes.get("longitude"))
-                            acc = float(state.attributes.get("gps_accuracy", 0))
+                            # Normalize accuracy through the integration's
+                            # canonical policy: 0.0m (the Android error code),
+                            # negative, NaN, Inf and missing values are corrupted
+                            # data and map to a conservative fallback radius (see
+                            # coordinator.helpers.geo.safe_accuracy). This keeps
+                            # the map consistent with the live entity and stops
+                            # unknown-quality points from masquerading as 0.0m.
+                            acc = safe_accuracy(state.attributes.get("gps_accuracy"))
 
                             # Apply the "Min Accuracy" filter from the UI slider.
-                            # accuracy_filter <= 0 means the filter is disabled
-                            # (default), so every point is kept. Otherwise drop
-                            # points whose accuracy radius is larger (worse) than
-                            # the requested threshold. A missing gps_accuracy
-                            # (acc == 0) is treated as best-possible and passes.
+                            # accuracy_filter <= 0 disables the filter (default),
+                            # so every point is kept. Otherwise drop points whose
+                            # accuracy radius is larger (worse) than the requested
+                            # threshold. Because acc is normalized above, invalid
+                            # or missing accuracies fall back to the conservative
+                            # radius and are dropped under any tighter slider.
                             if accuracy_filter > 0 and acc > accuracy_filter:
                                 continue
 
