@@ -122,6 +122,32 @@ class _StubEntityRegistry:
         return self.entities.get(entity_id)
 
 
+def _load_real_safe_accuracy() -> Any:
+    """Load the canonical ``safe_accuracy`` from geo.py by file path.
+
+    Loading the module directly (rather than importing it through the package)
+    keeps this lightweight loader free of the heavy integration import chain
+    while still exercising the real accuracy policy that production re-exports as
+    ``coordinator.safe_accuracy``. geo.py imports only ``math``/``typing`` and has
+    no relative imports, so it loads in isolation.
+    """
+
+    geo_path = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "googlefindmy"
+        / "coordinator"
+        / "helpers"
+        / "geo.py"
+    )
+    spec = importlib.util.spec_from_file_location("googlefindmy_test_geo", geo_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError("Failed to load geo module for testing")
+    geo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(geo)
+    return geo.safe_accuracy
+
+
 def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Load the map_view module with stubbed Home Assistant dependencies."""
 
@@ -210,9 +236,24 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     coordinator_module = ModuleType("custom_components.googlefindmy.coordinator")
     coordinator_module.GoogleFindMyCoordinator = _StubCoordinator
+    # Expose safe_accuracy as a direct attribute, mirroring the production
+    # re-export in coordinator/__init__.py. map_view resolves it via
+    # ``from .coordinator import safe_accuracy``; without this attribute the
+    # plain ModuleType stub (no __path__) would make that import fail.
+    coordinator_module.safe_accuracy = _load_real_safe_accuracy()
     monkeypatch.setitem(
         sys.modules, "custom_components.googlefindmy.coordinator", coordinator_module
     )
+    # Force every coordinator lookup through the stub. If a previous test already
+    # imported the real ``coordinator.helpers.geo`` it would linger in sys.modules
+    # and let a nested ``from .coordinator.helpers.geo import ...`` resolve from
+    # that cache, masking the very import-order fragility this loader guards
+    # against. Dropping the cached submodules makes the stub the only source.
+    for cached in (
+        "custom_components.googlefindmy.coordinator.helpers.geo",
+        "custom_components.googlefindmy.coordinator.helpers",
+    ):
+        monkeypatch.delitem(sys.modules, cached, raising=False)
 
     module_name = "custom_components.googlefindmy.map_view"
     spec = importlib.util.spec_from_file_location(
@@ -463,3 +504,30 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
     assert "parsed.toISOString()" in html_empty
     assert "getFullYear()" in html_with_locations
     assert "getFullYear()" in html_empty
+
+
+def test_map_view_resolves_safe_accuracy_under_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The accuracy resolver must work under the lightweight coordinator stub.
+
+    Regression for the Codex #186 finding: ``_resolve_safe_accuracy`` previously
+    imported ``.coordinator.helpers.geo``, which requires the coordinator to be a
+    real package. Under the plain ModuleType stub installed by this loader the
+    nested import aborted with "coordinator is not a package", so any history
+    render exercising the accuracy filter would crash. Resolving the re-exported
+    ``coordinator.safe_accuracy`` keeps the map renderable under the stub.
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    safe_accuracy = map_view._resolve_safe_accuracy()
+
+    # Canonical policy: valid measurements pass through unchanged, while the 0.0
+    # Android error code and missing values map to the conservative fallback.
+    assert safe_accuracy(50.0) == 50.0
+    assert safe_accuracy(0.0) == 200.0
+    assert safe_accuracy(None) == 200.0
+
+    # Second call must hit the cache instead of re-importing (same object).
+    assert map_view._resolve_safe_accuracy() is safe_accuracy
