@@ -32,6 +32,13 @@ from ..KeyBackup.cloud_key_decryptor import decrypt_eik
 # Re-export helpers subpackage
 from . import helpers
 
+# Re-export the canonical GPS accuracy normalizer. Exposing it as a direct
+# attribute of the coordinator package (mirroring GoogleFindMyCoordinator) lets
+# lightweight consumers such as map_view resolve it without reaching into the
+# nested .helpers.geo submodule, which keeps them tolerant of plain ModuleType
+# coordinator stubs in tests. geo is a pure, dependency-light module.
+from .helpers.geo import safe_accuracy
+
 # Re-export stats classes from helpers (commonly needed)
 from .helpers.stats import (
     ApiStatus,
@@ -88,6 +95,7 @@ __all__ = [
     "format_epoch_utc",
     "get_recorder",
     "normalize_epoch_seconds",
+    "safe_accuracy",
     # Semi-public functions
     "_as_ha_attributes",
     "_sync_get_last_gps_from_history",

@@ -55,11 +55,18 @@ def _resolve_safe_accuracy() -> Any:
     ``_resolve_coordinator_class``). Resolving and caching it on first use
     preserves the same import-time guarantees while letting the map reuse the
     integration-wide accuracy policy instead of duplicating it.
+
+    We import it as a direct attribute of ``.coordinator`` (re-exported there),
+    exactly like ``_resolve_coordinator_class`` resolves the coordinator class.
+    Reaching into the nested ``.coordinator.helpers.geo`` submodule instead would
+    require the coordinator to be a real package, which breaks lightweight test
+    loaders that install it as a plain ``ModuleType`` stub. Tests can also patch
+    the cached ``_SAFE_ACCURACY`` directly or expose ``safe_accuracy`` on the stub.
     """
 
     global _SAFE_ACCURACY
     if _SAFE_ACCURACY is None:
-        from .coordinator.helpers.geo import safe_accuracy as _safe_accuracy
+        from .coordinator import safe_accuracy as _safe_accuracy
 
         _SAFE_ACCURACY = _safe_accuracy
     return _SAFE_ACCURACY
