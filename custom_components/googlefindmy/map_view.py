@@ -281,6 +281,15 @@ class GoogleFindMyMapView(HomeAssistantView):
                             lon = float(state.attributes.get("longitude"))
                             acc = float(state.attributes.get("gps_accuracy", 0))
 
+                            # Apply the "Min Accuracy" filter from the UI slider.
+                            # accuracy_filter <= 0 means the filter is disabled
+                            # (default), so every point is kept. Otherwise drop
+                            # points whose accuracy radius is larger (worse) than
+                            # the requested threshold. A missing gps_accuracy
+                            # (acc == 0) is treated as best-possible and passes.
+                            if accuracy_filter > 0 and acc > accuracy_filter:
+                                continue
+
                             # Determine timestamp (prefer last_seen attribute if available for precision)
                             ts = state.last_updated.timestamp()
                             raw_last_seen = state.attributes.get("last_seen")
