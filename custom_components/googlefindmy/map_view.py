@@ -124,6 +124,54 @@ def _fallback_is_valid_accuracy(value: float | None) -> bool:
     return math.isfinite(v) and v >= _MIN_VALID_ACCURACY
 
 
+_RECORDED_ACCURACY_PAIR: Any = None
+
+
+def _resolve_recorded_accuracy_pair() -> Any:
+    """Import the canonical recorded-accuracy reader lazily.
+
+    ``recorded_accuracy_pair`` is the single authoritative reader for the
+    ``(raw_accuracy, estimated_flag)`` pair of a recorded state. Reading the
+    value and its provenance flag from the same source is what stops a stale
+    or fallback radius from being paired with the wrong provenance. Resolving
+    it here (re-exported on ``.coordinator``, exactly like
+    ``_resolve_is_valid_accuracy``) keeps the map in lockstep with the producer
+    instead of re-deriving the precedence in the view.
+    """
+
+    global _RECORDED_ACCURACY_PAIR
+    if _RECORDED_ACCURACY_PAIR is None:
+        try:
+            from .coordinator import recorded_accuracy_pair as _pair
+        except ImportError:
+            # Partial coordinator stubs may not expose the reader yet. Fall
+            # back to a copy of the canonical precedence so the history view
+            # keeps rendering. Kept in sync with
+            # coordinator.helpers.geo.recorded_accuracy_pair.
+            _pair = _fallback_recorded_accuracy_pair
+
+        _RECORDED_ACCURACY_PAIR = _pair
+    return _RECORDED_ACCURACY_PAIR
+
+
+def _fallback_recorded_accuracy_pair(
+    attributes: Any,
+) -> tuple[Any, bool | None]:
+    """Mirror ``coordinator.helpers.geo.recorded_accuracy_pair`` without import.
+
+    Used only when the canonical re-export cannot be resolved (see
+    ``_resolve_recorded_accuracy_pair``). Prefers the stable producer
+    ``accuracy_m`` over the volatile core ``gps_accuracy`` and returns the
+    producer ``accuracy_estimated`` flag, or ``None`` for legacy rows.
+    """
+
+    raw = attributes.get("accuracy_m")
+    if raw is None:
+        raw = attributes.get("gps_accuracy")
+    flag = attributes.get("accuracy_estimated")
+    return raw, (bool(flag) if flag is not None else None)
+
+
 # ------------------------------- HTML Helpers -------------------------------
 
 
@@ -339,6 +387,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         seen_timestamps: set[float] = set()
         safe_accuracy = _resolve_safe_accuracy()
         is_valid_accuracy = _resolve_is_valid_accuracy()
+        recorded_accuracy_pair = _resolve_recorded_accuracy_pair()
         if entity_id:
             try:
                 from homeassistant.components.recorder import get_instance
@@ -361,6 +410,18 @@ class GoogleFindMyMapView(HomeAssistantView):
                         try:
                             lat = float(state.attributes.get("latitude"))
                             lon = float(state.attributes.get("longitude"))
+                            # Read the accuracy value AND its estimated-provenance
+                            # flag from the same authoritative source. ``accuracy_m``
+                            # is the stable producer attribute; it survives Home
+                            # Assistant clearing the volatile core ``gps_accuracy``
+                            # on stale states, where the entity drops lat/lon but
+                            # the recorder still keeps accuracy_m/accuracy_estimated.
+                            # Reading the value from gps_accuracy while reading the
+                            # flag separately let a stale fallback row be drawn as a
+                            # real circle (Codex review, PR #1124).
+                            raw_accuracy, flag = recorded_accuracy_pair(
+                                state.attributes
+                            )
                             # Normalize accuracy through the integration's
                             # canonical policy: 0.0m (the Android error code),
                             # negative, NaN, Inf and missing values are corrupted
@@ -368,7 +429,6 @@ class GoogleFindMyMapView(HomeAssistantView):
                             # coordinator.helpers.geo.safe_accuracy). This keeps
                             # the map consistent with the live entity and stops
                             # unknown-quality points from masquerading as 0.0m.
-                            raw_accuracy = state.attributes.get("gps_accuracy")
                             acc = safe_accuracy(raw_accuracy)
 
                             # Apply the "Min Accuracy" filter from the UI slider.
@@ -409,12 +469,12 @@ class GoogleFindMyMapView(HomeAssistantView):
                             # sanitizer: once the raw value was replaced with the
                             # 200m fallback it is indistinguishable from a real
                             # 200m fix, so only the producer knows it was
-                            # estimated. Legacy recorder rows predating the flag
-                            # have no attribute; for those we fall back to the
-                            # validity predicate on the raw gps_accuracy.
-                            flag = state.attributes.get("accuracy_estimated")
+                            # estimated. ``flag`` is None for legacy recorder rows
+                            # predating the producer attribute; for those we fall
+                            # back to the validity predicate on the same raw value
+                            # the pair returned (accuracy_m, else gps_accuracy).
                             estimated = (
-                                bool(flag)
+                                flag
                                 if flag is not None
                                 else not is_valid_accuracy(raw_accuracy)
                             )

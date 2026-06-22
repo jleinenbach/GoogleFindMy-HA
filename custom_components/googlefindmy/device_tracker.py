@@ -30,7 +30,6 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_GPS_ACCURACY,
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
 )
@@ -50,7 +49,11 @@ from .const import (
     OPT_STALE_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
-from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
+from .coordinator import (
+    GoogleFindMyCoordinator,
+    _as_ha_attributes,
+    recorded_accuracy_pair,
+)
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
     _cloud_discovery_stable_key,
@@ -918,17 +921,19 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         lon = last_state.attributes.get(
             ATTR_LONGITUDE, last_state.attributes.get("longitude")
         )
-        acc = last_state.attributes.get(
-            ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy")
-        )
-        # Producer flag persisted alongside the recorded state. Carrying it back
-        # into the primed cache keeps a restored fallback radius distinguishable
-        # from a real measurement of the same value after a restart; without it
-        # the next state would reclassify a flagged 200m fallback as real
-        # (Codex review, PR #1124). Legacy rows recorded before the flag existed
-        # carry no key, and we deliberately do not fabricate one for them: the
-        # downstream map_view legacy fallback handles that documented case.
-        estimated = last_state.attributes.get("accuracy_estimated")
+        # Read the accuracy value AND its estimated-provenance flag from the
+        # same authoritative source as map_view and the snapshot builders:
+        # accuracy_m (the stable producer attribute) over the volatile core
+        # gps_accuracy, which Home Assistant clears on stale states. Reading the
+        # value from gps_accuracy alone dropped a real accuracy_m radius (and,
+        # guarded by ``acc is not None`` below, the paired flag) when reseeding
+        # the cache after a restart, the same decoupling closed elsewhere in
+        # PR #1124. Carrying the flag keeps a restored fallback radius
+        # distinguishable from a real measurement of the same value; legacy rows
+        # recorded before the flag carry estimated=None and we deliberately do
+        # not fabricate one (the downstream map_view legacy fallback handles
+        # that documented case).
+        acc, estimated = recorded_accuracy_pair(last_state.attributes)
 
         restored: dict[str, Any] = {}
         try:

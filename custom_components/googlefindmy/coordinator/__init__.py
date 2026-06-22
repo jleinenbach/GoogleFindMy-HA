@@ -37,7 +37,11 @@ from . import helpers
 # lightweight consumers such as map_view resolve it without reaching into the
 # nested .helpers.geo submodule, which keeps them tolerant of plain ModuleType
 # coordinator stubs in tests. geo is a pure, dependency-light module.
-from .helpers.geo import is_valid_accuracy, safe_accuracy
+from .helpers.geo import (
+    is_valid_accuracy,
+    recorded_accuracy_pair,
+    safe_accuracy,
+)
 
 # Re-export stats classes from helpers (commonly needed)
 from .helpers.stats import (
@@ -96,6 +100,7 @@ __all__ = [
     "get_recorder",
     "is_valid_accuracy",
     "normalize_epoch_seconds",
+    "recorded_accuracy_pair",
     "safe_accuracy",
     # Semi-public functions
     "_as_ha_attributes",

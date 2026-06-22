@@ -438,3 +438,139 @@ async def test_map_view_deduplicates_identical_timestamps(
     response = await _run_get(map_view, entry, device_id)
     assert response.status == 200
     assert len(captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_map_view_stale_real_point_uses_accuracy_m_not_gps_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale real fix (gps_accuracy cleared) keeps its real radius via accuracy_m.
+
+    For stale tracker states ``_sync_location_attrs`` clears the core latitude/
+    longitude so Home Assistant omits ``gps_accuracy``, but ``_as_ha_attributes``
+    still records the cached ``latitude``/``longitude``/``accuracy_m`` and a
+    producer ``accuracy_estimated=False``. Reading the value from the absent
+    ``gps_accuracy`` (the old behaviour) normalized it to the 200m fallback and,
+    paired with the False flag, drew a bogus 200m "real" circle. The point must
+    instead carry its real ``accuracy_m`` value (Codex review, PR #1124).
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    device_id = "device-stale-real"
+    coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "Device"}])
+    registry = _registry_for("entry-acc", device_id, coordinator)
+    entry, captured = _wire_view(
+        monkeypatch, map_view, device_id=device_id, registry=registry
+    )
+
+    states = [
+        SimpleNamespace(
+            attributes={
+                "latitude": "10.0",
+                "longitude": "20.0",
+                "last_seen": "2024-01-01T00:00:00Z",
+                # gps_accuracy intentionally absent (stale state); the stable
+                # producer attribute carries the real 35m measurement.
+                "accuracy_m": 35.0,
+                "accuracy_estimated": False,
+            },
+            last_updated=datetime(2024, 7, 1, tzinfo=UTC),
+            state="stale-real",
+        ),
+    ]
+    _install_history(monkeypatch, states)
+
+    response = await _run_get(map_view, entry, device_id)
+
+    assert response.status == 200
+    assert len(captured) == 1
+    # Real radius preserved, not collapsed to the 200m fallback.
+    assert captured[0]["accuracy"] == 35.0
+    assert captured[0]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_map_view_stale_fallback_point_stays_estimated_via_accuracy_m(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale fallback fix keeps accuracy_m=200 and its estimated flag.
+
+    Mirror of the stale-real case for the fallback: when gps_accuracy is cleared
+    the producer's accuracy_m=200 and accuracy_estimated=True must be read from
+    the same source so the point stays estimated and draws no real circle.
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    device_id = "device-stale-fallback"
+    coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "Device"}])
+    registry = _registry_for("entry-acc", device_id, coordinator)
+    entry, captured = _wire_view(
+        monkeypatch, map_view, device_id=device_id, registry=registry
+    )
+
+    states = [
+        SimpleNamespace(
+            attributes={
+                "latitude": "10.0",
+                "longitude": "20.0",
+                "last_seen": "2024-01-01T00:00:00Z",
+                "accuracy_m": 200.0,
+                "accuracy_estimated": True,
+            },
+            last_updated=datetime(2024, 7, 1, tzinfo=UTC),
+            state="stale-fallback",
+        ),
+    ]
+    _install_history(monkeypatch, states)
+
+    response = await _run_get(map_view, entry, device_id)
+
+    assert response.status == 200
+    assert len(captured) == 1
+    assert captured[0]["accuracy"] == 200.0
+    assert captured[0]["accuracy_estimated"] is True
+
+
+@pytest.mark.asyncio
+async def test_map_view_legacy_row_without_flag_prefers_accuracy_m(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy rows without the flag still prefer accuracy_m over gps_accuracy.
+
+    A row that predates the producer flag but already carries accuracy_m (for
+    example a stale state) must derive ``estimated`` from the same accuracy_m
+    value the radius is drawn from, keeping value and provenance consistent.
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    device_id = "device-legacy-accm"
+    coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "Device"}])
+    registry = _registry_for("entry-acc", device_id, coordinator)
+    entry, captured = _wire_view(
+        monkeypatch, map_view, device_id=device_id, registry=registry
+    )
+
+    states = [
+        SimpleNamespace(
+            attributes={
+                "latitude": "10.0",
+                "longitude": "20.0",
+                "last_seen": "2024-01-01T00:00:00Z",
+                # No flag; accuracy_m is a real measurement -> not estimated.
+                "accuracy_m": 18.0,
+            },
+            last_updated=datetime(2024, 7, 1, tzinfo=UTC),
+            state="legacy-accm",
+        ),
+    ]
+    _install_history(monkeypatch, states)
+
+    response = await _run_get(map_view, entry, device_id)
+
+    assert response.status == 200
+    assert len(captured) == 1
+    assert captured[0]["accuracy"] == 18.0
+    assert captured[0]["accuracy_estimated"] is False

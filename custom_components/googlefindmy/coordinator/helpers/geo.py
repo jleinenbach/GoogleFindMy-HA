@@ -15,6 +15,7 @@ Phase 1 of coordinator.py refactoring.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -204,6 +205,44 @@ def is_valid_accuracy(value: float | None) -> bool:
         return math.isfinite(v) and v >= MIN_VALID_ACCURACY
     except (TypeError, ValueError):
         return False
+
+
+def recorded_accuracy_pair(
+    attributes: Mapping[str, Any],
+) -> tuple[Any, bool | None]:
+    """Read the ``(raw_accuracy, estimated_flag)`` pair from a recorded state.
+
+    The accuracy value and its "estimated" provenance MUST be read from the
+    same authoritative source. Reading the value from one attribute and the
+    flag from another lets a stale or fallback radius be paired with the wrong
+    provenance, so a 200m fallback ends up masquerading as a real measurement.
+    That decoupling is the recurring defect class behind several PR #1124
+    Codex findings; this single reader is the structural fix and every consumer
+    that reconstructs accuracy from a recorded/published state must use it.
+
+    Value precedence:
+        ``accuracy_m`` -- the stable producer attribute emitted by
+        ``_as_ha_attributes``. It survives Home Assistant clearing the volatile
+        core ``gps_accuracy`` value on stale states, so it always reflects the
+        producer's measurement (real or fallback).
+        ``gps_accuracy`` -- the Home Assistant core integer; the only accuracy
+        key present on legacy recorder rows predating ``accuracy_m``.
+
+    Args:
+        attributes: A recorded state's attribute mapping.
+
+    Returns:
+        A ``(raw_accuracy, estimated_flag)`` tuple. ``raw_accuracy`` is the
+        producer value when available, else the core/legacy value, else
+        ``None``. ``estimated_flag`` is the producer ``accuracy_estimated``
+        bool when present, else ``None`` so callers can apply a legacy validity
+        fallback on ``raw_accuracy`` themselves.
+    """
+    raw = attributes.get("accuracy_m")
+    if raw is None:
+        raw = attributes.get("gps_accuracy")
+    flag = attributes.get("accuracy_estimated")
+    return raw, (bool(flag) if flag is not None else None)
 
 
 # ---------------------------------------------------------------------------

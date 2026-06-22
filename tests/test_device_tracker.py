@@ -541,9 +541,10 @@ class _RestoreCoordinatorStub:
 
     def __init__(self) -> None:
         self.hass = SimpleNamespace()
-        self.config_entry = SimpleNamespace(
-            entry_id="entry-restore", options={}, runtime_data=None
-        )
+        # Canonical config-entry stub (tests/AGENTS.md): make_config_entry
+        # supplies the production data/options defaults instead of an ad-hoc
+        # SimpleNamespace double. runtime_data defaults to None.
+        self.config_entry = make_config_entry(entry_id="entry-restore")
         self.primed: dict[str, Any] = {}
 
     def async_add_listener(
@@ -676,4 +677,39 @@ async def test_restore_preserves_estimated_false(
     await entity.async_added_to_hass()
 
     assert coordinator.primed["data"]["accuracy"] == 15
+    assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_stale_state_uses_accuracy_m_over_gps_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale restored state recovers its real radius from accuracy_m.
+
+    For stale states Home Assistant clears the core latitude/longitude and omits
+    ``gps_accuracy``, but the recorder still keeps the stable producer attributes
+    ``accuracy_m``/``accuracy_estimated`` (and the cached lat/lon). Reading the
+    value from the absent ``gps_accuracy`` alone dropped the real radius (and,
+    guarded by ``acc is not None``, the flag) when reseeding the cache. The
+    restore path must read the same authoritative pair as map_view and the
+    snapshot builders (PR #1124 defect class, last decoupled reader).
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # gps_accuracy intentionally absent (stale state); accuracy_m carries
+            # the real 35m measurement and the producer flag says it is real.
+            "accuracy_m": 35.0,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 35
     assert coordinator.primed["data"]["accuracy_estimated"] is False
