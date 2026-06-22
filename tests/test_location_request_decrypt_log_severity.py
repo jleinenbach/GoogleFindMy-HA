@@ -66,6 +66,7 @@ def _patch_callback_imports(
     monkeypatch.setattr(location_request, "_import_eid_info_module", lambda: eid_module)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("decrypt_exc", "expected_level"),
     [
