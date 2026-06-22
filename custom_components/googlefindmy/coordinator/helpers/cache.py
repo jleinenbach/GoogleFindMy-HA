@@ -96,6 +96,11 @@ LOCATION_FIELDS = frozenset(
         "latitude",
         "longitude",
         "accuracy",
+        # Travels atomically with ``accuracy``: when an insignificant update is
+        # rejected the existing accuracy is kept, so its estimated flag must be
+        # kept too. Otherwise a real fix would be paired with a rejected row's
+        # flag (and vice versa), reintroducing the 200m-fallback ambiguity.
+        "accuracy_estimated",
         "altitude",
         "status",
         "source_label",

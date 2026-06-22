@@ -1051,8 +1051,13 @@ async def test_map_html_auto_focuses_newest_real_point(
 ) -> None:
     """The newest real-accuracy point auto-opens, as if it were clicked.
 
-    Mutation guard: inverting the condition (dropping the negation, or the
-    idx === n - 1 guard) removes this exact substring and turns the test red.
+    Auto-focus is no longer coupled to the last index: every non-estimated point
+    assigns ``autoFocusMarker`` and, because locations are sorted oldest->newest,
+    the last assignment selects the newest real point even when the newest point
+    overall is an estimated fallback (Codex #1124 finding 2).
+
+    Mutation guard: dropping the negation removes this exact substring and turns
+    the test red; re-coupling it to ``idx === n - 1`` is asserted against below.
     """
 
     response = await _render_map_with_states(
@@ -1060,7 +1065,8 @@ async def test_map_html_auto_focuses_newest_real_point(
     )
     html = response.text
 
-    assert "if (idx === n - 1 && !loc.accuracy_estimated)" in html
+    assert "if (!loc.accuracy_estimated) { autoFocusMarker = marker; }" in html
+    assert "idx === n - 1 && !loc.accuracy_estimated" not in html
     assert "autoFocusMarker.openPopup();" in html
 
 

@@ -385,6 +385,14 @@ def _as_ha_attributes(row: dict[str, Any] | None) -> dict[str, Any] | None:
         out["accuracy_m"] = acc
     if alt is not None:
         out["altitude_m"] = alt
+    # Producer flag: True when ``accuracy_m`` is the conservative fallback radius
+    # rather than a real measurement. Forwarded as a bool so the recorder
+    # persists it and map_view can read it from history. Only emitted when the
+    # producer actually set it; legacy rows without the key stay unflagged. The
+    # trailing None filter keeps a False value (False is not None).
+    estimated = r.get("accuracy_estimated")
+    if estimated is not None:
+        out["accuracy_estimated"] = bool(estimated)
     return {k: v for k, v in out.items() if v is not None}
 
 

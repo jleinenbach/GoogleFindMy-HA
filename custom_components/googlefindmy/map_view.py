@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta
 from html import escape
@@ -87,10 +88,40 @@ def _resolve_is_valid_accuracy() -> Any:
 
     global _IS_VALID_ACCURACY
     if _IS_VALID_ACCURACY is None:
-        from .coordinator import is_valid_accuracy as _is_valid_accuracy
+        try:
+            from .coordinator import is_valid_accuracy as _is_valid_accuracy
+        except ImportError:
+            # Partial coordinator stubs (and any future re-export gaps) may not
+            # expose ``is_valid_accuracy``. Fall back to a predicate that mirrors
+            # the canonical geo.py policy so the map keeps rendering instead of
+            # crashing the history view. Kept in sync with
+            # coordinator.helpers.geo.is_valid_accuracy.
+            _is_valid_accuracy = _fallback_is_valid_accuracy
 
         _IS_VALID_ACCURACY = _is_valid_accuracy
     return _IS_VALID_ACCURACY
+
+
+# Minimum accuracy treated as a real measurement (1 millimeter). Mirrors
+# coordinator.helpers.geo.MIN_VALID_ACCURACY; below this is the 0.0 error code.
+_MIN_VALID_ACCURACY = 0.001
+
+
+def _fallback_is_valid_accuracy(value: float | None) -> bool:
+    """Mirror ``coordinator.helpers.geo.is_valid_accuracy`` without importing it.
+
+    Used only when the canonical re-export cannot be resolved (see
+    ``_resolve_is_valid_accuracy``). A value is valid when it is not None, casts
+    to a finite float, and is at least ``_MIN_VALID_ACCURACY`` (0.001m).
+    """
+
+    if value is None:
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v >= _MIN_VALID_ACCURACY
 
 
 # ------------------------------- HTML Helpers -------------------------------
@@ -369,19 +400,30 @@ class GoogleFindMyMapView(HomeAssistantView):
                                 continue
 
                             seen_timestamps.add(ts)
+                            # Whether ``accuracy`` is the conservative fallback
+                            # radius (raw gps_accuracy was missing/0.0/NaN/Inf/
+                            # negative) rather than a real measurement. The client
+                            # draws accuracy circles only for real measurements.
+                            #
+                            # Prefer the producer flag persisted by the cache
+                            # sanitizer: once the raw value was replaced with the
+                            # 200m fallback it is indistinguishable from a real
+                            # 200m fix, so only the producer knows it was
+                            # estimated. Legacy recorder rows predating the flag
+                            # have no attribute; for those we fall back to the
+                            # validity predicate on the raw gps_accuracy.
+                            flag = state.attributes.get("accuracy_estimated")
+                            estimated = (
+                                bool(flag)
+                                if flag is not None
+                                else not is_valid_accuracy(raw_accuracy)
+                            )
                             locations.append(
                                 {
                                     "lat": lat,
                                     "lon": lon,
                                     "accuracy": acc,
-                                    # Whether ``accuracy`` is the conservative
-                                    # fallback radius (raw gps_accuracy was
-                                    # missing/0.0/NaN/Inf/negative) rather than a
-                                    # real measurement. The client draws accuracy
-                                    # circles only for real measurements.
-                                    "accuracy_estimated": not is_valid_accuracy(
-                                        raw_accuracy
-                                    ),
+                                    "accuracy_estimated": estimated,
                                     "timestamp": datetime.fromtimestamp(
                                         ts, tz=dt_util.UTC
                                     ).isoformat(),
@@ -597,13 +639,18 @@ class GoogleFindMyMapView(HomeAssistantView):
 
                 markers.addLayer(marker);
                 bounds.extend([loc.lat, loc.lon]);
-                if (idx === n - 1 && !loc.accuracy_estimated) {{ autoFocusMarker = marker; }}
+                // Focus every real-accuracy point; because locations are sorted
+                // oldest->newest, the last assignment wins and selects the newest
+                // non-estimated point even when the newest point overall is an
+                // estimated fallback.
+                if (!loc.accuracy_estimated) {{ autoFocusMarker = marker; }}
             }});
 
             if (locations.length > 0) {{
                 map.fitBounds(bounds, {{padding: [50, 50]}});
             }}
-            // Auto-focus the newest real-accuracy point, as if it were clicked.
+            // Auto-focus the newest real-accuracy point (last non-estimated wins,
+            // oldest->newest sort), as if it were clicked.
             if (autoFocusMarker) {{ autoFocusMarker.openPopup(); }}
         }}
 
