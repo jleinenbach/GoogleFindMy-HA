@@ -157,26 +157,15 @@ def safe_accuracy(value: Any, *, fallback: float | None = None) -> float:
     if fallback is None:
         fallback = DEFAULT_ACCURACY_FALLBACK
 
-    # Handle None explicitly
-    if value is None:
+    # Single source of truth for the validity policy: is_valid_accuracy()
+    # decides None / non-numeric / NaN / Inf / below-MIN_VALID_ACCURACY in one
+    # place, so safe_accuracy and is_valid_accuracy can never drift apart.
+    if not is_valid_accuracy(value):
         return fallback
 
-    # Try to convert to float - handle any type gracefully
-    try:
-        float_value = float(value)
-    except (TypeError, ValueError):
-        return fallback
-
-    # Check for NaN/Inf
-    if not math.isfinite(float_value):
-        return fallback
-
-    # Values below MIN_VALID_ACCURACY are the error code (0.0) or negative
-    # Modern GNSS can achieve sub-meter accuracy, so we only reject < 0.001m
-    if float_value < MIN_VALID_ACCURACY:
-        return fallback
-
-    return float_value
+    # Validity guarantees float() succeeds and the value is finite and
+    # >= MIN_VALID_ACCURACY, so this conversion cannot fail.
+    return float(value)
 
 
 def is_valid_accuracy(value: float | None) -> bool:
