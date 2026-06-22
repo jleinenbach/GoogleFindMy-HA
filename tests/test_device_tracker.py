@@ -10,6 +10,7 @@ import logging
 from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -92,7 +93,7 @@ def test_find_tracker_entity_entry_uses_fallback(
     assert entry.unique_id.endswith(":tracker-42")
 
 
-def test_scanner_instantiates_tracker_for_known_registry_entry(
+async def test_scanner_instantiates_tracker_for_known_registry_entry(
     monkeypatch: pytest.MonkeyPatch,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
@@ -189,7 +190,7 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
         for task in scheduled:
             await task
 
-    asyncio.run(_exercise())
+    await _exercise()
 
     # Both main tracker and last location call find_tracker_entity_entry
     assert coordinator.lookup_calls == ["tracker-1", "tracker-1"]
@@ -211,7 +212,7 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
         assert task.done()
 
 
-def test_initial_snapshot_hydrates_registry_tracker(
+async def test_initial_snapshot_hydrates_registry_tracker(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Startup population should still create a tracker entity when the registry already knows it."""
@@ -277,9 +278,7 @@ def test_initial_snapshot_hydrates_registry_tracker(
         added.append(list(entities))
         assert update_before_add is True
 
-    asyncio.run(
-        device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities)
-    )
+    await device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities)
 
     # Should have 2 entities per device: main tracker + last location
     assert added and len(added[0]) == 2
@@ -525,3 +524,252 @@ def test_device_tracker_show_location_age_runtime_toggle() -> None:
 
     entity._sync_location_attrs()
     assert "location_age" not in entity._attr_extra_state_attributes
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for accuracy_estimated restore (Codex review, PR #1124).
+# A fallback fix recorded with accuracy_estimated=True must keep that flag when
+# the device_tracker reseeds the coordinator cache on a Home Assistant restart,
+# otherwise a flagless 200 m row is later reclassified as a real measurement.
+# ---------------------------------------------------------------------------
+
+
+class _RestoreCoordinatorStub:
+    """Coordinator stub that records the cache-priming payload on restore."""
+
+    def __init__(self) -> None:
+        self.hass = SimpleNamespace()
+        # Canonical config-entry stub (tests/AGENTS.md): make_config_entry
+        # supplies the production data/options defaults instead of an ad-hoc
+        # SimpleNamespace double. runtime_data defaults to None.
+        self.config_entry = make_config_entry(entry_id="entry-restore")
+        self.primed: dict[str, Any] = {}
+
+    def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
+        return lambda: None
+
+    def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
+        self.primed["device_id"] = device_id
+        self.primed["data"] = dict(data)
+
+
+def _build_restore_entity(
+    coordinator: _RestoreCoordinatorStub,
+    monkeypatch: pytest.MonkeyPatch,
+    attributes: dict[str, Any],
+) -> Any:
+    """Build a tracker entity wired for an isolated restore round-trip."""
+
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
+    entity = device_tracker.GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "device-restore", "name": "Tracker"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=TRACKER_SUBENTRY_KEY,
+    )
+    entity.hass = SimpleNamespace(data={DOMAIN: {}})
+    # Isolate cache priming from the full attribute sync / state-write path,
+    # which needs a live HA instance.
+    monkeypatch.setattr(entity, "_sync_location_attrs", lambda: None)
+    monkeypatch.setattr(entity, "async_write_ha_state", lambda: None)
+    restored_state = SimpleNamespace(attributes=dict(attributes))
+    monkeypatch.setattr(
+        entity, "async_get_last_state", AsyncMock(return_value=restored_state)
+    )
+    return entity
+
+
+@pytest.mark.asyncio
+async def test_restore_preserves_accuracy_estimated_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored fallback point keeps its producer estimated flag.
+
+    On a Home Assistant restart the device_tracker reseeds the coordinator
+    cache from the last published state. A fallback fix recorded with
+    ``accuracy_estimated=True`` must carry that flag into the cache so the next
+    state is not reclassified as a real measurement.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 200,
+            "accuracy_estimated": True,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["device_id"] == "device-restore"
+    assert coordinator.primed["data"]["accuracy"] == 200
+    assert coordinator.primed["data"]["accuracy_estimated"] is True
+    # The entity's stale-data snapshot must stay consistent with the cache.
+    assert entity._last_good_accuracy_data.get("accuracy_estimated") is True
+
+
+@pytest.mark.asyncio
+async def test_restore_without_flag_leaves_estimated_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy rows without the flag stay unflagged on restore.
+
+    We do not fabricate a producer flag for states recorded before the flag
+    existed. The documented legacy limitation (a fallback radius is
+    indistinguishable from a real measurement of the same value without the
+    flag) is handled downstream by map_view's legacy fallback, not by inventing
+    a value here.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 30,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 30
+    assert "accuracy_estimated" not in coordinator.primed["data"]
+
+
+@pytest.mark.asyncio
+async def test_restore_preserves_estimated_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored real measurement keeps an explicit estimated=False flag.
+
+    The flag must survive the restore round-trip even when it is ``False``: a
+    naive truthiness filter would drop it, which would then let the downstream
+    legacy fallback re-derive it. Seeding ``False`` explicitly pins the row as a
+    real measurement.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 15,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 15
+    assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_stale_state_uses_accuracy_m_over_gps_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale restored state recovers its real radius from accuracy_m.
+
+    For stale states Home Assistant clears the core latitude/longitude and omits
+    ``gps_accuracy``, but the recorder still keeps the stable producer attributes
+    ``accuracy_m``/``accuracy_estimated`` (and the cached lat/lon). Reading the
+    value from the absent ``gps_accuracy`` alone dropped the real radius (and,
+    guarded by ``acc is not None``, the flag) when reseeding the cache. The
+    restore path must read the same authoritative pair as map_view and the
+    snapshot builders (PR #1124 defect class, last decoupled reader).
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # gps_accuracy intentionally absent (stale state); accuracy_m carries
+            # the real 35m measurement and the producer flag says it is real.
+            "accuracy_m": 35.0,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 35
+    assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_preserves_sub_meter_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored sub-meter real fix keeps its fractional radius.
+
+    Modern dual-frequency GNSS reports sub-meter accuracy (e.g. 0.5m). The
+    restore path seeds the coordinator cache, whose ``accuracy`` field is a
+    float everywhere else, so it must normalize through ``safe_accuracy`` rather
+    than truncating with ``int()``. Truncating 0.5 to 0 would seed an invalid
+    0m radius (below ``MIN_VALID_ACCURACY``) while still carrying
+    ``accuracy_estimated=False``, recreating an invalid real fix after restart.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # Sub-meter real measurement; must survive the restore unchanged.
+            "accuracy_m": 0.5,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 0.5
+    assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_sanitizes_invalid_legacy_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy error-code accuracy is sanitized, not seeded as an invalid fix.
+
+    A legacy recorder row can carry the Android error code ``gps_accuracy=0``
+    (no producer ``accuracy_m``). The old ``int(float(acc))`` seeded a literal
+    ``0`` -- an invalid radius that wins fusion against every real fix. Routing
+    through ``safe_accuracy`` maps it to the 200m fallback, which fusion then
+    correctly down-weights. The flag is carried as recorded (not fabricated):
+    this pins the documented legacy boundary as deliberate behaviour.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # Android error code; no stable producer accuracy_m present.
+            "gps_accuracy": 0,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 200.0
+    assert coordinator.primed["data"]["accuracy_estimated"] is False

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -67,7 +66,9 @@ class _DummyEntityRegistry:
         return self._entity_ids.get((platform, domain, unique_id))
 
 
-def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_snapshot_uses_entry_scoped_unique_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Coordinator should rehydrate from HA state via entry-scoped tracker unique_id."""
 
     entity_registry = _DummyEntityRegistry()
@@ -95,10 +96,8 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     coordinator.location_poll_interval = 30
     coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-42", "name": "Pixel 8"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
     )
 
     assert len(result) == 1
@@ -112,7 +111,9 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     )
 
 
-def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_snapshot_preserves_recorded_last_seen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A persisted last_seen attribute should win over last_updated."""
 
     entity_registry = _DummyEntityRegistry()
@@ -146,10 +147,8 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
     coordinator.location_poll_interval = 30
     coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-42", "name": "Pixel 8"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
     )
 
     entry = result[0]
@@ -158,7 +157,7 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
     assert entry["last_seen_utc"] == iso_seen
 
 
-def test_snapshot_logs_formats_when_entity_missing(
+async def test_snapshot_logs_formats_when_entity_missing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log should clarify which unique_id formats were considered when none match."""
@@ -180,10 +179,8 @@ def test_snapshot_logs_formats_when_entity_missing(
 
     caplog.set_level("DEBUG")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-99", "name": "Tablet"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-99", "name": "Tablet"}]
     )
 
     assert result[0]["status"] == "Waiting for location poll"
@@ -244,3 +241,96 @@ def test_history_helper_preserves_last_seen(monkeypatch: pytest.MonkeyPatch) -> 
     expected_ts = datetime.fromisoformat(iso_seen.replace("Z", "+00:00")).timestamp()
     assert result["last_seen"] == pytest.approx(expected_ts)
     assert result["status"] == "Using historical data"
+
+
+def test_history_helper_carries_accuracy_estimated_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconstructed history rows must carry the producer accuracy_estimated flag.
+
+    The recorded state of a 200m fallback fix keeps accuracy_m=200 and
+    accuracy_estimated=True. Rebuilding the row from gps_accuracy alone dropped
+    the flag, so the rebuilt 200m value re-entered the cache looking like a real
+    measurement (PR #1124 defect class). The reader must take the value from
+    accuracy_m and forward the flag.
+    """
+
+    history_state = SimpleNamespace(
+        attributes={
+            "latitude": 48.137154,
+            "longitude": 11.576124,
+            # Stable producer pair; gps_accuracy intentionally absent.
+            "accuracy_m": 200.0,
+            "accuracy_estimated": True,
+            "last_seen": "2024-02-05T08:00:00Z",
+        },
+        last_updated=datetime(2024, 2, 6, tzinfo=UTC),
+    )
+
+    def _fake_get_last_state_changes(hass, limit, entity_ids):
+        return {entity_ids[0]: [history_state]}
+
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.coordinator.main.recorder_history.get_last_state_changes",
+        _fake_get_last_state_changes,
+        raising=False,
+    )
+
+    hass = SimpleNamespace()
+    result = _sync_get_last_gps_from_history(
+        hass, "device_tracker.googlefindmy_device_42"
+    )
+
+    assert result is not None
+    assert result["accuracy"] == pytest.approx(200.0)
+    assert result["accuracy_estimated"] is True
+
+
+async def test_snapshot_current_state_carries_accuracy_estimated_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live-state snapshot path must carry the producer accuracy_estimated flag.
+
+    Sibling of the history path: reusing a published 200m fallback state to build
+    a snapshot entry must read accuracy from accuracy_m and forward
+    accuracy_estimated, so the cache does not reclassify the fallback as real.
+    """
+
+    entity_registry = _DummyEntityRegistry()
+    entity_registry.add(
+        "device_tracker",
+        DOMAIN,
+        "entry-1:device-42",
+        "device_tracker.googlefindmy_device_42",
+    )
+    monkeypatch.setattr(
+        coordinator_registry.er, "async_get", lambda hass: entity_registry
+    )
+
+    hass = SimpleNamespace(states=_DummyStates())
+    hass.states.set(
+        "device_tracker.googlefindmy_device_42",
+        _DummyState(
+            latitude=37.4219999,
+            longitude=-122.0840575,
+            accuracy=None,
+            extra_attrs={"accuracy_m": 200.0, "accuracy_estimated": True},
+        ),
+    )
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator.hass = hass
+    coordinator.allow_history_fallback = False
+    coordinator._device_location_data = {}
+    coordinator.location_poll_interval = 30
+    coordinator.config_entry = make_config_entry(entry_id="entry-1")
+
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
+    )
+
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["status"] == "Using current state"
+    assert entry["accuracy"] == pytest.approx(200.0)
+    assert entry["accuracy_estimated"] is True

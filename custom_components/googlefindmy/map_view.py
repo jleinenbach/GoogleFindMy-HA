@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta
 from html import escape
@@ -70,6 +71,105 @@ def _resolve_safe_accuracy() -> Any:
 
         _SAFE_ACCURACY = _safe_accuracy
     return _SAFE_ACCURACY
+
+
+_IS_VALID_ACCURACY: Any = None
+
+
+def _resolve_is_valid_accuracy() -> Any:
+    """Import the canonical accuracy validity predicate lazily.
+
+    ``is_valid_accuracy`` is the single source of truth for "does this raw
+    gps_accuracy represent a real measurement, or would safe_accuracy fall back
+    to the conservative radius?". Resolving it here (re-exported on
+    ``.coordinator``, exactly like ``_resolve_safe_accuracy``) lets the map flag
+    estimated points without duplicating the validity policy in Python or JS.
+    """
+
+    global _IS_VALID_ACCURACY
+    if _IS_VALID_ACCURACY is None:
+        try:
+            from .coordinator import is_valid_accuracy as _is_valid_accuracy
+        except ImportError:
+            # Partial coordinator stubs (and any future re-export gaps) may not
+            # expose ``is_valid_accuracy``. Fall back to a predicate that mirrors
+            # the canonical geo.py policy so the map keeps rendering instead of
+            # crashing the history view. Kept in sync with
+            # coordinator.helpers.geo.is_valid_accuracy.
+            _is_valid_accuracy = _fallback_is_valid_accuracy
+
+        _IS_VALID_ACCURACY = _is_valid_accuracy
+    return _IS_VALID_ACCURACY
+
+
+# Minimum accuracy treated as a real measurement (1 millimeter). Mirrors
+# coordinator.helpers.geo.MIN_VALID_ACCURACY; below this is the 0.0 error code.
+_MIN_VALID_ACCURACY = 0.001
+
+
+def _fallback_is_valid_accuracy(value: float | None) -> bool:
+    """Mirror ``coordinator.helpers.geo.is_valid_accuracy`` without importing it.
+
+    Used only when the canonical re-export cannot be resolved (see
+    ``_resolve_is_valid_accuracy``). A value is valid when it is not None, casts
+    to a finite float, and is at least ``_MIN_VALID_ACCURACY`` (0.001m).
+    """
+
+    if value is None:
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v >= _MIN_VALID_ACCURACY
+
+
+_RECORDED_ACCURACY_PAIR: Any = None
+
+
+def _resolve_recorded_accuracy_pair() -> Any:
+    """Import the canonical recorded-accuracy reader lazily.
+
+    ``recorded_accuracy_pair`` is the single authoritative reader for the
+    ``(raw_accuracy, estimated_flag)`` pair of a recorded state. Reading the
+    value and its provenance flag from the same source is what stops a stale
+    or fallback radius from being paired with the wrong provenance. Resolving
+    it here (re-exported on ``.coordinator``, exactly like
+    ``_resolve_is_valid_accuracy``) keeps the map in lockstep with the producer
+    instead of re-deriving the precedence in the view.
+    """
+
+    global _RECORDED_ACCURACY_PAIR
+    if _RECORDED_ACCURACY_PAIR is None:
+        try:
+            from .coordinator import recorded_accuracy_pair as _pair
+        except ImportError:
+            # Partial coordinator stubs may not expose the reader yet. Fall
+            # back to a copy of the canonical precedence so the history view
+            # keeps rendering. Kept in sync with
+            # coordinator.helpers.geo.recorded_accuracy_pair.
+            _pair = _fallback_recorded_accuracy_pair
+
+        _RECORDED_ACCURACY_PAIR = _pair
+    return _RECORDED_ACCURACY_PAIR
+
+
+def _fallback_recorded_accuracy_pair(
+    attributes: Any,
+) -> tuple[Any, bool | None]:
+    """Mirror ``coordinator.helpers.geo.recorded_accuracy_pair`` without import.
+
+    Used only when the canonical re-export cannot be resolved (see
+    ``_resolve_recorded_accuracy_pair``). Prefers the stable producer
+    ``accuracy_m`` over the volatile core ``gps_accuracy`` and returns the
+    producer ``accuracy_estimated`` flag, or ``None`` for legacy rows.
+    """
+
+    raw = attributes.get("accuracy_m")
+    if raw is None:
+        raw = attributes.get("gps_accuracy")
+    flag = attributes.get("accuracy_estimated")
+    return raw, (bool(flag) if flag is not None else None)
 
 
 # ------------------------------- HTML Helpers -------------------------------
@@ -286,6 +386,8 @@ class GoogleFindMyMapView(HomeAssistantView):
         locations: list[dict[str, Any]] = []
         seen_timestamps: set[float] = set()
         safe_accuracy = _resolve_safe_accuracy()
+        is_valid_accuracy = _resolve_is_valid_accuracy()
+        recorded_accuracy_pair = _resolve_recorded_accuracy_pair()
         if entity_id:
             try:
                 from homeassistant.components.recorder import get_instance
@@ -308,6 +410,18 @@ class GoogleFindMyMapView(HomeAssistantView):
                         try:
                             lat = float(state.attributes.get("latitude"))
                             lon = float(state.attributes.get("longitude"))
+                            # Read the accuracy value AND its estimated-provenance
+                            # flag from the same authoritative source. ``accuracy_m``
+                            # is the stable producer attribute; it survives Home
+                            # Assistant clearing the volatile core ``gps_accuracy``
+                            # on stale states, where the entity drops lat/lon but
+                            # the recorder still keeps accuracy_m/accuracy_estimated.
+                            # Reading the value from gps_accuracy while reading the
+                            # flag separately let a stale fallback row be drawn as a
+                            # real circle (Codex review, PR #1124).
+                            raw_accuracy, flag = recorded_accuracy_pair(
+                                state.attributes
+                            )
                             # Normalize accuracy through the integration's
                             # canonical policy: 0.0m (the Android error code),
                             # negative, NaN, Inf and missing values are corrupted
@@ -315,7 +429,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                             # coordinator.helpers.geo.safe_accuracy). This keeps
                             # the map consistent with the live entity and stops
                             # unknown-quality points from masquerading as 0.0m.
-                            acc = safe_accuracy(state.attributes.get("gps_accuracy"))
+                            acc = safe_accuracy(raw_accuracy)
 
                             # Apply the "Min Accuracy" filter from the UI slider.
                             # accuracy_filter <= 0 disables the filter (default),
@@ -346,11 +460,30 @@ class GoogleFindMyMapView(HomeAssistantView):
                                 continue
 
                             seen_timestamps.add(ts)
+                            # Whether ``accuracy`` is the conservative fallback
+                            # radius (raw gps_accuracy was missing/0.0/NaN/Inf/
+                            # negative) rather than a real measurement. The client
+                            # draws accuracy circles only for real measurements.
+                            #
+                            # Prefer the producer flag persisted by the cache
+                            # sanitizer: once the raw value was replaced with the
+                            # 200m fallback it is indistinguishable from a real
+                            # 200m fix, so only the producer knows it was
+                            # estimated. ``flag`` is None for legacy recorder rows
+                            # predating the producer attribute; for those we fall
+                            # back to the validity predicate on the same raw value
+                            # the pair returned (accuracy_m, else gps_accuracy).
+                            estimated = (
+                                flag
+                                if flag is not None
+                                else not is_valid_accuracy(raw_accuracy)
+                            )
                             locations.append(
                                 {
                                     "lat": lat,
                                     "lon": lon,
                                     "accuracy": acc,
+                                    "accuracy_estimated": estimated,
                                     "timestamp": datetime.fromtimestamp(
                                         ts, tz=dt_util.UTC
                                     ).isoformat(),
@@ -468,6 +601,20 @@ class GoogleFindMyMapView(HomeAssistantView):
         var locations = {locations_json};
         var markers = L.layerGroup().addTo(map);
 
+        // Accuracy-circle / marker-fade constants (two separate concerns):
+        // FOCUS_FILL_OPACITY: fill of the single focus disc. Deliberately below
+        // the Leaflet default (L.Path.prototype.options.fillOpacity == 0.2) so a
+        // ~200m radius does not hide the map underneath. Editorial value, not
+        // sourceable (the user wants it fainter than the default on purpose).
+        var FOCUS_FILL_OPACITY = 0.12;
+        // FADE_SPAN: marker-DOT recency fade, mirrors Home Assistant's
+        // gradualOpacity (hui-map-card.ts == 0.8): newest dot 1.0, oldest
+        // 1 - FADE_SPAN == 0.2. Rank-based (index) like ha-map.ts, not time.
+        var FADE_SPAN = 0.8;
+        // Exactly one filled focus disc may exist at a time (one-FILL invariant),
+        // coupled to Leaflet's one-popup-open invariant.
+        var focusCircle = null;
+
         function toLocalInputValue(date) {{
             var year = date.getFullYear();
             var month = String(date.getMonth() + 1).padStart(2, '0');
@@ -477,39 +624,94 @@ class GoogleFindMyMapView(HomeAssistantView):
             return year + '-' + month + '-' + day + 'T' + hours + ':' + minutes;
         }}
 
+        // LAYER 3: the single filled focus disc (one-FILL invariant). Draws a
+        // metric accuracy disc only for real measurements; estimated
+        // (fallback-radius) points get no misleading precision circle.
+        function setFocus(loc, latlng) {{
+            if (focusCircle) {{ map.removeLayer(focusCircle); focusCircle = null; }}
+            if (!loc.accuracy_estimated) {{
+                focusCircle = L.circle(latlng, {{
+                    radius: loc.accuracy,
+                    color: loc.is_own_report ? '#28a745' : '#007bff',
+                    weight: 2,
+                    fillOpacity: FOCUS_FILL_OPACITY,
+                    opacity: 1.0,
+                    interactive: false
+                }}).addTo(map);
+            }}
+        }}
+
         function drawMap() {{
             markers.clearLayers();
+            if (focusCircle) {{ map.removeLayer(focusCircle); focusCircle = null; }}
             var bounds = L.latLngBounds();
+            var n = locations.length;
+            var autoFocusMarker = null;
 
             locations.forEach(function(loc, idx) {{
                 var color = loc.is_own_report ? '#28a745' : '#007bff';
-                var opacity = 1.0 - (idx / locations.length * 0.5); // Fade older points
+                // LAYER 1: marker-dot recency fade (HA model, rank-based).
+                // Newest (idx == n-1) full 1.0, oldest (idx 0) floor 1 - FADE_SPAN.
+                var markerFill = n <= 1 ? 1.0 : (1 - FADE_SPAN) + (idx / (n - 1)) * FADE_SPAN;
+
+                // LAYER 2: ambient accuracy ring (stroke-only) per real point.
+                // Stroke opacity rank-faded with floor 0 so old rings dissolve
+                // into "fog" instead of covering the map; fills never stack
+                // (stroke overlaps only at line crossings, not over areas).
+                if (!loc.accuracy_estimated) {{
+                    var ringOpacity = n <= 1 ? 1.0 : idx / (n - 1);
+                    markers.addLayer(L.circle([loc.lat, loc.lon], {{
+                        radius: loc.accuracy,
+                        color: color,
+                        weight: 1,
+                        fill: false,
+                        opacity: ringOpacity,
+                        interactive: false
+                    }}));
+                }}
 
                 var marker = L.circleMarker([loc.lat, loc.lon], {{
                     radius: 6,
                     color: '#fff',
                     weight: 1,
                     fillColor: color,
-                    fillOpacity: 0.8
+                    fillOpacity: markerFill
                 }});
 
                 var date = new Date(loc.timestamp).toLocaleString();
                 var source = loc.is_own_report ? "Own Device" : "Crowdsourced";
 
+                // autoPan: false keeps the auto-opened popup from panning the map
+                // away from fitBounds (see plan risk: openPopup autoPan jump).
                 marker.bindPopup(
                     "<b>Time:</b> " + date + "<br>" +
                     "<b>Accuracy:</b> " + loc.accuracy.toFixed(1) + "m<br>" +
                     "<b>Source:</b> " + source + "<br>" +
-                    (loc.semantic_location ? "<b>Location:</b> " + loc.semantic_location : "")
+                    (loc.semantic_location ? "<b>Location:</b> " + loc.semantic_location : ""),
+                    {{autoPan: false}}
                 );
+
+                // LAYER 3 lifecycle: the single focus disc follows the popup.
+                marker.on('popupopen', function() {{ setFocus(loc, [loc.lat, loc.lon]); }});
+                marker.on('popupclose', function() {{
+                    if (focusCircle) {{ map.removeLayer(focusCircle); focusCircle = null; }}
+                }});
 
                 markers.addLayer(marker);
                 bounds.extend([loc.lat, loc.lon]);
+                // Focus every real-accuracy point; because locations are sorted
+                // oldest->newest, the last assignment wins and selects the newest
+                // non-estimated point even when the newest point overall is an
+                // estimated fallback.
+                if (!loc.accuracy_estimated) {{ autoFocusMarker = marker; }}
             }});
 
             if (locations.length > 0) {{
                 map.fitBounds(bounds, {{padding: [50, 50]}});
             }}
+            // Auto-focus the newest real-accuracy point (last non-estimated wins,
+            // oldest->newest sort), as if it were clicked.
+            if (autoFocusMarker) {{ autoFocusMarker.openPopup(); }}
         }}
 
         function applyFilters() {{

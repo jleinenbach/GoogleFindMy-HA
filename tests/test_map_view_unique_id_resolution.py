@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import importlib.util
 import sys
@@ -148,6 +147,31 @@ def _load_real_safe_accuracy() -> Any:
     return geo.safe_accuracy
 
 
+def _load_real_is_valid_accuracy() -> Any:
+    """Load the canonical ``is_valid_accuracy`` from geo.py by file path.
+
+    Mirrors ``_load_real_safe_accuracy`` so the stub exposes the same accuracy
+    re-exports that production publishes on ``coordinator.is_valid_accuracy``.
+    geo.py has no relative imports, so it loads in isolation without dragging in
+    the heavy integration import chain.
+    """
+
+    geo_path = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "googlefindmy"
+        / "coordinator"
+        / "helpers"
+        / "geo.py"
+    )
+    spec = importlib.util.spec_from_file_location("googlefindmy_test_geo", geo_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError("Failed to load geo module for testing")
+    geo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(geo)
+    return geo.is_valid_accuracy
+
+
 def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Load the map_view module with stubbed Home Assistant dependencies."""
 
@@ -241,6 +265,10 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     # ``from .coordinator import safe_accuracy``; without this attribute the
     # plain ModuleType stub (no __path__) would make that import fail.
     coordinator_module.safe_accuracy = _load_real_safe_accuracy()
+    # Mirror the production re-export of ``is_valid_accuracy`` (see
+    # coordinator/__init__.py) so the map can flag estimated points without the
+    # plain ModuleType stub (no __path__) breaking the lazy import.
+    coordinator_module.is_valid_accuracy = _load_real_is_valid_accuracy()
     monkeypatch.setitem(
         sys.modules, "custom_components.googlefindmy.coordinator", coordinator_module
     )
@@ -271,7 +299,9 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return map_view
 
 
-def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_map_view_prefers_exact_unique_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Tracker selection must match explicit unique_id formats before fallback."""
 
     map_view = _load_map_view_module(monkeypatch)
@@ -340,13 +370,13 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     view = map_view.GoogleFindMyMapView(hass)
 
     request = SimpleNamespace(query={"token": "valid"})
-    response = asyncio.run(view.get(request, device_id))
+    response = await view.get(request, device_id)
 
     assert response.status == 200
     assert history_calls == [["device_tracker.googlefindmy_primary"]]
 
 
-def test_map_view_uses_iso_last_seen_for_timeline(
+async def test_map_view_uses_iso_last_seen_for_timeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ISO last_seen strings must drive ordering and de-duplication."""
@@ -456,7 +486,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     view = map_view.GoogleFindMyMapView(hass)
 
     request = SimpleNamespace(query={"token": "valid"})
-    response = asyncio.run(view.get(request, device_id))
+    response = await view.get(request, device_id)
 
     assert response.status == 200
     assert len(captured_locations) == 2
@@ -531,3 +561,64 @@ def test_map_view_resolves_safe_accuracy_under_stub(
 
     # Second call must hit the cache instead of re-importing (same object).
     assert map_view._resolve_safe_accuracy() is safe_accuracy
+
+
+def test_map_view_resolves_is_valid_accuracy_under_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validity predicate resolver must work under the coordinator stub.
+
+    The stub re-exports ``is_valid_accuracy`` exactly like production
+    (coordinator/__init__.py), so ``_resolve_is_valid_accuracy`` returns the real
+    predicate and classifies raw gps_accuracy values with the canonical policy.
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    is_valid_accuracy = map_view._resolve_is_valid_accuracy()
+
+    # Canonical policy: real measurements are valid; the 0.0 error code, missing
+    # values, and sub-millimeter noise fall back to the conservative radius.
+    assert is_valid_accuracy(50.0) is True
+    assert is_valid_accuracy(0.0) is False
+    assert is_valid_accuracy(None) is False
+
+    # Second call must hit the cache instead of re-importing (same object).
+    assert map_view._resolve_is_valid_accuracy() is is_valid_accuracy
+
+
+def test_resolve_is_valid_accuracy_falls_back_when_symbol_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A coordinator stub without ``is_valid_accuracy`` must not crash the map.
+
+    Older or partial coordinator stubs may re-export ``safe_accuracy`` but not
+    ``is_valid_accuracy``. The lazy resolver must catch the resulting ImportError
+    and fall back to a predicate that mirrors the geo.py validity policy
+    (None -> False; float-cast; finite and >= 0.001m). Without the fallback the
+    history render aborts with ImportError (Codex #1124 finding 3).
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    # Simulate a coordinator stub that lacks the re-export.
+    coordinator_stub = sys.modules["custom_components.googlefindmy.coordinator"]
+    monkeypatch.delattr(coordinator_stub, "is_valid_accuracy", raising=False)
+    monkeypatch.setattr(map_view, "_IS_VALID_ACCURACY", None, raising=False)
+
+    is_valid_accuracy = map_view._resolve_is_valid_accuracy()
+
+    # Fallback predicate must reproduce the canonical geo.py semantics.
+    assert is_valid_accuracy(50.0) is True
+    assert is_valid_accuracy(0.0) is False
+    assert is_valid_accuracy(0.0005) is False  # below MIN_VALID_ACCURACY (0.001m)
+    assert is_valid_accuracy(0.001) is True
+    assert is_valid_accuracy(-1.0) is False
+    assert is_valid_accuracy(float("nan")) is False
+    assert is_valid_accuracy(float("inf")) is False
+    assert is_valid_accuracy(None) is False
+    assert is_valid_accuracy("75") is True  # float-cast accepts numeric strings
+    assert is_valid_accuracy("abc") is False
+
+    # Second call must hit the cache instead of re-resolving (same object).
+    assert map_view._resolve_is_valid_accuracy() is is_valid_accuracy
