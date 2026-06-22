@@ -24,7 +24,7 @@ CONFIG_ENTRY_VERSION: int = 2
 # release; the two are a coupled pair. manifest.json is strict JSON (hassfest-validated)
 # and cannot carry this cross-reference, so the manifest side is anchored in this
 # directory's AGENTS.md ("Version bump touches two files").
-INTEGRATION_VERSION: str = "1.7.3"
+INTEGRATION_VERSION: str = "1.7.4"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
