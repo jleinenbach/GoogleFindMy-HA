@@ -773,3 +773,38 @@ async def test_restore_sanitizes_invalid_legacy_accuracy(
 
     assert coordinator.primed["data"]["accuracy"] == 200.0
     assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_marks_estimated_for_flagless_invalid_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flagless legacy error-code accuracy is marked estimated on restore.
+
+    Codex review of PR #1125: a recorder row predating ``accuracy_estimated``
+    can carry only the Android error code ``gps_accuracy=0`` and *no* flag.
+    ``safe_accuracy`` maps it to the 200m fallback, but the direct
+    ``prime_device_location_cache`` seed bypasses the canonical
+    ``_is_significant_update`` writer that would pair that fallback with
+    ``accuracy_estimated=True``. Without the coupling the fabricated radius
+    enters flagless and map_view draws a solid accuracy circle for it. The
+    restore path must mark the value estimated when the sanitization fell back
+    and no explicit flag was recorded.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # Android error code; no producer accuracy_m AND no recorded flag.
+            "gps_accuracy": 0,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 200.0
+    assert coordinator.primed["data"]["accuracy_estimated"] is True

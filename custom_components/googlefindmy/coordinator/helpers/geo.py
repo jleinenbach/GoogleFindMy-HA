@@ -245,6 +245,53 @@ def recorded_accuracy_pair(
     return raw, (bool(flag) if flag is not None else None)
 
 
+def resolve_seeded_accuracy(raw: Any, flag: bool | None) -> tuple[float, bool | None]:
+    """Couple accuracy sanitization with its ``estimated`` provenance.
+
+    Write-side mirror of :func:`recorded_accuracy_pair`. A direct cache seed
+    (e.g. ``prime_device_location_cache`` on restore) bypasses the canonical
+    ``_is_significant_update`` writer, which is the single place that normally
+    pairs sanitization with provenance: whenever it replaces an invalid value
+    with the conservative fallback radius it also sets ``accuracy_estimated``
+    so a fabricated radius never masquerades as a real measurement. Open-coding
+    only :func:`safe_accuracy` at such a seed site reproduces that decoupling
+    (the recurring PR #1124 defect class) -- the fabricated fallback radius
+    enters flagless and map_view then draws a solid accuracy circle for it.
+
+    This helper keeps the two halves together so every seed site classifies
+    provenance the same way the canonical writer does:
+
+    - an explicit producer ``flag`` wins (a restored real/estimated fix keeps
+      its recorded provenance);
+    - otherwise the value is ``estimated`` exactly when :func:`safe_accuracy`
+      had to fall back (``raw`` is missing/invalid), matching the canonical
+      ``_is_significant_update`` rule;
+    - otherwise ``None`` for a legacy *valid* measurement with no recorded
+      flag, leaving the documented map_view legacy fallback in charge instead
+      of fabricating a flag.
+
+    Args:
+        raw: The recorded/raw accuracy value (producer or legacy), or ``None``.
+        flag: The recorded ``accuracy_estimated`` provenance, or ``None`` when
+            the source row predates the flag.
+
+    Returns:
+        A ``(sanitized_accuracy, estimated_flag)`` tuple. ``sanitized_accuracy``
+        is always a finite float (see :func:`safe_accuracy`). ``estimated_flag``
+        is the resolved provenance, or ``None`` when the caller should leave the
+        flag unset (legacy valid value without recorded provenance).
+    """
+    sanitized = safe_accuracy(raw)
+    if flag is not None:
+        return sanitized, bool(flag)
+    if not is_valid_accuracy(raw):
+        # safe_accuracy fell back to the conservative radius; mark provenance
+        # so the seeded row is not later reclassified as a real measurement.
+        return sanitized, True
+    # Legacy valid measurement without a recorded flag: do not fabricate one.
+    return sanitized, None
+
+
 # ---------------------------------------------------------------------------
 # Distance Calculation
 # ---------------------------------------------------------------------------
