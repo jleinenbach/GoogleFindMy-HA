@@ -921,6 +921,14 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         acc = last_state.attributes.get(
             ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy")
         )
+        # Producer flag persisted alongside the recorded state. Carrying it back
+        # into the primed cache keeps a restored fallback radius distinguishable
+        # from a real measurement of the same value after a restart; without it
+        # the next state would reclassify a flagged 200m fallback as real
+        # (Codex review, PR #1124). Legacy rows recorded before the flag existed
+        # carry no key, and we deliberately do not fabricate one for them: the
+        # downstream map_view legacy fallback handles that documented case.
+        estimated = last_state.attributes.get("accuracy_estimated")
 
         restored: dict[str, Any] = {}
         try:
@@ -930,6 +938,8 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             if acc is not None:
                 # HA core accuracy attribute is an int (meters).
                 restored["accuracy"] = int(float(acc))
+                if estimated is not None:
+                    restored["accuracy_estimated"] = bool(estimated)
         except (TypeError, ValueError) as ex:
             _LOGGER.debug("Invalid restored coordinates for %s: %s", self.entity_id, ex)
             restored = {}
