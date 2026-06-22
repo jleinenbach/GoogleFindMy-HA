@@ -245,6 +245,62 @@ def recorded_accuracy_pair(
     return raw, (bool(flag) if flag is not None else None)
 
 
+def resolve_seeded_accuracy(raw: Any, flag: bool | None) -> tuple[float, bool | None]:
+    """Couple accuracy sanitization with its ``estimated`` provenance.
+
+    Write-side mirror of :func:`recorded_accuracy_pair`. A direct cache seed
+    (e.g. ``prime_device_location_cache`` on restore) bypasses the canonical
+    ``_is_significant_update`` writer, which is the single place that normally
+    pairs sanitization with provenance: whenever it replaces an invalid value
+    with the conservative fallback radius it also sets ``accuracy_estimated``
+    so a fabricated radius never masquerades as a real measurement. Open-coding
+    only :func:`safe_accuracy` at such a seed site reproduces that decoupling
+    (the recurring PR #1124 defect class) -- the fabricated fallback radius
+    enters flagless and map_view then draws a solid accuracy circle for it.
+
+    This helper keeps the two halves together so every seed site classifies
+    provenance the same way the canonical writer does:
+
+    - whenever :func:`safe_accuracy` has to fall back (``raw`` is missing or
+      invalid) the value is ``estimated``, overriding any recorded ``flag``.
+      The canonical ``_is_significant_update`` writer marks every fabricated
+      fallback radius estimated regardless of an incoming flag, so a stale
+      ``accuracy_estimated=False`` recorded beside an error-code value (e.g.
+      ``gps_accuracy=0``) never wins -- otherwise the fabricated radius would
+      masquerade as a real measurement and map_view would draw a solid circle;
+    - otherwise, for a numerically valid value, an explicit producer ``flag``
+      wins (a restored real/estimated fix keeps its recorded provenance);
+    - otherwise ``None`` for a legacy *valid* measurement with no recorded
+      flag, leaving the documented map_view legacy fallback in charge instead
+      of fabricating a flag.
+
+    Args:
+        raw: The recorded/raw accuracy value (producer or legacy), or ``None``.
+        flag: The recorded ``accuracy_estimated`` provenance, or ``None`` when
+            the source row predates the flag.
+
+    Returns:
+        A ``(sanitized_accuracy, estimated_flag)`` tuple. ``sanitized_accuracy``
+        is always a finite float (see :func:`safe_accuracy`). ``estimated_flag``
+        is the resolved provenance, or ``None`` when the caller should leave the
+        flag unset (legacy valid value without recorded provenance).
+    """
+    sanitized = safe_accuracy(raw)
+    if not is_valid_accuracy(raw):
+        # safe_accuracy fell back to the conservative radius. The canonical
+        # _is_significant_update writer ALWAYS marks such a fabricated radius
+        # estimated, overriding any flag a stale recorder row carried (e.g. an
+        # explicit accuracy_estimated=False next to gps_accuracy=0). Mirror that
+        # unconditionally so the fallback can never masquerade as a real fix.
+        return sanitized, True
+    if flag is not None:
+        # Valid measurement with recorded provenance: honor it (a carried
+        # estimated fix keeps its flag; a real fix stays real).
+        return sanitized, bool(flag)
+    # Legacy valid measurement without a recorded flag: do not fabricate one.
+    return sanitized, None
+
+
 # ---------------------------------------------------------------------------
 # Distance Calculation
 # ---------------------------------------------------------------------------

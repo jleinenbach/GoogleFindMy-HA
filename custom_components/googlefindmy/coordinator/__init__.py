@@ -40,6 +40,7 @@ from . import helpers
 from .helpers.geo import (
     is_valid_accuracy,
     recorded_accuracy_pair,
+    resolve_seeded_accuracy,
     safe_accuracy,
 )
 
@@ -101,6 +102,7 @@ __all__ = [
     "is_valid_accuracy",
     "normalize_epoch_seconds",
     "recorded_accuracy_pair",
+    "resolve_seeded_accuracy",
     "safe_accuracy",
     # Semi-public functions
     "_as_ha_attributes",

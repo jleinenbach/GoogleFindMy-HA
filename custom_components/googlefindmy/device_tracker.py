@@ -53,7 +53,7 @@ from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
     recorded_accuracy_pair,
-    safe_accuracy,
+    resolve_seeded_accuracy,
 )
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
@@ -944,14 +944,20 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             if acc is not None:
                 # Seed the coordinator cache, whose ``accuracy`` field is a
                 # sanitized float everywhere else (api/locate/fusion writers).
-                # Normalize through the same producer policy (safe_accuracy)
-                # instead of truncating with int(): truncation would drop a
-                # restored sub-meter real fix (e.g. 0.5m -> 0) below
-                # MIN_VALID_ACCURACY and seed an invalid 0m radius, while a
-                # paired accuracy_estimated=False still claims it is real.
-                restored["accuracy"] = safe_accuracy(acc)
-                if estimated is not None:
-                    restored["accuracy_estimated"] = bool(estimated)
+                # resolve_seeded_accuracy couples sanitization with provenance
+                # the way the canonical _is_significant_update writer does
+                # (which this direct prime bypasses): it normalizes through the
+                # producer policy (safe_accuracy) -- avoiding the int() truncation
+                # that would drop a restored sub-meter real fix (e.g. 0.5m -> 0)
+                # below MIN_VALID_ACCURACY -- AND marks accuracy_estimated when
+                # that sanitization had to fall back, so a fabricated 200m radius
+                # cannot enter flagless and be reclassified as a real fix. An
+                # explicitly recorded flag still wins; a legacy *valid* value
+                # without a flag stays unflagged (map_view legacy fallback).
+                accuracy_value, estimated_flag = resolve_seeded_accuracy(acc, estimated)
+                restored["accuracy"] = accuracy_value
+                if estimated_flag is not None:
+                    restored["accuracy_estimated"] = estimated_flag
         except (TypeError, ValueError) as ex:
             _LOGGER.debug("Invalid restored coordinates for %s: %s", self.entity_id, ex)
             restored = {}
