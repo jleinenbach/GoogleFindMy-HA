@@ -53,7 +53,7 @@ from ..const import (
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
-    SharedKeyMismatchError,
+    OwnReportIdentityMismatchError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
     is_real_location_record,
@@ -408,19 +408,27 @@ class PollingOperations(_MixinBase):
         return True
 
     @staticmethod
-    def _is_account_wide_key_failure(error: DecryptionError | None) -> bool:
-        """True for shared-key failures that need a fresh secrets.json (account-wide).
+    def _is_device_local_decrypt_failure(error: DecryptionError | None) -> bool:
+        """True ONLY for the one provably device-local class: own-report staleness.
 
-        ``SharedKeyMissingError`` and ``SharedKeyMismatchError`` mean the bundle's
-        shared key itself is missing or incompatible, so EVERY device's owner-key
-        unwrap is doomed regardless of which device is polled. A sibling that still
-        decrypts from cached owner/EIK material does NOT prove the shared key is
-        healthy, so -- unlike a plain per-device own-report ``DecryptionError`` -- a
-        shared-key failure must stay on the account-wide reauth path even when a
-        sibling succeeds. Single discriminator for both the cycle-error capture
-        priority and the escalation gate so the two cannot drift apart.
+        Fail-SAFE discriminator: a sibling decrypting proves the account keys are
+        healthy, so a device whose OWN server reports all fail authentication
+        (``OwnReportIdentityMismatchError`` -- e.g. a phone powered off for days, or
+        a re-paired device) is device-local and a fresh secrets.json cannot fix it.
+
+        EVERY other ``DecryptionError`` defaults to the account-wide reauth path:
+        the explicit shared-key subclasses (``SharedKeyMissingError`` /
+        ``SharedKeyMismatchError``) AND a plain ``DecryptionError`` from the
+        identity-key derivation path ("Identity key decryption failed.") -- the
+        owner/shared key feeding that derivation is account-wide, and a sibling
+        decrypting from cached owner/EIK material cannot refute it. Defaulting an
+        unrecognised failure to "account-wide / escalate" rather than "device-local
+        / suppress" means a NEW raise-site fails safe instead of stranding a broken
+        device without a reauth prompt (the Codex finding class). Single
+        discriminator for both the cycle-error capture priority and the escalation
+        gate so the two cannot drift apart.
         """
-        return isinstance(error, (SharedKeyMissingError, SharedKeyMismatchError))
+        return isinstance(error, OwnReportIdentityMismatchError)
 
     @classmethod
     def _prefer_account_wide_decrypt_error(
@@ -430,19 +438,20 @@ class PollingOperations(_MixinBase):
     ) -> DecryptionError:
         """Pick the cycle's representative decrypt error, account-wide first.
 
-        A single cycle can mix a per-device own-report failure (a phone powered off
-        for days) with an account-wide shared-key failure on another device. The
-        verdict downgrades only the per-device case on sibling success, so the
+        A single cycle can mix a device-local own-report failure (a phone powered
+        off for days) with an account-wide failure on another device (a shared-key
+        subclass, or a plain identity-key derivation failure). The verdict
+        downgrades only the device-local case on sibling success, so the
         representative error must be the account-wide one whenever present.
-        Otherwise an earlier-polled offline device would mask a genuine shared-key
+        Otherwise an earlier-polled offline device would mask a genuine account-wide
         failure and suppress the reauth the user actually needs. Keeps the first
         error of equal severity (stable, order-independent for same-class errors).
         """
         if current is None:
             return candidate
-        if cls._is_account_wide_key_failure(
-            candidate
-        ) and not cls._is_account_wide_key_failure(current):
+        if cls._is_device_local_decrypt_failure(
+            current
+        ) and not cls._is_device_local_decrypt_failure(candidate):
             return candidate
         return current
 
@@ -462,17 +471,18 @@ class PollingOperations(_MixinBase):
         - No decrypt error at all -> not account-wide.
         - Not a single device decrypted this cycle -> account-wide by the absence of
           any positive proof the shared key still works.
-        - A sibling decrypted, so positive proof dominates: only the explicit
-          shared-key subclasses (:meth:`_is_account_wide_key_failure`) remain
+        - A sibling decrypted, so positive proof dominates, but it refutes ONLY the
+          device-local own-report class (:meth:`_is_device_local_decrypt_failure`):
+          ``OwnReportIdentityMismatchError`` (e.g. a phone powered off for days). The
+          shared-key subclasses AND a plain identity-key derivation failure remain
           account-wide -- a sibling decrypting from cached owner/EIK material cannot
-          refute them. A plain per-device own-report failure (e.g. a phone powered
-          off for days) is refuted as device-local.
+          refute them, so they keep their reauth prompt (the Codex finding class).
         """
         if cycle_decrypt_error is None:
             return False
         if not cycle_had_successful_decrypt:
             return True
-        return self._is_account_wide_key_failure(cycle_decrypt_error)
+        return not self._is_device_local_decrypt_failure(cycle_decrypt_error)
 
     def _resolve_cycle_decrypt_outcome(
         self,
@@ -486,22 +496,24 @@ class PollingOperations(_MixinBase):
         Performs the post-loop crypto-sensor and reauth-budget side effects and
         returns ``True`` iff the caller must escalate to ``ConfigEntryAuthFailed``.
 
-        Positive proof dominates (D7), but ONLY for a plain per-device own-report
-        failure: if ANY device produced an authenticated coordinate this cycle
-        (``cycle_had_successful_decrypt``), a sibling's plain ``DecryptionError``
-        -- e.g. a phone powered off for days whose own server reports no longer
-        decrypt -- is a per-device condition that must NOT advance the account-wide
-        reauth budget and must NOT trigger reauth. This mirrors the per-tracker
-        ``StaleOwnerKeyError`` (``stale=True``) treatment ("other devices are
-        unaffected").
+        Positive proof dominates (D7), but ONLY for the device-local own-report
+        class: if ANY device produced an authenticated coordinate this cycle
+        (``cycle_had_successful_decrypt``), a sibling's
+        ``OwnReportIdentityMismatchError`` -- e.g. a phone powered off for days whose
+        own server reports no longer decrypt -- is a per-device condition that must
+        NOT advance the account-wide reauth budget and must NOT trigger reauth. This
+        mirrors the per-tracker ``StaleOwnerKeyError`` (``stale=True``) treatment
+        ("other devices are unaffected").
 
-        Explicit shared-key subclasses are the exception (see
-        ``_is_account_wide_key_failure``): ``SharedKeyMissingError`` and
-        ``SharedKeyMismatchError`` mean the bundle's shared key itself cannot unwrap
-        the owner key, so a sibling decrypting from cached owner/EIK material does
-        NOT prove the key is healthy. Such failures stay on the account-wide reauth
-        path even with sibling success -- otherwise a mixed cycle would strand the
-        broken device without ever prompting for fresh secrets.
+        Every OTHER ``DecryptionError`` is the exception (see
+        ``_is_device_local_decrypt_failure``): the shared-key subclasses
+        (``SharedKeyMissingError`` / ``SharedKeyMismatchError``) AND a plain
+        identity-key derivation failure ("Identity key decryption failed.") all rest
+        on the account-wide owner/shared key, so a sibling decrypting from cached
+        owner/EIK material does NOT prove the key is healthy. Such failures stay on
+        the account-wide reauth path even with sibling success -- otherwise a mixed
+        cycle would strand the broken device without ever prompting for fresh
+        secrets (the Codex finding class).
 
         Before the positive-proof gate the account-wide counter was advanced
         whenever a decrypt error was seen, regardless of sibling success, so a
@@ -516,8 +528,9 @@ class PollingOperations(_MixinBase):
         if cycle_decrypt_error is not None and self._decrypt_failure_is_account_wide(
             cycle_decrypt_error, cycle_had_successful_decrypt
         ):
-            # Account-wide stale/missing shared key: either NOT ONE device decrypted
-            # this cycle, OR the failure is an explicit shared-key subclass that a
+            # Account-wide failure: either NOT ONE device decrypted this cycle, OR
+            # the failure is anything other than the device-local own-report class (a
+            # shared-key subclass or a plain identity-key derivation failure) that a
             # sibling's cached-material success cannot refute. Advance the
             # consecutive-cycle counter exactly once; escalate (cooldown-gated) on
             # threshold.
@@ -2084,17 +2097,19 @@ class PollingOperations(_MixinBase):
                         # last_exception) to the post-loop verdict in
                         # _finalize_cycle_decrypt_state. Whether this decrypt error
                         # fails the whole coordinator update depends on the
-                        # cross-device outcome: a per-device own-report failure a
+                        # cross-device outcome: a device-local own-report failure a
                         # sibling success refutes is benign and must NOT mark the
                         # cycle failed (otherwise a single offline device fails every
                         # poll), while a genuinely account-wide failure does. Only
-                        # capture the representative error here -- the account-wide
-                        # shared-key subclass is kept over a co-occurring per-device
-                        # failure so the resolver's sibling-success downgrade cannot
-                        # mask a genuine shared-key problem. The account-wide failure
-                        # counter is still advanced exactly once after the loop, never
-                        # per device, preserving the documented consecutive-cycle
-                        # budget that gives the in-decrypt self-heal time to recover.
+                        # capture the representative error here -- a non-device-local
+                        # failure (shared-key subclass or plain identity-key
+                        # derivation failure) is kept over a co-occurring device-local
+                        # own-report failure so the resolver's sibling-success
+                        # downgrade cannot mask a genuine account-wide problem. The
+                        # account-wide failure counter is still advanced exactly once
+                        # after the loop, never per device, preserving the documented
+                        # consecutive-cycle budget that gives the in-decrypt self-heal
+                        # time to recover.
                         self._consecutive_timeouts = 0
                         cycle_decrypt_error = self._prefer_account_wide_decrypt_error(
                             cycle_decrypt_error, dec_err

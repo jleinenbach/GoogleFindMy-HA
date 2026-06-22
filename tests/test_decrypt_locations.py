@@ -425,9 +425,7 @@ def _add_report(
 ) -> None:
     """Append one encrypted report; empty public_key_random marks an own report."""
 
-    reports = (
-        update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
-    )
+    reports = update.deviceMetadata.information.locationInformation.reports.recentLocationAndNetworkLocations
     network_location = reports.networkLocations.add()
     network_location.status = Common_pb2.Status.LAST_KNOWN
     network_location.geoLocation.accuracy = ACCURACY_METERS
@@ -443,11 +441,15 @@ def _add_report(
 async def test_all_own_reports_failing_auth_raises_decryption_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """T-D1: every own report fails authentication → escalate via DecryptionError.
+    """T-D1: every own report fails authentication → OwnReportIdentityMismatchError.
 
-    This is the account-wide stale-key signal: the cached identity key no longer
-    matches the server's own reports, so the function must raise instead of
-    silently returning empty (which the coordinator would never escalate).
+    Device-local signal: the cached identity key no longer matches THIS device's own
+    server reports (e.g. a phone powered off for days), so the function must raise
+    the dedicated subclass instead of silently returning empty (which the
+    coordinator would never surface). The coordinator downgrades it to a warning
+    only when a sibling proves the account keys healthy; on its own it still
+    escalates. Asserting the concrete subclass locks in the contract the
+    coordinator's sibling-success gate keys off.
     """
 
     base_now = 1_700_000_000.0
@@ -474,7 +476,7 @@ async def test_all_own_reports_failing_auth_raises_decryption_error(
         base_now=base_now,
     )
 
-    with pytest.raises(decrypt_locations.DecryptionError):
+    with pytest.raises(decrypt_locations.OwnReportIdentityMismatchError):
         await decrypt_locations.async_decrypt_location_response_locations(
             update, cache=object()
         )

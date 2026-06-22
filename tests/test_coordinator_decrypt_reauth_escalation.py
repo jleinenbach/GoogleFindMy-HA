@@ -32,6 +32,7 @@ from custom_components.googlefindmy.coordinator.polling import (
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnReportIdentityMismatchError,
     SharedKeyMismatchError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
@@ -307,7 +308,11 @@ def test_resolve_mixed_cycle_sibling_success_blocks_spurious_reauth(
     """
     stub = _make_stub()
     stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
-    err = DecryptionError(
+    # The user's exact error: a powered-off device whose OWN server reports all
+    # fail authentication. decrypt_locations raises the dedicated device-local
+    # subclass here (NOT a plain DecryptionError), which is the only class the
+    # sibling-success downgrade applies to.
+    err = OwnReportIdentityMismatchError(
         "All own-report decryptions failed; the cached identity key no longer "
         "matches the server reports."
     )
@@ -400,7 +405,7 @@ def test_resolve_per_device_failure_with_stale_key_keeps_sensor() -> None:
     stub = _make_stub()
     stub._consecutive_decrypt_failures = 2
     stub._crypto_status_state = CryptoStatus.TRACKER_KEY_OUTDATED
-    err = DecryptionError("own reports failed")
+    err = OwnReportIdentityMismatchError("own reports failed")
 
     result = stub._resolve_cycle_decrypt_outcome(
         cycle_decrypt_error=err,
@@ -477,35 +482,49 @@ def test_resolve_account_wide_key_failure_escalates_despite_sibling(
     stub._set_auth_state.assert_called_once()
 
 
-def test_prefer_account_wide_decrypt_error_upgrades_per_device_to_shared_key() -> None:
-    """Capture priority: a shared-key failure wins over a per-device one.
+def test_prefer_account_wide_decrypt_error_upgrades_device_local_to_account_wide() -> (
+    None
+):
+    """Capture priority: an account-wide failure wins over a device-local one.
 
-    A mixed cycle can poll an offline device (plain ``DecryptionError``) before the
-    device whose shared-key unwrap fails. First-capture-wins would let the resolver
-    see only the per-device error and wrongly downgrade on sibling success, so the
-    capture must upgrade to the account-wide subclass regardless of poll order.
+    A mixed cycle can poll an offline device (``OwnReportIdentityMismatchError``)
+    before the device whose owner/shared-key unwrap fails. First-capture-wins would
+    let the resolver see only the device-local error and wrongly downgrade on
+    sibling success, so the capture must upgrade to the account-wide error
+    regardless of poll order. Every non-device-local ``DecryptionError`` qualifies:
+    the shared-key subclasses AND a plain identity-key derivation failure.
     """
-    per_device = DecryptionError("own reports failed")
+    device_local = OwnReportIdentityMismatchError("own reports failed")
     shared_key = SharedKeyMismatchError("stale shared key")
+    # A plain identity-key derivation failure (decrypt_locations: "Identity key
+    # decryption failed.") is account-wide too and must win over a device-local one
+    # -- the Codex finding: a plain DecryptionError must NOT be treated as benign.
+    identity_key = DecryptionError("Identity key decryption failed.")
 
     # None seed -> take the first error, whatever its class.
     assert (
-        PollingStub._prefer_account_wide_decrypt_error(None, per_device) is per_device
+        PollingStub._prefer_account_wide_decrypt_error(None, device_local)
+        is device_local
     )
-    # Per-device captured first, shared-key seen later -> upgrade.
+    # Device-local captured first, shared-key seen later -> upgrade.
     assert (
-        PollingStub._prefer_account_wide_decrypt_error(per_device, shared_key)
+        PollingStub._prefer_account_wide_decrypt_error(device_local, shared_key)
         is shared_key
     )
-    # Shared-key captured first, per-device seen later -> keep the account-wide one.
+    # Device-local captured first, plain identity-key failure later -> upgrade.
     assert (
-        PollingStub._prefer_account_wide_decrypt_error(shared_key, per_device)
+        PollingStub._prefer_account_wide_decrypt_error(device_local, identity_key)
+        is identity_key
+    )
+    # Account-wide captured first, device-local seen later -> keep the account-wide.
+    assert (
+        PollingStub._prefer_account_wide_decrypt_error(shared_key, device_local)
         is shared_key
     )
     # Two account-wide errors -> stable, keep the first (order-independent).
-    other_shared = SharedKeyMissingError("missing")
+    other_account_wide = SharedKeyMissingError("missing")
     assert (
-        PollingStub._prefer_account_wide_decrypt_error(shared_key, other_shared)
+        PollingStub._prefer_account_wide_decrypt_error(shared_key, other_account_wide)
         is shared_key
     )
 
@@ -532,11 +551,44 @@ def test_account_wide_predicate_without_sibling_is_account_wide() -> None:
     )
 
 
-def test_account_wide_predicate_per_device_with_sibling_is_local() -> None:
-    """A plain per-device failure that a sibling success refutes is device-local."""
+def test_account_wide_predicate_own_report_with_sibling_is_local() -> None:
+    """The device-local own-report class, refuted by a sibling, is NOT account-wide.
+
+    ``OwnReportIdentityMismatchError`` (a phone powered off for days) is the ONLY
+    class the sibling-success downgrade applies to: the account keys are proven
+    healthy and a fresh secrets.json cannot fix an offline/re-paired device.
+    """
     stub = _make_stub()
     assert (
-        stub._decrypt_failure_is_account_wide(DecryptionError("offline"), True) is False
+        stub._decrypt_failure_is_account_wide(
+            OwnReportIdentityMismatchError("offline"), True
+        )
+        is False
+    )
+
+
+def test_account_wide_predicate_plain_decryption_error_with_sibling_escalates() -> None:
+    """The Codex finding: a PLAIN DecryptionError stays account-wide despite a sibling.
+
+    The decryptor raises a plain ``DecryptionError("Identity key decryption
+    failed.")`` from the identity-key unwrap path after exhausting the account-wide
+    owner/shared-key candidates. A sibling decrypting from cached owner/EIK material
+    does NOT refute that, so the broken device must keep its reauth prompt. The fix
+    inverts the gate to fail-safe: ONLY the explicit device-local subclass is
+    downgraded; every other ``DecryptionError`` -- plain or shared-key subclass --
+    stays account-wide.
+
+    Mutation gate: the pre-fix gate downgraded ANY non-shared-key DecryptionError on
+    sibling success (returned False here), so asserting True turns red if the
+    discriminator regresses to keying off the shared-key subclasses instead of the
+    device-local own-report class.
+    """
+    stub = _make_stub()
+    assert (
+        stub._decrypt_failure_is_account_wide(
+            DecryptionError("Identity key decryption failed."), True
+        )
+        is True
     )
 
 
@@ -581,7 +633,7 @@ def test_finalize_downgraded_per_device_failure_does_not_fail_cycle() -> None:
     """
     stub = _make_stub()
     stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
-    err = DecryptionError("All own-report decryptions failed")
+    err = OwnReportIdentityMismatchError("All own-report decryptions failed")
 
     cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
         cycle_decrypt_error=err,
@@ -609,7 +661,7 @@ def test_finalize_downgrade_preserves_independent_failure() -> None:
     other_failure = TimeoutError("device timed out")
 
     cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
-        cycle_decrypt_error=DecryptionError("offline"),
+        cycle_decrypt_error=OwnReportIdentityMismatchError("offline"),
         cycle_had_successful_decrypt=True,
         cycle_had_stale_key=False,
         cycle_failed=True,
