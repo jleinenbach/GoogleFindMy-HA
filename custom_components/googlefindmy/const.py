@@ -20,10 +20,12 @@ DOMAIN: str = "googlefindmy"
 DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 # Latest config entry schema version handled by this integration.
 CONFIG_ENTRY_VERSION: int = 2
-# Integration version. MUST be bumped together with manifest.json "version" on every
-# release; the two are a coupled pair. manifest.json is strict JSON (hassfest-validated)
-# and cannot carry this cross-reference, so the manifest side is anchored in this
-# directory's AGENTS.md ("Version bump touches two files").
+# Integration version. MUST be bumped together with manifest.json "version" and
+# pyproject.toml [tool.poetry] version on every release; the three are a coupled
+# triple. manifest.json is strict JSON (hassfest-validated) and cannot carry this
+# cross-reference, so the manifest side is anchored in this directory's AGENTS.md
+# ("Version bump touches three files"). pyproject.toml carries the reverse reference
+# in a TOML comment.
 INTEGRATION_VERSION: str = "1.7.4"
 
 # --------------------------------------------------------------------------------------

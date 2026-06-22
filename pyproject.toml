@@ -1,6 +1,13 @@
 [tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.1"
+# Integration version: coupled triple. MUST be bumped together with
+# custom_components/googlefindmy/const.py INTEGRATION_VERSION and
+# custom_components/googlefindmy/manifest.json "version" on every release.
+# semantic-release manages this value on the `main` branch (see
+# [tool.semantic_release] version_toml below); on release branches it MUST be
+# bumped by hand alongside the other two. Canonical anchor:
+# custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
+version = "1.7.4"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
