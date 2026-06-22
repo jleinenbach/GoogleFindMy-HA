@@ -423,15 +423,19 @@ class TestResolveSeededAccuracy:
         assert accuracy == 15.0
         assert estimated is False
 
-    def test_explicit_false_flag_wins_even_for_invalid_value(self) -> None:
-        """An explicit flag wins over the fallback heuristic (Codex carve-out).
+    def test_invalid_value_overrides_explicit_false_flag(self) -> None:
+        """A sanitized fallback is marked estimated even over an explicit False.
 
-        The producer already classified this row; we respect the restored flag
-        even though the value sanitizes to the fallback radius.
+        Codex review of PR #1126: a stale recorder row can carry an explicit
+        ``accuracy_estimated=False`` next to an error-code ``gps_accuracy=0``.
+        The canonical ``_is_significant_update`` writer always marks a
+        fabricated fallback radius estimated, overriding the incoming flag, so
+        the seed-side mirror must do the same -- otherwise the 200m fallback
+        masquerades as a real measurement and map_view draws a solid circle.
         """
         accuracy, estimated = resolve_seeded_accuracy(0, False)
         assert accuracy == DEFAULT_ACCURACY_FALLBACK_M
-        assert estimated is False
+        assert estimated is True
 
     def test_invalid_value_without_flag_marks_estimated(self) -> None:
         """The Codex fix: a flagless error-code value is marked estimated.

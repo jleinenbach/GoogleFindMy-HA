@@ -261,11 +261,15 @@ def resolve_seeded_accuracy(raw: Any, flag: bool | None) -> tuple[float, bool | 
     This helper keeps the two halves together so every seed site classifies
     provenance the same way the canonical writer does:
 
-    - an explicit producer ``flag`` wins (a restored real/estimated fix keeps
-      its recorded provenance);
-    - otherwise the value is ``estimated`` exactly when :func:`safe_accuracy`
-      had to fall back (``raw`` is missing/invalid), matching the canonical
-      ``_is_significant_update`` rule;
+    - whenever :func:`safe_accuracy` has to fall back (``raw`` is missing or
+      invalid) the value is ``estimated``, overriding any recorded ``flag``.
+      The canonical ``_is_significant_update`` writer marks every fabricated
+      fallback radius estimated regardless of an incoming flag, so a stale
+      ``accuracy_estimated=False`` recorded beside an error-code value (e.g.
+      ``gps_accuracy=0``) never wins -- otherwise the fabricated radius would
+      masquerade as a real measurement and map_view would draw a solid circle;
+    - otherwise, for a numerically valid value, an explicit producer ``flag``
+      wins (a restored real/estimated fix keeps its recorded provenance);
     - otherwise ``None`` for a legacy *valid* measurement with no recorded
       flag, leaving the documented map_view legacy fallback in charge instead
       of fabricating a flag.
@@ -282,12 +286,17 @@ def resolve_seeded_accuracy(raw: Any, flag: bool | None) -> tuple[float, bool | 
         flag unset (legacy valid value without recorded provenance).
     """
     sanitized = safe_accuracy(raw)
-    if flag is not None:
-        return sanitized, bool(flag)
     if not is_valid_accuracy(raw):
-        # safe_accuracy fell back to the conservative radius; mark provenance
-        # so the seeded row is not later reclassified as a real measurement.
+        # safe_accuracy fell back to the conservative radius. The canonical
+        # _is_significant_update writer ALWAYS marks such a fabricated radius
+        # estimated, overriding any flag a stale recorder row carried (e.g. an
+        # explicit accuracy_estimated=False next to gps_accuracy=0). Mirror that
+        # unconditionally so the fallback can never masquerade as a real fix.
         return sanitized, True
+    if flag is not None:
+        # Valid measurement with recorded provenance: honor it (a carried
+        # estimated fix keeps its flag; a real fix stays real).
+        return sanitized, bool(flag)
     # Legacy valid measurement without a recorded flag: do not fabricate one.
     return sanitized, None
 

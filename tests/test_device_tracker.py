@@ -743,17 +743,19 @@ async def test_restore_preserves_sub_meter_accuracy(
 
 
 @pytest.mark.asyncio
-async def test_restore_sanitizes_invalid_legacy_accuracy(
+async def test_restore_invalid_accuracy_overrides_explicit_false_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A legacy error-code accuracy is sanitized, not seeded as an invalid fix.
+    """A sanitized legacy error-code accuracy is marked estimated even over False.
 
-    A legacy recorder row can carry the Android error code ``gps_accuracy=0``
-    (no producer ``accuracy_m``). The old ``int(float(acc))`` seeded a literal
-    ``0`` -- an invalid radius that wins fusion against every real fix. Routing
-    through ``safe_accuracy`` maps it to the 200m fallback, which fusion then
-    correctly down-weights. The flag is carried as recorded (not fabricated):
-    this pins the documented legacy boundary as deliberate behaviour.
+    Codex review of PR #1126: a stale recorder row can carry the Android error
+    code ``gps_accuracy=0`` (no producer ``accuracy_m``) together with an
+    explicit ``accuracy_estimated=False``. ``safe_accuracy`` maps the error code
+    to the 200m fallback; the canonical ``_is_significant_update`` writer always
+    marks such a fabricated radius estimated regardless of an incoming flag, so
+    the direct ``prime_device_location_cache`` seed must mirror that. Honoring
+    the stale ``False`` would let the fabricated radius masquerade as a real
+    measurement and map_view would draw a solid accuracy circle for it.
     """
 
     coordinator = _RestoreCoordinatorStub()
@@ -772,7 +774,7 @@ async def test_restore_sanitizes_invalid_legacy_accuracy(
     await entity.async_added_to_hass()
 
     assert coordinator.primed["data"]["accuracy"] == 200.0
-    assert coordinator.primed["data"]["accuracy_estimated"] is False
+    assert coordinator.primed["data"]["accuracy_estimated"] is True
 
 
 @pytest.mark.asyncio
