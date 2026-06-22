@@ -446,6 +446,34 @@ class PollingOperations(_MixinBase):
             return candidate
         return current
 
+    def _decrypt_failure_is_account_wide(
+        self,
+        cycle_decrypt_error: DecryptionError | None,
+        cycle_had_successful_decrypt: bool,
+    ) -> bool:
+        """Does a cycle's decrypt failure implicate the account-wide shared key?
+
+        Single source of truth shared by the escalation verdict
+        (:meth:`_resolve_cycle_decrypt_outcome`) and the cycle-failure
+        reconciliation (:meth:`_finalize_cycle_decrypt_state`) so the "escalate to
+        reauth" decision and the "mark the coordinator update failed" decision
+        cannot drift apart.
+
+        - No decrypt error at all -> not account-wide.
+        - Not a single device decrypted this cycle -> account-wide by the absence of
+          any positive proof the shared key still works.
+        - A sibling decrypted, so positive proof dominates: only the explicit
+          shared-key subclasses (:meth:`_is_account_wide_key_failure`) remain
+          account-wide -- a sibling decrypting from cached owner/EIK material cannot
+          refute them. A plain per-device own-report failure (e.g. a phone powered
+          off for days) is refuted as device-local.
+        """
+        if cycle_decrypt_error is None:
+            return False
+        if not cycle_had_successful_decrypt:
+            return True
+        return self._is_account_wide_key_failure(cycle_decrypt_error)
+
     def _resolve_cycle_decrypt_outcome(
         self,
         *,
@@ -481,11 +509,12 @@ class PollingOperations(_MixinBase):
         ``_MAX_DECRYPT_FAILURES`` and tripped a spurious reauth (removing the
         offline device silenced it -- the observed bug).
         """
-        account_wide_key_failure = self._is_account_wide_key_failure(
-            cycle_decrypt_error
-        )
-        if cycle_decrypt_error is not None and (
-            not cycle_had_successful_decrypt or account_wide_key_failure
+        # The explicit ``is not None`` narrows the type for the typed
+        # note_decrypt_failure(error=...) call; it is logically redundant with the
+        # predicate (which returns False for None) but keeps the predicate the
+        # single source of truth for the account-wide DECISION.
+        if cycle_decrypt_error is not None and self._decrypt_failure_is_account_wide(
+            cycle_decrypt_error, cycle_had_successful_decrypt
         ):
             # Account-wide stale/missing shared key: either NOT ONE device decrypted
             # this cycle, OR the failure is an explicit shared-key subclass that a
@@ -525,6 +554,60 @@ class PollingOperations(_MixinBase):
             # the poll path and the FCM background-push decode cannot drift apart.
             self.note_decrypt_success()
         return False
+
+    def _finalize_cycle_decrypt_state(
+        self,
+        *,
+        cycle_decrypt_error: DecryptionError | None,
+        cycle_had_successful_decrypt: bool,
+        cycle_had_stale_key: bool,
+        cycle_failed: bool,
+        last_exception: Exception | None,
+    ) -> tuple[bool, Exception | None, ConfigEntryAuthFailed | None]:
+        """Apply the cycle's decrypt verdict and reconcile the cycle-failure state.
+
+        Runs :meth:`_resolve_cycle_decrypt_outcome` (the counter/sensor side
+        effects) and then reconciles ``cycle_failed`` / ``last_exception`` with the
+        verdict in ONE place, returning ``(cycle_failed, last_exception,
+        reauth_exc)``. ``reauth_exc`` is non-``None`` iff the caller must escalate
+        (request reauth and abort the cycle).
+
+        The decrypt error must NOT contribute to the cycle-failure state at the
+        point it is caught: whether it fails the whole coordinator update depends on
+        the cross-device outcome resolved only after the loop. A per-device
+        own-report failure that a sibling success refutes is benign and leaves
+        ``cycle_failed`` / ``last_exception`` untouched, so a single offline/stale
+        device no longer marks every poll failed (the Codex finding). Only a
+        genuinely account-wide failure (see :meth:`_decrypt_failure_is_account_wide`)
+        surfaces on the coordinator update; at the consecutive-cycle threshold it
+        escalates to reauth. Failures from other device errors (timeouts, transient
+        auth) set ``cycle_failed`` / ``last_exception`` independently and are
+        preserved here untouched.
+        """
+        if self._resolve_cycle_decrypt_outcome(
+            cycle_decrypt_error=cycle_decrypt_error,
+            cycle_had_successful_decrypt=cycle_had_successful_decrypt,
+            cycle_had_stale_key=cycle_had_stale_key,
+        ):
+            reauth_exc = ConfigEntryAuthFailed(
+                "Location decryption keeps failing: the shared key "
+                "is stale; a fresh secrets.json (re-authentication) "
+                "is required"
+            )
+            return True, reauth_exc, reauth_exc
+        if self._decrypt_failure_is_account_wide(
+            cycle_decrypt_error, cycle_had_successful_decrypt
+        ):
+            # Genuine account-wide decrypt failure below the reauth threshold: the
+            # cycle failed to decrypt account data, so surface it on the coordinator
+            # update even though we do not yet force reauth.
+            cycle_failed = True
+            if last_exception is None:
+                last_exception = cycle_decrypt_error
+        # Otherwise: a clean cycle, or a per-device failure a sibling success
+        # refuted. The decrypt error (if any) is benign and must NOT mark the
+        # coordinator update failed.
+        return cycle_failed, last_exception, None
 
     def note_decrypt_success(self) -> None:
         """Record a proven location decryption and clear the reauth budget.
@@ -1997,25 +2080,25 @@ class PollingOperations(_MixinBase):
                             last_exception = stale_err
                         continue
                     except DecryptionError as dec_err:
-                        # Stale/missing shared key (account-wide) OR a per-device
-                        # own-report failure. Only FLAG the cycle here -- the
-                        # account-wide failure counter is advanced exactly once per
-                        # cycle after the device loop (see below). Counting per device
-                        # would let a multi-device account cross _MAX_DECRYPT_FAILURES
-                        # within a single cycle and escalate on the first poll,
-                        # defeating the documented "consecutive cycles" budget that
-                        # gives the in-decrypt self-heal a few cycles to recover an
-                        # owner-key bump. Keep the account-wide shared-key subclass as
-                        # the cycle's representative error over a co-occurring
-                        # per-device failure so the resolver's sibling-success
-                        # downgrade cannot mask a genuine shared-key problem.
+                        # Defer the cycle-failure bookkeeping (cycle_failed /
+                        # last_exception) to the post-loop verdict in
+                        # _finalize_cycle_decrypt_state. Whether this decrypt error
+                        # fails the whole coordinator update depends on the
+                        # cross-device outcome: a per-device own-report failure a
+                        # sibling success refutes is benign and must NOT mark the
+                        # cycle failed (otherwise a single offline device fails every
+                        # poll), while a genuinely account-wide failure does. Only
+                        # capture the representative error here -- the account-wide
+                        # shared-key subclass is kept over a co-occurring per-device
+                        # failure so the resolver's sibling-success downgrade cannot
+                        # mask a genuine shared-key problem. The account-wide failure
+                        # counter is still advanced exactly once after the loop, never
+                        # per device, preserving the documented consecutive-cycle
+                        # budget that gives the in-decrypt self-heal time to recover.
                         self._consecutive_timeouts = 0
-                        cycle_failed = True
                         cycle_decrypt_error = self._prefer_account_wide_decrypt_error(
                             cycle_decrypt_error, dec_err
                         )
-                        if last_exception is None:
-                            last_exception = dec_err
                         continue
                     except Exception as err:
                         _LOGGER.error(
@@ -2032,23 +2115,23 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
-                # Resolve the cycle's decrypt verdict in one place (positive proof
-                # dominates: a sibling success refutes a single device's failure as
-                # account-wide). Returns True only for a genuinely account-wide
-                # failure that crossed the consecutive-cycle reauth threshold.
-                if self._resolve_cycle_decrypt_outcome(
-                    cycle_decrypt_error=cycle_decrypt_error,
-                    cycle_had_successful_decrypt=cycle_had_successful_decrypt,
-                    cycle_had_stale_key=cycle_had_stale_key,
-                ):
-                    cycle_failed = True
-                    self._last_poll_result = "failed"
-                    reauth_exc = ConfigEntryAuthFailed(
-                        "Location decryption keeps failing: the shared key "
-                        "is stale; a fresh secrets.json (re-authentication) "
-                        "is required"
+                # Resolve the cycle's decrypt verdict AND reconcile the cycle's
+                # failure state with it in one place (positive proof dominates: a
+                # sibling success refutes a single device's failure as account-wide).
+                # A benign per-device downgrade neither escalates to reauth NOR marks
+                # the coordinator update failed; a genuinely account-wide failure
+                # surfaces and, at the consecutive-cycle threshold, escalates.
+                cycle_failed, last_exception, reauth_exc = (
+                    self._finalize_cycle_decrypt_state(
+                        cycle_decrypt_error=cycle_decrypt_error,
+                        cycle_had_successful_decrypt=cycle_had_successful_decrypt,
+                        cycle_had_stale_key=cycle_had_stale_key,
+                        cycle_failed=cycle_failed,
+                        last_exception=last_exception,
                     )
-                    last_exception = reauth_exc
+                )
+                if reauth_exc is not None:
+                    self._last_poll_result = "failed"
                     self._request_poll_reauth(reauth_exc)
                     return
             finally:

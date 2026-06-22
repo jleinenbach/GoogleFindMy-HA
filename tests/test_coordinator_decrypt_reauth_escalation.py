@@ -23,6 +23,7 @@ from collections.abc import Callable
 from unittest.mock import MagicMock
 
 import pytest
+from homeassistant.config_entries import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.coordinator import polling as polling_mod
 from custom_components.googlefindmy.coordinator.helpers.stats import CryptoStatus
@@ -507,3 +508,205 @@ def test_prefer_account_wide_decrypt_error_upgrades_per_device_to_shared_key() -
         PollingStub._prefer_account_wide_decrypt_error(shared_key, other_shared)
         is shared_key
     )
+
+
+# ---------------------------------------------------------------------------
+# _decrypt_failure_is_account_wide: the single discriminator shared by the
+# escalation verdict and the cycle-failure reconciliation. Pure predicate.
+# ---------------------------------------------------------------------------
+
+
+def test_account_wide_predicate_none_is_not_account_wide() -> None:
+    """No decrypt error this cycle is never an account-wide failure."""
+    stub = _make_stub()
+    assert stub._decrypt_failure_is_account_wide(None, True) is False
+    assert stub._decrypt_failure_is_account_wide(None, False) is False
+
+
+def test_account_wide_predicate_without_sibling_is_account_wide() -> None:
+    """Not a single device decrypted: the failure is account-wide by absence of
+    any positive proof, whatever the concrete error class."""
+    stub = _make_stub()
+    assert (
+        stub._decrypt_failure_is_account_wide(DecryptionError("offline"), False) is True
+    )
+
+
+def test_account_wide_predicate_per_device_with_sibling_is_local() -> None:
+    """A plain per-device failure that a sibling success refutes is device-local."""
+    stub = _make_stub()
+    assert (
+        stub._decrypt_failure_is_account_wide(DecryptionError("offline"), True) is False
+    )
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        pytest.param(lambda: SharedKeyMissingError("missing"), id="missing"),
+        pytest.param(lambda: SharedKeyMismatchError("mismatch"), id="mismatch"),
+    ],
+)
+def test_account_wide_predicate_shared_key_survives_sibling(
+    error_factory: Callable[[], DecryptionError],
+) -> None:
+    """A shared-key subclass stays account-wide even with sibling success: a
+    sibling decrypting from cached material cannot refute a broken shared key."""
+    stub = _make_stub()
+    assert stub._decrypt_failure_is_account_wide(error_factory(), True) is True
+
+
+# ---------------------------------------------------------------------------
+# _finalize_cycle_decrypt_state: resolve the verdict AND reconcile the cycle's
+# failure state with it. Regression suite for the Codex finding that a
+# downgraded per-device decrypt error still marked the whole coordinator update
+# failed every cycle (the eager except-block bookkeeping was never reconciled
+# with the sibling-success downgrade).
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_downgraded_per_device_failure_does_not_fail_cycle() -> None:
+    """THE Codex finding: a per-device failure refuted by a sibling success must
+    neither escalate NOR mark the coordinator update failed.
+
+    Below the reauth threshold, a mixed cycle (offline device + sibling success)
+    must leave ``cycle_failed`` False and ``last_exception`` None, so the finally
+    block records ``last_poll_result='success'`` and never calls
+    ``async_set_update_error``.
+
+    Mutation gate: restoring the eager ``cycle_failed = True`` /
+    ``last_exception = dec_err`` in the except block (or widening the account-wide
+    guard to always-True) makes this return ``(True, <err>, ...)`` -- the assert
+    turns red.
+    """
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
+    err = DecryptionError("All own-report decryptions failed")
+
+    cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=err,
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=False,
+        cycle_failed=False,
+        last_exception=None,
+    )
+
+    assert cycle_failed is False
+    assert last_exception is None
+    assert reauth_exc is None
+    # Sibling proof cleared the budget rather than advancing it.
+    assert stub._consecutive_decrypt_failures == 0
+
+
+def test_finalize_downgrade_preserves_independent_failure() -> None:
+    """A co-occurring non-decrypt failure (e.g. a timeout) survives the downgrade.
+
+    The benign decrypt path must leave an already-set ``cycle_failed`` /
+    ``last_exception`` untouched -- it may only refrain from ADDING a failure, never
+    clear a real one a sibling success does not refute.
+    """
+    stub = _make_stub()
+    other_failure = TimeoutError("device timed out")
+
+    cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=DecryptionError("offline"),
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=False,
+        cycle_failed=True,
+        last_exception=other_failure,
+    )
+
+    assert cycle_failed is True
+    assert last_exception is other_failure
+    assert reauth_exc is None
+
+
+def test_finalize_account_wide_below_threshold_fails_without_reauth() -> None:
+    """A genuine account-wide failure below the threshold fails the cycle and
+    surfaces the decrypt error, but does not yet escalate to reauth."""
+    stub = _make_stub()
+    err = DecryptionError("no device decrypted this cycle")
+
+    cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=err,
+        cycle_had_successful_decrypt=False,
+        cycle_had_stale_key=False,
+        cycle_failed=False,
+        last_exception=None,
+    )
+
+    assert cycle_failed is True
+    assert last_exception is err
+    assert reauth_exc is None
+    assert stub._consecutive_decrypt_failures == 1
+
+
+def test_finalize_account_wide_preserves_prior_independent_failure() -> None:
+    """An account-wide failure below the threshold must not clobber a prior error.
+
+    When another device already failed this cycle (e.g. a timeout on device A) and
+    a shared-key failure surfaces on device B, the account-wide branch surfaces the
+    cycle as failed but keeps the FIRST captured ``last_exception`` (the ``if
+    last_exception is None`` guard). Mutation gate for that guard: dropping it makes
+    ``last_exception`` the shared-key error and turns the assert red.
+    """
+    stub = _make_stub()
+    other_failure = TimeoutError("device A timed out")
+    err = SharedKeyMismatchError("device B: stale shared key")
+
+    cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=err,
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=False,
+        cycle_failed=True,
+        last_exception=other_failure,
+    )
+
+    assert cycle_failed is True
+    assert last_exception is other_failure
+    assert reauth_exc is None
+    # Account-wide failure still advanced the consecutive-cycle budget.
+    assert stub._consecutive_decrypt_failures == 1
+
+
+def test_finalize_escalates_at_threshold_with_reauth_exc() -> None:
+    """At the consecutive-cycle threshold the verdict escalates: finalize returns a
+    ``ConfigEntryAuthFailed`` as both ``last_exception`` and the reauth signal, even
+    when a sibling decrypted (shared-key subclass cannot be refuted)."""
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
+    err = SharedKeyMismatchError("stale shared key")
+
+    cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=err,
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=False,
+        cycle_failed=False,
+        last_exception=None,
+    )
+
+    assert cycle_failed is True
+    assert isinstance(reauth_exc, ConfigEntryAuthFailed)
+    assert last_exception is reauth_exc
+    stub._set_auth_state.assert_called_once()
+
+
+def test_finalize_clean_cycle_stays_success() -> None:
+    """A clean cycle (no decrypt error, sibling success) stays success and heals the
+    diagnostic sensor without failing the coordinator update."""
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = 2
+
+    cycle_failed, last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=None,
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=False,
+        cycle_failed=False,
+        last_exception=None,
+    )
+
+    assert cycle_failed is False
+    assert last_exception is None
+    assert reauth_exc is None
+    assert stub._consecutive_decrypt_failures == 0
+    assert stub._crypto_status_state == CryptoStatus.OK
