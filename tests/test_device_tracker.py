@@ -713,3 +713,69 @@ async def test_restore_stale_state_uses_accuracy_m_over_gps_accuracy(
 
     assert coordinator.primed["data"]["accuracy"] == 35
     assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_preserves_sub_meter_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A restored sub-meter real fix keeps its fractional radius.
+
+    Modern dual-frequency GNSS reports sub-meter accuracy (e.g. 0.5m). The
+    restore path seeds the coordinator cache, whose ``accuracy`` field is a
+    float everywhere else, so it must normalize through ``safe_accuracy`` rather
+    than truncating with ``int()``. Truncating 0.5 to 0 would seed an invalid
+    0m radius (below ``MIN_VALID_ACCURACY``) while still carrying
+    ``accuracy_estimated=False``, recreating an invalid real fix after restart.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # Sub-meter real measurement; must survive the restore unchanged.
+            "accuracy_m": 0.5,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 0.5
+    assert coordinator.primed["data"]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_restore_sanitizes_invalid_legacy_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A legacy error-code accuracy is sanitized, not seeded as an invalid fix.
+
+    A legacy recorder row can carry the Android error code ``gps_accuracy=0``
+    (no producer ``accuracy_m``). The old ``int(float(acc))`` seeded a literal
+    ``0`` -- an invalid radius that wins fusion against every real fix. Routing
+    through ``safe_accuracy`` maps it to the 200m fallback, which fusion then
+    correctly down-weights. The flag is carried as recorded (not fabricated):
+    this pins the documented legacy boundary as deliberate behaviour.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            # Android error code; no stable producer accuracy_m present.
+            "gps_accuracy": 0,
+            "accuracy_estimated": False,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    assert coordinator.primed["data"]["accuracy"] == 200.0
+    assert coordinator.primed["data"]["accuracy_estimated"] is False

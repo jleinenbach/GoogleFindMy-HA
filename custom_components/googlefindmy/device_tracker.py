@@ -53,6 +53,7 @@ from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
     recorded_accuracy_pair,
+    safe_accuracy,
 )
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
@@ -941,8 +942,14 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 restored["latitude"] = float(lat)
                 restored["longitude"] = float(lon)
             if acc is not None:
-                # HA core accuracy attribute is an int (meters).
-                restored["accuracy"] = int(float(acc))
+                # Seed the coordinator cache, whose ``accuracy`` field is a
+                # sanitized float everywhere else (api/locate/fusion writers).
+                # Normalize through the same producer policy (safe_accuracy)
+                # instead of truncating with int(): truncation would drop a
+                # restored sub-meter real fix (e.g. 0.5m -> 0) below
+                # MIN_VALID_ACCURACY and seed an invalid 0m radius, while a
+                # paired accuracy_estimated=False still claims it is real.
+                restored["accuracy"] = safe_accuracy(acc)
                 if estimated is not None:
                     restored["accuracy_estimated"] = bool(estimated)
         except (TypeError, ValueError) as ex:
