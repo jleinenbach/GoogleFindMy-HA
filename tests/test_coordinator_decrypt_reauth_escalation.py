@@ -278,4 +278,137 @@ def test_note_background_decrypt_success_leaves_unknown_untouched() -> None:
     stub.note_background_decrypt_success()
 
     assert stub._crypto_status_state == CryptoStatus.UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# _resolve_cycle_decrypt_outcome: the per-cycle verdict that decides escalation.
+# Regression suite for the "offline device drags a healthy account into a
+# spurious reauth" bug: positive proof (a sibling decrypt) must dominate a single
+# device's DecryptionError so the account-wide reauth budget is neither advanced
+# nor tripped.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_mixed_cycle_sibling_success_blocks_spurious_reauth(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bug: a powered-off device fails to decrypt while siblings succeed.
+
+    With the account-wide budget one step below the threshold, a mixed cycle
+    (``cycle_decrypt_error`` set AND ``cycle_had_successful_decrypt`` True) must
+    NOT escalate: the sibling success proves the shared key is healthy. The budget
+    is cleared (not advanced), the diagnostic sensor heals to OK, a warning (not
+    the account-wide ERROR escalation) is logged, and no auth state is set.
+
+    Mutation gate: the pre-fix code advanced the counter here (2 -> 3) and
+    returned True, so asserting ``result is False`` with a cleared counter and an
+    untouched auth state turns red if the positive-proof guard is removed.
+    """
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
+    err = DecryptionError(
+        "All own-report decryptions failed; the cached identity key no longer "
+        "matches the server reports."
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = stub._resolve_cycle_decrypt_outcome(
+            cycle_decrypt_error=err,
+            cycle_had_successful_decrypt=True,
+            cycle_had_stale_key=False,
+        )
+
+    assert result is False
+    assert stub._consecutive_decrypt_failures == 0
+    assert stub._crypto_status_state == CryptoStatus.OK
+    assert stub._last_decrypt_error is None
+    stub._set_auth_state.assert_not_called()
+    assert any(
+        rec.levelno == logging.WARNING
+        and "no re-authentication is required" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_resolve_account_wide_failure_without_sibling_escalates() -> None:
+    """A decrypt failure with NOT A SINGLE sibling success stays account-wide.
+
+    The verdict must still advance the consecutive-cycle budget and, at the
+    threshold, escalate to reauth -- the genuine stale-shared-key path that the
+    fix must preserve (the counterpart to the mixed-cycle suppression above).
+    """
+    stub = _make_stub()
+    err = SharedKeyMismatchError("stale shared key")
+
+    # Failures 1..N-1: account-wide, below threshold -> count up, no escalation.
+    for attempt in range(1, _MAX_DECRYPT_FAILURES):
+        assert (
+            stub._resolve_cycle_decrypt_outcome(
+                cycle_decrypt_error=err,
+                cycle_had_successful_decrypt=False,
+                cycle_had_stale_key=False,
+            )
+            is False
+        )
+        assert stub._consecutive_decrypt_failures == attempt
+    stub._set_auth_state.assert_not_called()
+
+    # Threshold reached -> escalate.
+    assert (
+        stub._resolve_cycle_decrypt_outcome(
+            cycle_decrypt_error=err,
+            cycle_had_successful_decrypt=False,
+            cycle_had_stale_key=False,
+        )
+        is True
+    )
+    stub._set_auth_state.assert_called_once()
+
+
+def test_resolve_clean_success_cycle_heals_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cycle with a success and no decrypt error heals the sensor silently.
+
+    No ``cycle_decrypt_error`` means no per-device warning; positive proof still
+    sets the OK status and clears any partial budget.
+    """
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = 2
+
+    with caplog.at_level(logging.WARNING):
+        result = stub._resolve_cycle_decrypt_outcome(
+            cycle_decrypt_error=None,
+            cycle_had_successful_decrypt=True,
+            cycle_had_stale_key=False,
+        )
+
+    assert result is False
+    assert stub._crypto_status_state == CryptoStatus.OK
+    assert stub._consecutive_decrypt_failures == 0
+    assert not any(rec.levelno == logging.WARNING for rec in caplog.records)
+
+
+def test_resolve_per_device_failure_with_stale_key_keeps_sensor() -> None:
+    """A per-device decrypt failure plus a stale tracker key, with sibling success.
+
+    Sibling proof clears the account-wide budget, but the ``not
+    cycle_had_stale_key`` gate keeps the diagnostic sensor from flipping to OK so
+    a still-outstanding per-tracker stale key is not masked. No escalation.
+    """
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = 2
+    stub._crypto_status_state = CryptoStatus.TRACKER_KEY_OUTDATED
+    err = DecryptionError("own reports failed")
+
+    result = stub._resolve_cycle_decrypt_outcome(
+        cycle_decrypt_error=err,
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=True,
+    )
+
+    assert result is False
+    assert stub._consecutive_decrypt_failures == 0
+    # OK gate is suppressed by the stale-key flag: sensor stays as-is.
+    assert stub._crypto_status_state == CryptoStatus.TRACKER_KEY_OUTDATED
     assert stub._last_decrypt_error is None

@@ -183,9 +183,7 @@ class PollingOperations(_MixinBase):
     _is_polling: bool
     _startup_complete: bool
 
-    def _set_api_status(
-        self, status: str, *, reason: str | None = None
-    ) -> None:
+    def _set_api_status(self, status: str, *, reason: str | None = None) -> None:
         """Update the API polling status and notify listeners if it changed."""
         if status == self._api_status_state and reason == self._api_status_reason:
             return
@@ -200,9 +198,7 @@ class PollingOperations(_MixinBase):
             # Fallback for very early startup when listeners are not ready yet.
             pass
 
-    def _set_fcm_status(
-        self, status: str, *, reason: str | None = None
-    ) -> None:
+    def _set_fcm_status(self, status: str, *, reason: str | None = None) -> None:
         """Update the push transport status while avoiding noisy churn."""
         if status == self._fcm_status_state and reason == self._fcm_status_reason:
             return
@@ -216,9 +212,7 @@ class PollingOperations(_MixinBase):
         except Exception:
             pass
 
-    def _set_crypto_status(
-        self, status: str, *, reason: str | None = None
-    ) -> None:
+    def _set_crypto_status(self, status: str, *, reason: str | None = None) -> None:
         """Update the location-decryption status while avoiding noisy churn.
 
         Mirrors ``_set_fcm_status`` exactly. This is the single writer for the
@@ -412,6 +406,72 @@ class PollingOperations(_MixinBase):
         )
         return True
 
+    def _resolve_cycle_decrypt_outcome(
+        self,
+        *,
+        cycle_decrypt_error: DecryptionError | None,
+        cycle_had_successful_decrypt: bool,
+        cycle_had_stale_key: bool,
+    ) -> bool:
+        """Resolve a poll cycle's decrypt verdict and return whether to escalate.
+
+        Performs the post-loop crypto-sensor and reauth-budget side effects and
+        returns ``True`` iff the caller must escalate to ``ConfigEntryAuthFailed``.
+
+        Positive proof dominates (D7): if ANY device produced an authenticated
+        coordinate this cycle (``cycle_had_successful_decrypt``), the account-wide
+        shared key is provably healthy, so a sibling device's ``DecryptionError``
+        -- e.g. a phone powered off for days whose own server reports no longer
+        decrypt -- is a per-device condition that must NOT advance the account-wide
+        reauth budget and must NOT trigger reauth. This mirrors the per-tracker
+        ``StaleOwnerKeyError`` (``stale=True``) treatment ("other devices are
+        unaffected"). Only a decrypt failure with NOT A SINGLE successful sibling
+        is account-wide and counted toward the consecutive-cycle reauth budget.
+
+        Before this gate the account-wide counter was advanced whenever a decrypt
+        error was seen, regardless of sibling success, so a single offline device
+        dragged a healthy multi-device account across ``_MAX_DECRYPT_FAILURES`` and
+        tripped a spurious reauth (removing the offline device silenced it -- the
+        observed bug).
+        """
+        if cycle_decrypt_error is not None and not cycle_had_successful_decrypt:
+            # Account-wide stale/missing shared key: a decrypt failure persisted AND
+            # not one device decrypted this cycle. Advance the consecutive-cycle
+            # counter exactly once; let it escalate (cooldown-gated) on threshold.
+            return self.note_decrypt_failure(
+                stale=False, error=cycle_decrypt_error, device=None
+            )
+
+        # Either a clean cycle, or a per-device decrypt failure that a sibling
+        # success refutes as account-wide. Never escalate to reauth from here.
+        if cycle_decrypt_error is not None:
+            # cycle_had_successful_decrypt is True here (guard above): a sibling
+            # proved the shared key works, so this failure is device-local. Log it
+            # as a warning -- the account-wide escalation ERROR is reserved for the
+            # genuinely account-wide path -- and leave the reauth budget untouched.
+            _LOGGER.warning(
+                "Location decryption failed for a device this cycle while other "
+                "devices decrypted successfully; the account shared key is "
+                "healthy, so no re-authentication is required. The affected "
+                "device may be powered off or its own server reports may be "
+                "stale: %s",
+                cycle_decrypt_error,
+            )
+        if cycle_had_successful_decrypt and not cycle_had_stale_key:
+            # Positive proof and no per-tracker stale key: heal the diagnostic
+            # sensor (D6 OK source, single writer) and clear the error class with
+            # it. Gating on ``not cycle_had_stale_key`` keeps a per-tracker
+            # StaleOwnerKeyError's error class intact while its tracker_key_outdated
+            # status persists.
+            self._set_crypto_status(CryptoStatus.OK)
+            self._last_decrypt_error = None
+        if cycle_had_successful_decrypt:
+            # Clear the consecutive-decrypt counter only on POSITIVE proof the
+            # account-wide shared key works, via the shared success entry point so
+            # the poll path and the FCM background-push decode cannot drift apart.
+            self.note_decrypt_success()
+        return False
+
     def note_decrypt_success(self) -> None:
         """Record a proven location decryption and clear the reauth budget.
 
@@ -530,9 +590,7 @@ class PollingOperations(_MixinBase):
         else:
             self._run_on_hass_loop(_invoke)
 
-    def _schedule_short_retry(
-        self, delay_s: float = 5.0
-    ) -> None:
+    def _schedule_short_retry(self, delay_s: float = 5.0) -> None:
         """Schedule a short, coalesced refresh instead of shifting the poll baseline.
 
         Rationale:
@@ -584,9 +642,7 @@ class PollingOperations(_MixinBase):
             log_context="device registry event",
         )
 
-    def _compute_type_cooldown_seconds(
-        self, report_hint: str | None
-    ) -> int:
+    def _compute_type_cooldown_seconds(self, report_hint: str | None) -> int:
         """Return a server-aware cooldown duration in seconds for a crowdsourced report type.
 
         Derived from POPETS'25 observations:
@@ -807,9 +863,7 @@ class PollingOperations(_MixinBase):
         return min(predictions)
 
     # -------------------- Push transport error handling --------------------
-    def _note_push_transport_problem(
-        self, cooldown_s: int = 90
-    ) -> None:
+    def _note_push_transport_problem(self, cooldown_s: int = 90) -> None:
         """Enter a temporary cooldown after a push transport failure to avoid spamming.
 
         Args:
@@ -1360,9 +1414,7 @@ class PollingOperations(_MixinBase):
         """
         entry = getattr(self, "config_entry", None)
         if entry is None:
-            _LOGGER.debug(
-                "Cannot start reauth from poll cycle: no config entry bound."
-            )
+            _LOGGER.debug("Cannot start reauth from poll cycle: no config entry bound.")
             return
         try:
             # ``ConfigEntry.async_start_reauth`` is a synchronous @callback that
@@ -1370,13 +1422,9 @@ class PollingOperations(_MixinBase):
             # TypeError. Call it without await (mirrors locate.py and
             # fcm_receiver_ha.py).
             entry.async_start_reauth(self.hass)
-            _LOGGER.warning(
-                "Poll cycle triggered re-authentication: %s", reauth_exc
-            )
+            _LOGGER.warning("Poll cycle triggered re-authentication: %s", reauth_exc)
         except Exception as reauth_err:  # pragma: no cover - defensive
-            _LOGGER.debug(
-                "Failed to start reauth flow from poll cycle: %s", reauth_err
-            )
+            _LOGGER.debug("Failed to start reauth flow from poll cycle: %s", reauth_err)
 
     # ---------------------------- Polling Cycle -----------------------------
     async def _async_start_poll_cycle(
@@ -1499,9 +1547,7 @@ class PollingOperations(_MixinBase):
                             # inner FCM wait returns an empty result rather than
                             # raising. This is a healthy idle outcome, not a fault
                             # (kept at INFO, symmetric with the timeout branch).
-                            _LOGGER.info(
-                                "No location data returned for %s", dev_name
-                            )
+                            _LOGGER.info("No location data returned for %s", dev_name)
                             self._log_idle_poll_diagnostics(
                                 dev_id, dev_name, source="empty-result"
                             )
@@ -1927,73 +1973,25 @@ class PollingOperations(_MixinBase):
                         await asyncio.sleep(self.device_poll_delay)
 
                 _LOGGER.debug("Completed polling cycle for %d devices", len(devices))
-                if cycle_decrypt_error is not None:
-                    # Account-wide decrypt failure persisted this cycle: advance the
-                    # consecutive-cycle counter exactly ONCE (not once per device)
-                    # and escalate to a reauth flow when it crosses the threshold
-                    # (with cooldown). Counting once per cycle keeps a multi-device
-                    # account on the same "N consecutive cycles" budget as a
-                    # single-device account. Raised here (still inside the outer
-                    # try, before its finally) so it propagates exactly like the
-                    # former in-loop raise.
-                    if self.note_decrypt_failure(
-                        stale=False, error=cycle_decrypt_error, device=None
-                    ):
-                        cycle_failed = True
-                        self._last_poll_result = "failed"
-                        reauth_exc = ConfigEntryAuthFailed(
-                            "Location decryption keeps failing: the shared key "
-                            "is stale; a fresh secrets.json (re-authentication) "
-                            "is required"
-                        )
-                        last_exception = reauth_exc
-                        self._request_poll_reauth(reauth_exc)
-                        return
-                else:
-                    # Whole cycle finished without an account-wide decrypt failure.
-                    if cycle_had_successful_decrypt and not cycle_had_stale_key:
-                        # At least one device actually decrypted location data this
-                        # cycle (positive proof, not just the absence of an error)
-                        # and no per-tracker stale key was seen: the account-wide
-                        # shared key is healthy. Reflect that into the diagnostic
-                        # sensor (D6 OK source, single writer). A cycle of pure
-                        # timeouts/transient errors leaves the prior state intact
-                        # rather than flickering a stale key to OK.
-                        self._set_crypto_status(CryptoStatus.OK)
-                        # Clear the diagnostic error class together with the OK
-                        # status: both are the same sensor surface and must move
-                        # as one. Gating it on the same ``not cycle_had_stale_key``
-                        # condition keeps a per-tracker StaleOwnerKeyError's error
-                        # class intact while its tracker_key_outdated status
-                        # persists -- note_decrypt_success() no longer wipes this
-                        # field blindly from the shared (poll + push) entry point.
-                        self._last_decrypt_error = None
-                    if cycle_had_successful_decrypt:
-                        # Clear the consecutive-decrypt counter only on POSITIVE
-                        # proof that the account-wide shared key works (at least one
-                        # device decrypted this cycle), mirroring the CryptoStatus.OK
-                        # gate above. An idle cycle that only saw empty/no-reporter
-                        # results (cycle_had_successful_decrypt == False) must NOT
-                        # reset the counter: intermittently reporting BLE trackers
-                        # would otherwise let idle cycles between two failing decrypt
-                        # cycles perpetually clear the budget, so the reauth threshold
-                        # could never be reached and the user would stay stuck with a
-                        # stale key and no reauth prompt.
-                        #
-                        # Unlike the OK gate this intentionally does NOT also require
-                        # ``not cycle_had_stale_key``: this counter tracks the
-                        # account-wide shared key, while a per-tracker outdated owner
-                        # key (cycle_had_stale_key) is a separate, device-local
-                        # concern that never advances this counter (see
-                        # note_decrypt_failure(stale=True)). Proof that the account
-                        # key works must be allowed to clear it even when one tracker
-                        # still carries an outdated key.
-                        #
-                        # Clear via the shared success entry point so this poll path
-                        # and the FCM background-push decode cannot drift apart again:
-                        # both sources feed the counter, both must be able to clear it
-                        # (the asymmetry that previously stranded a healthy account).
-                        self.note_decrypt_success()
+                # Resolve the cycle's decrypt verdict in one place (positive proof
+                # dominates: a sibling success refutes a single device's failure as
+                # account-wide). Returns True only for a genuinely account-wide
+                # failure that crossed the consecutive-cycle reauth threshold.
+                if self._resolve_cycle_decrypt_outcome(
+                    cycle_decrypt_error=cycle_decrypt_error,
+                    cycle_had_successful_decrypt=cycle_had_successful_decrypt,
+                    cycle_had_stale_key=cycle_had_stale_key,
+                ):
+                    cycle_failed = True
+                    self._last_poll_result = "failed"
+                    reauth_exc = ConfigEntryAuthFailed(
+                        "Location decryption keeps failing: the shared key "
+                        "is stale; a fresh secrets.json (re-authentication) "
+                        "is required"
+                    )
+                    last_exception = reauth_exc
+                    self._request_poll_reauth(reauth_exc)
+                    return
             finally:
                 # Update scheduling baseline and clear flag, then push end snapshot.
                 # Always advance the poll baseline to prevent high-frequency

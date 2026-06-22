@@ -368,9 +368,28 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     SpotAuthPermanentError,
                     InvalidTag,
                 ) as err:
-                    _LOGGER.error(
-                        "Failed to process location data for %s: %s", name, err
-                    )
+                    # A per-device decryption/key failure (DecryptionError incl. its
+                    # StaleOwnerKeyError subclass, or InvalidTag) is NOT, on its own,
+                    # an account-wide crisis: a device powered off for days lands
+                    # here while sibling devices decrypt fine. Log those as warnings
+                    # -- the account-wide escalation is decided once per cycle by the
+                    # coordinator's positive-proof-gated verdict
+                    # (PollingOperations._resolve_cycle_decrypt_outcome), and its
+                    # ERROR is emitted there via note_decrypt_failure, not per device
+                    # here. Genuine session/auth failures
+                    # (SpotApiEmptyResponseError, SpotAuthPermanentError) keep ERROR
+                    # severity because they themselves drive reauth. ctx.error and
+                    # the propagation are unchanged in every case.
+                    if isinstance(
+                        err, (SpotApiEmptyResponseError, SpotAuthPermanentError)
+                    ):
+                        _LOGGER.error(
+                            "Failed to process location data for %s: %s", name, err
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "Failed to process location data for %s: %s", name, err
+                        )
                     ctx.error = err
                     ctx.event.set()
                     return
@@ -609,9 +628,7 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     # heavy import cycle, so the name is not available at module scope. It is used
     # below to surface an auth-fatal stale-key failure instead of swallowing it.
     decrypt_module = _import_decrypt_locations_module()
-    DecryptionError = cast(
-        type[Exception], getattr(decrypt_module, "DecryptionError")
-    )
+    DecryptionError = cast(type[Exception], getattr(decrypt_module, "DecryptionError"))
 
     try:
         # Generate request UUID
