@@ -641,8 +641,14 @@ class CacheOperations(_MixinBase):
                         DEFAULT_ACCURACY_FALLBACK_M,
                     )
                     # Continue processing - the update is valid, with fallback precision
-                else:
-                    # Real measurement survived: mark it as a non-estimated fix.
+                # Numerically valid accuracy. Mark it as a non-estimated fix
+                # ONLY when the producer did not already flag it estimated. A
+                # preserved 200m fallback is numerically valid yet carries
+                # accuracy_estimated=True from upstream; clobbering it to False
+                # here would draw a solid "real measurement" circle for a
+                # fallback radius. A carried True therefore wins; otherwise the
+                # surviving real measurement is recorded as not estimated.
+                elif new_data.get("accuracy_estimated") is not True:
                     new_data["accuracy_estimated"] = False
             except (TypeError, ValueError):
                 # Non-numeric accuracy: replace with fallback
@@ -917,18 +923,20 @@ class CacheOperations(_MixinBase):
         # ALWAYS write back a valid accuracy - never leave it as None or missing
         # Home Assistant requires a numeric gps_accuracy for the state machine
         new_data["accuracy"] = best_accuracy
-        # Mirror the producer flag for the fused result: False when at least one
-        # input was a real measurement. Deriving it from the validity of the
-        # inputs (not from value-equality with the fallback) avoids mislabeling a
-        # genuinely fused measurement that happens to equal the 200m fallback
-        # value. This assignment is defensive and intentionally redundant: the
-        # significance gate (_is_significant_update) re-derives the flag from the
-        # final accuracy and is the authoritative writer, and the FIX #155
-        # short-circuit above already returns before this point when both inputs
-        # are the neither-valid fallback, so the True path here is a guard against
-        # future changes to that short-circuit rather than a currently reachable
-        # branch.
-        new_data["accuracy_estimated"] = not (valid_existing or valid_new)
+        # Mirror the producer flag for the fused result: False only when at least
+        # one input was a REAL measurement. An input counts as real when it is
+        # numerically valid AND not itself flagged estimated. A numerically valid
+        # value is not automatically a real measurement: a preserved 200m fallback
+        # is valid (>0) yet carries accuracy_estimated=True, so it must not flip the
+        # fused result to "real". The existing flag is read from the cached row and
+        # the new flag from new_data. Deriving from input validity (not from
+        # value-equality with the fallback) still avoids mislabeling a genuinely
+        # fused measurement that happens to equal the 200m fallback value. This
+        # assignment remains a guard: the significance gate (_is_significant_update)
+        # is the authoritative writer downstream.
+        real_existing = valid_existing and not existing.get("accuracy_estimated")
+        real_new = valid_new and not new_data.get("accuracy_estimated")
+        new_data["accuracy_estimated"] = not (real_existing or real_new)
 
         new_data["status"] = "Fused (Weighted)"
         new_data["_fused_applied"] = True

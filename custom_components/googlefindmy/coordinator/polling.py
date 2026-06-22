@@ -63,6 +63,7 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
+from .helpers.cache import carry_reused_accuracy
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
 from .helpers.subentry import normalize_epoch_seconds as _normalize_epoch_seconds
@@ -1607,7 +1608,10 @@ class PollingOperations(_MixinBase):
                                         location["longitude"] = prev_location[
                                             "longitude"
                                         ]
-                                        location["accuracy"] = prev_location["accuracy"]
+                                        # Carry the producer flag with the reused
+                                        # accuracy so a preserved estimated fallback
+                                        # is not reclassified as a real measurement.
+                                        carry_reused_accuracy(location, prev_location)
                                     else:
                                         _LOGGER.info(
                                             "Google Home filter: %s detected at '%s', substituting with Home coordinates",
@@ -1654,7 +1658,10 @@ class PollingOperations(_MixinBase):
                             if prev:
                                 location["latitude"] = prev.get("latitude")
                                 location["longitude"] = prev.get("longitude")
-                                location["accuracy"] = prev.get("accuracy")
+                                # Carry the producer flag with the reused accuracy
+                                # so a preserved estimated fallback keeps its dashed
+                                # circle downstream instead of being treated as real.
+                                carry_reused_accuracy(location, prev)
                                 location["status"] = (
                                     "Semantic location; preserving previous coordinates"
                                 )

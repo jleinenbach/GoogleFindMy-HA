@@ -46,6 +46,7 @@ __all__ = [
     "STATUS_STALE",
     "STATUS_WAITING",
     "build_base_snapshot_entry",
+    "carry_reused_accuracy",
     "compare_location_freshness",
     "determine_location_status",
     "epoch_to_datetime_utc",
@@ -353,6 +354,61 @@ def normalize_location_fields(
                 result[field] = None
 
     return result
+
+
+def carry_reused_accuracy(
+    target: dict[str, Any],
+    source: Mapping[str, Any],
+    *,
+    setdefault: bool = False,
+) -> None:
+    """Copy a reused ``accuracy`` together with its ``accuracy_estimated`` flag.
+
+    ``accuracy_estimated`` is a producer-side flag: ``True`` means the numeric
+    ``accuracy`` is the conservative 200m fallback radius, not a real measurement.
+    Once the value is the 200m fallback it is byte-for-byte indistinguishable from
+    a genuine 200m fix downstream (fusion, the significance gate, the recorder and
+    map_view), so only this flag tells the two apart.
+
+    The upstream preserve-sites (Google-Home filter and semantic-only fallbacks in
+    ``polling`` and ``locate``) reuse a previously cached ``accuracy``. Copying the
+    value alone strips the flag, letting a downstream chokepoint reclassify a
+    preserved fallback as a real measurement. This helper keeps the flag travelling
+    with the value so the reclassification cannot happen, centralizing the rule in
+    one place instead of repeating it at every preserve-site.
+
+    Two modes mirror the two call shapes at the sites:
+
+    - Assignment (default): unconditionally set ``target["accuracy"]`` from
+      ``source`` and mirror the flag. When ``source`` has no flag the target's flag
+      is removed, so a stale ``True`` cannot linger next to an unflagged value.
+    - ``setdefault=True``: only fill ``accuracy``/``accuracy_estimated`` when the
+      target lacks ``accuracy`` (matching the ``dict.setdefault`` semantics at the
+      locate semantic-only site). A ``None`` flag is never injected.
+
+    Args:
+        target: Location payload being assembled (mutated in place).
+        source: Previously cached location row to reuse the accuracy from.
+        setdefault: When True, preserve existing values instead of overwriting.
+    """
+    if setdefault:
+        if "accuracy" in target:
+            # Target already declares an accuracy (the ``dict.setdefault`` no-op
+            # case): leave both the value and any existing flag untouched.
+            return
+        target["accuracy"] = source.get("accuracy")
+        if "accuracy_estimated" in source:
+            # Only fill the flag when the source actually carries it; never
+            # inject a None flag for an unflagged source row.
+            target.setdefault("accuracy_estimated", source["accuracy_estimated"])
+        return
+
+    target["accuracy"] = source.get("accuracy")
+    if "accuracy_estimated" in source:
+        target["accuracy_estimated"] = source["accuracy_estimated"]
+    else:
+        # Source describes an unflagged fix; do not keep a stale estimated flag.
+        target.pop("accuracy_estimated", None)
 
 
 def preserve_metadata_fields(

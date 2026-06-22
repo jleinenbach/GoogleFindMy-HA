@@ -349,7 +349,10 @@ skip_covered = true
 # root-owned .storage path that CI does not hit, so CI total is >= 68.33 %.
 # Raised to 69 after the crypto-audit test suite (PR #1111) lifted CI total to
 # 69.14 % (measured 2026-06-16); floor tracks the new CI total to lock the gain.
-fail_under = 69
+# Raised to 70 with the accuracy_estimated producer-flag suite (PR #1124): the
+# new carry_reused_accuracy helper and chokepoint regression tests lift CI total
+# past 70 %; floor tracks the new CI total to lock the gain.
+fail_under = 70
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
