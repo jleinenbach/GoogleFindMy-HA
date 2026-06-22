@@ -610,10 +610,16 @@ class CacheOperations(_MixinBase):
         # We ACCEPT the update and REPLACE invalid accuracy with a conservative fallback.
         # This ensures Home Assistant always gets a valid numeric gps_accuracy attribute.
         # Valid sub-meter values like 0.5m or 0.01m are preserved!
+        # ``accuracy_estimated`` is a producer-side flag: True whenever the
+        # accuracy below was replaced by the conservative fallback radius, False
+        # when a real measurement survived. Only the producer can tell the two
+        # apart, because once the value is the 200m fallback it is byte-for-byte
+        # indistinguishable from a real 200m fix downstream (map_view, recorder).
         new_acc = new_data.get("accuracy")
         if new_acc is None:
             # Missing accuracy: set conservative fallback for HA state machine
             new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+            new_data["accuracy_estimated"] = True
             self.increment_stat("accuracy_sanitized_count")
             _LOGGER.debug(
                 "Setting fallback accuracy for %s: key was missing, using %sm",
@@ -626,6 +632,7 @@ class CacheOperations(_MixinBase):
                 if not math.isfinite(acc_f) or acc_f < MIN_PHYSICAL_ACCURACY_M:
                     # Sanitize: replace error code with conservative fallback
                     new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+                    new_data["accuracy_estimated"] = True
                     self.increment_stat("accuracy_sanitized_count")
                     _LOGGER.debug(
                         "Sanitizing update for %s: error code accuracy (%s) -> %sm",
@@ -634,9 +641,19 @@ class CacheOperations(_MixinBase):
                         DEFAULT_ACCURACY_FALLBACK_M,
                     )
                     # Continue processing - the update is valid, with fallback precision
+                # Numerically valid accuracy. Mark it as a non-estimated fix
+                # ONLY when the producer did not already flag it estimated. A
+                # preserved 200m fallback is numerically valid yet carries
+                # accuracy_estimated=True from upstream; clobbering it to False
+                # here would draw a solid "real measurement" circle for a
+                # fallback radius. A carried True therefore wins; otherwise the
+                # surviving real measurement is recorded as not estimated.
+                elif new_data.get("accuracy_estimated") is not True:
+                    new_data["accuracy_estimated"] = False
             except (TypeError, ValueError):
                 # Non-numeric accuracy: replace with fallback
                 new_data["accuracy"] = DEFAULT_ACCURACY_FALLBACK_M
+                new_data["accuracy_estimated"] = True
                 self.increment_stat("accuracy_sanitized_count")
                 _LOGGER.debug(
                     "Sanitizing update for %s: non-numeric accuracy (%r) -> %sm",
@@ -858,6 +875,18 @@ class CacheOperations(_MixinBase):
 
         MIN_FUSED_ACCURACY_M = 5.0  # Consumer GPS floor
 
+        # NOTE: This predicate intentionally differs from the canonical
+        # ``coordinator.helpers.geo.is_valid_accuracy`` and must NOT be
+        # consolidated with it. geo uses ``>= MIN_VALID_ACCURACY`` (0.001m),
+        # whereas fusion accepts any strictly positive accuracy (``> 0``).
+        # For a sub-millimeter input in the open interval (0, 0.001) the two
+        # disagree: this predicate keeps it as a valid measurement (driving the
+        # both-valid inverse-variance branch), while geo would reject it and
+        # collapse fusion to the single valid side. That changes the fused
+        # accuracy (characterization: tests/test_cache_fusion_validity.py pins
+        # ~11.978m here versus 12.0m under geo). The divergence is deliberate:
+        # fusion treats a sub-mm fix as a real, high-weight measurement rather
+        # than the 0.0 error code geo guards against.
         def _is_valid_accuracy(acc: float | None) -> bool:
             return (
                 acc is not None
@@ -894,6 +923,20 @@ class CacheOperations(_MixinBase):
         # ALWAYS write back a valid accuracy - never leave it as None or missing
         # Home Assistant requires a numeric gps_accuracy for the state machine
         new_data["accuracy"] = best_accuracy
+        # Mirror the producer flag for the fused result: False only when at least
+        # one input was a REAL measurement. An input counts as real when it is
+        # numerically valid AND not itself flagged estimated. A numerically valid
+        # value is not automatically a real measurement: a preserved 200m fallback
+        # is valid (>0) yet carries accuracy_estimated=True, so it must not flip the
+        # fused result to "real". The existing flag is read from the cached row and
+        # the new flag from new_data. Deriving from input validity (not from
+        # value-equality with the fallback) still avoids mislabeling a genuinely
+        # fused measurement that happens to equal the 200m fallback value. This
+        # assignment remains a guard: the significance gate (_is_significant_update)
+        # is the authoritative writer downstream.
+        real_existing = valid_existing and not existing.get("accuracy_estimated")
+        real_new = valid_new and not new_data.get("accuracy_estimated")
+        new_data["accuracy_estimated"] = not (real_existing or real_new)
 
         new_data["status"] = "Fused (Weighted)"
         new_data["_fused_applied"] = True

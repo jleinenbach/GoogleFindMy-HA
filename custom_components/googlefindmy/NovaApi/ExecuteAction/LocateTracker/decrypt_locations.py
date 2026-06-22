@@ -210,12 +210,7 @@ def _try_unwrap_aesgcm_envelope(
 def _extract_canonic_id(device_update_protobuf: Any) -> str | None:
     """Extract the first canonical ID from a DeviceUpdate protobuf."""
     try:
-        canonic_ids = (
-            device_update_protobuf.deviceMetadata
-            .identifierInformation
-            .canonicIds
-            .canonicId
-        )
+        canonic_ids = device_update_protobuf.deviceMetadata.identifierInformation.canonicIds.canonicId
         for cid in canonic_ids:
             val = getattr(cid, "id", None)
             if isinstance(val, str) and val:
@@ -268,6 +263,25 @@ class SharedKeyMissingError(DecryptionError):
 
     Account-wide: the secrets.json did not provide a usable shared key. A complete
     re-import / fresh secrets.json is required.
+    """
+
+
+class OwnReportIdentityMismatchError(DecryptionError):
+    """Raised when a device's OWN server reports all fail authentication.
+
+    Device-local condition: the account keys are healthy (the identity key was
+    derived and siblings decrypt), but THIS device's own reports on the server were
+    encrypted with an identity key the local cache no longer matches -- typically a
+    phone powered off for days whose server-side reports are stale, or a re-paired
+    device. A fresh secrets.json (account-wide re-auth) does NOT fix it, so when a
+    sibling proves the shared key is healthy the coordinator downgrades this to a
+    per-device warning instead of prompting for re-authentication.
+
+    Kept a DISTINCT subclass so the coordinator's sibling-success downgrade applies
+    ONLY here. Every OTHER ``DecryptionError`` -- identity-key derivation failures
+    (account-wide owner/shared key, e.g. "Identity key decryption failed.") and the
+    explicit shared-key subclasses -- stays on the account-wide reauth path, so a
+    new raise-site fails safe (escalates) rather than being silently suppressed.
     """
 
 
@@ -448,9 +462,7 @@ async def async_retrieve_identity_key(
             owner_key_info.version,
         )
         try:
-            owner_key_info = await async_get_owner_key(
-                cache=cache, force_refresh=True
-            )
+            owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
         except (InvalidTag, RuntimeError) as exc:
             raise _classify_owner_key_failure(exc, context="forced refresh") from exc
 
@@ -475,9 +487,7 @@ async def async_retrieve_identity_key(
             flipped_blob = flip_bits(raw_encrypted_identity_key, do_flip)
 
             # --- EIK Cache Lookup (Performance Optimization) ---
-            eik_cache_key = _get_eik_cache_key(
-                flipped_blob, owner_key_version, do_flip
-            )
+            eik_cache_key = _get_eik_cache_key(flipped_blob, owner_key_version, do_flip)
             cached_eik = _eik_cache.get(eik_cache_key)
             if cached_eik is not None:
                 _eik_cache_stats["hits"] += 1
@@ -529,10 +539,7 @@ async def async_retrieve_identity_key(
                 envelope_result = _try_unwrap_aesgcm_envelope(
                     flipped_blob, wrapping_key, device_id=device_id
                 )
-                if (
-                    envelope_result is not None
-                    and len(envelope_result) == _EIK_LEN
-                ):
+                if envelope_result is not None and len(envelope_result) == _EIK_LEN:
                     key_bytes = bytes(envelope_result)
                     _eik_cache[eik_cache_key] = key_bytes
                     _LOGGER.info(
@@ -573,9 +580,7 @@ async def async_retrieve_identity_key(
         # timeout or SSL teardown) is swallowed and the regular decrypt
         # error path continues unaffected, so it must not surface as a
         # user-facing WARNING.
-        _LOGGER.debug(
-            "Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc
-        )
+        _LOGGER.debug("Failed to retrieve E2EE metadata for diagnostics: %s", meta_exc)
 
     old_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", None)
     last_exc = decrypt_errors[-1] if decrypt_errors else None
@@ -1325,7 +1330,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # AES-EAX with different key derivation). Trying all candidates prevents
     # silent loss of all crowdsourced location data.
     all_identity_keys: list[bytes] = [
-        bytes(k) for k in (identity_key_candidates or [])
+        bytes(k)
+        for k in (identity_key_candidates or [])
         if k is not None and len(k) == _EIK_LEN
     ]
     # Track the active key; promote alternate candidates on success
@@ -1383,7 +1389,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     # guard. Intentionally a ValueError (config error, not an auth
                     # signal) so it is NOT counted as an own auth failure and does
                     # not trigger stale-key reauth escalation.
-                    raise ValueError("No identity key available for own-report decryption")
+                    raise ValueError(
+                        "No identity key available for own-report decryption"
+                    )
                 decrypted_location_raw = await _offload_decrypt_aes(
                     active_identity_key, encrypted_location
                 )
@@ -1399,7 +1407,8 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 decrypted_location_raw = None
                 _last_foreign_exc: Exception | None = None
                 for _candidate_idx, candidate_key in enumerate(
-                    all_identity_keys or ([active_identity_key] if active_identity_key else [])
+                    all_identity_keys
+                    or ([active_identity_key] if active_identity_key else [])
                 ):
                     try:
                         decrypted_location_raw = await _offload_decrypt_foreign(
@@ -1542,19 +1551,22 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
 
     # Diff-Review #1: When the device HAS its own encrypted reports and EVERY
     # one of them failed authentication (with not a single own-report success),
-    # the cached identity key no longer matches the server's reports. This is a
-    # genuine account-wide auth failure, distinct from the masked retrieve path
-    # above and from foreign/crowdsourced failures (which legitimately fail with
-    # other accounts' keys and must NOT escalate). Raise DecryptionError so the
-    # existing escalation machinery (coordinator poll/locate handlers and the FCM
-    # push handler, all gated by per-cycle counting + cooldown) can surface a
-    # reauth repair instead of silently returning empty every cycle.
+    # the cached identity key no longer matches THIS device's server reports --
+    # distinct from the masked retrieve path above and from foreign/crowdsourced
+    # failures (which legitimately fail with other accounts' keys and must NOT
+    # escalate). Raise the dedicated OwnReportIdentityMismatchError so the existing
+    # escalation machinery (coordinator poll/locate handlers and the FCM push
+    # handler, all gated by per-cycle counting + cooldown) surfaces a reauth repair
+    # instead of silently returning empty every cycle -- UNLESS a sibling device
+    # decrypts in the same poll cycle, which proves the account keys are healthy
+    # and lets the coordinator downgrade this device-local staleness to a warning
+    # (a fresh secrets.json cannot fix an offline/re-paired device anyway).
     if (
         _own_encrypted_report_count > 0
         and _own_auth_failures >= _own_encrypted_report_count
         and not _own_report_success
     ):
-        raise DecryptionError(
+        raise OwnReportIdentityMismatchError(
             "All own-report decryptions failed; the cached identity key no "
             "longer matches the server reports."
         )

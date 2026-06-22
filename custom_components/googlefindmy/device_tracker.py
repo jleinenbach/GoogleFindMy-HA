@@ -30,7 +30,6 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    ATTR_GPS_ACCURACY,
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
 )
@@ -50,7 +49,12 @@ from .const import (
     OPT_STALE_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
-from .coordinator import GoogleFindMyCoordinator, _as_ha_attributes
+from .coordinator import (
+    GoogleFindMyCoordinator,
+    _as_ha_attributes,
+    recorded_accuracy_pair,
+    resolve_seeded_accuracy,
+)
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
     _cloud_discovery_stable_key,
@@ -918,9 +922,19 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         lon = last_state.attributes.get(
             ATTR_LONGITUDE, last_state.attributes.get("longitude")
         )
-        acc = last_state.attributes.get(
-            ATTR_GPS_ACCURACY, last_state.attributes.get("gps_accuracy")
-        )
+        # Read the accuracy value AND its estimated-provenance flag from the
+        # same authoritative source as map_view and the snapshot builders:
+        # accuracy_m (the stable producer attribute) over the volatile core
+        # gps_accuracy, which Home Assistant clears on stale states. Reading the
+        # value from gps_accuracy alone dropped a real accuracy_m radius (and,
+        # guarded by ``acc is not None`` below, the paired flag) when reseeding
+        # the cache after a restart, the same decoupling closed elsewhere in
+        # PR #1124. Carrying the flag keeps a restored fallback radius
+        # distinguishable from a real measurement of the same value; legacy rows
+        # recorded before the flag carry estimated=None and we deliberately do
+        # not fabricate one (the downstream map_view legacy fallback handles
+        # that documented case).
+        acc, estimated = recorded_accuracy_pair(last_state.attributes)
 
         restored: dict[str, Any] = {}
         try:
@@ -928,8 +942,22 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 restored["latitude"] = float(lat)
                 restored["longitude"] = float(lon)
             if acc is not None:
-                # HA core accuracy attribute is an int (meters).
-                restored["accuracy"] = int(float(acc))
+                # Seed the coordinator cache, whose ``accuracy`` field is a
+                # sanitized float everywhere else (api/locate/fusion writers).
+                # resolve_seeded_accuracy couples sanitization with provenance
+                # the way the canonical _is_significant_update writer does
+                # (which this direct prime bypasses): it normalizes through the
+                # producer policy (safe_accuracy) -- avoiding the int() truncation
+                # that would drop a restored sub-meter real fix (e.g. 0.5m -> 0)
+                # below MIN_VALID_ACCURACY -- AND marks accuracy_estimated when
+                # that sanitization had to fall back, so a fabricated 200m radius
+                # cannot enter flagless and be reclassified as a real fix. An
+                # explicitly recorded flag still wins; a legacy *valid* value
+                # without a flag stays unflagged (map_view legacy fallback).
+                accuracy_value, estimated_flag = resolve_seeded_accuracy(acc, estimated)
+                restored["accuracy"] = accuracy_value
+                if estimated_flag is not None:
+                    restored["accuracy_estimated"] = estimated_flag
         except (TypeError, ValueError) as ex:
             _LOGGER.debug("Invalid restored coordinates for %s: %s", self.entity_id, ex)
             restored = {}

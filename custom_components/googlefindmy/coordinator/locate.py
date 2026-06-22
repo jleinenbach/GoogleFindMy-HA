@@ -38,7 +38,11 @@ from ..NovaApi.nova_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
-from .helpers.cache import SOUND_UUID_MAX_AGE_S, is_sound_uuid_expired
+from .helpers.cache import (
+    SOUND_UUID_MAX_AGE_S,
+    carry_reused_accuracy,
+    is_sound_uuid_expired,
+)
 from .helpers.geo import MIN_PHYSICAL_ACCURACY_M
 
 _LOGGER = logging.getLogger(__name__)
@@ -390,7 +394,10 @@ class LocateOperations(_MixinBase):
                                 )
                                 location_data["latitude"] = prev_location["latitude"]
                                 location_data["longitude"] = prev_location["longitude"]
-                                location_data["accuracy"] = prev_location["accuracy"]
+                                # Carry the producer flag with the reused accuracy so
+                                # a preserved estimated fallback is not reclassified
+                                # as a real measurement downstream.
+                                carry_reused_accuracy(location_data, prev_location)
                             else:
                                 if (
                                     "latitude" in replacement_attrs
@@ -423,7 +430,10 @@ class LocateOperations(_MixinBase):
                     if prev:
                         location_data.setdefault("latitude", prev.get("latitude"))
                         location_data.setdefault("longitude", prev.get("longitude"))
-                        location_data.setdefault("accuracy", prev.get("accuracy"))
+                        # Carry the producer flag with the reused accuracy under
+                        # setdefault semantics so a preserved estimated fallback
+                        # keeps its flag without clobbering a value already present.
+                        carry_reused_accuracy(location_data, prev, setdefault=True)
                         location_data["status"] = (
                             "Semantic location; preserving previous coordinates"
                         )

@@ -21,6 +21,7 @@ from custom_components.googlefindmy.coordinator.helpers.geo import (
     clamp,
     coerce_float,
     haversine_distance,
+    resolve_seeded_accuracy,
     safe_accuracy,
 )
 
@@ -398,3 +399,73 @@ class TestGeoIntegration:
 
         dist = haversine_distance(lat1, lon1, lat2, lon2)
         assert 479_000 < dist < 529_000
+
+
+class TestResolveSeededAccuracy:
+    """Tests for resolve_seeded_accuracy (write-side provenance coupler).
+
+    This helper is the structural fix for the recurring PR #1124 defect class:
+    a direct cache seed (prime_device_location_cache on restore) bypasses the
+    canonical _is_significant_update writer, so sanitization and the
+    accuracy_estimated provenance flag must be derived together here instead of
+    open-coding only safe_accuracy() and leaving a fabricated radius flagless.
+    """
+
+    def test_explicit_true_flag_wins(self) -> None:
+        """A recorded estimated=True survives even for a numerically valid value."""
+        accuracy, estimated = resolve_seeded_accuracy(200.0, True)
+        assert accuracy == 200.0
+        assert estimated is True
+
+    def test_explicit_false_flag_wins(self) -> None:
+        """A recorded estimated=False is preserved (real measurement)."""
+        accuracy, estimated = resolve_seeded_accuracy(15.0, False)
+        assert accuracy == 15.0
+        assert estimated is False
+
+    def test_invalid_value_overrides_explicit_false_flag(self) -> None:
+        """A sanitized fallback is marked estimated even over an explicit False.
+
+        Codex review of PR #1126: a stale recorder row can carry an explicit
+        ``accuracy_estimated=False`` next to an error-code ``gps_accuracy=0``.
+        The canonical ``_is_significant_update`` writer always marks a
+        fabricated fallback radius estimated, overriding the incoming flag, so
+        the seed-side mirror must do the same -- otherwise the 200m fallback
+        masquerades as a real measurement and map_view draws a solid circle.
+        """
+        accuracy, estimated = resolve_seeded_accuracy(0, False)
+        assert accuracy == DEFAULT_ACCURACY_FALLBACK_M
+        assert estimated is True
+
+    def test_invalid_value_without_flag_marks_estimated(self) -> None:
+        """The Codex fix: a flagless error-code value is marked estimated.
+
+        A legacy row predating accuracy_estimated with gps_accuracy=0 sanitizes
+        to the 200m fallback. Without this coupling the radius enters flagless
+        and map_view draws a solid circle for a fabricated measurement.
+        """
+        accuracy, estimated = resolve_seeded_accuracy(0, None)
+        assert accuracy == DEFAULT_ACCURACY_FALLBACK_M
+        assert estimated is True
+
+    def test_none_value_without_flag_marks_estimated(self) -> None:
+        """A missing value without a flag also sanitizes-and-marks estimated."""
+        accuracy, estimated = resolve_seeded_accuracy(None, None)
+        assert accuracy == DEFAULT_ACCURACY_FALLBACK_M
+        assert estimated is True
+
+    def test_valid_value_without_flag_stays_unflagged(self) -> None:
+        """A legacy valid measurement without a flag is not fabricated.
+
+        Returning None tells the caller to leave accuracy_estimated unset, so
+        the documented map_view legacy fallback stays in charge.
+        """
+        accuracy, estimated = resolve_seeded_accuracy(30, None)
+        assert accuracy == 30.0
+        assert estimated is None
+
+    def test_valid_submeter_value_without_flag_stays_unflagged(self) -> None:
+        """A valid sub-meter real fix is preserved and left unflagged."""
+        accuracy, estimated = resolve_seeded_accuracy(0.5, None)
+        assert accuracy == 0.5
+        assert estimated is None

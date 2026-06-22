@@ -1,6 +1,13 @@
 [tool.poetry]
 name = "googlefindmy-ha"
-version = "1.7.1"
+# Integration version: coupled triple. MUST be bumped together with
+# custom_components/googlefindmy/const.py INTEGRATION_VERSION and
+# custom_components/googlefindmy/manifest.json "version" on every release.
+# semantic-release manages this value on the `main` branch (see
+# [tool.semantic_release] version_toml below); on release branches it MUST be
+# bumped by hand alongside the other two. Canonical anchor:
+# custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
+version = "1.7.4"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -349,7 +356,10 @@ skip_covered = true
 # root-owned .storage path that CI does not hit, so CI total is >= 68.33 %.
 # Raised to 69 after the crypto-audit test suite (PR #1111) lifted CI total to
 # 69.14 % (measured 2026-06-16); floor tracks the new CI total to lock the gain.
-fail_under = 69
+# Raised to 70 with the accuracy_estimated producer-flag suite (PR #1124): the
+# new carry_reused_accuracy helper and chokepoint regression tests lift CI total
+# past 70 %; floor tracks the new CI total to lock the gain.
+fail_under = 70
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

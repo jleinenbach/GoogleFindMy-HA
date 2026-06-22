@@ -84,6 +84,9 @@ from .helpers.cache import (
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
 )
+from .helpers.geo import (
+    recorded_accuracy_pair,
+)
 from .helpers.stats import (
     ApiStatus,
     CryptoStatus,
@@ -385,6 +388,14 @@ def _as_ha_attributes(row: dict[str, Any] | None) -> dict[str, Any] | None:
         out["accuracy_m"] = acc
     if alt is not None:
         out["altitude_m"] = alt
+    # Producer flag: True when ``accuracy_m`` is the conservative fallback radius
+    # rather than a real measurement. Forwarded as a bool so the recorder
+    # persists it and map_view can read it from history. Only emitted when the
+    # producer actually set it; legacy rows without the key stay unflagged. The
+    # trailing None filter keeps a False value (False is not None).
+    estimated = r.get("accuracy_estimated")
+    if estimated is not None:
+        out["accuracy_estimated"] = bool(estimated)
     return {k: v for k, v in out.items() if v is not None}
 
 
@@ -471,13 +482,23 @@ def _sync_get_last_gps_from_history(
         last_seen_ts = _resolve_last_seen_from_attributes(
             attrs, last_state.last_updated.timestamp()
         )
-        return {
+        # Read accuracy and its estimated-provenance flag from the same
+        # authoritative source (accuracy_m over the volatile gps_accuracy) and
+        # carry the flag into the reconstructed row, so a recorded 200m fallback
+        # stays distinguishable from a real measurement once it re-enters the
+        # cache. Reading only gps_accuracy here dropped the flag and let the
+        # producer reclassify the fallback as real (PR #1124 defect class).
+        raw_accuracy, estimated = recorded_accuracy_pair(attrs)
+        row: dict[str, Any] = {
             "latitude": lat,
             "longitude": lon,
-            "accuracy": attrs.get("gps_accuracy"),
+            "accuracy": raw_accuracy,
             "last_seen": last_seen_ts,
             "status": "Using historical data",
         }
+        if estimated is not None:
+            row["accuracy_estimated"] = estimated
+        return row
     except Exception as err:
         _LOGGER.debug("History lookup failed for %s: %s", entity_id, err)
         return None
@@ -1505,7 +1526,12 @@ class GoogleFindMyCoordinator(
             if state:
                 lat = state.attributes.get("latitude")
                 lon = state.attributes.get("longitude")
-                acc = state.attributes.get("gps_accuracy")
+                # Same authoritative read as the history path: take accuracy
+                # from accuracy_m (stable producer attribute) over the volatile
+                # gps_accuracy and carry accuracy_estimated, so a fallback radius
+                # reused from the published state keeps its provenance instead of
+                # being reclassified as real (PR #1124 defect class).
+                acc, estimated = recorded_accuracy_pair(state.attributes)
                 last_seen_ts = _resolve_last_seen_from_attributes(
                     state.attributes, state.last_updated.timestamp()
                 )
@@ -1519,6 +1545,8 @@ class GoogleFindMyCoordinator(
                             "status": "Using current state",
                         }
                     )
+                    if estimated is not None:
+                        entry["accuracy_estimated"] = estimated
                     entry = _sanitize_decoder_row(entry)
                     snapshot.append(entry)
                     continue

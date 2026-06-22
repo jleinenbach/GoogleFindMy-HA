@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import json
+import re
 import sys
 from datetime import datetime
 from types import ModuleType, SimpleNamespace
@@ -956,3 +958,152 @@ async def test_redirect_missing_token_returns_bad_request(
     response = await view.get(SimpleNamespace(query={}), device_id="device123")
 
     assert response.status == 400
+
+
+# ---------------------------------------------------------------------------
+# Accuracy-circle feature: server field + three-layer client rendering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_location_row_marks_estimated_accuracy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each row exposes accuracy_estimated: real measurement vs. fallback radius.
+
+    The client needs this flag to draw accuracy circles only for real
+    measurements. A real gps_accuracy yields False; the Android error code 0.0
+    (normalized to the conservative fallback radius) yields True.
+    """
+
+    real = _StubState(latitude=10.0, longitude=20.0)
+    real.attributes["gps_accuracy"] = 30
+    real.attributes["last_seen"] = 1704067200.0
+
+    fallback = _StubState(latitude=50.0, longitude=60.0)
+    fallback.attributes["gps_accuracy"] = 0.0  # error code -> fallback radius
+    fallback.attributes["last_seen"] = 1704067260.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [real, fallback], {"accuracy": "0"}
+    )
+
+    assert response.status == 200
+    # Both points survive the disabled filter; one real, one estimated.
+    assert '"accuracy_estimated": false' in response.text
+    assert '"accuracy_estimated": true' in response.text
+
+
+@pytest.mark.asyncio
+async def test_map_html_has_three_accuracy_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rendered JS carries dots-fade, ambient rings and the focus disc."""
+
+    response = await _render_map_with_states(
+        monkeypatch, _precise_and_coarse_states(), {"accuracy": "0"}
+    )
+    html = response.text
+
+    # Two editorial/HA-sourced constants, each defined exactly once.
+    assert html.count("var FOCUS_FILL_OPACITY = 0.12;") == 1
+    assert html.count("var FADE_SPAN = 0.8;") == 1
+    assert "var focusCircle = null;" in html
+
+    # Layer 3: exactly one filled focus disc, coupled to the popup lifecycle.
+    assert "function setFocus(loc, latlng)" in html
+    assert "fillOpacity: FOCUS_FILL_OPACITY" in html
+    assert "marker.on('popupopen'" in html
+    assert "marker.on('popupclose'" in html
+
+    # Layer 2: ambient rings are stroke-only (no area fill -> no alpha stacking).
+    assert "fill: false" in html
+
+    # autoPan:false prevents the auto-opened popup from panning the map.
+    assert "{autoPan: false}" in html
+
+
+@pytest.mark.asyncio
+async def test_map_html_replaces_dead_marker_fade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dead/inverted fade is gone; the dot fade follows the HA rank model."""
+
+    response = await _render_map_with_states(
+        monkeypatch, _precise_and_coarse_states(), {"accuracy": "0"}
+    )
+    html = response.text
+
+    # The old dead variable and the hardcoded fill opacity must be gone.
+    assert "1.0 - (idx / locations.length * 0.5)" not in html
+    assert "fillOpacity: 0.8" not in html
+
+    # Dot fade uses the HA model and references FADE_SPAN (newest 1.0, oldest
+    # 1 - FADE_SPAN == 0.2). The ambient ring floor is 0 (idx/(n-1)), a
+    # deliberately different floor from the dots.
+    assert "(1 - FADE_SPAN) + (idx / (n - 1)) * FADE_SPAN" in html
+    assert "idx / (n - 1)" in html
+
+
+@pytest.mark.asyncio
+async def test_map_html_auto_focuses_newest_real_point(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The newest real-accuracy point auto-opens, as if it were clicked.
+
+    Auto-focus is no longer coupled to the last index: every non-estimated point
+    assigns ``autoFocusMarker`` and, because locations are sorted oldest->newest,
+    the last assignment selects the newest real point even when the newest point
+    overall is an estimated fallback (Codex #1124 finding 2).
+
+    Mutation guard: dropping the negation removes this exact substring and turns
+    the test red; re-coupling it to ``idx === n - 1`` is asserted against below.
+    """
+
+    response = await _render_map_with_states(
+        monkeypatch, _precise_and_coarse_states(), {"accuracy": "0"}
+    )
+    html = response.text
+
+    assert "if (!loc.accuracy_estimated) { autoFocusMarker = marker; }" in html
+    assert "idx === n - 1 && !loc.accuracy_estimated" not in html
+    assert "autoFocusMarker.openPopup();" in html
+
+
+def _extract_locations_json(html: str) -> list[dict[str, Any]]:
+    """Pull the `var locations = [...]` array back out of the rendered HTML."""
+
+    match = re.search(r"var locations = (\[.*?\]);", html, re.DOTALL)
+    assert match is not None, "locations array not found in rendered HTML"
+    return json.loads(match.group(1))
+
+
+@pytest.mark.asyncio
+async def test_newest_point_can_be_estimated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the newest point is estimated, the row is flagged accordingly.
+
+    Points are sorted ascending by last_seen, so the last array element is the
+    newest. The client uses accuracy_estimated of that element to decide whether
+    to auto-open a focus circle; here the newest is a fallback radius, so it must
+    be marked estimated (no misleading auto-circle).
+    """
+
+    older_real = _StubState(latitude=10.0, longitude=20.0)
+    older_real.attributes["gps_accuracy"] = 25
+    older_real.attributes["last_seen"] = 1704067200.0
+
+    newest_estimated = _StubState(latitude=50.0, longitude=60.0)
+    newest_estimated.attributes["gps_accuracy"] = 0.0  # error code -> fallback
+    newest_estimated.attributes["last_seen"] = 1704067260.0
+
+    response = await _render_map_with_states(
+        monkeypatch, [older_real, newest_estimated], {"accuracy": "0"}
+    )
+
+    assert response.status == 200
+    locations = _extract_locations_json(response.text)
+    assert len(locations) == 2
+    assert locations[0]["accuracy_estimated"] is False
+    assert locations[-1]["accuracy_estimated"] is True
