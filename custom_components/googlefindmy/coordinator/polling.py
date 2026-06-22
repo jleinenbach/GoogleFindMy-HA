@@ -53,6 +53,7 @@ from ..const import (
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    SharedKeyMismatchError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
     is_real_location_record,
@@ -406,6 +407,45 @@ class PollingOperations(_MixinBase):
         )
         return True
 
+    @staticmethod
+    def _is_account_wide_key_failure(error: DecryptionError | None) -> bool:
+        """True for shared-key failures that need a fresh secrets.json (account-wide).
+
+        ``SharedKeyMissingError`` and ``SharedKeyMismatchError`` mean the bundle's
+        shared key itself is missing or incompatible, so EVERY device's owner-key
+        unwrap is doomed regardless of which device is polled. A sibling that still
+        decrypts from cached owner/EIK material does NOT prove the shared key is
+        healthy, so -- unlike a plain per-device own-report ``DecryptionError`` -- a
+        shared-key failure must stay on the account-wide reauth path even when a
+        sibling succeeds. Single discriminator for both the cycle-error capture
+        priority and the escalation gate so the two cannot drift apart.
+        """
+        return isinstance(error, (SharedKeyMissingError, SharedKeyMismatchError))
+
+    @classmethod
+    def _prefer_account_wide_decrypt_error(
+        cls,
+        current: DecryptionError | None,
+        candidate: DecryptionError,
+    ) -> DecryptionError:
+        """Pick the cycle's representative decrypt error, account-wide first.
+
+        A single cycle can mix a per-device own-report failure (a phone powered off
+        for days) with an account-wide shared-key failure on another device. The
+        verdict downgrades only the per-device case on sibling success, so the
+        representative error must be the account-wide one whenever present.
+        Otherwise an earlier-polled offline device would mask a genuine shared-key
+        failure and suppress the reauth the user actually needs. Keeps the first
+        error of equal severity (stable, order-independent for same-class errors).
+        """
+        if current is None:
+            return candidate
+        if cls._is_account_wide_key_failure(
+            candidate
+        ) and not cls._is_account_wide_key_failure(current):
+            return candidate
+        return current
+
     def _resolve_cycle_decrypt_outcome(
         self,
         *,
@@ -418,26 +458,40 @@ class PollingOperations(_MixinBase):
         Performs the post-loop crypto-sensor and reauth-budget side effects and
         returns ``True`` iff the caller must escalate to ``ConfigEntryAuthFailed``.
 
-        Positive proof dominates (D7): if ANY device produced an authenticated
-        coordinate this cycle (``cycle_had_successful_decrypt``), the account-wide
-        shared key is provably healthy, so a sibling device's ``DecryptionError``
+        Positive proof dominates (D7), but ONLY for a plain per-device own-report
+        failure: if ANY device produced an authenticated coordinate this cycle
+        (``cycle_had_successful_decrypt``), a sibling's plain ``DecryptionError``
         -- e.g. a phone powered off for days whose own server reports no longer
         decrypt -- is a per-device condition that must NOT advance the account-wide
         reauth budget and must NOT trigger reauth. This mirrors the per-tracker
         ``StaleOwnerKeyError`` (``stale=True``) treatment ("other devices are
-        unaffected"). Only a decrypt failure with NOT A SINGLE successful sibling
-        is account-wide and counted toward the consecutive-cycle reauth budget.
+        unaffected").
 
-        Before this gate the account-wide counter was advanced whenever a decrypt
-        error was seen, regardless of sibling success, so a single offline device
-        dragged a healthy multi-device account across ``_MAX_DECRYPT_FAILURES`` and
-        tripped a spurious reauth (removing the offline device silenced it -- the
-        observed bug).
+        Explicit shared-key subclasses are the exception (see
+        ``_is_account_wide_key_failure``): ``SharedKeyMissingError`` and
+        ``SharedKeyMismatchError`` mean the bundle's shared key itself cannot unwrap
+        the owner key, so a sibling decrypting from cached owner/EIK material does
+        NOT prove the key is healthy. Such failures stay on the account-wide reauth
+        path even with sibling success -- otherwise a mixed cycle would strand the
+        broken device without ever prompting for fresh secrets.
+
+        Before the positive-proof gate the account-wide counter was advanced
+        whenever a decrypt error was seen, regardless of sibling success, so a
+        single offline device dragged a healthy multi-device account across
+        ``_MAX_DECRYPT_FAILURES`` and tripped a spurious reauth (removing the
+        offline device silenced it -- the observed bug).
         """
-        if cycle_decrypt_error is not None and not cycle_had_successful_decrypt:
-            # Account-wide stale/missing shared key: a decrypt failure persisted AND
-            # not one device decrypted this cycle. Advance the consecutive-cycle
-            # counter exactly once; let it escalate (cooldown-gated) on threshold.
+        account_wide_key_failure = self._is_account_wide_key_failure(
+            cycle_decrypt_error
+        )
+        if cycle_decrypt_error is not None and (
+            not cycle_had_successful_decrypt or account_wide_key_failure
+        ):
+            # Account-wide stale/missing shared key: either NOT ONE device decrypted
+            # this cycle, OR the failure is an explicit shared-key subclass that a
+            # sibling's cached-material success cannot refute. Advance the
+            # consecutive-cycle counter exactly once; escalate (cooldown-gated) on
+            # threshold.
             return self.note_decrypt_failure(
                 stale=False, error=cycle_decrypt_error, device=None
             )
@@ -1943,18 +1997,23 @@ class PollingOperations(_MixinBase):
                             last_exception = stale_err
                         continue
                     except DecryptionError as dec_err:
-                        # Account-wide stale/missing shared key. Only FLAG the cycle
-                        # here -- the account-wide failure counter is advanced exactly
-                        # once per cycle after the device loop (see below). Counting
-                        # per device would let a multi-device account cross
-                        # _MAX_DECRYPT_FAILURES within a single cycle and escalate on
-                        # the first poll, defeating the documented "consecutive
-                        # cycles" budget that gives the in-decrypt self-heal a few
-                        # cycles to recover an owner-key bump.
+                        # Stale/missing shared key (account-wide) OR a per-device
+                        # own-report failure. Only FLAG the cycle here -- the
+                        # account-wide failure counter is advanced exactly once per
+                        # cycle after the device loop (see below). Counting per device
+                        # would let a multi-device account cross _MAX_DECRYPT_FAILURES
+                        # within a single cycle and escalate on the first poll,
+                        # defeating the documented "consecutive cycles" budget that
+                        # gives the in-decrypt self-heal a few cycles to recover an
+                        # owner-key bump. Keep the account-wide shared-key subclass as
+                        # the cycle's representative error over a co-occurring
+                        # per-device failure so the resolver's sibling-success
+                        # downgrade cannot mask a genuine shared-key problem.
                         self._consecutive_timeouts = 0
                         cycle_failed = True
-                        if cycle_decrypt_error is None:
-                            cycle_decrypt_error = dec_err
+                        cycle_decrypt_error = self._prefer_account_wide_decrypt_error(
+                            cycle_decrypt_error, dec_err
+                        )
                         if last_exception is None:
                             last_exception = dec_err
                         continue

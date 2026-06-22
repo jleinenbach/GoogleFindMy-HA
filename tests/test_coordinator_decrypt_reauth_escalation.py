@@ -412,3 +412,98 @@ def test_resolve_per_device_failure_with_stale_key_keeps_sensor() -> None:
     # OK gate is suppressed by the stale-key flag: sensor stays as-is.
     assert stub._crypto_status_state == CryptoStatus.TRACKER_KEY_OUTDATED
     assert stub._last_decrypt_error is None
+
+
+@pytest.mark.parametrize(
+    ("error_factory", "expected_status"),
+    [
+        pytest.param(
+            lambda: SharedKeyMissingError("missing"),
+            CryptoStatus.SHARED_KEY_MISSING,
+            id="missing",
+        ),
+        pytest.param(
+            lambda: SharedKeyMismatchError("mismatch"),
+            CryptoStatus.SHARED_KEY_INVALID,
+            id="mismatch",
+        ),
+    ],
+)
+def test_resolve_account_wide_key_failure_escalates_despite_sibling(
+    error_factory: Callable[[], DecryptionError],
+    expected_status: CryptoStatus,
+) -> None:
+    """A shared-key failure stays account-wide even when a sibling decrypts.
+
+    ``SharedKeyMissingError`` / ``SharedKeyMismatchError`` mean the bundle's shared
+    key itself cannot unwrap the owner key, so a sibling decrypting from cached
+    owner/EIK material does NOT prove the key healthy. Unlike a plain per-device
+    ``DecryptionError``, positive proof must NOT downgrade it: the verdict has to
+    advance the budget every cycle and escalate at the threshold, otherwise the
+    broken device is stranded without a reauth prompt (the Codex finding).
+
+    Mutation gate: the pre-fix gate (``not cycle_had_successful_decrypt`` only)
+    returned False and cleared the budget here, so asserting an advancing counter
+    and a threshold escalation turns red if the shared-key carve-out is removed.
+    """
+    stub = _make_stub()
+
+    # Below threshold: account-wide failure counts up despite sibling success.
+    for attempt in range(1, _MAX_DECRYPT_FAILURES):
+        assert (
+            stub._resolve_cycle_decrypt_outcome(
+                cycle_decrypt_error=error_factory(),
+                cycle_had_successful_decrypt=True,
+                cycle_had_stale_key=False,
+            )
+            is False
+        )
+        assert stub._consecutive_decrypt_failures == attempt
+    stub._set_auth_state.assert_not_called()
+    # Sibling success must NOT heal the sensor while the shared key is broken; the
+    # concrete subclass maps to its diagnostic status (note_decrypt_failure).
+    assert stub._crypto_status_state == expected_status
+
+    # Threshold reached -> escalate to reauth.
+    assert (
+        stub._resolve_cycle_decrypt_outcome(
+            cycle_decrypt_error=error_factory(),
+            cycle_had_successful_decrypt=True,
+            cycle_had_stale_key=False,
+        )
+        is True
+    )
+    stub._set_auth_state.assert_called_once()
+
+
+def test_prefer_account_wide_decrypt_error_upgrades_per_device_to_shared_key() -> None:
+    """Capture priority: a shared-key failure wins over a per-device one.
+
+    A mixed cycle can poll an offline device (plain ``DecryptionError``) before the
+    device whose shared-key unwrap fails. First-capture-wins would let the resolver
+    see only the per-device error and wrongly downgrade on sibling success, so the
+    capture must upgrade to the account-wide subclass regardless of poll order.
+    """
+    per_device = DecryptionError("own reports failed")
+    shared_key = SharedKeyMismatchError("stale shared key")
+
+    # None seed -> take the first error, whatever its class.
+    assert (
+        PollingStub._prefer_account_wide_decrypt_error(None, per_device) is per_device
+    )
+    # Per-device captured first, shared-key seen later -> upgrade.
+    assert (
+        PollingStub._prefer_account_wide_decrypt_error(per_device, shared_key)
+        is shared_key
+    )
+    # Shared-key captured first, per-device seen later -> keep the account-wide one.
+    assert (
+        PollingStub._prefer_account_wide_decrypt_error(shared_key, per_device)
+        is shared_key
+    )
+    # Two account-wide errors -> stable, keep the first (order-independent).
+    other_shared = SharedKeyMissingError("missing")
+    assert (
+        PollingStub._prefer_account_wide_decrypt_error(shared_key, other_shared)
+        is shared_key
+    )
