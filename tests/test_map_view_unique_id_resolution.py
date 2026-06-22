@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import importlib.util
 import sys
@@ -300,7 +299,9 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return map_view
 
 
-def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_map_view_prefers_exact_unique_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Tracker selection must match explicit unique_id formats before fallback."""
 
     map_view = _load_map_view_module(monkeypatch)
@@ -369,13 +370,13 @@ def test_map_view_prefers_exact_unique_id(monkeypatch: pytest.MonkeyPatch) -> No
     view = map_view.GoogleFindMyMapView(hass)
 
     request = SimpleNamespace(query={"token": "valid"})
-    response = asyncio.run(view.get(request, device_id))
+    response = await view.get(request, device_id)
 
     assert response.status == 200
     assert history_calls == [["device_tracker.googlefindmy_primary"]]
 
 
-def test_map_view_uses_iso_last_seen_for_timeline(
+async def test_map_view_uses_iso_last_seen_for_timeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ISO last_seen strings must drive ordering and de-duplication."""
@@ -485,7 +486,7 @@ def test_map_view_uses_iso_last_seen_for_timeline(
     view = map_view.GoogleFindMyMapView(hass)
 
     request = SimpleNamespace(query={"token": "valid"})
-    response = asyncio.run(view.get(request, device_id))
+    response = await view.get(request, device_id)
 
     assert response.status == 200
     assert len(captured_locations) == 2

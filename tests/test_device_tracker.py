@@ -93,7 +93,7 @@ def test_find_tracker_entity_entry_uses_fallback(
     assert entry.unique_id.endswith(":tracker-42")
 
 
-def test_scanner_instantiates_tracker_for_known_registry_entry(
+async def test_scanner_instantiates_tracker_for_known_registry_entry(
     monkeypatch: pytest.MonkeyPatch,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
@@ -190,7 +190,7 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
         for task in scheduled:
             await task
 
-    asyncio.run(_exercise())
+    await _exercise()
 
     # Both main tracker and last location call find_tracker_entity_entry
     assert coordinator.lookup_calls == ["tracker-1", "tracker-1"]
@@ -212,7 +212,7 @@ def test_scanner_instantiates_tracker_for_known_registry_entry(
         assert task.done()
 
 
-def test_initial_snapshot_hydrates_registry_tracker(
+async def test_initial_snapshot_hydrates_registry_tracker(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
     """Startup population should still create a tracker entity when the registry already knows it."""
@@ -278,9 +278,7 @@ def test_initial_snapshot_hydrates_registry_tracker(
         added.append(list(entities))
         assert update_before_add is True
 
-    asyncio.run(
-        device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities)
-    )
+    await device_tracker.async_setup_entry(coordinator.hass, entry, _capture_entities)
 
     # Should have 2 entities per device: main tracker + last location
     assert added and len(added[0]) == 2
@@ -547,14 +545,10 @@ class _RestoreCoordinatorStub:
         self.config_entry = make_config_entry(entry_id="entry-restore")
         self.primed: dict[str, Any] = {}
 
-    def async_add_listener(
-        self, listener: Callable[[], None]
-    ) -> Callable[[], None]:
+    def async_add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
         return lambda: None
 
-    def prime_device_location_cache(
-        self, device_id: str, data: dict[str, Any]
-    ) -> None:
+    def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         self.primed["device_id"] = device_id
         self.primed["data"] = dict(data)
 

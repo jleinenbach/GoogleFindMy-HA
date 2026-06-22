@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -67,7 +66,9 @@ class _DummyEntityRegistry:
         return self._entity_ids.get((platform, domain, unique_id))
 
 
-def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_snapshot_uses_entry_scoped_unique_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Coordinator should rehydrate from HA state via entry-scoped tracker unique_id."""
 
     entity_registry = _DummyEntityRegistry()
@@ -95,10 +96,8 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     coordinator.location_poll_interval = 30
     coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-42", "name": "Pixel 8"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
     )
 
     assert len(result) == 1
@@ -112,7 +111,9 @@ def test_snapshot_uses_entry_scoped_unique_id(monkeypatch: pytest.MonkeyPatch) -
     )
 
 
-def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_snapshot_preserves_recorded_last_seen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A persisted last_seen attribute should win over last_updated."""
 
     entity_registry = _DummyEntityRegistry()
@@ -146,10 +147,8 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
     coordinator.location_poll_interval = 30
     coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-42", "name": "Pixel 8"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
     )
 
     entry = result[0]
@@ -158,7 +157,7 @@ def test_snapshot_preserves_recorded_last_seen(monkeypatch: pytest.MonkeyPatch) 
     assert entry["last_seen_utc"] == iso_seen
 
 
-def test_snapshot_logs_formats_when_entity_missing(
+async def test_snapshot_logs_formats_when_entity_missing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log should clarify which unique_id formats were considered when none match."""
@@ -180,10 +179,8 @@ def test_snapshot_logs_formats_when_entity_missing(
 
     caplog.set_level("DEBUG")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-99", "name": "Tablet"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-99", "name": "Tablet"}]
     )
 
     assert result[0]["status"] == "Waiting for location poll"
@@ -289,7 +286,7 @@ def test_history_helper_carries_accuracy_estimated_flag(
     assert result["accuracy_estimated"] is True
 
 
-def test_snapshot_current_state_carries_accuracy_estimated_flag(
+async def test_snapshot_current_state_carries_accuracy_estimated_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The live-state snapshot path must carry the producer accuracy_estimated flag.
@@ -328,10 +325,8 @@ def test_snapshot_current_state_carries_accuracy_estimated_flag(
     coordinator.location_poll_interval = 30
     coordinator.config_entry = make_config_entry(entry_id="entry-1")
 
-    result = asyncio.run(
-        coordinator._async_build_device_snapshot_with_fallbacks(
-            devices=[{"id": "device-42", "name": "Pixel 8"}]
-        )
+    result = await coordinator._async_build_device_snapshot_with_fallbacks(
+        devices=[{"id": "device-42", "name": "Pixel 8"}]
     )
 
     assert len(result) == 1
