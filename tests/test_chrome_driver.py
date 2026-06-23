@@ -229,3 +229,57 @@ def test_create_driver_headless_fallback_on_non_headless_mode(
     assert chrome_calls[3].binary_location == "/opt/chrome"
     assert "--headless" in chrome_calls[3].arguments
     assert "Strategy 4 (headless) failed" in " ".join(caplog.messages)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="characterizes Strategy-3 None-escalation bug; flips to GREEN in AP2",
+)
+def test_strategy3_escalates_to_none_when_strategy1_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterize the Strategy-3 ``version_main=None`` escalation bug.
+
+    When Strategy 1 and Strategy 2 fail transiently but a Chrome version was
+    detected (149), the current code reaches Strategy 3, which hardcodes
+    ``version_main=None``. undetected-chromedriver then fetches the latest
+    stable driver (e.g. 150) instead of the detected 149, causing a hard
+    version-mismatch abort.
+
+    This test pins the desired behavior: no ``Chrome(...)`` call may pass
+    ``version_main=None`` while a version is known. It is marked ``xfail``
+    here because the fix lands in AP2; the marker is removed there so the test
+    flips to a hard GREEN in the same commit as the fix.
+    """
+
+    recorded_versions: list[int | None] = []
+
+    monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
+    monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _: 149)
+    monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
+
+    fake_driver = object()
+
+    def chrome_stub(
+        *, options: FakeChromeOptions, version_main: int | None = None, **kwargs: object
+    ) -> object:
+        recorded_versions.append(version_main)
+        # Strategy 1 and Strategy 2 fail transiently; Strategy 3 (third call)
+        # succeeds, so the loop returns the fake driver from Strategy 3.
+        if len(recorded_versions) < 3:
+            raise SentinelError("transient driver start failure")
+        return fake_driver
+
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setattr(uc_module, "Chrome", chrome_stub)
+
+    driver = chrome_driver.create_driver(headless=True)
+
+    assert driver is fake_driver
+    # The third call is Strategy 3. Against today's code it records ``None``.
+    assert recorded_versions[-1] == 149, (
+        "Strategy 3 must reuse the detected version, not escalate to None"
+    )
+    assert None not in recorded_versions
