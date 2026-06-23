@@ -44,6 +44,11 @@ except ImportError:
 
 LOGGER = logging.getLogger(__name__)
 
+# Environment variable overrides for the layered resolution chain
+# (priority: CLI argument > environment variable > auto-detection).
+_ENV_CHROME_PATH = "GOOGLEFINDMY_CHROME_PATH"
+_ENV_CHROME_VERSION = "GOOGLEFINDMY_CHROME_VERSION"
+
 
 def _load_uc() -> Any:
     """Import undetected-chromedriver with a stub fallback.
@@ -305,13 +310,20 @@ def get_options(*, headless: bool = False) -> ChromeOptions:
     return chrome_options
 
 
-def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
+def get_driver(
+    chrome_path: str | None,
+    *,
+    chrome_version: int | None = None,
+    headless: bool = False,
+) -> WebDriver:
     """Initialize and return an undetected Chrome driver.
 
     Parameters
     ----------
-    chrome_path: str
+    chrome_path: str | None
         Path to the Chrome executable.
+    chrome_version: int | None
+        Optional explicit Chrome major version override (highest priority).
     headless: bool
         Whether to run the browser in headless mode.
 
@@ -325,7 +337,19 @@ def get_driver(chrome_path: str | None, *, headless: bool = False) -> WebDriver:
     if chrome_path:
         options.binary_location = chrome_path
 
-    return cast(WebDriver, _get_uc_module().Chrome(options=options, version_main=None))
+    # Apply the same resolution invariant as the main path: never escalate to
+    # version_main=None while a version is known (explicit/env/detected).
+    detected = get_chrome_version(chrome_path) if chrome_path else None
+    resolved_version, _source = _resolve_chrome_version(
+        explicit=chrome_version,
+        env_raw=os.environ.get(_ENV_CHROME_VERSION),
+        detected=detected,
+    )
+
+    return cast(
+        WebDriver,
+        _get_uc_module().Chrome(options=options, version_main=resolved_version),
+    )
 
 
 def _try_webdriver_manager_fallback() -> WebDriver | None:
@@ -407,7 +431,10 @@ def _quit_driver(driver: WebDriver | None) -> None:
 
 
 def create_driver(
-    chrome_path: str | None = None, *, headless: bool = False
+    chrome_path: str | None = None,
+    *,
+    chrome_version: int | None = None,
+    headless: bool = False,
 ) -> WebDriver:
     """Backward-compatible wrapper for driver creation with multiple fallbacks.
 
@@ -426,7 +453,11 @@ def create_driver(
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            return _create_driver_inner(chrome_path=chrome_path, headless=headless)
+            return _create_driver_inner(
+                chrome_path=chrome_path,
+                chrome_version=chrome_version,
+                headless=headless,
+            )
         except (PermissionError, OSError) as err:
             # WinError 32 (file in use) or WinError 183 (file already exists)
             err_str = str(err)
@@ -452,13 +483,79 @@ def create_driver(
             time.sleep(3)
 
     # Should not reach here, but satisfy type checker
-    return _create_driver_inner(chrome_path=chrome_path, headless=headless)
+    return _create_driver_inner(
+        chrome_path=chrome_path, chrome_version=chrome_version, headless=headless
+    )
 
 
 def _is_file_lock_error(err: BaseException) -> bool:
     """Check if an exception is a Windows file lock error (WinError 32/183)."""
     msg = str(err)
     return "WinError 32" in msg or "WinError 183" in msg
+
+
+def _parse_env_version(env_raw: str | None) -> int | None:
+    """Parse a ``GOOGLEFINDMY_CHROME_VERSION`` value into a major version int.
+
+    An unset, empty or whitespace-only value yields ``None``. A non-integer
+    value is ignored with a warning (so resolution falls through to the next
+    lower-priority source) rather than raising.
+    """
+    if env_raw is None:
+        return None
+    stripped = env_raw.strip()
+    if not stripped:
+        return None
+    try:
+        return int(stripped)
+    except ValueError:
+        LOGGER.warning(
+            "Ignoring invalid %s=%r (not an integer); "
+            "falling back to lower-priority source",
+            _ENV_CHROME_VERSION,
+            env_raw,
+        )
+        return None
+
+
+def _resolve_chrome_version(
+    *, explicit: int | None, env_raw: str | None, detected: int | None
+) -> tuple[int | None, str]:
+    """Resolve the effective Chrome major version and its provenance.
+
+    Priority: ``explicit`` (CLI) > environment variable > ``detected`` (auto).
+    Returns ``(version, source)`` where ``source`` is one of ``"cli"``,
+    ``"env"``, ``"auto"`` or ``"none"``. An invalid/empty env value is skipped
+    (see :func:`_parse_env_version`).
+    """
+    if explicit is not None:
+        return explicit, "cli"
+    parsed_env = _parse_env_version(env_raw)
+    if parsed_env is not None:
+        return parsed_env, "env"
+    if detected is not None:
+        return detected, "auto"
+    return None, "none"
+
+
+def _resolve_chrome_path(
+    *, explicit: str | None, env_raw: str | None, detected: str | None
+) -> tuple[str | None, str]:
+    """Resolve the effective Chrome binary path and its provenance.
+
+    Priority: ``explicit`` (CLI) > environment variable > ``detected`` (auto).
+    An empty/whitespace-only env value is treated as unset. The three sources
+    are kept separate on purpose: collapsing ``explicit or detected`` before
+    consulting the env var would make the env unreachable between CLI and auto.
+    Returns ``(path, source)``.
+    """
+    if explicit:
+        return explicit, "cli"
+    if env_raw and env_raw.strip():
+        return env_raw.strip(), "env"
+    if detected:
+        return detected, "auto"
+    return None, "none"
 
 
 def _try_strategy_default(
@@ -563,43 +660,79 @@ def _try_strategy_headless(
 
 
 def _create_driver_inner(
-    chrome_path: str | None = None, *, headless: bool = False
+    chrome_path: str | None = None,
+    *,
+    chrome_version: int | None = None,
+    headless: bool = False,
 ) -> WebDriver:
-    """Internal driver creation, orchestrating the strategy fallbacks."""
+    """Internal driver creation, orchestrating the strategy fallbacks.
+
+    Resolution follows the layered chain CLI argument > environment variable >
+    auto-detection for both the Chrome path and the Chrome version. The version
+    is resolved independently of the path so an explicit version override still
+    applies when no binary path can be located.
+    """
     # Kill any existing Chrome processes to avoid conflicts
     _kill_existing_chrome_processes()
 
-    resolved_path = chrome_path or find_chrome()
-    version_main = get_chrome_version(resolved_path) if resolved_path else None
-    if version_main:
-        LOGGER.debug("Detected Chrome version: %d", version_main)
+    # Resolve path and version from their three independent sources. The sources
+    # are kept separate (no chrome_path-or-find_chrome collapse) so the env var
+    # can take effect between an explicit argument and auto-detection.
+    resolved_path, _path_source = _resolve_chrome_path(
+        explicit=chrome_path,
+        env_raw=os.environ.get(_ENV_CHROME_PATH),
+        detected=find_chrome(),
+    )
+    detected_version = get_chrome_version(resolved_path) if resolved_path else None
+    if detected_version:
+        LOGGER.debug("Detected Chrome version: %d", detected_version)
+    resolved_version, version_source = _resolve_chrome_version(
+        explicit=chrome_version,
+        env_raw=os.environ.get(_ENV_CHROME_VERSION),
+        detected=detected_version,
+    )
+    if resolved_version is not None and resolved_path is None:
+        LOGGER.warning(
+            "Chrome version override is set (version=%s, source=%s) but no Chrome "
+            "binary path could be resolved; undetected-chromedriver must locate "
+            "Chrome on its own (binary_location/browser_executable_path unset).",
+            resolved_version,
+            version_source,
+        )
 
     # Build the ordered list of strategy attempts. Strategy 2 only applies when
-    # a path is resolved; strategy 4 (headless retry) only when not already
-    # headless. Each attempt returns (driver, saw_non_file_lock_error).
+    # a path is resolved; strategy 3 (let uc pick the version) only when no
+    # version could be resolved -- with a known version it would duplicate
+    # strategy 1 and, in the old code, escalate to the latest stable driver;
+    # strategy 4 (headless retry) only when not already headless. Every strategy
+    # uses resolved_version so we never escalate to None while a version is
+    # known. Each attempt returns (driver, saw_non_file_lock_error).
     attempts: list[Callable[[], tuple[WebDriver | None, bool]]] = [
         lambda: _try_strategy_default(
-            resolved_path=resolved_path, version_main=version_main, headless=headless
+            resolved_path=resolved_path,
+            version_main=resolved_version,
+            headless=headless,
         )
     ]
     if resolved_path:
         attempts.append(
             lambda: _try_strategy_explicit_path(
                 resolved_path=resolved_path,
-                version_main=version_main,
+                version_main=resolved_version,
                 headless=headless,
             )
         )
-    attempts.append(
-        lambda: _try_strategy_no_version(
-            resolved_path=resolved_path, headless=headless
+    if resolved_version is None:
+        attempts.append(
+            lambda: _try_strategy_no_version(
+                resolved_path=resolved_path, headless=headless
+            )
         )
-    )
     if not headless:
         LOGGER.info("Trying headless mode...")
         attempts.append(
             lambda: _try_strategy_headless(
-                resolved_path=resolved_path, version_main=version_main
+                resolved_path=resolved_path, version_main=resolved_version
             )
         )
 
@@ -625,13 +758,15 @@ def _create_driver_inner(
             "A previous ChromeDriver process may still be running."
         )
 
-    # All strategies failed
+    # All strategies failed -- report detected vs. used version and its source
+    # so the failure is diagnosable instead of just echoing Selenium's raw line.
     raise RuntimeError(
         "Failed to start ChromeDriver after all attempts.\n"
         "Possible solutions:\n"
         "1. Make sure Google Chrome is installed and up-to-date\n"
         "2. Try: pip install --upgrade undetected-chromedriver selenium webdriver-manager\n"
         f"3. Current detected path: {resolved_path or 'None'}\n"
-        f"4. Current detected version: {version_main or 'Unknown'}\n"
+        f"4. detected: {detected_version or 'Unknown'}; "
+        f"requested/used: {resolved_version or 'Unknown'}; source: {version_source}\n"
         "5. Check if Chrome is blocked by antivirus or firewall"
     )
