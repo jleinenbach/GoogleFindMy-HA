@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from importlib import import_module
 from typing import Any
 
 import pytest
@@ -238,35 +239,20 @@ async def test_config_flow_round_trip_strips_owner_key_space(
 
 
 # ---------------------------------------------------------------------------
-# RED characterization tests for the D1 gap and the D2 understated warning.
+# D1/D2 single-key enforcement tests.
 #
 # Design decision (single-key inversion, v5): the presence of ``shared_key`` is
 # the only gate that decides whether a pasted secrets bundle is importable. An
 # owner-only bundle without a ``shared_key`` is a non-renewable dead end and must
 # be blocked; conversely a bundle that carries a ``shared_key`` but lacks (or has
 # a stale) ``owner_key`` is tolerated because the integration can fetch/refresh
-# the owner key itself.
-#
-# Today's code does NOT enforce that rule, so these tests assert the *target*
-# behavior and are therefore expected to fail. They are marked
-# ``xfail(strict=True)`` so that once AP3/AP4 land the fix, the now-passing tests
-# turn into ``xpassed`` -> ``failed`` under strict mode, forcing the GREEN flip
-# to be made explicit.
+# the owner key itself. The D2 seeding warning names the real outage scope
+# (immediate FMDN loss plus the rotation-driven late outage for own devices).
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "D1 gap: _interpret_credentials_choice currently accepts a secrets "
-        "bundle that has a valid email and token but no shared_key. Under the "
-        "v5 single-key rule both owner-missing and owner-present inputs must be "
-        "blocked with the 'keys_missing' error. Flips to xpass once AP3/AP4 add "
-        "the shared_key gate."
-    ),
-)
-def test_d1_shared_missing_currently_accepted_xfail() -> None:
-    """Nail down the D1 gap: shared_key-less bundles must block under v5.
+def test_d1_shared_missing_blocked() -> None:
+    """The D1 single-key rule: shared_key-less bundles block under v5.
 
     ``_interpret_credentials_choice`` is a pure function, so no ConfigEntry or
     hass stub is required. Two input classes are pinned, both of which carry a
@@ -317,27 +303,24 @@ class _CapturingCache:
         self.saved[name] = value
 
 
+def _seeding_shared_missing_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> list[str]:
+    """Return the emitted missing-shared_key warning messages."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "shared_key" in record.getMessage()
+    ]
+
+
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "D2 understatement: when shared_key is missing, _async_save_secrets_data "
-        "warns only about FMDN crowdsourced reports and omits the rotation-driven "
-        "late outage. This test pins the current incomplete wording; it flips to "
-        "xpass once AP3/AP4 broaden the warning to cover the rotation outage."
-    ),
-)
-async def test_d2_seeding_warning_understates_outage_xfail(
+async def test_d2_seeding_warning_names_rotation_outage_when_owner_present(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Nail down the D2 understatement in the seeding warning text.
-
-    The current warning only claims an FMDN ("crowdsourced") restriction and
-    does not mention the rotation-driven late outage that follows once the
-    existing key rotates. We pin the present incomplete wording so the GREEN
-    flip becomes visible once the message is broadened.
-    """
-    from custom_components.googlefindmy import __init__ as integration_init
+    """D2 fix: an owner-only (shared_key missing) bundle warns about the
+    rotation-driven late outage, not only the immediate FMDN restriction."""
+    integration_init = import_module("custom_components.googlefindmy")
 
     cache = _CapturingCache()
     secrets_bundle = {
@@ -350,17 +333,435 @@ async def test_d2_seeding_warning_understates_outage_xfail(
     with caplog.at_level("WARNING"):
         await integration_init._async_save_secrets_data(cache, secrets_bundle)
 
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelname == "WARNING" and "shared_key" in record.getMessage()
-    ]
+    warnings = _seeding_shared_missing_warnings(caplog)
     assert warnings, "Expected a missing-shared_key warning to be emitted"
     message = warnings[0]
-    # The current text understates the outage: it only mentions the FMDN
-    # restriction and does not surface the rotation-driven late outage.
-    assert "FMDN network (crowdsourced) location reports will fail to decrypt" in message
-    assert "rotat" not in message.lower(), (
-        "Today's warning omits the rotation outage; once it is added this "
-        "assertion fails and the strict xfail flips to a forced GREEN."
+    # The corrected wording now surfaces the rotation-driven late outage.
+    assert "rotat" in message.lower()
+    assert "will fail" in message
+
+
+@pytest.mark.asyncio
+async def test_d2_seeding_warning_names_total_outage_when_owner_missing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D2 fix: a bundle with neither key warns that no location can be
+    decrypted at all."""
+    integration_init = import_module("custom_components.googlefindmy")
+
+    cache = _CapturingCache()
+    secrets_bundle = {
+        "google_email": "user@example.com",
+        "username": "user@example.com",
+        # neither owner_key nor shared_key present.
+    }
+
+    with caplog.at_level("WARNING"):
+        await integration_init._async_save_secrets_data(cache, secrets_bundle)
+
+    warnings = _seeding_shared_missing_warnings(caplog)
+    assert warnings, "Expected a missing-shared_key warning to be emitted"
+    message = warnings[0]
+    assert "No location can be decrypted" in message
+    # The total-outage variant must not claim a (non-existent) rotation grace
+    # period.
+    assert "rotat" not in message.lower()
+
+
+@pytest.mark.asyncio
+async def test_d2_seeding_warning_silent_when_shared_present(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D2 fix: a bundle that carries a shared_key emits no seeding warning."""
+    integration_init = import_module("custom_components.googlefindmy")
+
+    cache = _CapturingCache()
+    secrets_bundle = {
+        "google_email": "user@example.com",
+        "username": "user@example.com",
+        "owner_key": "AABBCC",
+        "shared_key": "DDEEFF",
+    }
+
+    with caplog.at_level("WARNING"):
+        await integration_init._async_save_secrets_data(cache, secrets_bundle)
+
+    assert not _seeding_shared_missing_warnings(caplog), (
+        "A complete bundle (shared_key present) must not warn about a missing "
+        "shared_key."
     )
+
+
+# ---------------------------------------------------------------------------
+# AP2: unit coverage for the _secrets_key_status helper (four input classes).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("bundle", "expected"),
+    [
+        ({}, (False, False)),  # both missing
+        ({"shared_key": "AABB"}, (True, False)),  # shared only
+        ({"owner_key": "CCDD"}, (False, True)),  # owner only
+        ({"shared_key": "AABB", "owner_key": "CCDD"}, (True, True)),  # both
+    ],
+)
+def test_secrets_key_status_four_classes(
+    bundle: dict[str, Any], expected: tuple[bool, bool]
+) -> None:
+    """The helper reports presence for each of the four key combinations."""
+    assert config_flow._secrets_key_status(bundle) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", "\n\t", 123, None, b"AABB", ["AABB"]],
+)
+def test_secrets_key_status_typechecks_presence(value: Any) -> None:
+    """Only a non-empty string (after stripping) counts as a present key."""
+    has_shared, has_owner = config_flow._secrets_key_status(
+        {"shared_key": value, "owner_key": value}
+    )
+    assert has_shared is False
+    assert has_owner is False
+
+
+# ---------------------------------------------------------------------------
+# AP3: call-site integration coverage for async_step_secrets_json.
+#
+# shared-missing (owner missing OR present) -> errors["base"] == "keys_missing"
+# shared-present -> the flow proceeds to the device-selection entry path.
+# ---------------------------------------------------------------------------
+
+
+def _make_secrets_flow(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any]]:
+    """Build a ConfigFlow wired with the canonical _FlowHass stub pattern."""
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    class _ConfigEntries(ConfigEntriesDomainUniqueIdLookupMixin):
+        def __init__(self) -> None:
+            attach_config_entries_flow_manager(self)
+
+        def async_entries(self, domain: str) -> list[Any]:
+            assert domain == config_flow.DOMAIN
+            return []
+
+    class _FlowHass:
+        def __init__(self) -> None:
+            prepare_flow_hass_config_entries(
+                self,
+                _ConfigEntries,
+                frame_module=frame,
+            )
+
+    hass = _FlowHass()
+    flow = config_flow.ConfigFlow()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.context = {}
+    flow._available_devices = [("Device", "device-id")]  # type: ignore[attr-defined]
+    set_config_flow_unique_id(flow, None)
+
+    async def _set_unique_id(value: str, *, raise_on_progress: bool = False) -> None:
+        set_config_flow_unique_id(flow, value)
+
+    async def _create_entry(
+        *,
+        title: str,
+        data: dict[str, Any],
+        options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        captured["result"] = {"title": title, "data": data, "options": options}
+        return {"type": "create_entry", "title": title, "data": data}
+
+    flow.async_set_unique_id = _set_unique_id  # type: ignore[assignment]
+    flow._abort_if_unique_id_configured = lambda **_: None  # type: ignore[attr-defined]
+    flow.async_create_entry = _create_entry  # type: ignore[assignment]
+    return flow, captured
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_secrets_json_step_blocks_when_shared_missing(
+    monkeypatch: pytest.MonkeyPatch, with_owner: bool
+) -> None:
+    """async_step_secrets_json rejects a shared_key-less paste with keys_missing.
+
+    Both owner classes (owner missing and owner present) are blocked, since the
+    single-key rule gates only on the shared_key.
+    """
+    flow, captured = _make_secrets_flow(monkeypatch)
+
+    secrets_payload: dict[str, Any] = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/FROM_SECRETS",
+    }
+    if with_owner:
+        secrets_payload["owner_key"] = "AABBCC"
+
+    result = await flow.async_step_secrets_json(
+        {"secrets_json": json.dumps(secrets_payload)}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "keys_missing"}
+    assert "result" not in captured
+
+
+@pytest.mark.asyncio
+async def test_secrets_json_step_accepts_when_shared_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """async_step_secrets_json accepts a shared_key bundle and proceeds to entry."""
+    flow, captured = _make_secrets_flow(monkeypatch)
+
+    secrets_payload = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/FROM_SECRETS",
+        "shared_key": "DDEEFF",
+    }
+
+    first = await flow.async_step_secrets_json(
+        {"secrets_json": json.dumps(secrets_payload)}
+    )
+    if inspect.isawaitable(first):
+        first = await first
+    assert isinstance(first, dict)
+    # No key error: the flow advanced to the device-selection form.
+    assert first.get("errors", {}) == {}
+
+    final = await flow.async_step_device_selection({})
+    if inspect.isawaitable(final):
+        final = await final
+    assert isinstance(final, dict)
+    assert final.get("type") == "create_entry"
+    assert captured["result"]["data"][DATA_SECRET_BUNDLE]["shared_key"] == "DDEEFF"
+
+
+# ---------------------------------------------------------------------------
+# AP3e: call-site integration coverage for async_step_credentials
+# (options "Refresh credentials"). Reuses the canonical options-flow harness.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_owner", [False, True])
+async def test_credentials_step_blocks_when_shared_missing(
+    monkeypatch: pytest.MonkeyPatch, with_owner: bool
+) -> None:
+    """async_step_credentials rejects a shared_key-less refresh in the field slot.
+
+    The error lands in the new_secrets_json field slot (not base) and no entry
+    update / reload is performed.
+    """
+    from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
+    from tests.test_options_flow_credentials_cache import (
+        _DummyEntry,
+        _DummyHass,
+        _MemoryCache,
+    )
+
+    cache = _MemoryCache()
+    entry = _DummyEntry(
+        entry_id="entry-1",
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+        },
+        cache=cache,
+    )
+    hass = _DummyHass(entry, cache)
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _fail_pick(*args: Any, **kwargs: Any) -> str | None:
+        raise AssertionError("token validation must not run for a blocked bundle")
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fail_pick)
+
+    payload: dict[str, Any] = {
+        "google_email": "user@example.com",
+        "oauth_token": "oauth-token-from-secrets-123456",
+    }
+    if with_owner:
+        payload["owner_key"] = "AABBCC"
+
+    result = await flow.async_step_credentials(
+        {"new_secrets_json": json.dumps(payload), "subentry": TRACKER_SUBENTRY_KEY}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"new_secrets_json": "keys_missing"}
+    assert not hass.config_entries.updated_payloads
+    assert not hass.config_entries.reloaded
+
+
+@pytest.mark.asyncio
+async def test_credentials_step_accepts_when_shared_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """async_step_credentials accepts a shared_key refresh and finalizes."""
+    from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
+    from tests.test_options_flow_credentials_cache import (
+        _DummyEntry,
+        _DummyHass,
+        _MemoryCache,
+    )
+
+    cache = _MemoryCache()
+    entry = _DummyEntry(
+        entry_id="entry-1",
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+        },
+        cache=cache,
+    )
+    hass = _DummyHass(entry, cache)
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _fake_pick(
+        hass: Any,
+        email: str,
+        candidates: list[tuple[str, str]],
+        *,
+        secrets_bundle: dict[str, Any] | None = None,
+    ) -> str | None:
+        return candidates[0][1] if candidates else None
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
+
+    payload = {
+        "google_email": "user@example.com",
+        "oauth_token": "oauth-token-from-secrets-123456",
+        "shared_key": "DDEEFF",
+    }
+
+    result = await flow.async_step_credentials(
+        {"new_secrets_json": json.dumps(payload), "subentry": TRACKER_SUBENTRY_KEY}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    # _finalize_success was reached: the entry was updated with the new bundle.
+    assert hass.config_entries.updated_payloads
+    updated = hass.config_entries.updated_payloads[-1]
+    assert updated[DATA_SECRET_BUNDLE]["shared_key"] == "DDEEFF"
+    await hass.drain_tasks()
+
+
+@pytest.mark.asyncio
+async def test_credentials_step_shared_present_but_no_token_is_invalid_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared_key-bearing bundle with no plausible token still fails on tokens.
+
+    This pins the branch that follows the single-key gate: the gate passes (the
+    shared_key is present) but the candidate-token check then rejects the bundle
+    with ``invalid_token`` in the base slot.
+    """
+    from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
+    from tests.test_options_flow_credentials_cache import (
+        _DummyEntry,
+        _DummyHass,
+        _MemoryCache,
+    )
+
+    cache = _MemoryCache()
+    entry = _DummyEntry(
+        entry_id="entry-1",
+        data={
+            CONF_GOOGLE_EMAIL: "user@example.com",
+            CONF_OAUTH_TOKEN: "oauth-original-token-123456",
+        },
+        cache=cache,
+    )
+    hass = _DummyHass(entry, cache)
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    async def _fail_pick(*args: Any, **kwargs: Any) -> str | None:
+        raise AssertionError("token validation must not run without candidates")
+
+    monkeypatch.setattr(config_flow, "async_pick_working_token", _fail_pick)
+
+    payload = {
+        "google_email": "user@example.com",
+        # shared_key present so the gate passes, but no plausible token.
+        "shared_key": "DDEEFF",
+    }
+
+    result = await flow.async_step_credentials(
+        {"new_secrets_json": json.dumps(payload), "subentry": TRACKER_SUBENTRY_KEY}
+    )
+    if inspect.isawaitable(result):
+        result = await result
+
+    assert isinstance(result, dict)
+    assert result.get("errors") == {"base": "invalid_token"}
+    assert not hass.config_entries.updated_payloads
+
+
+# ---------------------------------------------------------------------------
+# AP3c: discovery validator coverage for the single-key gate.
+#
+# shared-missing (owner missing OR present) -> DiscoveryFlowError("keys_missing")
+# shared-present -> the discovery payload validates normally.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("with_owner", [False, True])
+def test_discovery_payload_blocks_when_shared_missing(with_owner: bool) -> None:
+    """A discovered bundle without a shared_key is rejected with keys_missing."""
+    secrets: dict[str, Any] = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/DISCOVERY",
+    }
+    if with_owner:
+        secrets["owner_key"] = "AABBCC"
+
+    with pytest.raises(config_flow.DiscoveryFlowError) as exc_info:
+        config_flow._normalize_and_validate_discovery_payload(
+            {DATA_SECRET_BUNDLE: secrets}
+        )
+    assert exc_info.value.reason == "keys_missing"
+
+
+def test_discovery_payload_accepts_when_shared_present() -> None:
+    """A discovered bundle with a shared_key validates normally."""
+    secrets = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/DISCOVERY",
+        "shared_key": "DDEEFF",
+    }
+    result = config_flow._normalize_and_validate_discovery_payload(
+        {DATA_SECRET_BUNDLE: secrets}
+    )
+    assert result.email == "user@example.com"
+    assert result.secrets_bundle is not None
+    assert result.secrets_bundle["shared_key"] == "DDEEFF"

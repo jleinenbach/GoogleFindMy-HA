@@ -69,6 +69,7 @@
       "invalid_auth": "אימות לא תקין. נא לספק טוקן חדש ו/או להיכנס שוב.",
       "invalid_token": "טוקן/אימייל לא תקין או שחסרים שדות נדרשים.",
       "invalid_json": "פורמט JSON לא תקין בתוכן secrets.json.",
+      "keys_missing": "secrets.json אינו מכיל מפתח הצפנה (shared_key); לא ניתן לפענח מיקומים. צור אותו מחדש עם אחזור מלא של המפתחות: כלי ה-CLI המצורף (main.py) מאחזר את שני המפתחות אוטומטית, או ב-GoogleFindMyTools בחר התקן לאיתור לפני הייצוא.",
       "no_devices": "לא נמצאו התקנים. יש לוודא ששירות Find My Device מופעל בחשבון Google שלך.",
       "cannot_connect": "נכשל החיבור אל API של Google. ייתכן שזה זמני - נא לנסות שוב מאוחר יותר.",
       "dependency_not_ready": "תלויות נדרשות של השילוב חסרות. יש להתקין את דרישות Google Find My Device ולהפעיל מחדש את Home Assistant.",
@@ -316,6 +317,7 @@
     },
     "error": {
       "invalid_json": "פורמט JSON לא תקין בתוכן secrets.json.",
+      "keys_missing": "secrets.json אינו מכיל מפתח הצפנה (shared_key); לא ניתן לפענח מיקומים. צור אותו מחדש עם אחזור מלא של המפתחות: כלי ה-CLI המצורף (main.py) מאחזר את שני המפתחות אוטומטית, או ב-GoogleFindMyTools בחר התקן לאיתור לפני הייצוא.",
       "invalid": "האימות נכשל. אנא בדוק את הקלט שלך.",
       "invalid_auth": "אימות לא תקין. נא לספק טוקן חדש ו/או להיכנס שוב.",
       "cannot_connect": "נכשל החיבור ל-API של Google.",

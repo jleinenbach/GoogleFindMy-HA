@@ -69,6 +69,7 @@
       "invalid_auth": "Nieprawidłowe uwierzytelnienie. Podaj nowy token i/lub zaloguj się ponownie.",
       "invalid_token": "Nieprawidłowy token/e-mail lub brakuje wymaganych pól.",
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
+      "keys_missing": "secrets.json nie zawiera klucza szyfrowania (shared_key); lokalizacji nie można odszyfrować. Wygeneruj go ponownie z pełnym pobraniem kluczy: dołączone narzędzie CLI (main.py) pobiera oba klucze automatycznie lub w GoogleFindMyTools wybierz urządzenie do zlokalizowania przed wyeksportowaniem.",
       "no_devices": "Nie znaleziono urządzeń. Upewnij się, że „Znajdź moje urządzenie” jest włączone na Twoim koncie Google.",
       "cannot_connect": "Nie udało się połączyć z API Google. Może to być problem tymczasowy — spróbuj ponownie później.",
       "dependency_not_ready": "Brakuje wymaganych zależności integracji. Zainstaluj wymagania Google Find My Device i uruchom ponownie Home Assistant.",
@@ -316,6 +317,7 @@
     },
     "error": {
       "invalid_json": "Nieprawidłowy format JSON w zawartości pliku secrets.json.",
+      "keys_missing": "secrets.json nie zawiera klucza szyfrowania (shared_key); lokalizacji nie można odszyfrować. Wygeneruj go ponownie z pełnym pobraniem kluczy: dołączone narzędzie CLI (main.py) pobiera oba klucze automatycznie lub w GoogleFindMyTools wybierz urządzenie do zlokalizowania przed wyeksportowaniem.",
       "invalid": "Walidacja nie powiodła się. Sprawdź swoje dane.",
       "invalid_auth": "Nieprawidłowe uwierzytelnienie. Podaj nowy token i/lub zaloguj się ponownie.",
       "cannot_connect": "Nie udało się połączyć z API Google.",

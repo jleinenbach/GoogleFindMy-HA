@@ -210,6 +210,45 @@ else:
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
 
 
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Atomically write ``data`` as JSON to ``path`` with 0600 permissions.
+
+    The standalone ``secrets.json`` carries OAuth/AAS tokens, so an interrupted
+    write (process abort, full disk) must never leave a truncated or empty file
+    behind. The data is first written to a temporary file in the *same*
+    directory (``os.replace`` is only atomic within a single filesystem), then
+    flushed and ``fsync``-ed, then renamed onto the target. On any failure the
+    temporary artifact is removed so no orphan ``*.tmp`` lingers next to the
+    real file. ``tempfile.mkstemp`` creates the temp file with 0600, which the
+    rename preserves; the explicit ``os.chmod`` keeps the mode correct even if
+    the target already existed with looser permissions.
+    """
+    import json  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, str(path))
+        os.chmod(path, 0o600)
+    except BaseException:
+        # Clean up the temp artifact on any failure (errors *and* interrupts);
+        # the rename either fully succeeded or never happened, so removing the
+        # leftover temp keeps the directory free of orphans without touching
+        # the existing target file.
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _register_file_cache(entry_id: str = "") -> object:
     """Create a file-backed TokenCache and register it for standalone CLI use.
 
@@ -277,9 +316,7 @@ def _register_file_cache(entry_id: str = "") -> object:
             if self._load_failed and not self._data:
                 return  # Don't overwrite valid file with empty data
             self._load_failed = False
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._path, "w", encoding="utf-8") as fh:
-                json.dump(self._data, fh, indent=2)
+            _atomic_write_json(self._path, self._data)
 
         # --- async interface expected by nbe_list_devices / nova_request ---
 
@@ -434,9 +471,7 @@ def _ensure_authenticated() -> None:
     data.pop("aas_token", None)
 
     # 3) Persist to secrets.json
-    secrets_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(secrets_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
+    _atomic_write_json(secrets_path, data)
 
     print("\nCredentials saved. Continuing...\n")
 
@@ -513,6 +548,73 @@ async def _ensure_shared_key(cache: object) -> None:
         username=username if isinstance(username, str) else None,
     )
     print("Encryption key saved.\n")
+
+
+async def _ensure_owner_key(cache: object) -> None:
+    """Eagerly fetch the owner key so the generated bundle is complete.
+
+    Mirrors :func:`_ensure_shared_key`: called once during CLI startup after the
+    shared key is available. The owner-key fetch is non-interactive (a SPOT API
+    call plus a decrypt with the already-retrieved shared key, no browser), so
+    it is cheap to perform eagerly. Functionally the shared key alone suffices
+    for the HA integration (the owner key is derivable at runtime); fetching it
+    here is a robustness/completeness step so a single CLI run yields a bundle
+    that carries both keys.
+
+    Beyond the runtime-scoped ``owner_key_{username}`` cache entry (which
+    ``async_get_owner_key`` writes itself), this also stores the owner key as a
+    top-level ``owner_key`` hex string. That top-level field is the only form
+    the paste/seeding import reads (``__init__._async_save_secrets_data``), so
+    writing it keeps the generated ``secrets.json`` paste-compatible.
+    """
+    existing = await cache.get("owner_key")  # type: ignore[attr-defined]
+    if existing:
+        return
+    username = await cache.get("username")  # type: ignore[attr-defined]
+    if isinstance(username, str) and username:
+        scoped = await cache.get(f"owner_key_{username}")  # type: ignore[attr-defined]
+        if scoped:
+            return
+    print("Retrieving owner key...\n")
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (  # noqa: PLC0415
+        async_get_owner_key,
+    )
+
+    info = await async_get_owner_key(cache=cache)  # type: ignore[arg-type]
+    # Persist the top-level paste-compatible hex form (bundle-inherently
+    # version-less, matching externally produced Google bundles).
+    await cache.set("owner_key", info.key.hex())  # type: ignore[attr-defined]
+    print("Owner key saved.\n")
+
+
+async def _ensure_vault_keys(cache: object) -> None:
+    """Eagerly obtain both vault keys, exiting cleanly on any vault failure.
+
+    Wraps the eager shared-key and owner-key retrieval at the CLI terminal
+    point. The vault/login step can fail in several ways (``RuntimeError`` from
+    ``shared_key_retrieval``, ``ValueError`` from hex/base64 decoding, or
+    ``ConfigEntryAuthFailed`` from the SPOT auth path); rather than surfacing a
+    raw traceback, this prints an actionable message and exits with status 1.
+    ``except Exception`` deliberately does *not* catch ``KeyboardInterrupt``
+    (a ``BaseException``), so a user-initiated abort still propagates.
+
+    No tokens are deleted on failure: the AAS/oauth tokens are durable by design
+    (``_FileCache._SOFT_INVALIDATE_KEYS``); removing them would force an
+    expensive full OAuth login on the next run.
+    """
+    try:
+        await _ensure_shared_key(cache)
+        await _ensure_owner_key(cache)
+    except Exception:  # noqa: BLE001
+        print(
+            "\nError: vault key retrieval failed.\n"
+            "Could not obtain the encryption keys from Google's vault.\n"
+            "\n"
+            "Please re-run the tool and complete the Google sign-in when the "
+            "browser opens.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 async def _clear_stale_adm_token(cache: object) -> None:
@@ -717,7 +819,9 @@ if __name__ == "__main__":
             # cookie has a very short TTL and is invalidated once a new Chrome
             # session is opened, so the exchange must happen immediately.
             await _ensure_aas_token(_file_cache)
-            await _ensure_shared_key(_file_cache)
+            # Eagerly obtain both vault keys (shared + owner); a vault failure
+            # exits cleanly without deleting the durable AAS/oauth tokens.
+            await _ensure_vault_keys(_file_cache)
             await _clear_stale_adm_token(_file_cache)
             fcm = await _setup_fcm_receiver(_file_cache)
             try:

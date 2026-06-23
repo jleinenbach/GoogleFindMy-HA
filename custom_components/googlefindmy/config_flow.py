@@ -1252,6 +1252,34 @@ def _extract_fcm_credentials_from_secrets(
     return None
 
 
+def _secrets_key_status(parsed: dict[str, Any]) -> tuple[bool, bool]:
+    """Report which E2EE keys are present in a parsed secrets bundle.
+
+    The single-key rule: ``has_shared`` is the only gate that decides whether a
+    bundle is importable. A bundle without a ``shared_key`` is a non-renewable
+    dead end (the owner key can only be refreshed with the shared key), so it
+    must be blocked regardless of the owner key. ``has_owner`` does NOT gate the
+    validation; it only selects the wording of the D2 seeding warning (an
+    owner-only bundle decrypts own-device locations until the owner key rotates,
+    whereas a bundle with neither key decrypts nothing).
+
+    A value counts as present only when it is a non-empty string after stripping
+    surrounding whitespace; no further structural assumptions are made about the
+    bundle.
+
+    Args:
+        parsed: A parsed (and normally already whitespace-normalized) bundle.
+
+    Returns:
+        A ``(has_shared, has_owner)`` tuple of booleans.
+    """
+
+    def _present(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    return _present(parsed.get("shared_key")), _present(parsed.get("owner_key"))
+
+
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -1421,6 +1449,13 @@ def _interpret_credentials_choice(
             parsed = normalize_secrets_bundle(parsed)
         except (json.JSONDecodeError, TypeError):
             return "secrets", None, None, "invalid_json"
+
+        has_shared, _has_owner = _secrets_key_status(parsed)
+        if not has_shared:
+            # Single-key rule: a bundle without a shared_key is a non-renewable
+            # dead end (the owner key can never be refreshed) and is blocked,
+            # regardless of whether an owner_key is present.
+            return "secrets", None, None, "keys_missing"
 
         email = _extract_email_from_secrets(parsed) or ""
         cands = _extract_oauth_candidates_from_secrets(parsed)
@@ -1691,6 +1726,12 @@ def _normalize_and_validate_discovery_payload(
         # cleanup. A stray space in owner_key/shared_key breaks AES-GCM
         # decryption. normalize_secrets_bundle is idempotent and copies its input.
         secrets_dict = dict(normalize_secrets_bundle(secrets_raw))
+        # Single-key rule (parity with the paste/options import surfaces): a
+        # discovered bundle without a shared_key is a non-renewable dead end and
+        # is rejected here instead of being accepted as a valid discovery.
+        has_shared, _has_owner = _secrets_key_status(secrets_dict)
+        if not has_shared:
+            raise DiscoveryFlowError("keys_missing")
         secrets_bundle = MappingProxyType(secrets_dict)
         email_from_secrets = _extract_email_from_secrets(secrets_dict)
         if email_from_secrets:
@@ -3623,9 +3664,11 @@ class ConfigFlow(
                                             )
                                         else:
                                             _LOGGER.warning(
-                                                "Reauth for %s: no shared_key in secrets bundle — "
-                                                "FMDN crowdsourced reports cannot be decrypted. "
-                                                "Re-run GoogleFindMyTools to obtain the shared_key first.",
+                                                "Reauth for %s: no shared_key in secrets bundle. "
+                                                "Crowdsourced/FMDN locations cannot be decrypted now; "
+                                                "own-device locations will fail when the owner key rotates "
+                                                "(it can only be refreshed with the shared_key). "
+                                                "Re-import a complete secrets.json.",
                                                 fixed_email,
                                             )
                                         success_reason = self.context.get(
@@ -5845,8 +5888,19 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             except Exception:
                                 errors["new_secrets_json"] = "invalid_json"
                             else:
-                                cands = _extract_oauth_candidates_from_secrets(parsed)
-                                if not cands:
+                                has_shared, _has_owner = _secrets_key_status(parsed)
+                                if not has_shared:
+                                    # Single-key rule: reject a shared_key-less
+                                    # bundle before any persist/reload. Field
+                                    # slot (like invalid_json) because it is a
+                                    # correctable paste, not a bundle/network
+                                    # state.
+                                    errors["new_secrets_json"] = "keys_missing"
+                                elif not (
+                                    cands := _extract_oauth_candidates_from_secrets(
+                                        parsed
+                                    )
+                                ):
                                     errors["base"] = "invalid_token"
                                 else:
                                     try:

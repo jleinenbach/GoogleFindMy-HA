@@ -69,6 +69,7 @@
       "invalid_auth": "Authentification invalide. Fournissez un nouveau jeton et/ou reconnectez-vous.",
       "invalid_token": "Identifiants invalides (jeton/e-mail) ou champs requis manquants.",
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
+      "keys_missing": "secrets.json ne contient pas la clé de chiffrement (shared_key) ; les positions ne peuvent pas être déchiffrées. Régénérez-le avec une récupération complète des clés : la CLI fournie (main.py) récupère les deux clés automatiquement, ou dans GoogleFindMyTools sélectionnez un appareil à localiser avant l'export.",
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
       "dependency_not_ready": "Des dépendances de l’intégration sont manquantes. Installez les dépendances requises de Google Find My Device et redémarrez Home Assistant.",
@@ -316,6 +317,7 @@
     },
     "error": {
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
+      "keys_missing": "secrets.json ne contient pas la clé de chiffrement (shared_key) ; les positions ne peuvent pas être déchiffrées. Régénérez-le avec une récupération complète des clés : la CLI fournie (main.py) récupère les deux clés automatiquement, ou dans GoogleFindMyTools sélectionnez un appareil à localiser avant l'export.",
       "invalid": "Échec de la validation. Veuillez vérifier vos saisies.",
       "invalid_auth": "Authentification invalide. Fournissez un nouveau jeton et/ou reconnectez-vous.",
       "cannot_connect": "Échec de la connexion à l’API Google.",

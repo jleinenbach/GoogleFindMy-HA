@@ -160,6 +160,9 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 >While going through the process in main.py to authenticate, you **MUST** go through **2 login processes!**  After the first login is successful, your available devices will be listed.  You must complete the next step to display location data for one of your devices.  You will then login again.  After you complete this step, you should see valid location data for your device, followed by several errors that are not important.  ONLY at this point are you ready to move on to the next step!
 3. Copy the entire contents of the secrets.json file.
     - Specifically, open the file in a text editor, select all, and copy.
+> [!IMPORTANT]
+> The encryption key (`shared_key`) is only retrieved during the **second** login, which happens when you actively **select a device to locate**. If you stop after the device list appears (skipping that step), the resulting `secrets.json` has no `shared_key` and Home Assistant will reject the import with a `keys_missing` error, because locations cannot be decrypted without it.
+> As an alternative to the external GoogleFindMyTools, the bundled CLI (`custom_components/googlefindmy/main.py`) fetches **both** keys automatically in a single run, without requiring you to select a device manually, so it is the more robust way to generate a complete `secrets.json`.
 
 ### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
 4. Add the integration to your Home Assistant install.

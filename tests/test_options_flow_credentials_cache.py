@@ -464,6 +464,9 @@ def test_options_flow_secrets_reauth_strips_owner_key_space(
             "google_email": "user@example.com",
             "oauth_token": "oauth-token-from-secrets-123456",
             "owner_key": "AA BB\nCC ",
+            # A shared_key is required for the bundle to pass the single-key
+            # import gate; this test only asserts whitespace normalization.
+            "shared_key": "DDEEFF",
             "username": "  Keep Me  ",
         }
         result = await flow.async_step_credentials(
@@ -531,6 +534,9 @@ def test_options_flow_secrets_reauth_guard_error_fallback_normalizes(
             "google_email": "user@example.com",
             "oauth_token": "oauth-token-from-secrets-123456",
             "owner_key": "AA BB CC",
+            # A shared_key is required to pass the single-key import gate; this
+            # test exercises the multi-entry-guard fallback normalization.
+            "shared_key": "DDEEFF",
         }
         result = await flow.async_step_credentials(
             {"new_secrets_json": json.dumps(payload), "subentry": TRACKER_SUBENTRY_KEY}

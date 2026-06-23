@@ -69,6 +69,7 @@
       "invalid_auth": "Autenticação inválida. ",
       "invalid_token": "Token/e-mail inválido fornecido ou campos obrigatórios ausentes.",
       "invalid_json": "Formato JSON inválido no conteúdo do secrets.json.",
+      "keys_missing": "secrets.json não contém a chave de criptografia (shared_key); não é possível descriptografar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "no_devices": "Nenhum dispositivo encontrado. ",
       "cannot_connect": "Falha ao conectar-se à API do Google. ",
       "dependency_not_ready": "As dependências de integração necessárias estão faltando. ",
@@ -316,6 +317,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON inválido no conteúdo do secrets.json.",
+      "keys_missing": "secrets.json não contém a chave de criptografia (shared_key); não é possível descriptografar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "invalid": "A validação falhou. ",
       "invalid_auth": "Autenticação inválida. ",
       "cannot_connect": "Falha ao conectar-se à API do Google.",
