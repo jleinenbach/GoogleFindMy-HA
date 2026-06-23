@@ -14,7 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from custom_components.googlefindmy.chrome_driver import create_driver, safe_quit_driver
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     from selenium.webdriver.remote.webdriver import WebDriver
 
 

@@ -23,7 +23,7 @@ from custom_components.googlefindmy.KeyBackup.shared_key_request import (
     get_security_domain_request_url,
 )
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     from selenium.webdriver.remote.webdriver import WebDriver
 
 

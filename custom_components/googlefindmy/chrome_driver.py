@@ -19,7 +19,7 @@ from selenium.webdriver.remote.webdriver import WebDriver as RemoteWebDriver
 
 # Platform-specific import for Windows registry access
 _winreg: ModuleType | None = None
-if sys.platform == "win32":
+if sys.platform == "win32":  # pragma: no cover - Windows-only import
     import winreg as _winreg
 
 # Optional imports for webdriver-manager fallback
@@ -483,7 +483,7 @@ def create_driver(
             time.sleep(3)
 
     # Should not reach here, but satisfy type checker
-    return _create_driver_inner(
+    return _create_driver_inner(  # pragma: no cover - loop always returns or raises
         chrome_path=chrome_path, chrome_version=chrome_version, headless=headless
     )
 

@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # pragma: no cover - import-time typing block
     from selenium.webdriver.remote.webdriver import WebDriver
 
 
@@ -20,7 +20,7 @@ sys.path.insert(0, current_dir)
 
 # Also add parent directories to handle custom_components structure
 parent_dir = os.path.dirname(current_dir)
-if "custom_components" in current_dir:
+if "custom_components" in current_dir:  # pragma: no cover - import-time path setup
     # If we're inside custom_components, add the parent of custom_components
     sys.path.insert(0, os.path.dirname(parent_dir))
 
