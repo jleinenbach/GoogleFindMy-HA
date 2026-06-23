@@ -109,13 +109,19 @@ def _reset_uc_cache(module: Any | None = None) -> None:
 type ChromeOptions = Any
 
 
-def get_chrome_version(chrome_path: str) -> int | None:
+def get_chrome_version(chrome_path: str, *, prefer_binary: bool = False) -> int | None:
     """Get Chrome version from executable.
 
     Parameters
     ----------
     chrome_path: str
         Path to the Chrome executable.
+    prefer_binary: bool
+        When ``True``, skip the Windows registry lookup and query the given
+        binary directly via ``--version``. Set this for an explicit/env path
+        override: the registry reports the registered default Chrome, which may
+        differ from the overridden binary. Auto-detection leaves this ``False``
+        so the registry-first fast path is preserved (no behavior change).
 
     Returns
     -------
@@ -124,8 +130,10 @@ def get_chrome_version(chrome_path: str) -> int | None:
     """
     try:
         if platform.system() == "Windows":
-            # Try to get version from registry first
-            if _winreg is not None:
+            # Try the registry first only for auto-detected Chrome. For an
+            # explicit/env override the registry may report a different
+            # binary's version, so query the selected binary directly instead.
+            if _winreg is not None and not prefer_binary:
                 try:
                     key = _winreg.OpenKey(
                         _winreg.HKEY_CURRENT_USER, r"Software\Google\Chrome\BLBeacon"
@@ -339,7 +347,11 @@ def get_driver(
 
     # Apply the same resolution invariant as the main path: never escalate to
     # version_main=None while a version is known (explicit/env/detected).
-    detected = get_chrome_version(chrome_path) if chrome_path else None
+    # chrome_path here is always an explicit override, so query the binary
+    # directly (prefer_binary) instead of trusting the Windows registry.
+    detected = (
+        get_chrome_version(chrome_path, prefer_binary=True) if chrome_path else None
+    )
     resolved_version, _source = _resolve_chrome_version(
         explicit=chrome_version,
         env_raw=os.environ.get(_ENV_CHROME_VERSION),
@@ -713,12 +725,19 @@ def _create_driver_inner(
     # Resolve path and version from their three independent sources. The sources
     # are kept separate (no chrome_path-or-find_chrome collapse) so the env var
     # can take effect between an explicit argument and auto-detection.
-    resolved_path, _path_source = _resolve_chrome_path(
+    resolved_path, path_source = _resolve_chrome_path(
         explicit=chrome_path,
         env_raw=os.environ.get(_ENV_CHROME_PATH),
         detected=find_chrome(),
     )
-    detected_version = get_chrome_version(resolved_path) if resolved_path else None
+    # For an explicit/env path override, bypass the Windows registry so the
+    # overridden binary's own version is detected (the registry reports the
+    # registered default Chrome). Auto-detection keeps the registry-first path.
+    detected_version = (
+        get_chrome_version(resolved_path, prefer_binary=path_source != "auto")
+        if resolved_path
+        else None
+    )
     if detected_version:
         LOGGER.debug("Detected Chrome version: %d", detected_version)
     resolved_version, version_source = _resolve_chrome_version(

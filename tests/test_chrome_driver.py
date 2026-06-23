@@ -149,7 +149,7 @@ def test_create_driver_fallback_logs_and_raises_runtime_error(
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     # Mock get_chrome_version to return None (can't detect version)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _, **_k: None)
     # Disable webdriver-manager fallback
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
@@ -202,7 +202,7 @@ def test_create_driver_headless_fallback_on_non_headless_mode(
     # Mock _kill_existing_chrome_processes to avoid actual process killing
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     # Mock get_chrome_version to return None (can't detect version)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _, **_k: None)
     # Disable webdriver-manager fallback
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
@@ -254,7 +254,7 @@ def test_strategy3_does_not_escalate_to_none_when_version_known(
 
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _: 149)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _, **_k: 149)
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_PATH", raising=False)
     monkeypatch.delenv("GOOGLEFINDMY_CHROME_VERSION", raising=False)
@@ -492,6 +492,54 @@ def test_get_chrome_version_windows_no_match_returns_none(
     assert chrome_driver.get_chrome_version("C:/chrome.exe") is None
 
 
+def test_get_chrome_version_windows_prefer_binary_skips_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``prefer_binary=True`` bypasses the registry and queries the binary.
+
+    The registry reports the registered default Chrome. For an explicit/env
+    path override the overridden binary may carry a different version, so the
+    binary's own ``--version`` must win. The fake ``winreg`` raises if touched,
+    proving the registry branch is skipped entirely.
+    """
+
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+
+    class _DefaultWinreg:
+        """Registry that successfully reports the registered default Chrome (152)."""
+
+        HKEY_CURRENT_USER = 1
+
+        @staticmethod
+        def OpenKey(root: Any, sub: str) -> Any:
+            return object()
+
+        @staticmethod
+        def QueryValueEx(key: Any, name: str) -> tuple[str, int]:
+            return "152.0.99.7", 1
+
+        @staticmethod
+        def CloseKey(key: Any) -> None:
+            return None
+
+    monkeypatch.setattr(chrome_driver, "_winreg", _DefaultWinreg)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(stdout="Chrome 149.0.7827.155"),
+    )
+
+    # The registry would have returned the default 152; with prefer_binary the
+    # overridden binary's own version (149) must win instead. Without the skip
+    # this would return 152, so the assertion is mutation-sharp.
+    assert (
+        chrome_driver.get_chrome_version(
+            "C:/portable/chrome.exe", prefer_binary=True
+        )
+        == 149
+    )
+
+
 # ---------------------------------------------------------------------------
 # _kill_existing_chrome_processes
 # ---------------------------------------------------------------------------
@@ -647,7 +695,7 @@ def test_get_driver_passes_resolved_version_and_binary(
         return fake_driver
 
     monkeypatch.setattr(uc_module, "Chrome", fake_chrome)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: 140)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 140)
 
     driver = chrome_driver.get_driver("/opt/chrome", chrome_version=149)
 
@@ -679,6 +727,36 @@ def test_get_driver_without_path_uses_detected_none(
 
     assert captured["binary_location"] is None
     assert captured["version_main"] is None
+
+
+def test_get_driver_detects_explicit_binary_with_prefer_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``get_driver`` always queries an explicit path binary directly.
+
+    The ``chrome_path`` argument here is always an explicit override, so the
+    call site must pass ``prefer_binary=True`` to bypass the Windows registry.
+    """
+
+    captured: dict[str, Any] = {}
+    uc_module = chrome_driver._get_uc_module()
+    monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
+    monkeypatch.setattr(
+        uc_module,
+        "Chrome",
+        lambda *, options, version_main=None, **kwargs: object(),
+    )
+
+    def spy(path: str, *, prefer_binary: bool = False) -> int:
+        captured["path"] = path
+        captured["prefer_binary"] = prefer_binary
+        return 149
+
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", spy)
+
+    chrome_driver.get_driver("/opt/portable/chrome")
+
+    assert captured == {"path": "/opt/portable/chrome", "prefer_binary": True}
 
 
 # ---------------------------------------------------------------------------
@@ -1172,7 +1250,7 @@ def test_version_precedence(
 ) -> None:
     records = _stub_uc_capture(monkeypatch)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: detected)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: detected)
     if env is not None:
         monkeypatch.setenv("GOOGLEFINDMY_CHROME_VERSION", env)
 
@@ -1198,13 +1276,51 @@ def test_path_precedence(
 ) -> None:
     records = _stub_uc_capture(monkeypatch)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: detected)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     if env is not None:
         monkeypatch.setenv("GOOGLEFINDMY_CHROME_PATH", env)
 
     chrome_driver.create_driver(chrome_path=explicit, headless=True)
 
     assert records[0]["binary_location"] == expected_path
+
+
+@pytest.mark.parametrize(
+    ("explicit", "env", "expected_prefer"),
+    [
+        ("/cli/chrome", None, True),  # explicit override -> query binary
+        (None, "/env/chrome", True),  # env override -> query binary
+        (None, None, False),  # auto-detected -> registry-first preserved
+    ],
+)
+def test_prefer_binary_follows_path_source(
+    monkeypatch: pytest.MonkeyPatch,
+    explicit: str | None,
+    env: str | None,
+    expected_prefer: bool,
+) -> None:
+    """The version lookup bypasses the registry only for explicit/env paths.
+
+    Auto-detected paths keep ``prefer_binary=False`` (registry-first), while an
+    explicit CLI argument or the env override must set ``prefer_binary=True`` so
+    the overridden binary's own version is detected.
+    """
+
+    _stub_uc_capture(monkeypatch)
+    captured: dict[str, bool] = {}
+    monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/auto/chrome")
+
+    def spy(path: str, *, prefer_binary: bool = False) -> int:
+        captured["prefer_binary"] = prefer_binary
+        return 149
+
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", spy)
+    if env is not None:
+        monkeypatch.setenv("GOOGLEFINDMY_CHROME_PATH", env)
+
+    chrome_driver.create_driver(chrome_path=explicit, headless=True)
+
+    assert captured["prefer_binary"] is expected_prefer
 
 
 def test_strategy3_passes_none_only_when_unresolvable(
@@ -1225,7 +1341,7 @@ def test_strategy3_passes_none_only_when_unresolvable(
     monkeypatch.setattr(uc_module, "Chrome", chrome_stub)
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
     with pytest.raises(RuntimeError):
@@ -1243,7 +1359,7 @@ def test_version_override_without_path_warns(
     caplog.set_level(logging.WARNING)
     records = _stub_uc_capture(monkeypatch)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
 
     chrome_driver.create_driver(chrome_version=149, headless=True)
 
@@ -1257,7 +1373,7 @@ def test_env_var_applied_without_cli(monkeypatch: pytest.MonkeyPatch) -> None:
 
     records = _stub_uc_capture(monkeypatch)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setenv("GOOGLEFINDMY_CHROME_PATH", "/env/chrome")
     monkeypatch.setenv("GOOGLEFINDMY_CHROME_VERSION", "148")
 
@@ -1273,7 +1389,7 @@ def test_invalid_env_version_warns_and_falls_back(
     caplog.set_level(logging.WARNING)
     records = _stub_uc_capture(monkeypatch)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: 151)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 151)
     monkeypatch.setenv("GOOGLEFINDMY_CHROME_VERSION", "garbage")
 
     chrome_driver.create_driver(headless=True)
@@ -1288,7 +1404,7 @@ def test_empty_env_version_treated_as_unset(
 ) -> None:
     records = _stub_uc_capture(monkeypatch)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: "/opt/chrome")
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: 151)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 151)
     monkeypatch.setenv("GOOGLEFINDMY_CHROME_VERSION", "   ")
 
     chrome_driver.create_driver(headless=True)
@@ -1310,7 +1426,7 @@ def test_final_error_message_contains_provenance(
     )
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -1337,7 +1453,7 @@ def test_final_error_logs_version_mismatch_hint(
     )
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
 
     with pytest.raises(RuntimeError):
@@ -1361,7 +1477,7 @@ def test_create_driver_uses_webdriver_manager_fallback(
     )
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setattr(
         chrome_driver, "_try_webdriver_manager_fallback", lambda: fallback_driver
     )
@@ -1381,7 +1497,7 @@ def test_get_driver_invariant_with_and_without_version(
         lambda *, options, version_main=None, **k: captured.append(version_main)
         or object(),
     )
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: 151)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 151)
 
     chrome_driver.get_driver("/opt/chrome", chrome_version=149)
     chrome_driver.get_driver("/opt/chrome")
@@ -1486,7 +1602,7 @@ def test_create_driver_inner_strategy_returns_no_driver_no_error(
     fake_driver = object()
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setattr(
         chrome_driver,
         "_try_strategy_default",
@@ -1518,7 +1634,7 @@ def test_create_driver_inner_all_file_lock_raises_permission_on_windows(
     )
     monkeypatch.setattr(chrome_driver, "_kill_existing_chrome_processes", lambda: None)
     monkeypatch.setattr(chrome_driver, "find_chrome", lambda: None)
-    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p: None)
+    monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: None)
     monkeypatch.setattr(chrome_driver, "_WEBDRIVER_MANAGER_AVAILABLE", False)
     monkeypatch.setattr(platform, "system", lambda: "Windows")
 
