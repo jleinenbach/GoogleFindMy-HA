@@ -326,6 +326,36 @@ The integration provides a couple of Home Assistant Actions for use with automat
 - Check if devices have moved recently (Find My devices may not update GPS when stationary)
 - Check battery levels (low battery may disable GPS reporting)
 
+### Chrome/ChromeDriver version mismatch (standalone auth scripts)
+When you run the standalone helper scripts (`get_oauth_token.py`,
+`Auth/auth_flow.py`, `KeyBackup/shared_key_flow.py`) from the command line,
+`undetected_chromedriver` downloads a driver for your installed Chrome version.
+If the Chrome-for-Testing **stable** channel has moved ahead of the Chrome build
+offered to your desktop (for example the driver targets Chrome 150 while only
+149 is installed), startup can abort with `only supports Chrome version 150`.
+
+The integration auto-detects the installed version and passes it through, so
+this usually resolves itself. If detection fails, or you need to pin a specific
+version, use the layered override (priority: **CLI flag > environment variable >
+auto-detection**):
+
+| Override | CLI flag | Environment variable |
+| --- | --- | --- |
+| Chrome binary path | `--chrome-path /path/to/chrome` | `GOOGLEFINDMY_CHROME_PATH` |
+| Chrome major version | `--chrome-version 149` | `GOOGLEFINDMY_CHROME_VERSION` |
+
+```bash
+# Pin the major version on the command line
+python custom_components/googlefindmy/get_oauth_token.py --chrome-version 149
+
+# Or via environment variables. These also cover the Home Assistant runtime
+# path, which has no command line of its own.
+export GOOGLEFINDMY_CHROME_VERSION=149
+export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
+```
+
+Run any of the scripts with `--help` to list the available options.
+
 ### Location updates stopped after an upgrade
 Location data is fetched **outbound** from Home Assistant to Google (FCM push plus Nova/SPOT polling); it does **not** depend on your Home Assistant internal or external URL configuration. If updates stop after upgrading the integration:
 1. **Reload the integration** (Settings → Devices & Services → Google Find My Device → ⋮ → Reload) or restart Home Assistant. This re-establishes the FCM connection and refreshes tokens, which resolves most post-upgrade stalls.
