@@ -84,6 +84,7 @@
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
       "dependency_not_ready": "Las dependencias de Google Find My Device no están instaladas. Instala los requisitos e inténtalo de nuevo.",
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "reauth_successful": "Reautenticación correcta.",
       "migration_successful": "Migración completada.",
       "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",

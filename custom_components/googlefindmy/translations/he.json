@@ -84,6 +84,7 @@
       "cannot_connect": "נכשל החיבור ל-Google Find My Device.",
       "dependency_not_ready": "תלויות של Google Find My Device לא מותקנות. יש להתקין את הדרישות ולנסות שוב.",
       "invalid_discovery_info": "מטען הגילוי לא היה תקין. יש לבדוק את האישורים ולנסות שוב.",
+      "keys_missing": "secrets.json אינו מכיל מפתח הצפנה (shared_key); לא ניתן לפענח מיקומים. צור אותו מחדש עם אחזור מלא של המפתחות: כלי ה-CLI המצורף (main.py) מאחזר את שני המפתחות אוטומטית, או ב-GoogleFindMyTools בחר התקן לאיתור לפני הייצוא.",
       "reauth_successful": "אימות מחדש הצליח.",
       "migration_successful": "ההעברה הושלמה.",
       "migration_failed": "ההעברה נכשלה. נא להסיר את השילוב ולהוסיף אותו מחדש.",

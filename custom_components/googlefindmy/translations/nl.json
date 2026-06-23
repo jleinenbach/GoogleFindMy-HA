@@ -84,6 +84,7 @@
       "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
       "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
       "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "reauth_successful": "Herauthenticatie geslaagd.",
       "migration_successful": "Migratie voltooid.",
       "migration_failed": "Migratie mislukt. Verwijder de integratie en voeg deze opnieuw toe.",
