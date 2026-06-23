@@ -235,3 +235,132 @@ async def test_config_flow_round_trip_strips_owner_key_space(
     # Token persisted from the (clean) aas_token.
     assert data[CONF_OAUTH_TOKEN] == "aas_et/FROM_SECRETS"
     assert data[CONF_GOOGLE_EMAIL] == "user@example.com"
+
+
+# ---------------------------------------------------------------------------
+# RED characterization tests for the D1 gap and the D2 understated warning.
+#
+# Design decision (single-key inversion, v5): the presence of ``shared_key`` is
+# the only gate that decides whether a pasted secrets bundle is importable. An
+# owner-only bundle without a ``shared_key`` is a non-renewable dead end and must
+# be blocked; conversely a bundle that carries a ``shared_key`` but lacks (or has
+# a stale) ``owner_key`` is tolerated because the integration can fetch/refresh
+# the owner key itself.
+#
+# Today's code does NOT enforce that rule, so these tests assert the *target*
+# behavior and are therefore expected to fail. They are marked
+# ``xfail(strict=True)`` so that once AP3/AP4 land the fix, the now-passing tests
+# turn into ``xpassed`` -> ``failed`` under strict mode, forcing the GREEN flip
+# to be made explicit.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "D1 gap: _interpret_credentials_choice currently accepts a secrets "
+        "bundle that has a valid email and token but no shared_key. Under the "
+        "v5 single-key rule both owner-missing and owner-present inputs must be "
+        "blocked with the 'keys_missing' error. Flips to xpass once AP3/AP4 add "
+        "the shared_key gate."
+    ),
+)
+def test_d1_shared_missing_currently_accepted_xfail() -> None:
+    """Nail down the D1 gap: shared_key-less bundles must block under v5.
+
+    ``_interpret_credentials_choice`` is a pure function, so no ConfigEntry or
+    hass stub is required. Two input classes are pinned, both of which carry a
+    valid email and a plausible token and must block once the single-key rule
+    is enforced:
+
+    * (a) shared_key missing AND owner_key missing.
+    * (b) shared_key missing BUT owner_key present.
+    """
+    # Class (a): neither shared_key nor owner_key present.
+    bundle_no_owner = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/FROM_SECRETS",
+    }
+    # Class (b): owner_key present, shared_key still missing.
+    bundle_with_owner = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/FROM_SECRETS",
+        "owner_key": "AABBCC",
+    }
+
+    for bundle in (bundle_no_owner, bundle_with_owner):
+        _method, _email, _cands, err = config_flow._interpret_credentials_choice(
+            {"secrets_json": json.dumps(bundle)},
+            secrets_field="secrets_json",
+            token_field=CONF_OAUTH_TOKEN,
+            email_field=CONF_GOOGLE_EMAIL,
+        )
+        # Target (v5) behavior: a missing shared_key blocks the import.
+        assert err == "keys_missing", (
+            "shared_key-less bundle must be rejected with 'keys_missing' "
+            f"(owner_key present={'owner_key' in bundle})"
+        )
+
+
+class _CapturingCache:
+    """Minimal cache stub recording values written by the secrets migrator.
+
+    Mirrors the ``_CapturingCache`` pattern in
+    ``tests/test_token_cache_secrets.py`` so the seeding helper can be exercised
+    without a real ``TokenCache`` or ConfigEntry.
+    """
+
+    def __init__(self) -> None:
+        self.saved: dict[str, Any] = {}
+
+    async def async_set_cached_value(self, name: str, value: Any) -> None:
+        self.saved[name] = value
+
+
+@pytest.mark.asyncio
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "D2 understatement: when shared_key is missing, _async_save_secrets_data "
+        "warns only about FMDN crowdsourced reports and omits the rotation-driven "
+        "late outage. This test pins the current incomplete wording; it flips to "
+        "xpass once AP3/AP4 broaden the warning to cover the rotation outage."
+    ),
+)
+async def test_d2_seeding_warning_understates_outage_xfail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nail down the D2 understatement in the seeding warning text.
+
+    The current warning only claims an FMDN ("crowdsourced") restriction and
+    does not mention the rotation-driven late outage that follows once the
+    existing key rotates. We pin the present incomplete wording so the GREEN
+    flip becomes visible once the message is broadened.
+    """
+    from custom_components.googlefindmy import __init__ as integration_init
+
+    cache = _CapturingCache()
+    secrets_bundle = {
+        "google_email": "user@example.com",
+        "username": "user@example.com",
+        "owner_key": "AABBCC",
+        # shared_key intentionally absent -> triggers the seeding warning.
+    }
+
+    with caplog.at_level("WARNING"):
+        await integration_init._async_save_secrets_data(cache, secrets_bundle)
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "shared_key" in record.getMessage()
+    ]
+    assert warnings, "Expected a missing-shared_key warning to be emitted"
+    message = warnings[0]
+    # The current text understates the outage: it only mentions the FMDN
+    # restriction and does not surface the rotation-driven late outage.
+    assert "FMDN network (crowdsourced) location reports will fail to decrypt" in message
+    assert "rotat" not in message.lower(), (
+        "Today's warning omits the rotation outage; once it is added this "
+        "assertion fails and the strict xfail flips to a forced GREEN."
+    )
