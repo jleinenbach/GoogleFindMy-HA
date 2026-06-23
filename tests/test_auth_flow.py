@@ -96,7 +96,7 @@ def _apply_flow_patches(
     monkeypatch: pytest.MonkeyPatch, driver: FakeDriver
 ) -> ImmediateWaitFactory:
     wait_factory = ImmediateWaitFactory()
-    monkeypatch.setattr(auth_flow, "create_driver", lambda headless: driver)
+    monkeypatch.setattr(auth_flow, "create_driver", lambda **kwargs: driver)
     monkeypatch.setattr(auth_flow, "WebDriverWait", wait_factory)
     return wait_factory
 

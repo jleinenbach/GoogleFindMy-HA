@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -29,12 +30,37 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 
-def request_shared_key_flow() -> str | None:
+def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the standalone shared key helper."""
+
+    parser = argparse.ArgumentParser(
+        description="Run the manual shared key retrieval flow via Chrome."
+    )
+    parser.add_argument(
+        "--chrome-path",
+        default=None,
+        help="Path to the Chrome/Chromium binary (overrides auto-detection).",
+    )
+    parser.add_argument(
+        "--chrome-version",
+        type=int,
+        default=None,
+        help=(
+            "Chrome major version to pin (e.g. 149). Overrides auto-detection; "
+            "useful when the stable channel is ahead of your installed Chrome."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def request_shared_key_flow(
+    *, chrome_path: str | None = None, chrome_version: int | None = None
+) -> str | None:
     """Execute the manual shared key retrieval flow via Selenium."""
 
     driver: WebDriver | None = None
     try:
-        driver = create_driver()
+        driver = create_driver(chrome_path=chrome_path, chrome_version=chrome_version)
     except Exception:  # pragma: no cover - relies on runtime Selenium setup
         LOGGER.exception("Failed to initialize ChromeDriver for shared key flow")
         return None
@@ -106,4 +132,7 @@ def request_shared_key_flow() -> str | None:
 
 
 if __name__ == "__main__":
-    request_shared_key_flow()
+    _args = _parse_cli_args()
+    request_shared_key_flow(
+        chrome_path=_args.chrome_path, chrome_version=_args.chrome_version
+    )

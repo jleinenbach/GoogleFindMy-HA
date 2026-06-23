@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from collections.abc import Mapping
@@ -37,7 +38,32 @@ def _cookie_value(cookie: Mapping[str, Any] | None) -> str | None:
     return cast(str | None, value)
 
 
-def main() -> None:
+def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments for the standalone OAuth token helper."""
+
+    parser = argparse.ArgumentParser(
+        description="Obtain an OAuth token for the Google Find My integration."
+    )
+    parser.add_argument(
+        "--chrome-path",
+        default=None,
+        help="Path to the Chrome/Chromium binary (overrides auto-detection).",
+    )
+    parser.add_argument(
+        "--chrome-version",
+        type=int,
+        default=None,
+        help=(
+            "Chrome major version to pin (e.g. 149). Overrides auto-detection; "
+            "useful when the stable channel is ahead of your installed Chrome."
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(
+    *, chrome_path: str | None = None, chrome_version: int | None = None
+) -> None:
     """Get OAuth token for Google Find My Device."""
 
     print("=" * 60)
@@ -57,7 +83,9 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        driver: WebDriver = create_driver(headless=False)
+        driver: WebDriver = create_driver(
+            chrome_path=chrome_path, chrome_version=chrome_version, headless=False
+        )
     except Exception as err:
         print(f"Error: {err}")
         print()
@@ -107,4 +135,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    _args = _parse_cli_args()
+    main(chrome_path=_args.chrome_path, chrome_version=_args.chrome_version)
