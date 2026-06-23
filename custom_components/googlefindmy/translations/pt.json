@@ -69,6 +69,7 @@
       "invalid_auth": "Autenticação inválida. ",
       "invalid_token": "Token/e-mail inválido fornecido ou campos obrigatórios ausentes.",
       "invalid_json": "Formato JSON inválido no conteúdo secrets.json.",
+      "keys_missing": "secrets.json não contém a chave de encriptação (shared_key); não é possível desencriptar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "no_devices": "Nenhum dispositivo encontrado. ",
       "cannot_connect": "Falha ao conectar-se à API do Google. ",
       "dependency_not_ready": "As dependências de integração necessárias estão faltando. ",
@@ -83,6 +84,7 @@
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",
+      "keys_missing": "secrets.json não contém a chave de encriptação (shared_key); não é possível desencriptar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "reauth_successful": "Reautenticação bem-sucedida.",
       "migration_successful": "Migração concluída.",
       "migration_failed": "A migração falhou. ",
@@ -316,6 +318,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON inválido no conteúdo secrets.json.",
+      "keys_missing": "secrets.json não contém a chave de encriptação (shared_key); não é possível desencriptar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "invalid": "A validação falhou. ",
       "invalid_auth": "Autenticação inválida. ",
       "cannot_connect": "Falha ao conectar-se à API do Google.",

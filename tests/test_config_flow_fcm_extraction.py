@@ -31,6 +31,8 @@ async def test_secrets_json_extracts_fcm_credentials(
     secrets_payload = {
         "google_email": "fcm-user@example.com",
         "aas_token": "aas_et/FROM_SECRETS",
+        # A shared_key is required to pass the single-key import gate.
+        "shared_key": "DDEEFF",
         "fcm_credentials": {"installation": {"token": "install-token"}},
     }
 

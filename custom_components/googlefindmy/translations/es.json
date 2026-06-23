@@ -69,6 +69,7 @@
       "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "invalid_token": "Credenciales no válidas (token/correo) o faltan campos obligatorios.",
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
       "cannot_connect": "No se pudo conectar con la API de Google. Puede ser un problema temporal: inténtalo de nuevo más tarde.",
       "dependency_not_ready": "Faltan dependencias de la integración. Instala los requisitos de Google Find My Device y reinicia Home Assistant.",
@@ -83,6 +84,7 @@
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
       "dependency_not_ready": "Las dependencias de Google Find My Device no están instaladas. Instala los requisitos e inténtalo de nuevo.",
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "reauth_successful": "Reautenticación correcta.",
       "migration_successful": "Migración completada.",
       "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",
@@ -316,6 +318,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "invalid": "Falló la validación. Revisa tus datos.",
       "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "cannot_connect": "No se pudo conectar con la API de Google.",

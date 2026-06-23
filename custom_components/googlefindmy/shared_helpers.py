@@ -152,31 +152,122 @@ def _normalize_secret_value(key: str, value: str) -> str:
     return value.strip()
 
 
-def normalize_secrets_bundle(data: Any) -> Any:
-    """Return a whitespace-normalized deep copy of a secrets.json bundle.
+_SCOPED_SHARED_KEY_PREFIX = "shared_key_"
 
-    Copy/paste of ``secrets.json`` into the config flow can inject stray
-    whitespace into credential values (a single space in ``owner_key`` breaks
-    AES-GCM decryption). This walks the bundle recursively and normalizes every
-    string value via :func:`_normalize_secret_value`, descending into nested
-    dicts (e.g. ``fcm_credentials``) and lists.
 
-    The function is idempotent and never mutates its input, so it is safe to
-    apply to ``MappingProxyType``-wrapped structures. Non-string scalars are
-    returned unchanged.
+def _normalize_whitespace(data: Any) -> Any:
+    """Return a whitespace-normalized deep copy of a secrets.json structure.
+
+    This is the recursive core of :func:`normalize_secrets_bundle`: it walks the
+    bundle, normalizes every string value via :func:`_normalize_secret_value`,
+    and descends into nested mappings (e.g. ``fcm_credentials``) and lists. It
+    performs *only* whitespace normalization; the top-level-only scoped-key
+    promotion lives in the public wrapper so recursion never triggers it.
     """
     if isinstance(data, Mapping):
         return {
             key: (
                 _normalize_secret_value(key, value)
                 if isinstance(value, str)
-                else normalize_secrets_bundle(value)
+                else _normalize_whitespace(value)
             )
             for key, value in data.items()
         }
     if isinstance(data, list):
-        return [normalize_secrets_bundle(item) for item in data]
+        return [_normalize_whitespace(item) for item in data]
     return data
+
+
+def _promote_scoped_shared_key(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Promote an unambiguous scoped ``shared_key_<id>`` to the top level.
+
+    The single-key rule (``_secrets_key_status`` in ``config_flow``) decides
+    importability solely from the *top-level* ``shared_key``. Legacy and
+    CLI-produced ``secrets.json`` bundles, however, may carry only a *scoped*
+    ``shared_key_<username>`` entry: the CLI producer (``main.py::_ensure_shared_key``)
+    treats either form as present, and the runtime reader
+    (``shared_key_retrieval._get_or_generate_shared_key_hex``) can migrate a
+    scoped key into the canonical slot. Without this promotion the import gate
+    would reject such a bundle as ``keys_missing`` even though it is perfectly
+    usable -- a producer/consumer divergence over the *definition* of "has a
+    shared key".
+
+    This is the single canonical chokepoint for that reconciliation:
+    ``normalize_secrets_bundle`` runs at every import surface and on the runtime
+    save path, so promoting here makes the canonical top-level ``shared_key``
+    visible to the gate *and* to the runtime reader's top-level fast path,
+    instead of replicating the rule per surface or depending on the runtime's
+    fragile username-matched migration.
+
+    Promotion rules (top-level keys only):
+
+    * If a non-empty top-level ``shared_key`` already exists, nothing changes.
+    * Otherwise, collect every top-level ``shared_key_<suffix>`` entry (the
+      suffix must be non-empty, so the bare ``shared_key`` is never matched)
+      whose value is a non-empty string. If there is exactly one such value -- or
+      several that are all identical -- it becomes the top-level ``shared_key``
+      (the scoped entry is kept so the runtime save path stays consistent).
+    * If two or more *distinct* scoped values exist (an ambiguous multi-account
+      bundle), nothing is promoted. The import gate then rejects the bundle as
+      ``keys_missing``, which is the safe outcome: we will not guess which
+      account's key is canonical.
+
+    The caller already passes a freshly built dict (from
+    :func:`_normalize_whitespace`); this returns that dict with at most one added
+    key, so the public contract (idempotent, input never mutated) is preserved.
+    """
+    existing = bundle.get("shared_key")
+    if isinstance(existing, str) and existing.strip():
+        return bundle
+
+    # Normalize each scoped value as if it were the canonical ``shared_key`` so a
+    # wrapped-paste interior space cannot survive promotion (the scoped keys
+    # themselves are not whitelisted, so they were only edge-trimmed above). The
+    # ambiguity check then compares the *normalized* values, so two scoped
+    # entries differing only by whitespace count as the same key, not a conflict.
+    scoped_values = [
+        _normalize_secret_value("shared_key", value)
+        for key, value in bundle.items()
+        if isinstance(key, str)
+        and key.startswith(_SCOPED_SHARED_KEY_PREFIX)
+        and len(key) > len(_SCOPED_SHARED_KEY_PREFIX)
+        and isinstance(value, str)
+        and value.strip()
+    ]
+    if not scoped_values or len(set(scoped_values)) > 1:
+        return bundle
+
+    return {**bundle, "shared_key": scoped_values[0]}
+
+
+def normalize_secrets_bundle(data: Any) -> Any:
+    """Return a normalized deep copy of a secrets.json bundle.
+
+    Two normalizations are applied, in order:
+
+    1. **Whitespace** -- copy/paste of ``secrets.json`` into the config flow can
+       inject stray whitespace into credential values (a single space in
+       ``owner_key`` breaks AES-GCM decryption). Every string value is normalized
+       via :func:`_normalize_secret_value`, descending into nested dicts (e.g.
+       ``fcm_credentials``) and lists.
+    2. **Scoped-shared-key promotion** (top-level invocation only) -- an
+       unambiguous scoped ``shared_key_<id>`` is promoted to the canonical
+       top-level ``shared_key`` so the single-key import gate and the runtime
+       reader agree on one key definition. See
+       :func:`_promote_scoped_shared_key` for the exact rule (including the
+       ambiguous-multi-account case that is intentionally left unpromoted).
+
+    Promotion runs *only* at this top-level entry point, never during recursion,
+    so nested mappings are never given a synthesized top-level ``shared_key``.
+
+    The function is idempotent and never mutates its input, so it is safe to
+    apply to ``MappingProxyType``-wrapped structures. Non-string scalars are
+    returned unchanged.
+    """
+    normalized = _normalize_whitespace(data)
+    if isinstance(normalized, dict):
+        return _promote_scoped_shared_key(normalized)
+    return normalized
 
 
 def normalize_fcm_entry_snapshot(entry_id: str, snap: dict[str, Any]) -> dict[str, Any]:

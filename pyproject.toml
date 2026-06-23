@@ -359,7 +359,12 @@ skip_covered = true
 # Raised to 70 with the accuracy_estimated producer-flag suite (PR #1124): the
 # new carry_reused_accuracy helper and chokepoint regression tests lift CI total
 # past 70 %; floor tracks the new CI total to lock the gain.
-fail_under = 70
+# Raised to 71 with the secrets shared_key validation suite (PR #1128): the
+# single-key gate, reauth/discovery guard tests and translation-parity tests
+# lift CI total to 71.84 %; floor tracks the new total to lock the gain. The
+# usual -1 Pp jitter margin is intentionally tightened here (0.84 Pp headroom)
+# per maintainer request to hold the floor at 71.
+fail_under = 71
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

@@ -69,6 +69,7 @@
       "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "invalid_token": "Credenziali non valide (token/e-mail) o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
+      "keys_missing": "secrets.json non contiene la chiave di crittografia (shared_key); le posizioni non possono essere decifrate. Rigeneralo con il recupero completo delle chiavi: la CLI inclusa (main.py) recupera entrambe le chiavi automaticamente, oppure in GoogleFindMyTools seleziona un dispositivo da localizzare prima di esportare.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
       "dependency_not_ready": "Mancano le dipendenze dell'integrazione. Installa i requisiti di Google Find My Device e riavvia Home Assistant.",
@@ -83,6 +84,7 @@
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
       "dependency_not_ready": "Le dipendenze di Google Find My Device non sono installate. Installa i requisiti e riprova.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
+      "keys_missing": "secrets.json non contiene la chiave di crittografia (shared_key); le posizioni non possono essere decifrate. Rigeneralo con il recupero completo delle chiavi: la CLI inclusa (main.py) recupera entrambe le chiavi automaticamente, oppure in GoogleFindMyTools seleziona un dispositivo da localizzare prima di esportare.",
       "reauth_successful": "Riautenticazione riuscita.",
       "migration_successful": "Migrazione completata.",
       "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo.",
@@ -316,6 +318,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
+      "keys_missing": "secrets.json non contiene la chiave di crittografia (shared_key); le posizioni non possono essere decifrate. Rigeneralo con il recupero completo delle chiavi: la CLI inclusa (main.py) recupera entrambe le chiavi automaticamente, oppure in GoogleFindMyTools seleziona un dispositivo da localizzare prima di esportare.",
       "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
       "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "cannot_connect": "Impossibile connettersi all’API di Google.",

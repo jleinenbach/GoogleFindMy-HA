@@ -69,6 +69,7 @@
       "invalid_auth": "Ongeldige authenticatie. Geef een nieuwe token op en/of meld je opnieuw aan.",
       "invalid_token": "Ongeldige token/e-mail opgegeven of verplichte velden ontbreken.",
       "invalid_json": "Ongeldig JSON-formaat in secrets.json-inhoud.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "no_devices": "Geen apparaten gevonden. Zorg ervoor dat Vind mijn apparaat is ingeschakeld in je Google-account.",
       "cannot_connect": "Kan geen verbinding maken met de Google API. Dit kan tijdelijk zijn – probeer het later opnieuw.",
       "dependency_not_ready": "Vereiste integratie-afhankelijkheden ontbreken. Installeer de Google Find My Device-vereisten en herstart Home Assistant.",
@@ -83,6 +84,7 @@
       "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
       "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
       "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "reauth_successful": "Herauthenticatie geslaagd.",
       "migration_successful": "Migratie voltooid.",
       "migration_failed": "Migratie mislukt. Verwijder de integratie en voeg deze opnieuw toe.",
@@ -316,6 +318,7 @@
     },
     "error": {
       "invalid_json": "Ongeldig JSON-formaat in secrets.json-inhoud.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "invalid": "Validatie mislukt. Controleer je invoer.",
       "invalid_auth": "Ongeldige authenticatie. Geef een nieuwe token op en/of meld je opnieuw aan.",
       "cannot_connect": "Kan geen verbinding maken met de Google API.",
