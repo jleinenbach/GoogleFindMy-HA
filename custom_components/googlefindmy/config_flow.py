@@ -3637,7 +3637,18 @@ class ConfigFlow(
                                 if existing is not None:
                                     return self.async_abort(reason="already_configured")
                                 errors["base"] = "email_mismatch"
-                            else:
+                            # Single-key rule: a shared_key-less bundle is a
+                            # non-renewable dead end. Gate it BEFORE the token
+                            # probe, mirroring the initial/options/discovery
+                            # surfaces where the gate always dominates token
+                            # validation. This sits INSIDE the email-matches
+                            # branch so a foreign/already-configured bundle keeps
+                            # its email_mismatch/already_configured precedence
+                            # above. Hoisting the gate makes a shared_key-less
+                            # bundle with a dead token return the deterministic
+                            # ``keys_missing`` instead of masking it as
+                            # ``cannot_connect`` from a failed probe.
+                            elif not _reject_if_shared_key_missing(parsed, errors):
                                 try:
                                     chosen = await async_pick_working_token(
                                         self.hass,
@@ -3672,56 +3683,47 @@ class ConfigFlow(
                                             )
                                             if alt:
                                                 to_persist = alt
-                                        # Single-key rule: a shared_key-less bundle
-                                        # is a non-renewable dead end. Block the
-                                        # reauth persist and fall through to
-                                        # re-show the form, mirroring the
-                                        # initial/options/discovery gates instead
-                                        # of warning-then-persisting.
-                                        if not _reject_if_shared_key_missing(
-                                            parsed, errors
-                                        ):
-                                            updated_data = {
-                                                **entry.data,
-                                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                                CONF_OAUTH_TOKEN: to_persist,
-                                                DATA_SECRET_BUNDLE: parsed,
-                                            }
-                                            fcm_credentials = (
-                                                _extract_fcm_credentials_from_secrets(
-                                                    parsed
-                                                )
+                                        updated_data = {
+                                            **entry.data,
+                                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                            CONF_OAUTH_TOKEN: to_persist,
+                                            DATA_SECRET_BUNDLE: parsed,
+                                        }
+                                        fcm_credentials = (
+                                            _extract_fcm_credentials_from_secrets(
+                                                parsed
                                             )
-                                            if fcm_credentials is not None:
-                                                updated_data["fcm_credentials"] = (
-                                                    fcm_credentials
-                                                )
-                                            if isinstance(
-                                                to_persist, str
-                                            ) and to_persist.startswith("aas_et/"):
-                                                updated_data[DATA_AAS_TOKEN] = to_persist
-                                            elif DATA_AAS_TOKEN in updated_data:
-                                                updated_data.pop(DATA_AAS_TOKEN, None)
-                                            await self._async_clear_cached_aas_token(
-                                                entry
+                                        )
+                                        if fcm_credentials is not None:
+                                            updated_data["fcm_credentials"] = (
+                                                fcm_credentials
                                             )
-                                            # The single-key gate above guarantees a
-                                            # usable shared_key here; record it for
-                                            # operators without re-deriving the
-                                            # missing-key warning (now a hard block).
-                                            _LOGGER.info(
-                                                "Reauth for %s: shared_key present in secrets bundle",
-                                                fixed_email,
-                                            )
-                                            success_reason = self.context.get(
-                                                "reauth_success_reason_override",
-                                                "reauth_successful",
-                                            )
-                                            return self.async_update_reload_and_abort(
-                                                entry=entry,
-                                                data=updated_data,
-                                                reason=success_reason,
-                                            )
+                                        if isinstance(
+                                            to_persist, str
+                                        ) and to_persist.startswith("aas_et/"):
+                                            updated_data[DATA_AAS_TOKEN] = to_persist
+                                        elif DATA_AAS_TOKEN in updated_data:
+                                            updated_data.pop(DATA_AAS_TOKEN, None)
+                                        await self._async_clear_cached_aas_token(
+                                            entry
+                                        )
+                                        # The single-key gate above already
+                                        # guaranteed a usable shared_key, so the
+                                        # persist runs unconditionally here; record
+                                        # the key for operators.
+                                        _LOGGER.info(
+                                            "Reauth for %s: shared_key present in secrets bundle",
+                                            fixed_email,
+                                        )
+                                        success_reason = self.context.get(
+                                            "reauth_success_reason_override",
+                                            "reauth_successful",
+                                        )
+                                        return self.async_update_reload_and_abort(
+                                            entry=entry,
+                                            data=updated_data,
+                                            reason=success_reason,
+                                        )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload

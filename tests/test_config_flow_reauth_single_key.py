@@ -57,17 +57,22 @@ def _build_reauth_flow(
     monkeypatch: pytest.MonkeyPatch,
     *,
     pick_raises: BaseException | None = None,
+    pick_returns_none: bool = False,
 ) -> tuple[Any, _ReauthEntry, dict[str, Any]]:
     """Wire a ``ConfigFlow`` instance for ``async_step_reauth_confirm`` tests.
 
     ``pick_raises`` lets a test drive the multi-entry-guard *deferral* path by
-    making token validation raise an entry-scope guard error. ``captured``
-    records any ``async_update_reload_and_abort`` persistence so tests can assert
-    a blocked bundle never persists.
+    making token validation raise an entry-scope guard error.
+    ``pick_returns_none`` simulates a dead/expired token so the probe (if it is
+    reached at all) fails. ``captured`` records any
+    ``async_update_reload_and_abort`` persistence so tests can assert a blocked
+    bundle never persists, and records every ``async_pick_working_token`` call
+    so tests can assert the gate dominates the probe.
     """
 
     entry = _ReauthEntry("entry-reauth", "user@example.com")
     captured: dict[str, Any] = {}
+    captured["pick_calls"] = 0
 
     async def _fake_pick(
         hass: Any,
@@ -76,8 +81,11 @@ def _build_reauth_flow(
         *,
         secrets_bundle: dict[str, Any] | None = None,
     ) -> str | None:
+        captured["pick_calls"] += 1
         if pick_raises is not None:
             raise pick_raises
+        if pick_returns_none:
+            return None
         return candidates[0][1] if candidates else None
 
     monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
@@ -165,6 +173,34 @@ async def test_reauth_happy_path_blocks_when_shared_missing(
     assert result.get("type") == "form"
     assert result.get("errors") == {"base": "keys_missing"}
     assert "persist" not in captured
+
+
+@pytest.mark.asyncio
+async def test_reauth_gate_precedes_probe_when_token_dead_and_shared_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The single-key gate must precede the token probe on the reauth surface.
+
+    Category: gate must precede token probe on every secrets surface. A
+    shared_key-less bundle paired with a dead/expired token previously reached
+    the form with ``cannot_connect`` (the token probe ran first and failed),
+    masking the deterministic ``keys_missing`` the other import surfaces return.
+    With the gate hoisted above the probe, the gate dominates: the result is
+    ``keys_missing`` and ``async_pick_working_token`` is never called for this
+    bundle.
+    """
+    flow, _entry, captured = _build_reauth_flow(
+        monkeypatch, pick_returns_none=True
+    )
+
+    result = await _run_reauth(flow, _shared_missing_bundle())
+
+    assert result.get("type") == "form"
+    assert result.get("errors") == {"base": "keys_missing"}
+    assert "persist" not in captured
+    # Gate dominates the probe: a shared_key-less bundle is rejected before any
+    # token validation, so the (dead) token is never probed.
+    assert captured["pick_calls"] == 0
 
 
 @pytest.mark.asyncio
