@@ -494,6 +494,41 @@ def _is_file_lock_error(err: BaseException) -> bool:
     return "WinError 32" in msg or "WinError 183" in msg
 
 
+def _is_version_mismatch_error(err: BaseException) -> bool:
+    """Check if an exception looks like a Chrome/driver version mismatch.
+
+    undetected-chromedriver surfaces Selenium's "only supports Chrome version N"
+    message when the driver and the installed browser disagree on the version.
+    """
+    return "only supports Chrome version" in str(err)
+
+
+def _log_version_mismatch_hint(
+    error: BaseException | None,
+    *,
+    detected_version: int | None,
+    resolved_version: int | None,
+    version_source: str,
+) -> None:
+    """Log an actionable hint when the last failure was a version mismatch.
+
+    Replaces Selenium's bare "only supports Chrome version" line with the
+    detected/used versions, the override source and how to pin a version.
+    """
+    if error is None or not _is_version_mismatch_error(error):
+        return
+    LOGGER.error(
+        "Chrome/driver version mismatch (detected: %s, requested/used: %s, "
+        "source: %s). Pin a matching major version via --chrome-version or the "
+        "%s environment variable (set it to your installed Chrome major "
+        "version).",
+        detected_version or "Unknown",
+        resolved_version or "Unknown",
+        version_source,
+        _ENV_CHROME_VERSION,
+    )
+
+
 def _parse_env_version(env_raw: str | None) -> int | None:
     """Parse a ``GOOGLEFINDMY_CHROME_VERSION`` value into a major version int.
 
@@ -560,12 +595,12 @@ def _resolve_chrome_path(
 
 def _try_strategy_default(
     *, resolved_path: str | None, version_main: int | None, headless: bool
-) -> tuple[WebDriver | None, bool]:
+) -> tuple[WebDriver | None, BaseException | None]:
     """Strategy 1: default creation, passing ``version_main`` if detected.
 
-    Returns ``(driver, saw_non_file_lock_error)``. ``driver`` is ``None`` on
-    failure; the boolean reports whether the failure was something other than a
-    Windows file lock (so the caller can track ``_all_file_lock``).
+    Returns ``(driver, error)``. ``driver`` is ``None`` on failure and ``error``
+    is the caught exception (``None`` on success), letting the caller track
+    ``all_file_lock`` and surface a version-mismatch hint on total failure.
     """
     driver: WebDriver | None = None
     try:
@@ -577,16 +612,16 @@ def _try_strategy_default(
             _get_uc_module().Chrome(options=options, version_main=version_main),
         )
         LOGGER.debug("ChromeDriver started successfully.")
-        return driver, False
+        return driver, None
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
         LOGGER.warning("Strategy 1 (default) failed: %s", err)
-        return None, not _is_file_lock_error(err)
+        return None, err
 
 
 def _try_strategy_explicit_path(
     *, resolved_path: str, version_main: int | None, headless: bool
-) -> tuple[WebDriver | None, bool]:
+) -> tuple[WebDriver | None, BaseException | None]:
     """Strategy 2: pass ``browser_executable_path`` explicitly.
 
     See :func:`_try_strategy_default` for the return contract.
@@ -603,16 +638,16 @@ def _try_strategy_explicit_path(
             ),
         )
         LOGGER.debug("ChromeDriver started with browser_executable_path.")
-        return driver, False
+        return driver, None
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
         LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
-        return None, not _is_file_lock_error(err)
+        return None, err
 
 
 def _try_strategy_no_version(
     *, resolved_path: str | None, headless: bool
-) -> tuple[WebDriver | None, bool]:
+) -> tuple[WebDriver | None, BaseException | None]:
     """Strategy 3: attempt creation without specifying a version.
 
     See :func:`_try_strategy_default` for the return contract.
@@ -626,16 +661,16 @@ def _try_strategy_no_version(
             WebDriver, _get_uc_module().Chrome(options=options, version_main=None)
         )
         LOGGER.debug("ChromeDriver started without explicit version.")
-        return driver, False
+        return driver, None
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
         LOGGER.warning("Strategy 3 (no version) failed: %s", err)
-        return None, not _is_file_lock_error(err)
+        return None, err
 
 
 def _try_strategy_headless(
     *, resolved_path: str | None, version_main: int | None
-) -> tuple[WebDriver | None, bool]:
+) -> tuple[WebDriver | None, BaseException | None]:
     """Strategy 4: retry in headless mode.
 
     See :func:`_try_strategy_default` for the return contract.
@@ -652,11 +687,11 @@ def _try_strategy_headless(
             ),
         )
         LOGGER.debug("ChromeDriver started in headless mode.")
-        return driver, False
+        return driver, None
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
         LOGGER.warning("Strategy 4 (headless) failed: %s", err)
-        return None, not _is_file_lock_error(err)
+        return None, err
 
 
 def _create_driver_inner(
@@ -707,7 +742,7 @@ def _create_driver_inner(
     # strategy 4 (headless retry) only when not already headless. Every strategy
     # uses resolved_version so we never escalate to None while a version is
     # known. Each attempt returns (driver, saw_non_file_lock_error).
-    attempts: list[Callable[[], tuple[WebDriver | None, bool]]] = [
+    attempts: list[Callable[[], tuple[WebDriver | None, BaseException | None]]] = [
         lambda: _try_strategy_default(
             resolved_path=resolved_path,
             version_main=resolved_version,
@@ -736,14 +771,18 @@ def _create_driver_inner(
             )
         )
 
-    # Track whether all failures are file-lock related (Windows)
+    # Track whether all failures are file-lock related (Windows) and keep the
+    # last error so we can surface a targeted version-mismatch hint.
     all_file_lock = True
+    last_error: BaseException | None = None
     for attempt in attempts:
-        driver, saw_non_file_lock = attempt()
+        driver, error = attempt()
         if driver is not None:
             return driver
-        if saw_non_file_lock:
-            all_file_lock = False
+        if error is not None:
+            last_error = error
+            if not _is_file_lock_error(error):
+                all_file_lock = False
 
     # Strategy 5: webdriver-manager fallback
     fallback_driver = _try_webdriver_manager_fallback()
@@ -760,6 +799,12 @@ def _create_driver_inner(
 
     # All strategies failed -- report detected vs. used version and its source
     # so the failure is diagnosable instead of just echoing Selenium's raw line.
+    _log_version_mismatch_hint(
+        last_error,
+        detected_version=detected_version,
+        resolved_version=resolved_version,
+        version_source=version_source,
+    )
     raise RuntimeError(
         "Failed to start ChromeDriver after all attempts.\n"
         "Possible solutions:\n"
