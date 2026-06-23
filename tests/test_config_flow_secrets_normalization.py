@@ -138,6 +138,182 @@ def test_non_mapping_input_returned_unchanged() -> None:
     assert normalize_secrets_bundle(None) is None
 
 
+# ---------------------------------------------------------------------------
+# Scoped-shared-key promotion (producer/consumer contract repair).
+#
+# A legacy/older secrets.json may carry a *scoped* ``shared_key_<email>`` entry
+# but no top-level ``shared_key``. The CLI producer and the runtime reader both
+# accept the scoped form, but ``_secrets_key_status`` only inspects the
+# top-level ``shared_key``, so the import gate would wrongly reject such a bundle
+# as ``keys_missing``. ``normalize_secrets_bundle`` promotes an unambiguous
+# scoped key to the canonical top-level slot so every import surface and the
+# runtime reader converge on one key definition.
+# ---------------------------------------------------------------------------
+
+# A realistic 32-byte (64 hex chars) shared key value.
+_SHARED_HEX = "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00"
+_SHARED_HEX_2 = "00ffeeddccbbaa998877665544332211090f8e7d6c5b4a3a291807f6e5d4c3b2a1"[:64]
+
+
+def test_scoped_only_shared_key_promoted_to_top_level() -> None:
+    """A scoped-only shared key is promoted to the canonical top-level slot."""
+    bundle = {
+        "shared_key_user@example.com": _SHARED_HEX,
+        "oauth_token": "aas_et/FROM_SECRETS",
+    }
+    result = normalize_secrets_bundle(bundle)
+    assert result["shared_key"] == _SHARED_HEX
+    # The scoped entry is preserved (runtime save path still writes it scoped).
+    assert result["shared_key_user@example.com"] == _SHARED_HEX
+
+
+def test_existing_top_level_shared_key_not_overwritten() -> None:
+    """An existing non-empty top-level shared_key wins over any scoped entry."""
+    bundle = {
+        "shared_key": _SHARED_HEX,
+        "shared_key_user@example.com": _SHARED_HEX_2,
+    }
+    result = normalize_secrets_bundle(bundle)
+    assert result["shared_key"] == _SHARED_HEX
+
+
+def test_multiple_scoped_same_value_promoted() -> None:
+    """Multiple scoped entries sharing the SAME value still promote (no ambiguity)."""
+    bundle = {
+        "shared_key_a@example.com": _SHARED_HEX,
+        "shared_key_b@example.com": _SHARED_HEX,
+    }
+    result = normalize_secrets_bundle(bundle)
+    assert result["shared_key"] == _SHARED_HEX
+
+
+def test_ambiguous_distinct_scoped_values_not_promoted() -> None:
+    """Two DISTINCT scoped values are ambiguous and must NOT be promoted."""
+    bundle = {
+        "shared_key_a@example.com": _SHARED_HEX,
+        "shared_key_b@example.com": _SHARED_HEX_2,
+    }
+    result = normalize_secrets_bundle(bundle)
+    assert "shared_key" not in result
+
+
+def test_bare_shared_key_prefix_not_matched_as_scoped() -> None:
+    """The bare ``shared_key`` must not be mistaken for a scoped entry.
+
+    Only keys with a non-empty suffix after the ``shared_key_`` prefix qualify;
+    an empty (``""``) top-level shared_key alongside no scoped entry stays absent.
+    """
+    bundle = {"shared_key": "", "oauth_token": "aas_et/X"}
+    result = normalize_secrets_bundle(bundle)
+    # No scoped entry exists to promote, and the empty value is not "present".
+    assert result["shared_key"] == ""
+
+
+def test_scoped_empty_value_not_promoted() -> None:
+    """A scoped entry whose value is empty/whitespace does not qualify."""
+    bundle = {"shared_key_user@example.com": "   ", "oauth_token": "aas_et/X"}
+    result = normalize_secrets_bundle(bundle)
+    assert "shared_key" not in result
+
+
+def test_promotion_does_not_descend_into_nested_dicts() -> None:
+    """Promotion is a top-level-only step; nested scoped keys are untouched."""
+    bundle = {
+        "oauth_token": "aas_et/X",
+        "nested": {"shared_key_user@example.com": _SHARED_HEX},
+    }
+    result = normalize_secrets_bundle(bundle)
+    # No top-level shared_key is synthesized from a nested scoped entry.
+    assert "shared_key" not in result
+    assert result["nested"]["shared_key_user@example.com"] == _SHARED_HEX
+    assert "shared_key" not in result["nested"]
+
+
+def test_promotion_idempotent() -> None:
+    """Promotion is idempotent: a second pass yields an identical bundle."""
+    bundle = {
+        "shared_key_user@example.com": _SHARED_HEX,
+        "oauth_token": "aas_et/X",
+    }
+    once = normalize_secrets_bundle(bundle)
+    assert normalize_secrets_bundle(once) == once
+
+
+def test_promotion_does_not_mutate_input() -> None:
+    """The scoped-only input mapping is never mutated by promotion."""
+    bundle = {
+        "shared_key_user@example.com": _SHARED_HEX,
+        "oauth_token": "aas_et/X",
+    }
+    normalize_secrets_bundle(bundle)
+    assert "shared_key" not in bundle
+
+
+def test_promoted_scoped_value_is_whitespace_normalized() -> None:
+    """A promoted scoped key is normalized like the canonical ``shared_key``.
+
+    Scoped ``shared_key_<id>`` keys are not whitelisted, so the recursive
+    whitespace pass only edge-trims them. Promotion must apply the canonical
+    credential normalization (all whitespace removed) so a wrapped-paste interior
+    space cannot survive into the top-level key and break AES-GCM decryption.
+    """
+    bundle = {"shared_key_user@example.com": " a b\nc ", "oauth_token": "aas_et/X"}
+    result = normalize_secrets_bundle(bundle)
+    assert result["shared_key"] == "abc"
+
+
+def test_scoped_values_differing_only_by_whitespace_not_ambiguous() -> None:
+    """Two scoped entries that normalize to the same key are not a conflict."""
+    bundle = {
+        "shared_key_a@example.com": "AA BB",
+        "shared_key_b@example.com": "AABB",
+    }
+    result = normalize_secrets_bundle(bundle)
+    # Both normalize to "AABB", so promotion proceeds with that single value.
+    assert result["shared_key"] == "AABB"
+
+
+def test_promotion_tolerates_non_string_keys() -> None:
+    """Promotion never raises on non-string keys (contract: input is ``Any``).
+
+    A bundle may carry non-string keys; the scoped-key scan must skip them rather
+    than call ``str``-only methods on them.
+    """
+    bundle: dict[Any, Any] = {
+        7: "numeric-key-value",
+        "shared_key_user@example.com": _SHARED_HEX,
+    }
+    result = normalize_secrets_bundle(bundle)
+    assert result["shared_key"] == _SHARED_HEX
+    assert result[7] == "numeric-key-value"
+
+
+def test_scoped_only_bundle_passes_key_status_gate() -> None:
+    """End-to-end: a scoped-only bundle is importable after normalization.
+
+    ``_secrets_key_status`` reads only the top-level ``shared_key``; the
+    promotion at the normalization chokepoint makes the scoped key visible to
+    the gate so ``has_shared`` is True and ``_interpret_credentials_choice`` does
+    not return ``keys_missing``.
+    """
+    raw = {
+        "google_email": "user@example.com",
+        "aas_token": "aas_et/FROM_SECRETS",
+        "shared_key_user@example.com": _SHARED_HEX,
+    }
+    normalized = normalize_secrets_bundle(raw)
+    has_shared, _has_owner = config_flow._secrets_key_status(normalized)
+    assert has_shared is True
+
+    _method, _email, _cands, err = config_flow._interpret_credentials_choice(
+        {"secrets_json": json.dumps(raw)},
+        secrets_field="secrets_json",
+        token_field=CONF_OAUTH_TOKEN,
+        email_field=CONF_GOOGLE_EMAIL,
+    )
+    assert err != "keys_missing"
+
+
 @pytest.mark.asyncio
 async def test_config_flow_round_trip_strips_owner_key_space(
     monkeypatch: pytest.MonkeyPatch,

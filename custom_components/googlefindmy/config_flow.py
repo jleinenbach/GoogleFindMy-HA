@@ -1280,6 +1280,35 @@ def _secrets_key_status(parsed: dict[str, Any]) -> tuple[bool, bool]:
     return _present(parsed.get("shared_key")), _present(parsed.get("owner_key"))
 
 
+def _reject_if_shared_key_missing(
+    parsed: dict[str, Any], errors: dict[str, str], *, slot: str = "base"
+) -> bool:
+    """Apply the single-key import gate to ``parsed``; report blocked bundles.
+
+    The single-key rule (see :func:`_secrets_key_status`) must hold at *every*
+    import surface. This is the one named guard the reauth confirm flow uses at
+    both of its persist sub-paths so the rule has a single call form rather than
+    being re-inlined per branch. When the bundle has no usable ``shared_key`` the
+    guard writes ``keys_missing`` into ``errors[slot]`` and returns ``True`` so
+    the caller can fall through to re-show the form without persisting.
+
+    Args:
+        parsed: An already-normalized secrets bundle.
+        errors: The flow's error mapping, mutated in place when blocked.
+        slot: The error slot to populate (``"base"`` for surfaces without a
+            dedicated field, like reauth).
+
+    Returns:
+        ``True`` if the bundle was rejected (caller must not persist), else
+        ``False``.
+    """
+    has_shared, _has_owner = _secrets_key_status(parsed)
+    if has_shared:
+        return False
+    errors[slot] = "keys_missing"
+    return True
+
+
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -3586,7 +3615,16 @@ class ConfigFlow(
                         if not isinstance(payload, Mapping):
                             errors["base"] = "invalid_token"
                         else:
-                            parsed: dict[str, Any] = dict(payload)
+                            # Normalize locally so the gate, the email/token
+                            # extraction, and the persisted bundle all operate on
+                            # the same whitespace-normalized, scoped-key-promoted
+                            # bundle, instead of depending on an implicit
+                            # invariant established by an upstream caller.
+                            # ``normalize_secrets_bundle`` is idempotent, so this
+                            # is a no-op when ``payload`` was already normalized.
+                            parsed: dict[str, Any] = normalize_secrets_bundle(
+                                dict(payload)
+                            )
                             extracted_email = normalize_email(
                                 _extract_email_from_secrets(parsed)
                             )
@@ -3634,52 +3672,56 @@ class ConfigFlow(
                                             )
                                             if alt:
                                                 to_persist = alt
-                                        updated_data = {
-                                            **entry.data,
-                                            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                            CONF_OAUTH_TOKEN: to_persist,
-                                            DATA_SECRET_BUNDLE: parsed,
-                                        }
-                                        fcm_credentials = (
-                                            _extract_fcm_credentials_from_secrets(
-                                                parsed
+                                        # Single-key rule: a shared_key-less bundle
+                                        # is a non-renewable dead end. Block the
+                                        # reauth persist and fall through to
+                                        # re-show the form, mirroring the
+                                        # initial/options/discovery gates instead
+                                        # of warning-then-persisting.
+                                        if not _reject_if_shared_key_missing(
+                                            parsed, errors
+                                        ):
+                                            updated_data = {
+                                                **entry.data,
+                                                DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                                                CONF_OAUTH_TOKEN: to_persist,
+                                                DATA_SECRET_BUNDLE: parsed,
+                                            }
+                                            fcm_credentials = (
+                                                _extract_fcm_credentials_from_secrets(
+                                                    parsed
+                                                )
                                             )
-                                        )
-                                        if fcm_credentials is not None:
-                                            updated_data["fcm_credentials"] = (
-                                                fcm_credentials
+                                            if fcm_credentials is not None:
+                                                updated_data["fcm_credentials"] = (
+                                                    fcm_credentials
+                                                )
+                                            if isinstance(
+                                                to_persist, str
+                                            ) and to_persist.startswith("aas_et/"):
+                                                updated_data[DATA_AAS_TOKEN] = to_persist
+                                            elif DATA_AAS_TOKEN in updated_data:
+                                                updated_data.pop(DATA_AAS_TOKEN, None)
+                                            await self._async_clear_cached_aas_token(
+                                                entry
                                             )
-                                        if isinstance(
-                                            to_persist, str
-                                        ) and to_persist.startswith("aas_et/"):
-                                            updated_data[DATA_AAS_TOKEN] = to_persist
-                                        elif DATA_AAS_TOKEN in updated_data:
-                                            updated_data.pop(DATA_AAS_TOKEN, None)
-                                        await self._async_clear_cached_aas_token(entry)
-                                        _reauth_shared = parsed.get("shared_key")
-                                        if _reauth_shared:
+                                            # The single-key gate above guarantees a
+                                            # usable shared_key here; record it for
+                                            # operators without re-deriving the
+                                            # missing-key warning (now a hard block).
                                             _LOGGER.info(
                                                 "Reauth for %s: shared_key present in secrets bundle",
                                                 fixed_email,
                                             )
-                                        else:
-                                            _LOGGER.warning(
-                                                "Reauth for %s: no shared_key in secrets bundle. "
-                                                "Crowdsourced/FMDN locations cannot be decrypted now; "
-                                                "own-device locations will fail when the owner key rotates "
-                                                "(it can only be refreshed with the shared_key). "
-                                                "Re-import a complete secrets.json.",
-                                                fixed_email,
+                                            success_reason = self.context.get(
+                                                "reauth_success_reason_override",
+                                                "reauth_successful",
                                             )
-                                        success_reason = self.context.get(
-                                            "reauth_success_reason_override",
-                                            "reauth_successful",
-                                        )
-                                        return self.async_update_reload_and_abort(
-                                            entry=entry,
-                                            data=updated_data,
-                                            reason=success_reason,
-                                        )
+                                            return self.async_update_reload_and_abort(
+                                                entry=entry,
+                                                data=updated_data,
+                                                reason=success_reason,
+                                            )
                 except Exception as err2:  # noqa: BLE001
                     if _is_multi_entry_guard_error(err2):
                         # Defer: accept first candidate and reload
@@ -3701,11 +3743,14 @@ class ConfigFlow(
                                 data=updated_data,
                                 reason="reauth_successful",
                             )
-                        if method == "secrets":
-                            if not isinstance(payload, Mapping):
-                                errors["base"] = "invalid_token"
-                            else:
-                                parsed = dict(payload)
+                        if method == "secrets" and isinstance(payload, Mapping):
+                            # Normalize once and gate on the SAME object that is
+                            # persisted, so the single-key gate and the stored
+                            # bundle can never disagree. An entry-scope guard
+                            # error must not become a bypass for a shared_key-less
+                            # (or whitespace-corrupted) bundle.
+                            parsed = normalize_secrets_bundle(dict(payload))
+                            if not _reject_if_shared_key_missing(parsed, errors):
                                 cands = _extract_oauth_candidates_from_secrets(parsed)
                                 token_first = cands[0][1] if cands else ""
                                 updated_data = {
@@ -3731,7 +3776,14 @@ class ConfigFlow(
                                     data=updated_data,
                                     reason="reauth_successful",
                                 )
-                    errors["base"] = _map_api_exc_to_error_key(err2)
+                        elif method == "secrets":
+                            # payload is not a Mapping: malformed deferral input.
+                            errors["base"] = "invalid_token"
+                    # Fall back to the generic mapped error only when the
+                    # deferral branch above did not already classify the failure
+                    # (for example the single-key gate setting ``keys_missing``);
+                    # do not clobber a more specific error.
+                    errors.setdefault("base", _map_api_exc_to_error_key(err2))
 
         return self.async_show_form(
             step_id="reauth_confirm",
