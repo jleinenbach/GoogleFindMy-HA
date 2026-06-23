@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -460,25 +461,15 @@ def _is_file_lock_error(err: BaseException) -> bool:
     return "WinError 32" in msg or "WinError 183" in msg
 
 
-def _create_driver_inner(  # noqa: PLR0912, PLR0915
-    chrome_path: str | None = None, *, headless: bool = False
-) -> WebDriver:
-    """Internal driver creation with multiple strategy fallbacks."""
-    # Kill any existing Chrome processes to avoid conflicts
-    _kill_existing_chrome_processes()
+def _try_strategy_default(
+    *, resolved_path: str | None, version_main: int | None, headless: bool
+) -> tuple[WebDriver | None, bool]:
+    """Strategy 1: default creation, passing ``version_main`` if detected.
 
-    resolved_path = chrome_path or find_chrome()
-    version_main: int | None = None
-
-    if resolved_path:
-        version_main = get_chrome_version(resolved_path)
-        if version_main:
-            LOGGER.debug("Detected Chrome version: %d", version_main)
-
-    # Track whether all failures are file-lock related (Windows)
-    _all_file_lock = True
-
-    # Strategy 1: Default with version_main if detected
+    Returns ``(driver, saw_non_file_lock_error)``. ``driver`` is ``None`` on
+    failure; the boolean reports whether the failure was something other than a
+    Windows file lock (so the caller can track ``_all_file_lock``).
+    """
     driver: WebDriver | None = None
     try:
         options = get_options(headless=headless)
@@ -489,34 +480,47 @@ def _create_driver_inner(  # noqa: PLR0912, PLR0915
             _get_uc_module().Chrome(options=options, version_main=version_main),
         )
         LOGGER.debug("ChromeDriver started successfully.")
-        return driver
+        return driver, False
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
-        if not _is_file_lock_error(err):
-            _all_file_lock = False
         LOGGER.warning("Strategy 1 (default) failed: %s", err)
+        return None, not _is_file_lock_error(err)
 
-    # Strategy 2: Use browser_executable_path parameter (if supported)
-    if resolved_path:
-        try:
-            options = get_options(headless=headless)
-            driver = cast(
-                WebDriver,
-                _get_uc_module().Chrome(
-                    options=options,
-                    version_main=version_main,
-                    browser_executable_path=resolved_path,
-                ),
-            )
-            LOGGER.debug("ChromeDriver started with browser_executable_path.")
-            return driver
-        except Exception as err:  # noqa: BLE001
-            _quit_driver(driver)
-            if not _is_file_lock_error(err):
-                _all_file_lock = False
-            LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
 
-    # Strategy 3: Try without specifying version
+def _try_strategy_explicit_path(
+    *, resolved_path: str, version_main: int | None, headless: bool
+) -> tuple[WebDriver | None, bool]:
+    """Strategy 2: pass ``browser_executable_path`` explicitly.
+
+    See :func:`_try_strategy_default` for the return contract.
+    """
+    driver: WebDriver | None = None
+    try:
+        options = get_options(headless=headless)
+        driver = cast(
+            WebDriver,
+            _get_uc_module().Chrome(
+                options=options,
+                version_main=version_main,
+                browser_executable_path=resolved_path,
+            ),
+        )
+        LOGGER.debug("ChromeDriver started with browser_executable_path.")
+        return driver, False
+    except Exception as err:  # noqa: BLE001
+        _quit_driver(driver)
+        LOGGER.warning("Strategy 2 (explicit path) failed: %s", err)
+        return None, not _is_file_lock_error(err)
+
+
+def _try_strategy_no_version(
+    *, resolved_path: str | None, headless: bool
+) -> tuple[WebDriver | None, bool]:
+    """Strategy 3: attempt creation without specifying a version.
+
+    See :func:`_try_strategy_default` for the return contract.
+    """
+    driver: WebDriver | None = None
     try:
         options = get_options(headless=headless)
         if resolved_path:
@@ -525,33 +529,88 @@ def _create_driver_inner(  # noqa: PLR0912, PLR0915
             WebDriver, _get_uc_module().Chrome(options=options, version_main=None)
         )
         LOGGER.debug("ChromeDriver started without explicit version.")
-        return driver
+        return driver, False
     except Exception as err:  # noqa: BLE001
         _quit_driver(driver)
-        if not _is_file_lock_error(err):
-            _all_file_lock = False
         LOGGER.warning("Strategy 3 (no version) failed: %s", err)
+        return None, not _is_file_lock_error(err)
 
-    # Strategy 4: Try headless mode
+
+def _try_strategy_headless(
+    *, resolved_path: str | None, version_main: int | None
+) -> tuple[WebDriver | None, bool]:
+    """Strategy 4: retry in headless mode.
+
+    See :func:`_try_strategy_default` for the return contract.
+    """
+    driver: WebDriver | None = None
+    try:
+        headless_options = get_options(headless=True)
+        if resolved_path:
+            headless_options.binary_location = resolved_path
+        driver = cast(
+            WebDriver,
+            _get_uc_module().Chrome(
+                options=headless_options, version_main=version_main
+            ),
+        )
+        LOGGER.debug("ChromeDriver started in headless mode.")
+        return driver, False
+    except Exception as err:  # noqa: BLE001
+        _quit_driver(driver)
+        LOGGER.warning("Strategy 4 (headless) failed: %s", err)
+        return None, not _is_file_lock_error(err)
+
+
+def _create_driver_inner(
+    chrome_path: str | None = None, *, headless: bool = False
+) -> WebDriver:
+    """Internal driver creation, orchestrating the strategy fallbacks."""
+    # Kill any existing Chrome processes to avoid conflicts
+    _kill_existing_chrome_processes()
+
+    resolved_path = chrome_path or find_chrome()
+    version_main = get_chrome_version(resolved_path) if resolved_path else None
+    if version_main:
+        LOGGER.debug("Detected Chrome version: %d", version_main)
+
+    # Build the ordered list of strategy attempts. Strategy 2 only applies when
+    # a path is resolved; strategy 4 (headless retry) only when not already
+    # headless. Each attempt returns (driver, saw_non_file_lock_error).
+    attempts: list[Callable[[], tuple[WebDriver | None, bool]]] = [
+        lambda: _try_strategy_default(
+            resolved_path=resolved_path, version_main=version_main, headless=headless
+        )
+    ]
+    if resolved_path:
+        attempts.append(
+            lambda: _try_strategy_explicit_path(
+                resolved_path=resolved_path,
+                version_main=version_main,
+                headless=headless,
+            )
+        )
+    attempts.append(
+        lambda: _try_strategy_no_version(
+            resolved_path=resolved_path, headless=headless
+        )
+    )
     if not headless:
         LOGGER.info("Trying headless mode...")
-        try:
-            headless_options = get_options(headless=True)
-            if resolved_path:
-                headless_options.binary_location = resolved_path
-            driver = cast(
-                WebDriver,
-                _get_uc_module().Chrome(
-                    options=headless_options, version_main=version_main
-                ),
+        attempts.append(
+            lambda: _try_strategy_headless(
+                resolved_path=resolved_path, version_main=version_main
             )
-            LOGGER.debug("ChromeDriver started in headless mode.")
+        )
+
+    # Track whether all failures are file-lock related (Windows)
+    all_file_lock = True
+    for attempt in attempts:
+        driver, saw_non_file_lock = attempt()
+        if driver is not None:
             return driver
-        except Exception as err:  # noqa: BLE001
-            _quit_driver(driver)
-            if not _is_file_lock_error(err):
-                _all_file_lock = False
-            LOGGER.warning("Strategy 4 (headless) failed: %s", err)
+        if saw_non_file_lock:
+            all_file_lock = False
 
     # Strategy 5: webdriver-manager fallback
     fallback_driver = _try_webdriver_manager_fallback()
@@ -560,7 +619,7 @@ def _create_driver_inner(  # noqa: PLR0912, PLR0915
 
     # If all failures were file-lock related, raise PermissionError so the
     # outer retry loop in create_driver() can wait and retry.
-    if _all_file_lock and platform.system() == "Windows":
+    if all_file_lock and platform.system() == "Windows":
         raise PermissionError(
             "All ChromeDriver strategies failed due to file lock (WinError 32/183). "
             "A previous ChromeDriver process may still be running."
