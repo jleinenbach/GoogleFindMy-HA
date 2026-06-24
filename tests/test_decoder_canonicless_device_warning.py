@@ -1,3 +1,4 @@
+# tests/test_decoder_canonicless_device_warning.py
 """Observability for devices that Google returns without a canonical ID.
 
 When Google's device list contains a device but provides no canonical ID for it
@@ -252,3 +253,55 @@ def test_same_count_in_one_entry_warns_once_across_calls(
         decoder.get_devices_with_location(device_list, cache=cache)
 
     assert len(_canonicless_warnings(caplog)) == 1
+
+
+def test_reset_with_entry_id_re_arms_only_that_entry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An entry-scoped reset re-arms that entry's warning without touching others.
+
+    The guard is process-wide and survives a Home Assistant config-entry reload (the
+    module is not re-imported). Without an entry-scoped reset on unload, a reload would
+    leave the ``(entry, count)`` key in place, so a still-missing device would be
+    silently suppressed on the next poll. ``_reset_canonicless_warning_state(entry_id)``
+    must clear only that entry's keys, mirroring the per-entry isolation of the guard
+    key itself (a whole-set clear would re-introduce the cross-entry coupling fixed
+    earlier).
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_phone_device(name="Lost Pixel", canonic_ids=[])]
+    )
+    cache_a = SimpleNamespace(entry_id="entry-A")
+    cache_b = SimpleNamespace(entry_id="entry-B")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        # Both entries warn once; the guard now holds a key per entry.
+        decoder.get_devices_with_location(device_list, cache=cache_a)
+        decoder.get_devices_with_location(device_list, cache=cache_b)
+        # Simulate a reload of entry-A only.
+        decoder._reset_canonicless_warning_state("entry-A")
+        # entry-A is re-armed and warns again; entry-B stays suppressed.
+        decoder.get_devices_with_location(device_list, cache=cache_a)
+        decoder.get_devices_with_location(device_list, cache=cache_b)
+
+    assert len(_canonicless_warnings(caplog)) == 3
+
+
+def test_reset_without_entry_id_clears_all(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A reset with no entry id clears the whole guard (test-isolation contract)."""
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_phone_device(name="Lost Pixel", canonic_ids=[])]
+    )
+    cache_a = SimpleNamespace(entry_id="entry-A")
+    cache_b = SimpleNamespace(entry_id="entry-B")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(device_list, cache=cache_a)
+        decoder.get_devices_with_location(device_list, cache=cache_b)
+        decoder._reset_canonicless_warning_state()
+        decoder.get_devices_with_location(device_list, cache=cache_a)
+        decoder.get_devices_with_location(device_list, cache=cache_b)
+
+    assert len(_canonicless_warnings(caplog)) == 4

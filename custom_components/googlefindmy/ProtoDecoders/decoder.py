@@ -45,14 +45,28 @@ _LOGGER = logging.getLogger(__name__)
 # at DEBUG instead (not guarded), so enabling debug logging always reveals which
 # devices are affected. The naming mirrors main.py's _warned_bad_identifier_devices,
 # but the scope differs: that is a per-coordinator instance attribute, while this is a
-# module-level set only cleared by the test reset hook (a re-discovered count warns
-# again only after a process restart).
+# module-level set. It is cleared per entry on config-entry unload/reload (see
+# async_unload_entry) so a reload re-arms the warning for a still-missing device; the
+# argument-free reset is the test-isolation hook.
 _warned_canonicless_counts: set[tuple[str, int]] = set()
 
 
-def _reset_canonicless_warning_state() -> None:
-    """Clear the canonicless-device warning guard (test hook for isolation)."""
-    _warned_canonicless_counts.clear()
+def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
+    """Clear the canonicless-device warning guard.
+
+    Args:
+        entry_id: When ``None`` (test isolation), the whole guard is cleared. When an
+            entry id is given, only that entry's keys are dropped, so unloading or
+            reloading one config entry re-arms its warning on the next poll without
+            disturbing other entries' guards. A whole-set clear per unload would
+            re-introduce the cross-entry coupling the keyed guard fixed.
+    """
+    if entry_id is None:
+        _warned_canonicless_counts.clear()
+        return
+    _warned_canonicless_counts.difference_update(
+        {key for key in _warned_canonicless_counts if key[0] == entry_id}
+    )
 
 
 _text_format_module: Any | None = None

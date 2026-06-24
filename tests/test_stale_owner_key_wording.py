@@ -1,3 +1,4 @@
+# tests/test_stale_owner_key_wording.py
 """Wording of the stale-owner-key failure in ``async_retrieve_identity_key``.
 
 When a tracker's EIK was sealed with an owner-key version older than the current

@@ -8502,6 +8502,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """
 
     parent_entry_id = getattr(entry, "parent_entry_id", None)
+
+    # Re-arm the decoder's canonicless-device warning for this scope. That guard is
+    # process-wide and survives a config-entry reload (the module stays imported), so
+    # without this an unchanged affected-device count would stay suppressed across a
+    # reload and silently hide a still-missing device. The guard key is the parent
+    # entry's token-cache id, so clear the parent scope (not the subentry id).
+    from .ProtoDecoders.decoder import _reset_canonicless_warning_state
+
+    _reset_canonicless_warning_state(parent_entry_id or entry.entry_id)
+
     if parent_entry_id:
         return await _async_unload_subentry(hass, entry)
     return await _async_unload_parent_entry(hass, entry)
