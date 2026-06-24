@@ -19,10 +19,21 @@ tracks *handling relevance*:
   (a real regression). The per-device name stays at DEBUG (privacy).
 
 Valid devices stay silent on both tiers (no behavioural change to the happy path).
+
+Command-Query-Separation contract (``emit_canonicless_diagnostics``):
+    ``get_devices_with_location`` runs twice per poll with the same cache: once as a
+    capability probe (``api.py:361``, ``_build_can_ring_index``) and once as the main
+    poll (``api.py:702``). Only the main poll passes ``emit_canonicless_diagnostics=True``
+    and is allowed to emit the canonicless diagnostics (DEBUG lines, the count WARNING)
+    and to mutate the module-level visibility/count maps. The capability probe runs with
+    the default ``False`` and is diagnostically silent and side-effect free, so the
+    main poll reads the correct previous-poll visibility set instead of one already
+    overwritten by the probe pass.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 from types import SimpleNamespace
 
@@ -147,6 +158,9 @@ def _canonicless_debug_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 # ----------------------------------------------------------------------------------------
 # Benign classes (phone, accessory): silent WARNING tier, named DEBUG line, no remediation
+#
+# These model the MAIN poll, so they pass emit_canonicless_diagnostics=True: only the main
+# poll is allowed to emit the per-device DEBUG line the benign tier asserts.
 # ----------------------------------------------------------------------------------------
 
 
@@ -163,7 +177,9 @@ def test_phone_canonicless_never_visible_is_silent_with_benign_debug(
     device_list = SimpleNamespace(deviceMetadata=[device])
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        results = decoder.get_devices_with_location(device_list, cache=None)
+        results = decoder.get_devices_with_location(
+            device_list, cache=None, emit_canonicless_diagnostics=True
+        )
 
     assert results == []
     assert _canonicless_warnings(caplog) == []
@@ -185,7 +201,9 @@ def test_buds_canonicless_never_visible_is_silent_with_benign_debug(
     device_list = SimpleNamespace(deviceMetadata=[device])
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        results = decoder.get_devices_with_location(device_list, cache=None)
+        results = decoder.get_devices_with_location(
+            device_list, cache=None, emit_canonicless_diagnostics=True
+        )
 
     assert results == []
     assert _canonicless_warnings(caplog) == []
@@ -206,22 +224,24 @@ def test_blank_canonic_id_phone_is_silent_when_never_visible(
     device_list = SimpleNamespace(deviceMetadata=[device])
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        results = decoder.get_devices_with_location(device_list, cache=None)
+        results = decoder.get_devices_with_location(
+            device_list, cache=None, emit_canonicless_diagnostics=True
+        )
 
     assert results == []
     assert _canonicless_warnings(caplog) == []
-    assert any(
-        "Blank ID Phone" in line for line in _canonicless_debug_lines(caplog)
-    )
+    assert any("Blank ID Phone" in line for line in _canonicless_debug_lines(caplog))
 
 
 def test_never_visible_benign_device_no_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Explicit (v): a never-visible benign device produces zero WARNING records."""
-    device_list = SimpleNamespace(
-        deviceMetadata=[_make_buds_device(name="Earbuds")]
-    )
+    """Explicit (v): a never-visible benign device produces zero WARNING records.
+
+    Left at the default emit_canonicless_diagnostics=False so it additionally pins the
+    capability-probe pass as WARNING-silent.
+    """
+    device_list = SimpleNamespace(deviceMetadata=[_make_buds_device(name="Earbuds")])
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
@@ -248,7 +268,9 @@ def test_tracker_canonicless_emits_count_warning(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        results = decoder.get_devices_with_location(device_list, cache=cache)
+        results = decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert results == []
     warnings = _canonicless_warnings(caplog)
@@ -265,7 +287,8 @@ def test_previously_visible_benign_device_drop_emits_warning(
     """A benign device that was visible and now drops is warn-worthy (iv).
 
     Even though a phone is the benign class, a real disappearance ("was visible, now
-    gone") is a regression and must surface exactly one WARNING.
+    gone") is a regression and must surface exactly one WARNING. Both calls model main
+    polls (emit_canonicless_diagnostics=True).
     """
     cache = SimpleNamespace(entry_id="entry-A")
     visible = SimpleNamespace(
@@ -278,9 +301,13 @@ def test_previously_visible_benign_device_drop_emits_warning(
     )
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        first = decoder.get_devices_with_location(visible, cache=cache)
+        first = decoder.get_devices_with_location(
+            visible, cache=cache, emit_canonicless_diagnostics=True
+        )
         assert len(first) == 1
-        decoder.get_devices_with_location(dropped, cache=cache)
+        decoder.get_devices_with_location(
+            dropped, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 1
 
@@ -292,7 +319,8 @@ def test_previously_visible_benign_device_drop_warns_once_then_silent(
 
     Run 1 makes "X" visible; run 2 drops it (one WARNING); run 3 drops it again. Because
     the visibility set is rebuilt per run, "X" is no longer "previously visible" in run 3,
-    so it falls back to the benign class and emits no further WARNING.
+    so it falls back to the benign class and emits no further WARNING. Every run models a
+    main poll (emit_canonicless_diagnostics=True).
     """
     cache = SimpleNamespace(entry_id="entry-A")
     visible = SimpleNamespace(
@@ -305,23 +333,30 @@ def test_previously_visible_benign_device_drop_warns_once_then_silent(
     )
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(visible, cache=cache)
-        decoder.get_devices_with_location(dropped, cache=cache)
+        decoder.get_devices_with_location(
+            visible, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            dropped, cache=cache, emit_canonicless_diagnostics=True
+        )
         assert len(_canonicless_warnings(caplog)) == 1
-        decoder.get_devices_with_location(dropped, cache=cache)
+        decoder.get_devices_with_location(
+            dropped, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 1
 
 
-def test_transition_warns_at_most_once_per_poll(
+def test_transition_warns_exactly_once_per_poll_despite_double_call(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Multi-run-per-poll invariant (vii): two calls in one poll warn at most once.
+    """Multi-run-per-poll invariant (vii): the capability probe must not consume it.
 
-    ``get_devices_with_location`` runs twice per poll with the same cache (api.py:361 and
-    api.py:702). After "X" was visible, the first drop warns and clears "X" from the
-    visibility set; the second call in the same poll no longer sees "X" as previously
-    visible, so the transition warns at most once per poll.
+    A poll calls ``get_devices_with_location`` twice with the same cache: the capability
+    probe (emit_canonicless_diagnostics=False) and the main poll (True). After "X" was
+    visible, the probe pass on the dropped list must NOT touch the visibility map, so the
+    main pass still sees "X" as previously visible and fires the transition WARNING exactly
+    once (``== 1``, not the pre-fix ``<= 1`` where the probe zertrat the map).
     """
     cache = SimpleNamespace(entry_id="entry-A")
     visible = SimpleNamespace(
@@ -334,17 +369,29 @@ def test_transition_warns_at_most_once_per_poll(
     )
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(visible, cache=cache)
-        decoder.get_devices_with_location(dropped, cache=cache)
-        decoder.get_devices_with_location(dropped, cache=cache)
+        # Poll 1: main poll makes "X" visible.
+        decoder.get_devices_with_location(
+            visible, cache=cache, emit_canonicless_diagnostics=True
+        )
+        # Poll 2: capability probe (silent) then main poll (emits) on the dropped list.
+        decoder.get_devices_with_location(
+            dropped, cache=cache, emit_canonicless_diagnostics=False
+        )
+        decoder.get_devices_with_location(
+            dropped, cache=cache, emit_canonicless_diagnostics=True
+        )
 
-    assert len(_canonicless_warnings(caplog)) <= 1
+    assert len(_canonicless_warnings(caplog)) == 1
 
 
 def test_valid_canonic_id_produces_row_and_no_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Negative control: a valid canonic ID yields one row and no canonicless signal."""
+    """Negative control: a valid canonic ID yields one row and no canonicless signal.
+
+    Left at the default emit_canonicless_diagnostics=False: the happy path is identical on
+    both passes, so this also pins that the probe pass produces the row without diagnostics.
+    """
     device = _make_phone_device(
         name="Healthy Phone", canonic_ids=[SimpleNamespace(id="valid-canonic-id")]
     )
@@ -359,7 +406,112 @@ def test_valid_canonic_id_produces_row_and_no_warning(
 
 
 # ----------------------------------------------------------------------------------------
-# Count-guard re-arm mechanics, now exercised on the warn-worthy (tracker) population
+# Command-Query-Separation: the capability probe pass (emit=False) is silent and pure
+# ----------------------------------------------------------------------------------------
+
+
+def test_emit_false_pass_leaves_count_state_for_main_pass(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T2: the capability probe pass does not pre-load or pop the entry's count state.
+
+    A poll runs the probe (emit=False) before the main poll (emit=True) on the same
+    canonicless tracker list. The probe must leave ``_last_canonicless_count_by_entry``
+    untouched (no premature dedup, no spurious pop), so the subsequent main pass fires the
+    WARNING exactly once and records the count.
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_tracker_device(name="Garage Tracker")]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    assert decoder._last_canonicless_count_by_entry.get("entry-A") is None
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
+        # Capability probe pass: silent, no state change.
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=False
+        )
+        assert _canonicless_warnings(caplog) == []
+        assert _canonicless_debug_lines(caplog) == []
+        assert decoder._last_canonicless_count_by_entry.get("entry-A") is None
+
+        # Main poll pass: fires exactly one WARNING and records the count.
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
+
+    assert len(_canonicless_warnings(caplog)) == 1
+    assert decoder._last_canonicless_count_by_entry.get("entry-A") == 1
+
+
+def test_emit_false_mutates_no_module_state_and_logs_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T3: an emit=False call is side-effect free and logs neither WARNING nor DEBUG.
+
+    Pre-seeds both module maps, then runs a canonicless tracker through the probe pass and
+    asserts: (a) the visibility map is unchanged (not overwritten with this run's set),
+    (b) the count map is unchanged (its pre-seeded entry is NOT popped by the 0-count
+    ``else`` branch of the count guard), and (c) no canonicless WARNING/DEBUG is emitted.
+    """
+    cache = SimpleNamespace(entry_id="entry-A")
+    decoder._last_canonicless_count_by_entry["entry-A"] = 1
+    decoder._visible_device_names_by_entry["entry-A"] = {"Previously Seen"}
+
+    count_snapshot = copy.deepcopy(decoder._last_canonicless_count_by_entry)
+    visible_snapshot = copy.deepcopy(decoder._visible_device_names_by_entry)
+
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_tracker_device(name="Garage Tracker")]
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=False
+        )
+
+    assert decoder._last_canonicless_count_by_entry == count_snapshot
+    assert decoder._visible_device_names_by_entry == visible_snapshot
+    assert _canonicless_warnings(caplog) == []
+    assert _canonicless_debug_lines(caplog) == []
+
+
+def test_emit_false_rows_match_emit_true(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T4: the returned rows are identical between the probe and the main pass.
+
+    Only the diagnostics differ between the two passes; the produced rows (the query
+    result) must not. A list with a valid phone plus a canonicless tracker yields exactly
+    the valid phone's row in both passes.
+    """
+
+    def _build_list() -> SimpleNamespace:
+        return SimpleNamespace(
+            deviceMetadata=[
+                _make_phone_device(
+                    name="Healthy", canonic_ids=[SimpleNamespace(id="valid-id")]
+                ),
+                _make_tracker_device(name="Garage Tracker"),
+            ]
+        )
+
+    rows_probe = decoder.get_devices_with_location(
+        _build_list(), cache=None, emit_canonicless_diagnostics=False
+    )
+    decoder._reset_canonicless_warning_state()
+    rows_main = decoder.get_devices_with_location(
+        _build_list(), cache=None, emit_canonicless_diagnostics=True
+    )
+
+    assert len(rows_probe) == 1
+    assert rows_probe == rows_main
+
+
+# ----------------------------------------------------------------------------------------
+# Count-guard re-arm mechanics, now exercised on the warn-worthy (tracker) population.
+# All model the main poll, so each call passes emit_canonicless_diagnostics=True.
 # ----------------------------------------------------------------------------------------
 
 
@@ -373,8 +525,12 @@ def test_tracker_repeated_call_does_not_warn_twice(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(device_list, cache=cache)
-        decoder.get_devices_with_location(device_list, cache=cache)
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 1
 
@@ -390,8 +546,12 @@ def test_tracker_same_count_in_distinct_entries_each_warns(
     cache_b = SimpleNamespace(entry_id="entry-B")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(device_list, cache=cache_a)
-        decoder.get_devices_with_location(device_list, cache=cache_b)
+        decoder.get_devices_with_location(
+            device_list, cache=cache_a, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache_b, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 2
 
@@ -409,7 +569,9 @@ def test_tracker_multiple_canonicless_in_one_list_warn_once_with_count(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        results = decoder.get_devices_with_location(device_list, cache=cache)
+        results = decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert results == []
     warnings = _canonicless_warnings(caplog)
@@ -433,8 +595,12 @@ def test_tracker_changed_count_in_one_entry_warns_again(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(one, cache=cache)
-        decoder.get_devices_with_location(two, cache=cache)
+        decoder.get_devices_with_location(
+            one, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            two, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     warnings = _canonicless_warnings(caplog)
     assert len(warnings) == 2
@@ -456,9 +622,15 @@ def test_tracker_count_returning_to_prior_value_warns_again(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(one, cache=cache)
-        decoder.get_devices_with_location(two, cache=cache)
-        decoder.get_devices_with_location(one, cache=cache)
+        decoder.get_devices_with_location(
+            one, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            two, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            one, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     warnings = _canonicless_warnings(caplog)
     assert len(warnings) == 3
@@ -480,10 +652,16 @@ def test_tracker_recovery_then_redrop_warns_again(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(missing, cache=cache)
-        decoder.get_devices_with_location(healthy, cache=cache)
+        decoder.get_devices_with_location(
+            missing, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            healthy, cache=cache, emit_canonicless_diagnostics=True
+        )
         assert len(_canonicless_warnings(caplog)) == 1
-        decoder.get_devices_with_location(missing, cache=cache)
+        decoder.get_devices_with_location(
+            missing, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 2
 
@@ -495,7 +673,7 @@ def test_mixed_run_only_benign_left_pops_guard(
 
     Run 1: a tracker drops (count 1, WARNING). Run 2: the tracker recovers and a benign,
     never-visible accessory drops -- the warn-worthy count is 0, so the guard pops and no
-    second WARNING fires.
+    second WARNING fires. Both runs model the main poll.
     """
     cache = SimpleNamespace(entry_id="entry-A")
     run1 = SimpleNamespace(deviceMetadata=[_make_tracker_device(name="Tracker")])
@@ -509,9 +687,13 @@ def test_mixed_run_only_benign_left_pops_guard(
     )
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(run1, cache=cache)
+        decoder.get_devices_with_location(
+            run1, cache=cache, emit_canonicless_diagnostics=True
+        )
         assert len(_canonicless_warnings(caplog)) == 1
-        decoder.get_devices_with_location(run2, cache=cache)
+        decoder.get_devices_with_location(
+            run2, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 1
     assert decoder._last_canonicless_count_by_entry.get("entry-A") is None
@@ -527,8 +709,12 @@ def test_tracker_same_count_in_one_entry_warns_once_across_calls(
     cache = SimpleNamespace(entry_id="entry-A")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(device_list, cache=cache)
-        decoder.get_devices_with_location(device_list, cache=cache)
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 1
 
@@ -544,11 +730,19 @@ def test_reset_with_entry_id_re_arms_only_that_entry(
     cache_b = SimpleNamespace(entry_id="entry-B")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(device_list, cache=cache_a)
-        decoder.get_devices_with_location(device_list, cache=cache_b)
+        decoder.get_devices_with_location(
+            device_list, cache=cache_a, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache_b, emit_canonicless_diagnostics=True
+        )
         decoder._reset_canonicless_warning_state("entry-A")
-        decoder.get_devices_with_location(device_list, cache=cache_a)
-        decoder.get_devices_with_location(device_list, cache=cache_b)
+        decoder.get_devices_with_location(
+            device_list, cache=cache_a, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache_b, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 3
 
@@ -564,10 +758,18 @@ def test_reset_without_entry_id_clears_all(
     cache_b = SimpleNamespace(entry_id="entry-B")
 
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
-        decoder.get_devices_with_location(device_list, cache=cache_a)
-        decoder.get_devices_with_location(device_list, cache=cache_b)
+        decoder.get_devices_with_location(
+            device_list, cache=cache_a, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache_b, emit_canonicless_diagnostics=True
+        )
         decoder._reset_canonicless_warning_state()
-        decoder.get_devices_with_location(device_list, cache=cache_a)
-        decoder.get_devices_with_location(device_list, cache=cache_b)
+        decoder.get_devices_with_location(
+            device_list, cache=cache_a, emit_canonicless_diagnostics=True
+        )
+        decoder.get_devices_with_location(
+            device_list, cache=cache_b, emit_canonicless_diagnostics=True
+        )
 
     assert len(_canonicless_warnings(caplog)) == 4
