@@ -20,14 +20,6 @@
           "secrets_json": "Inhalt der secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Methode 2: Manueller OAuth-Token",
-        "description": "Gib deinen OAuth-Token und deine Google-E-Mail-Adresse aus dem manuellen Anmeldeprozess ein.",
-        "data": {
-          "oauth_token": "OAuth-Token",
-          "google_email": "Google-E-Mail-Adresse"
-        }
-      },
       "device_selection": {
         "title": "Abfrageeinstellungen",
         "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)\n\nGoogle-Home-Filter: Standardmäßig aktiviert mit den Schlüsselwörtern nest/google/home/mini/hub/display/chromecast/speaker. Für Google-/Nest-/Chromecast-Erkennungen werden die Koordinaten der Home-Zone eingesetzt und wiederholte \"home\"-Meldungen 15 Minuten lang entprellt. Passe die Schlüsselwörter hier an, wenn deine Geräte andere Namen verwenden.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben.",
+        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nHinweis: Die Konto-E-Mail-Adresse ist für diese erneute Authentifizierung fest vorgegeben; um ein anderes Konto zu nutzen, entferne die Integration und füge sie neu hinzu.",
         "data": {
-          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "new_oauth_token": "Neuer OAuth-Token"
+          "secrets_json": "Neue secrets.json (vollständiger Inhalt)"
         }
       },
       "migrate_complete": {
@@ -241,14 +232,9 @@
       },
       "credentials": {
         "title": "Anmeldedaten aktualisieren (optional)",
-        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "Aktualisiere deine Anmeldedaten. Bestehende Werte werden aus Sicherheitsgründen nicht angezeigt.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nNach dem Absenden werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
-          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "oauth_token": "Neuer OAuth-Token",
-          "google_email": "Google-E-Mail",
           "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "new_oauth_token": "Neuer OAuth-Token",
-          "new_google_email": "Google-E-Mail",
           "subentry": "Funktionsgruppe"
         },
         "data_description": {

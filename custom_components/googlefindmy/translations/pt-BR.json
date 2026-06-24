@@ -20,14 +20,6 @@
           "secrets_json": "Conteúdo do arquivo secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Método 2: Token OAuth individual",
-        "description": "Insira seu token OAuth e o endereço de e-mail do Google obtidos por meio de um processo manual de autenticação.",
-        "data": {
-          "oauth_token": "Token OAuth",
-          "google_email": "Endereço de e-mail do Google"
-        }
-      },
       "device_selection": {
         "title": "Configurações de consulta",
         "description": "Os dispositivos recém-descobertos aparecem desativados e podem ser ativados nas configurações do dispositivo. ",
@@ -55,8 +47,7 @@
         "title": "Reautenticar",
         "description": "Suas credenciais para **{email}** parecem ser inválidas ou expiradas. ",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)",
-          "new_oauth_token": "Novo token OAuth"
+          "secrets_json": "Novo secrets.json (conteúdo completo)"
         }
       },
       "migrate_complete": {
@@ -243,12 +234,7 @@
         "title": "Atualizar credenciais (opcional)",
         "description": "Atualize as credenciais sem expor os valores existentes. ",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)",
-          "oauth_token": "Novo token OAuth",
-          "google_email": "E-mail do Google",
           "new_secrets_json": "Novo secrets.json (conteúdo completo)",
-          "new_oauth_token": "Novo token OAuth",
-          "new_google_email": "E-mail do Google",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
