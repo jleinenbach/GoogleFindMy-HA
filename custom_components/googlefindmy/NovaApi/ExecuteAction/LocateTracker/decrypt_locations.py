@@ -18,6 +18,9 @@ from typing import TYPE_CHECKING, Any, cast
 from cryptography.exceptions import InvalidTag
 
 from custom_components.googlefindmy import get_proto_decoder
+from custom_components.googlefindmy.Auth.adm_token_retrieval import (
+    is_non_retryable_auth_kind,
+)
 from custom_components.googlefindmy.Auth.username_provider import username_string
 from custom_components.googlefindmy.const import MAX_ACCEPTED_LOCATION_FUTURE_DRIFT_S
 from custom_components.googlefindmy.FMDNCrypto._lazy_crypto import get_aesgcm_class
@@ -321,6 +324,31 @@ class OwnerKeyLookupTransientError(Exception):
     """
 
 
+class _OwnerKeyRederiveRequired(OwnerKeyLookupTransientError):
+    """Internal signal that a locally structurally-defective owner key should
+    trigger a single-shot ``force_refresh`` re-derive.
+
+    A LOCAL owner-key STRUCTURE defect (the stored owner key is missing/invalid,
+    malformed, or the wrong length) is re-derivable from the (valid) shared key,
+    so the caller should re-derive once via ``async_get_owner_key(force_refresh=
+    True)`` BEFORE deciding anything -- never escalate the first defect straight
+    to reauth. Subclasses the transient base ``OwnerKeyLookupTransientError``
+    deliberately: should this internal signal ever leak past the caller's
+    orchestration, it fails safe as a benign transient miss (skipped by the
+    poll/locate paths, never caught by ``except DecryptionError``, never reaching
+    the account-wide reauth verdict). It is NOT a ``DecryptionError`` and makes no
+    "re-authenticate" claim.
+    """
+
+
+# Single-shot WARNING dedup for the R4 "persistent structure defect after a
+# successful re-derive" notice. Keyed on the entry-scope identity (here ``id(
+# cache)`` -- the closest available per-entry handle in this function; this keys
+# per cache OBJECT, so the dedup only suppresses cross-poll spam, not distinct
+# entries). The R4 contract asserts exactly one WARNING per key.
+_warned_rederive_persistent_defect: set[int] = set()
+
+
 def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
     """Map a low-level owner-key lookup failure to a specific error class.
 
@@ -332,22 +360,35 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
     preserves the original error via ``raise ... from exc``.
 
     Deterministic, field-specific matching (first match wins):
+      (auth) a non-retryable structured ``error_kind`` (badauthentication /
+          auth_error / invalid_grant) -> ``OwnerKeyInvalidError`` (reauth-worthy
+          ``DecryptionError``). This is the ONLY reauth-worthy branch and is keyed
+          on the structured ``error_kind`` attribute, NEVER on message substrings,
+          so a transient text that merely contains "401" (e.g. "retry after 4012
+          ms") stays transient. See AP3.
       (a) ``InvalidTag`` -> ``SharedKeyMismatchError`` (genuine credential defect).
       (b) a local "shared key ... missing or empty" bundle ->
           ``SharedKeyMissingError`` (genuine credential defect).
-      (b2) a local owner-key validity defect (the stored owner key is missing,
-          malformed, or the wrong length) -> ``OwnerKeyInvalidError`` (genuine
-          credential defect; deterministic, never fixed by a retry, so it must
-          stay reauth-worthy and must NOT be swallowed by the transient default).
+      (b2) a local owner-key STRUCTURE defect (the stored owner key is missing,
+          malformed, or the wrong length) -> ``_OwnerKeyRederiveRequired`` (an
+          INTERNAL re-derive signal, NOT reauth). The defect is re-derivable from
+          the (valid) shared key, so the caller force-refreshes the owner key once
+          before deciding anything. Fail-safe transient subclass; never reauth.
       (c) a partial server-field response (``encryptedOwnerKeyAndMetadata`` /
           ``encryptedOwnerKey`` / "Decrypted owner_key is empty") ->
           ``OwnerKeyLookupTransientError`` (transient server condition).
       (d) everything else (default, inverted) -> ``OwnerKeyLookupTransientError``
           (no "stale" / "re-authenticate" guess).
 
-    The order matters: (b2) anchors on owner-key validity wordings that are
-    distinct from the (c) server-field tokens, so a deterministic local defect is
-    classified before the transient fallthrough can hide it.
+    Order / reachability: the (auth) ``error_kind`` check runs first and is the
+    only path that yields a reauth-worthy ``OwnerKeyInvalidError``. It is
+    reachable via a bare ``RuntimeError`` carrying ``error_kind`` propagated from
+    the ADM/owner-key getters; ``error_kind``-tagged errors carry none of the
+    (a)-(c) wordings, so placing it first does not steal those branches.
+    ``InvalidAasTokenError`` does NOT reach this branch (the lower layers
+    pre-convert it). The (b2) anchor is distinct from the (c) server-field tokens,
+    so a deterministic local structure defect is routed to the re-derive signal
+    before the transient fallthrough can hide it.
 
     Scope of (b2): it covers only STRUCTURAL defects of an owner key that was
     already obtained (missing/invalid value after retrieval, malformed encoding,
@@ -358,6 +399,12 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
     cry-wolf prompt this classifier exists to avoid. They are NOT structural
     owner-key defects, so they are intentionally not folded into (b2).
     """
+    if is_non_retryable_auth_kind(exc):
+        return OwnerKeyInvalidError(
+            f"Owner key lookup hit a non-retryable auth failure during {context} "
+            "(structured error_kind). The stored credentials are rejected; "
+            "re-authentication is required."
+        )
     if isinstance(exc, InvalidTag):
         return SharedKeyMismatchError(
             f"Owner key decryption failed (InvalidTag) during {context}: the shared "
@@ -375,10 +422,11 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
         or "invalid owner_key format" in text
         or "owner key must be exactly" in text
     ):
-        return OwnerKeyInvalidError(
-            f"The locally stored owner key is invalid during {context} (missing, "
-            "malformed, or wrong length). A fresh secrets.json is required "
-            "(re-authentication)."
+        return _OwnerKeyRederiveRequired(
+            f"The locally stored owner key is structurally defective during "
+            f"{context} (missing, malformed, or wrong length). It is re-derivable "
+            "from the shared key; a single-shot owner-key re-derive (force_refresh) "
+            "is required. This is transient, not a credential rejection."
         )
     if (
         "encryptedownerkeyandmetadata" in text
@@ -526,6 +574,10 @@ async def async_retrieve_identity_key(
         )
 
     owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
+    # Set when the single-shot structural-defect re-derive below already forced a
+    # fresh owner key. It makes the later blind-refresh path a no-op so the owner
+    # key is force-refreshed at most once per call (R1: exactly one force_refresh).
+    did_force_rederive = False
     try:
         owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
     except SpotError as exc:
@@ -544,7 +596,60 @@ async def async_retrieve_identity_key(
         ) from exc
     except (InvalidTag, RuntimeError) as exc:
         _LOGGER.debug("Owner-key lookup phase=%s failed", "initial lookup")
-        raise _classify_owner_key_failure(exc, context="initial lookup") from exc
+        classified = _classify_owner_key_failure(exc, context="initial lookup")
+        if not isinstance(classified, _OwnerKeyRederiveRequired):
+            raise classified from exc
+        # single-shot re-derive: a structural owner-key defect is re-derivable from
+        # the (valid) shared key. Mirror the force_refresh pattern below; LINEAR,
+        # not recursive -> structurally single-shot (the re-derive's own failures
+        # are converted here, never re-entered into the re-derive branch).
+        _LOGGER.debug(
+            "Owner-key structural defect on initial lookup; re-deriving once "
+            "(force_refresh)."
+        )
+        did_force_rederive = True
+        try:
+            owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
+            # Re-arm the persistent-defect WARNING guard: a successful re-derive
+            # means the structural defect is resolved, so a future recurrence must
+            # warn again instead of being suppressed by a lifetime-accumulating
+            # guard (re-arm-on-recovery, mirrors the dedup-guard lesson from the
+            # earlier device-drop work).
+            _warned_rederive_persistent_defect.discard(id(cache))
+        except SpotError as exc2:
+            _LOGGER.debug(
+                "Owner-key re-derive phase=%s hit a transient SpotError: %s",
+                "forced re-derive",
+                type(exc2).__name__,
+            )
+            raise OwnerKeyLookupTransientError(
+                "Owner key retrieval did not complete (transient): the forced "
+                "re-derive failed at the transport/gRPC layer. The crypto keys are "
+                "presumed valid; this will be retried."
+            ) from exc2
+        except (InvalidTag, RuntimeError) as exc2:
+            reclassified = _classify_owner_key_failure(
+                exc2, context="forced re-derive"
+            )
+            if isinstance(reclassified, _OwnerKeyRederiveRequired):
+                # R4 default: still structurally defective AFTER a successful-HTTP
+                # re-derive -> transient + WARNING-once (no reauth without an
+                # InvalidTag shared-key rejection). Dedup keyed on id(cache) (the
+                # per-entry handle available here) so polls do not spam the log.
+                rederive_warn_key = id(cache)
+                if rederive_warn_key not in _warned_rederive_persistent_defect:
+                    _warned_rederive_persistent_defect.add(rederive_warn_key)
+                    _LOGGER.warning(
+                        "Owner key remains structurally defective after a forced "
+                        "re-derive; treating as transient (no re-authentication). "
+                        "The lookup will be retried on the next poll."
+                    )
+                raise OwnerKeyLookupTransientError(
+                    "Owner key retrieval did not complete (transient): the owner "
+                    "key is still structurally defective after a re-derive. The "
+                    "crypto keys are presumed valid; this will be retried."
+                ) from exc2
+            raise reclassified from exc2
 
     # --- Proactive Owner Key Version Mismatch Check ---
     # If the tracker requires a newer owner key version than what we have cached,
@@ -757,7 +862,12 @@ async def async_retrieve_identity_key(
     # Blind refresh: version check unavailable but key is clearly wrong.
     # This mirrors the version-mismatch retry above but works when SPOT gRPC
     # fails to provide current_owner_key_version (common in standalone CLI).
-    if not candidates and current_owner_key_version is None and _retry:
+    if (
+        not candidates
+        and current_owner_key_version is None
+        and _retry
+        and not did_force_rederive
+    ):
         _LOGGER.info(
             "EIK decryption failed and SPOT version check unavailable; "
             "attempting blind owner key refresh."

@@ -72,6 +72,30 @@ except ImportError:  # pragma: no cover - RED phase before AP3 lands the class
     OwnerKeyLookupTransientError = _MissingTransientError  # type: ignore[assignment,misc]
 
 
+# v3 AP1 introduces ``_OwnerKeyRederiveRequired``: an INTERNAL re-derive signal
+# raised when a LOCAL owner-key STRUCTURE defect is detected, asking the caller to
+# re-derive the owner key (force_refresh) instead of escalating to reauth. It
+# subclasses ``OwnerKeyLookupTransientError`` (fail-safe: base ``Exception``, never
+# ``DecryptionError``, never reauth). The class does not exist on HEAD yet, so it
+# is imported softly through a sentinel -- the v3 re-derive tests below assert RED
+# on a missing/wrong type instead of erroring out the whole collection.
+try:
+    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # noqa: E501
+        _OwnerKeyRederiveRequired,
+    )
+except ImportError:  # pragma: no cover - RED phase before AP1 lands the signal
+
+    class _MissingRederiveSignal:
+        """Placeholder so re-derive-contract tests fail (not error) pre-AP1.
+
+        ``type(result) is _OwnerKeyRederiveRequired`` and the subclass checks
+        below never match a real ``OwnerKeyInvalidError`` / ``DecryptionError``,
+        so each re-derive assertion is RED while the unchanged tests stay green.
+        """
+
+    _OwnerKeyRederiveRequired = _MissingRederiveSignal  # type: ignore[assignment,misc]
+
+
 def test_liskov_subclasses_are_decryption_errors() -> None:
     """All specific shared-key errors stay DecryptionError subclasses so existing
     ``except DecryptionError`` handlers keep catching them (no silent breakage)."""
@@ -84,6 +108,13 @@ def test_liskov_subclasses_are_decryption_errors() -> None:
     # as a benign transient miss).
     assert issubclass(OwnerKeyInvalidError, DecryptionError)
     assert not issubclass(OwnerKeyInvalidError, OwnerKeyLookupTransientError)
+    # v3 AP1: the internal re-derive signal is fail-safe -- it IS an
+    # OwnerKeyLookupTransientError (so a leak is skipped as a benign transient
+    # miss, never escalated to reauth) and is NOT a DecryptionError (so the
+    # ``except DecryptionError`` reauth handlers never catch it). RED-tolerant:
+    # the soft-imported sentinel makes these assertions fail (not error) on HEAD.
+    assert issubclass(_OwnerKeyRederiveRequired, OwnerKeyLookupTransientError)
+    assert not issubclass(_OwnerKeyRederiveRequired, DecryptionError)
 
 
 def test_t2_invalid_tag_maps_to_shared_key_mismatch() -> None:
@@ -194,25 +225,27 @@ def test_f6_shared_key_missing_verbatim_string_is_characterized() -> None:
         "Owner key must be exactly 32 bytes long.",
     ],
 )
-def test_local_owner_key_defect_is_reauth_worthy_not_transient(message: str) -> None:
-    """A LOCAL owner-key validity defect must stay reauth-worthy (Codex P2 fix).
+def test_local_owner_key_defect_requests_rederive_not_reauth(message: str) -> None:
+    """RED (v3 AP1): a LOCAL owner-key STRUCTURE defect now requests a RE-DERIVE.
 
     ``async_get_owner_key`` raises these deterministic ``RuntimeError`` strings
     when the locally stored owner key is missing/invalid, malformed, or the wrong
-    length. The inverted default (branch d) would swallow them as
-    ``OwnerKeyLookupTransientError``, which the poll/locate paths skip silently --
-    so an account with a corrupted owner key would never be prompted to re-import
-    secrets. Branch (b2) keeps them as ``OwnerKeyInvalidError`` (a reauth-worthy
-    ``DecryptionError``), not a transient miss.
+    length. The v3 contract REPURPOSES this path: instead of escalating straight
+    to ``OwnerKeyInvalidError``/reauth, the classifier returns the internal
+    ``_OwnerKeyRederiveRequired`` signal so the caller first re-derives the owner
+    key (force_refresh). The signal is fail-safe: an ``OwnerKeyLookupTransientError``
+    subclass (skipped as a benign miss, never reauth) and NOT a ``DecryptionError``
+    (so ``except DecryptionError`` reauth handlers never catch it), and it makes
+    no "re-authenticate" claim. RED today: HEAD still returns
+    ``OwnerKeyInvalidError`` (a reauth-worthy ``DecryptionError``).
     """
     result = _classify_owner_key_failure(RuntimeError(message), context="initial lookup")
-    assert isinstance(result, OwnerKeyInvalidError)
-    assert isinstance(result, DecryptionError)
-    assert not isinstance(result, OwnerKeyLookupTransientError)
-    text = str(result).lower()
-    # The reauth recovery is surfaced, not hidden behind a "transient/retry" claim.
-    assert "re-authentication" in text
-    assert "transient" not in text
+    assert type(result) is _OwnerKeyRederiveRequired
+    # Fail-safe: a transient subclass, never a reauth-worthy DecryptionError.
+    assert isinstance(result, OwnerKeyLookupTransientError)
+    assert not isinstance(result, DecryptionError)
+    # No speculative credential accusation: never asks to re-authenticate.
+    assert "re-authenticat" not in str(result).lower()
 
 
 def test_local_owner_key_defect_does_not_collide_with_server_field_transient() -> None:
