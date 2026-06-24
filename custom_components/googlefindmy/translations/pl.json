@@ -20,14 +20,6 @@
           "secrets_json": "Zawartość pliku secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Metoda 2: Indywidualny token OAuth",
-        "description": "Wprowadź token OAuth i adres e-mail Google uzyskane podczas ręcznej autoryzacji.",
-        "data": {
-          "oauth_token": "Token OAuth",
-          "google_email": "Adres e-mail Google"
-        }
-      },
       "device_selection": {
         "title": "Ustawienia odpytywania",
         "description": "Nowo wykryte urządzenia pojawiają się jako wyłączone i można je włączyć w ustawieniach urządzenia. Skonfiguruj tutaj ogólne parametry odpytywania:\n• Interwał odpytywania lokalizacji: jak często rozpoczyna się nowy cykl (60–3600 sekund)\n• Opóźnienie między odpytywaniem urządzeń: odstęp między zapytaniami dla poszczególnych urządzeń w cyklu (1–60 sekund)\n\nFiltr Google Home: domyślnie włączony ze słowami kluczowymi nest/google/home/mini/hub/display/chromecast/speaker. Podmienia współrzędne strefy Home dla wykryć Google/Nest/Chromecast i tłumi powtarzające się zgłoszenia \"home\" przez 15 minut. Dostosuj słowa kluczowe tutaj, jeśli urządzenia używają innych nazw.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Ponowne uwierzytelnienie",
-        "description": "Poświadczenia dla **{email}** są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWskazówka: możesz wkleić pełną zawartość nowego pliku secrets.json **albo** podać nowy token OAuth i adres e-mail.",
+        "description": "Poświadczenia dla **{email}** są nieprawidłowe lub wygasły. Podaj poniżej nowe.\n\nWklej pełną zawartość nowego pliku **secrets.json** (wygenerowanego przez uruchomienie GoogleFindMyTools).\n\nUwaga: adres e-mail konta jest stały dla tego ponownego uwierzytelnienia; aby użyć innego konta, usuń integrację i dodaj ją ponownie.",
         "data": {
-          "secrets_json": "Nowy secrets.json (pełna zawartość)",
-          "new_oauth_token": "Nowy token OAuth"
+          "secrets_json": "Nowy secrets.json (pełna zawartość)"
         }
       },
       "migrate_complete": {
@@ -241,14 +232,9 @@
       },
       "credentials": {
         "title": "Aktualizuj poświadczenia (opcjonalnie)",
-        "description": "Zaktualizuj poświadczenia bez ujawniania istniejących wartości. Podaj dokładnie jedną metodę:\n\n• Wklej pełną zawartość nowego **secrets.json**\n**albo**\n• Podaj nowy **token OAuth** i **adres e-mail Google**.\n\nJeśli podasz nowe dane, zostaną one zweryfikowane i zapisane; integracja przeładuje się bez zmiany nazw Twoich encji.",
+        "description": "Zaktualizuj swoje poświadczenia. Istniejące wartości nie są wyświetlane ze względów bezpieczeństwa.\n\nWklej pełną zawartość nowego pliku **secrets.json** (wygenerowanego przez uruchomienie GoogleFindMyTools).\n\nPo przesłaniu poświadczenia zostaną zweryfikowane i zapisane; integracja przeładuje się bez zmiany nazw Twoich encji.",
         "data": {
-          "secrets_json": "Nowy secrets.json (pełna zawartość)",
-          "oauth_token": "Nowy token OAuth",
-          "google_email": "Adres e-mail Google",
           "new_secrets_json": "Nowy plik secrets.json (pełna zawartość)",
-          "new_oauth_token": "Nowy token OAuth",
-          "new_google_email": "Nowy adres e-mail Google",
           "subentry": "Grupa funkcji"
         },
         "data_description": {
