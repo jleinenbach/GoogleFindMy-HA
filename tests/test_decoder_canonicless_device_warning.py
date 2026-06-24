@@ -235,6 +235,68 @@ def test_changed_count_in_one_entry_warns_again(
     assert "2" in warnings[1]
 
 
+def test_count_returning_to_prior_value_warns_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A count that returns to an earlier value re-surfaces the WARNING.
+
+    The guard remembers only the *last* count per entry, not every count ever seen.
+    A cycle of 1 -> 2 -> 1 (one device recovers, leaving a different one missing, or a
+    transient extra drop clears) is three distinct states, so it must warn three times.
+    A lifetime set of seen counts would wrongly suppress the final ``1`` because the
+    ``(entry, 1)`` key is still present from the first state.
+    """
+    one = SimpleNamespace(
+        deviceMetadata=[_make_phone_device(name="A", canonic_ids=[])]
+    )
+    two = SimpleNamespace(
+        deviceMetadata=[
+            _make_phone_device(name="A", canonic_ids=[]),
+            _make_phone_device(name="B", canonic_ids=[]),
+        ]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(one, cache=cache)
+        decoder.get_devices_with_location(two, cache=cache)
+        decoder.get_devices_with_location(one, cache=cache)
+
+    warnings = _canonicless_warnings(caplog)
+    assert len(warnings) == 3
+    assert "1" in warnings[0]
+    assert "2" in warnings[1]
+    assert "1" in warnings[2]
+
+
+def test_recovery_then_redrop_warns_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full recovery (count 0) followed by a new drop re-surfaces the WARNING.
+
+    When an entry's affected count returns to 0 every device recovered, so the guard
+    must forget that entry. A later drop is then new information and warns again, even
+    if the count returns to a value seen before the recovery. The healthy (count 0)
+    poll itself must stay silent on the default-visible WARNING tier.
+    """
+    missing = SimpleNamespace(
+        deviceMetadata=[_make_phone_device(name="A", canonic_ids=[])]
+    )
+    healthy = SimpleNamespace(
+        deviceMetadata=[
+            _make_phone_device(name="A", canonic_ids=[SimpleNamespace(id="ok")])
+        ]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(missing, cache=cache)
+        decoder.get_devices_with_location(healthy, cache=cache)
+        decoder.get_devices_with_location(missing, cache=cache)
+
+    assert len(_canonicless_warnings(caplog)) == 2
+
+
 def test_same_count_in_one_entry_warns_once_across_calls(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -43,12 +43,19 @@ _LOGGER = logging.getLogger(__name__)
 # from silencing each other, and the count re-surfaces the WARNING only when the
 # number of affected devices changes (new information). The per-device name is logged
 # at DEBUG instead (not guarded), so enabling debug logging always reveals which
-# devices are affected. The naming mirrors main.py's _warned_bad_identifier_devices,
-# but the scope differs: that is a per-coordinator instance attribute, while this is a
-# module-level set. It is cleared per entry on config-entry unload/reload (see
+# devices are affected.
+#
+# The guard maps an entry scope (cache.entry_id, or "<no-entry>" in stub mode) to the
+# LAST affected-device count that entry warned about. Storing the last count — rather
+# than a set of every count ever seen — is the correctness point: a count that returns
+# to an earlier value (1 -> 2 -> 1) still re-surfaces, because the comparison is against
+# the previous state, not membership in an all-time history that never forgets. A
+# recovery (count 0) drops the entry, so a later drop re-warns even if the count returns
+# to a pre-recovery value, and the map stays scoped to entries that are actually
+# affected. It is cleared per entry on config-entry unload/reload (see
 # async_unload_entry) so a reload re-arms the warning for a still-missing device; the
 # argument-free reset is the test-isolation hook.
-_warned_canonicless_counts: set[tuple[str, int]] = set()
+_last_canonicless_count_by_entry: dict[str, int] = {}
 
 
 def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
@@ -56,17 +63,15 @@ def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
 
     Args:
         entry_id: When ``None`` (test isolation), the whole guard is cleared. When an
-            entry id is given, only that entry's keys are dropped, so unloading or
+            entry id is given, only that entry's last-count is dropped, so unloading or
             reloading one config entry re-arms its warning on the next poll without
-            disturbing other entries' guards. A whole-set clear per unload would
+            disturbing other entries' guards. A whole-map clear per unload would
             re-introduce the cross-entry coupling the keyed guard fixed.
     """
     if entry_id is None:
-        _warned_canonicless_counts.clear()
+        _last_canonicless_count_by_entry.clear()
         return
-    _warned_canonicless_counts.difference_update(
-        {key for key in _warned_canonicless_counts if key[0] == entry_id}
-    )
+    _last_canonicless_count_by_entry.pop(entry_id, None)
 
 
 _text_format_module: Any | None = None
@@ -1227,11 +1232,14 @@ def get_devices_with_location(
 
     if canonicless_count:
         # Default-visible aggregate: report only how many devices are affected, never
-        # their names. De-duplicate per (entry, count) so a stable count warns once per
-        # process and a changed count (a device dropped or recovered) re-surfaces it.
-        count_key = (entry_scope, canonicless_count)
-        if count_key not in _warned_canonicless_counts:
-            _warned_canonicless_counts.add(count_key)
+        # their names. Re-arm per entry whenever the affected-device COUNT changes:
+        # compare against this entry's last warned count, so a stable count warns once
+        # while any change (a device dropped or recovered) re-surfaces it — including a
+        # count that returns to an earlier value (1 -> 2 -> 1), which a lifetime set of
+        # every count ever seen would wrongly suppress.
+        last_count = _last_canonicless_count_by_entry.get(entry_scope)
+        if last_count != canonicless_count:
+            _last_canonicless_count_by_entry[entry_scope] = canonicless_count
             _LOGGER.warning(
                 "%d device(s) returned by Google without a canonical ID are not shown "
                 "in Home Assistant. Enable debug logging for "
@@ -1240,6 +1248,11 @@ def get_devices_with_location(
                 "account) and reload the integration.",
                 canonicless_count,
             )
+    else:
+        # This entry currently has no affected devices: forget its last count so a later
+        # drop re-surfaces the warning even if the count returns to a pre-recovery value.
+        # Keeps the guard scoped to entries that are actually affected.
+        _last_canonicless_count_by_entry.pop(entry_scope, None)
 
     return results
 
