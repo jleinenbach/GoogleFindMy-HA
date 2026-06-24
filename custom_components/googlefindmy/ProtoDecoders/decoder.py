@@ -36,21 +36,23 @@ from custom_components.googlefindmy.ProtoDecoders import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Process-wide guard so each canonicless device (returned by Google without a
-# canonical ID) is announced only once, despite get_devices_with_location running
-# multiple times per poll. The key is the triple (entry scope, device position,
-# device name): entry scope (cache.entry_id) keeps two config entries from silencing
-# each other, and the position disambiguates same-named/unnamed siblings within one
-# account, since a canonicless device has no canonical ID to key on. The naming mirrors
-# main.py's _warned_bad_identifier_devices, but the scope differs: that is a
-# per-coordinator instance attribute, while this is a module-level set only cleared by
-# the test reset hook (a re-discovered device warns again only after a process restart).
-_warned_canonicless_devices: set[tuple[str, int, str]] = set()
+# Process-wide guard so the aggregate canonicless-device WARNING (how many devices
+# Google returned without a canonical ID) is announced only once per config entry,
+# despite get_devices_with_location running multiple times per poll. The key is the
+# pair (entry scope, count): entry scope (cache.entry_id) keeps two config entries
+# from silencing each other, and the count re-surfaces the WARNING only when the
+# number of affected devices changes (new information). The per-device name is logged
+# at DEBUG instead (not guarded), so enabling debug logging always reveals which
+# devices are affected. The naming mirrors main.py's _warned_bad_identifier_devices,
+# but the scope differs: that is a per-coordinator instance attribute, while this is a
+# module-level set only cleared by the test reset hook (a re-discovered count warns
+# again only after a process restart).
+_warned_canonicless_counts: set[tuple[str, int]] = set()
 
 
 def _reset_canonicless_warning_state() -> None:
     """Clear the canonicless-device warning guard (test hook for isolation)."""
-    _warned_canonicless_devices.clear()
+    _warned_canonicless_counts.clear()
 
 
 _text_format_module: Any | None = None
@@ -874,9 +876,11 @@ def get_devices_with_location(
     # entries from silencing each other's diagnostics. None in stub mode (cache absent).
     entry_scope = getattr(cache, "entry_id", None) or "<no-entry>"
 
-    for device_index, device in enumerate(
-        getattr(device_list, "deviceMetadata", [])
-    ):
+    # Count devices Google returned without a usable canonical ID in this call, so the
+    # default-visible WARNING can report an aggregate count instead of per-device names.
+    canonicless_count = 0
+
+    for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
         # FIX: For phones (IDENTIFIER_ANDROID), use only the FIRST canonical ID.
         # Phones can have multiple canonical IDs in the array (e.g., after re-pairing),
@@ -1192,27 +1196,36 @@ def get_devices_with_location(
             emitted_for_device += 1
 
         if emitted_for_device == 0:
-            # Google returned this device without a usable canonical ID, so no row
-            # was emitted and it silently vanishes from Home Assistant. Surface it
-            # once per process so the user can act. The guard key separates the
-            # human-facing display name from the de-duplication identity: it scopes by
-            # config entry (so two entries do not silence each other) and by device
-            # position (so same-named/unnamed siblings within one account each warn),
-            # since a canonicless device has no canonical ID to key on. The position
-            # keys by list slot, not device identity, so if Google reorders the device
-            # list across polls a canonicless device may emit a few extra warnings over
-            # the process lifetime; for a diagnostic that is the right trade-off over
-            # silently missing a device.
-            display_name = device_name or "<unnamed>"
-            guard_key = (entry_scope, device_index, display_name)
-            if guard_key not in _warned_canonicless_devices:
-                _warned_canonicless_devices.add(guard_key)
-                _LOGGER.warning(
-                    "Device '%s' was returned without a canonical ID and is not "
-                    "shown in Home Assistant. Make it findable again in the Find My "
-                    "Device app (or your Google account), then reload the integration.",
-                    display_name,
-                )
+            # Google returned this device without a usable canonical ID, so no row was
+            # emitted and it silently vanishes from Home Assistant. Count it for the
+            # aggregate WARNING below, and name it at DEBUG only: the user-defined name
+            # is potentially identifying (AGENTS.md privacy guidance), so it is kept off
+            # the default-visible WARNING tier and surfaced only when the operator opts
+            # in by enabling debug logging. The DEBUG line is intentionally not guarded,
+            # so it always reveals the affected device once debug logging is turned on.
+            canonicless_count += 1
+            _LOGGER.debug(
+                "Device '%s' was returned without a canonical ID and is not shown "
+                "in Home Assistant. Make it findable again in the Find My Device app "
+                "(or your Google account), then reload the integration.",
+                device_name or "<unnamed>",
+            )
+
+    if canonicless_count:
+        # Default-visible aggregate: report only how many devices are affected, never
+        # their names. De-duplicate per (entry, count) so a stable count warns once per
+        # process and a changed count (a device dropped or recovered) re-surfaces it.
+        count_key = (entry_scope, canonicless_count)
+        if count_key not in _warned_canonicless_counts:
+            _warned_canonicless_counts.add(count_key)
+            _LOGGER.warning(
+                "%d device(s) returned by Google without a canonical ID are not shown "
+                "in Home Assistant. Enable debug logging for "
+                "custom_components.googlefindmy to see which devices are affected, then "
+                "make them findable again in the Find My Device app (or your Google "
+                "account) and reload the integration.",
+                canonicless_count,
+            )
 
     return results
 
