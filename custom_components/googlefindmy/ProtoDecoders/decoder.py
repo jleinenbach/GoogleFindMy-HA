@@ -36,6 +36,18 @@ from custom_components.googlefindmy.ProtoDecoders import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Process-wide guard so each canonicless device (returned by Google without a
+# canonical ID) is announced only once, despite get_devices_with_location running
+# multiple times per poll. Keyed by device name (the only stable handle a
+# canonicless device has). Mirrors the naming of main.py's _warned_bad_identifier_devices.
+_warned_canonicless_devices: set[str] = set()
+
+
+def _reset_canonicless_warning_state() -> None:
+    """Clear the canonicless-device warning guard (test hook for isolation)."""
+    _warned_canonicless_devices.clear()
+
+
 _text_format_module: Any | None = None
 
 
@@ -1130,6 +1142,7 @@ def get_devices_with_location(
             anchor_union["time_anchors_debug"] = dbg
 
         # Emit **exactly one** row per canonic ID.
+        emitted_for_device = 0
         for canonic in canonic_ids:
             cid = getattr(canonic, "id", None)
             if not (isinstance(cid, str) and cid):
@@ -1165,6 +1178,22 @@ def get_devices_with_location(
                     row[k] = v
 
             results.append(row)
+            emitted_for_device += 1
+
+        if emitted_for_device == 0:
+            # Google returned this device without a usable canonical ID, so no row
+            # was emitted and it silently vanishes from Home Assistant. Surface it
+            # once per process so the user can act, de-duplicated by device name
+            # (the only stable handle a canonicless device has).
+            dedup_key = device_name or "<unnamed>"
+            if dedup_key not in _warned_canonicless_devices:
+                _warned_canonicless_devices.add(dedup_key)
+                _LOGGER.warning(
+                    "Device '%s' was returned without a canonical ID and is not "
+                    "shown in Home Assistant. Make it findable again in the Find My "
+                    "Device app (or your Google account), then reload the integration.",
+                    dedup_key,
+                )
 
     return results
 

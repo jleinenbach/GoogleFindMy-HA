@@ -628,13 +628,16 @@ async def async_retrieve_identity_key(
 
         _LOGGER.error(
             "Owner key version mismatch: tracker=%s, current=%s. "
-            "This typically occurs after resetting E2EE data. "
-            "The tracker cannot be decrypted anymore; remove it in the Find My Device app.",
+            "This typically occurs after resetting E2EE data for this tracker. "
+            "Re-pair this single tracker in the Find My Device app; no account "
+            "re-authentication and no new secrets.json are required, and other "
+            "devices are unaffected.",
             old_ver,
             current_owner_key_version,
         )
         raise StaleOwnerKeyError(
-            "Tracker was encrypted with a stale owner key version."
+            "Tracker was encrypted with a stale owner key version; re-pair this "
+            "single tracker (no account re-authentication or new secrets.json needed)."
         ) from last_exc
 
     # Blind refresh: version check unavailable but key is clearly wrong.
