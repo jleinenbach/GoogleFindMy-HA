@@ -1198,8 +1198,11 @@ def get_devices_with_location(
             # human-facing display name from the de-duplication identity: it scopes by
             # config entry (so two entries do not silence each other) and by device
             # position (so same-named/unnamed siblings within one account each warn),
-            # since a canonicless device has no canonical ID to key on. For a diagnostic
-            # this errs toward warning twice over silently missing a device.
+            # since a canonicless device has no canonical ID to key on. The position
+            # keys by list slot, not device identity, so if Google reorders the device
+            # list across polls a canonicless device may emit a few extra warnings over
+            # the process lifetime; for a diagnostic that is the right trade-off over
+            # silently missing a device.
             display_name = device_name or "<unnamed>"
             guard_key = (entry_scope, device_index, display_name)
             if guard_key not in _warned_canonicless_devices:
