@@ -46,6 +46,7 @@ from .const import (
 from .NovaApi import nova_request
 from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyLookupTransientError,
     any_real_location_record,
 )
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -1354,6 +1355,15 @@ class GoogleFindMyAPI:
             # Re-raise it so the coordinator can count it and escalate to a reauth
             # flow (or per-tracker repair). This is the layer that must stay
             # transparent for the location_request fix to have any effect.
+            raise
+
+        except OwnerKeyLookupTransientError:
+            # A transient owner-key lookup miss (base Exception, NOT a
+            # DecryptionError and NOT a RuntimeError): the transient must reach the
+            # coordinator sink for a DEBUG skip without a counter touch. The broad
+            # `except Exception` below would otherwise turn it into an empty result,
+            # hiding the transient from the coordinator. Analog to the A1
+            # `except DecryptionError: raise` guard above.
             raise
 
         except RuntimeError as err:

@@ -29,6 +29,9 @@ from grpclib.const import Status
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     location_request,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    OwnerKeyLookupTransientError,
+)
 from custom_components.googlefindmy.SpotApi.spot_request import SpotGrpcStatusError
 
 pytestmark = pytest.mark.asyncio
@@ -186,6 +189,110 @@ async def test_r9c_surfacing_includes_nested_grpc_cause_detail(
     ]
     structured_text = " ".join(rec.getMessage() for rec in structured_records)
     assert grpc_detail in structured_text
+
+
+def _wire_transient_via_ctx_error(
+    monkeypatch: pytest.MonkeyPatch, *, transient: Exception
+) -> None:
+    """Wire the locate flow so the FCM callback sets ``ctx.error = transient``.
+
+    This reproduces the ONLY real arrival path for a transient owner-key failure:
+    the threadsafe decrypt dispatch in ``_decrypt_and_store`` never lets the
+    exception escape the callback; it records it on ``ctx.error`` and signals the
+    event. ``get_location_data_for_device`` then inspects ``ctx.error`` after the
+    wait. The Nova send and request build are stubbed to succeed so control reaches
+    that inspection block.
+    """
+    receiver = _DummyFcmReceiver()
+    monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda: receiver)
+
+    def _fake_make_callback(
+        *, ctx: Any, canonic_device_id: str, **_: Any
+    ) -> Callable[[str, str], None]:
+        def _callback(_response_canonic_id: str, _hex: str) -> None:
+            ctx.error = transient
+            ctx.event.set()
+
+        return _callback
+
+    monkeypatch.setattr(
+        location_request, "_make_location_callback", _fake_make_callback
+    )
+
+    # Request build + Nova send succeed so the flow reaches the ctx.error check.
+    monkeypatch.setattr(
+        location_request, "create_location_request", lambda *a, **k: "deadbeef"
+    )
+
+    async def _fake_nova(*_a: object, **_k: object) -> bytes:
+        return b""
+
+    monkeypatch.setattr(location_request, "async_nova_request", _fake_nova)
+
+    # Fire the callback synchronously once the locate flow registers it, so the
+    # subsequent ``await ctx.event.wait()`` returns immediately with ctx.error set.
+    real_register = receiver.async_register_for_location_updates
+
+    async def _register_and_fire(
+        device_id: str, callback: Callable[[str, str], None]
+    ) -> str:
+        token = await real_register(device_id, callback)
+        callback(device_id, "deadbeef")
+        return token
+
+    monkeypatch.setattr(
+        receiver, "async_register_for_location_updates", _register_and_fire
+    )
+
+
+async def test_transient_owner_key_via_ctx_error_is_reraised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RED (real path, AP4 vector a): a transient owner-key failure recorded on
+    ``ctx.error`` must propagate out of ``get_location_data_for_device``.
+
+    This is the only real arrival path (thread-safe decrypt sets ctx.error). Today
+    the function returns ``[]`` because the ``if ctx.error:`` block only re-raises
+    ``SpotApiEmptyResponseError`` / ``SpotAuthPermanentError`` / ``DecryptionError``
+    and ``OwnerKeyLookupTransientError`` is none of those (base ``Exception``).
+    """
+    transient = OwnerKeyLookupTransientError("owner key lookup timed out")
+    _wire_transient_via_ctx_error(monkeypatch, transient=transient)
+
+    with pytest.raises(OwnerKeyLookupTransientError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id="device-xyz",
+            name="Tracker",
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
+
+
+async def test_transient_owner_key_synthetic_outer_raise_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SYNTHETIC / DEFENSIVE (AP4 vector b): a transient raised directly from the
+    outer try-body must propagate, mirroring ``except DecryptionError: raise``.
+
+    NOTE: this is NOT a real decrypt path -- the real decrypt never raises out of
+    the callback (it sets ctx.error, see vector a). This vector only pins the
+    symmetry of the outer-``try`` exception handling: an ``OwnerKeyLookupTransientError``
+    surfacing through the outer body (here forced via ``create_location_request``)
+    must re-raise just like ``DecryptionError`` does, not be swallowed by the broad
+    ``except Exception`` into ``return []``.
+    """
+    transient = OwnerKeyLookupTransientError("synthetic outer-body transient")
+    _wire_locate_flow(monkeypatch, surfacing_exc=transient)
+
+    with pytest.raises(OwnerKeyLookupTransientError):
+        await location_request.get_location_data_for_device(
+            canonic_device_id="device-xyz",
+            name="Tracker",
+            session=None,
+            username="user@example.com",
+            cache=_FakeTokenCache(),
+        )
 
 
 async def test_format_cause_chain_breaks_on_cyclic_cause() -> None:
