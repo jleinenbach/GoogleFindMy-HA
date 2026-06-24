@@ -39,7 +39,10 @@ _LOGGER = logging.getLogger(__name__)
 # Process-wide guard so each canonicless device (returned by Google without a
 # canonical ID) is announced only once, despite get_devices_with_location running
 # multiple times per poll. Keyed by device name (the only stable handle a
-# canonicless device has). Mirrors the naming of main.py's _warned_bad_identifier_devices.
+# canonicless device has). The naming mirrors main.py's _warned_bad_identifier_devices,
+# but the scope differs: that is a per-coordinator instance attribute, while this is a
+# module-level set shared across config entries and only cleared by the test reset hook
+# (a re-discovered device warns again only after a process restart).
 _warned_canonicless_devices: set[str] = set()
 
 

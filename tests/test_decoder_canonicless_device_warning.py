@@ -26,10 +26,9 @@ def _reset_canonicless_warning_state() -> None:
 
     The decoder de-duplicates the canonicless WARNING via a module-level set. Without
     a reset the warning would be suppressed across tests depending on run order, so the
-    guard is cleared up front to keep every test order-independent. ``getattr`` keeps
-    the fixture usable in the RED phase before the reset hook exists.
+    guard is cleared up front to keep every test order-independent.
     """
-    getattr(decoder, "_reset_canonicless_warning_state", lambda: None)()
+    decoder._reset_canonicless_warning_state()
 
 
 def _make_phone_device(
