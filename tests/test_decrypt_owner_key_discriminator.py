@@ -45,6 +45,7 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices import (
 from custom_components.googlefindmy.SpotApi.spot_request import (
     SpotError,
     SpotGrpcStatusError,
+    SpotNetworkError,
 )
 from tests.helpers.config_entries_stub import install_config_entries_stubs
 
@@ -279,6 +280,67 @@ async def test_owner_key_forced_refresh_invalid_tag_maps_to_mismatch(
         await _dl.async_retrieve_identity_key(registration, cache=object())
 
 
+@pytest.mark.asyncio
+async def test_r3_initial_lookup_spot_error_maps_to_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3 (AP4): a typed ``SpotError`` from the initial owner-key lookup surfaces as
+    ``OwnerKeyLookupTransientError`` -- never a stale/reauth ``DecryptionError``.
+
+    ``SpotError`` is not a ``RuntimeError``, so the dedicated ``except SpotError``
+    block (placed before the generic handler) classifies the transport/gRPC
+    failure as transient and keeps it off the speculative reauth path (Q5).
+    """
+
+    async def _boom(**_kwargs: object) -> object:
+        raise SpotGrpcStatusError("gRPC error: UNAVAILABLE")
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", _boom)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 60
+
+    with pytest.raises(OwnerKeyLookupTransientError) as excinfo:
+        await _dl.async_retrieve_identity_key(registration, cache=object())
+
+    text = str(excinfo.value).lower()
+    assert "stale" not in text
+    assert "re-authenticate" not in text
+    assert "transient" in text
+
+
+@pytest.mark.asyncio
+async def test_r3_forced_refresh_spot_error_maps_to_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3 (AP4): a typed ``SpotError`` during the forced refresh surfaces as
+    ``OwnerKeyLookupTransientError`` (the forced-refresh wrap path mirrors the
+    initial-lookup carve-out, never a stale/reauth ``DecryptionError``)."""
+    from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
+        OwnerKeyInfo,
+    )
+
+    async def _owner(
+        *, cache: object, force_refresh: bool = False, **_kw: object
+    ) -> object:
+        if force_refresh:
+            raise SpotNetworkError("Timeout after retries.")
+        return OwnerKeyInfo(key=b"\x00" * 32, version=1)
+
+    monkeypatch.setattr(_dl, "async_get_owner_key", _owner)
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    registration = update.deviceMetadata.information.deviceRegistration
+    registration.encryptedUserSecrets.encryptedIdentityKey = b"\x00" * 60
+    registration.encryptedUserSecrets.ownerKeyVersion = 5  # > cached version 1
+
+    with pytest.raises(OwnerKeyLookupTransientError) as excinfo:
+        await _dl.async_retrieve_identity_key(registration, cache=object())
+
+    assert "transient" in str(excinfo.value).lower()
+
+
 # ---------------------------------------------------------------------------
 # R8: the synchronous SPOT fallback wrapper must NOT flatten a typed SpotError
 # into a bare RuntimeError, or the Q5 invariant (typed transient errors stay
@@ -424,6 +486,61 @@ async def test_r9a_auth_token_sentinel_not_leaked_into_message(
         )
 
     assert auth_sentinel not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_r9a_retries_exhausted_grpc_message_reaches_spot_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R9a: a retryable gRPC status that exhausts the budget carries the server
+    detail into the ``SpotRequestFailedAfterRetries`` message.
+
+    ``UNAVAILABLE`` is retried; once the budget is spent the transient error must
+    still surface the status name AND the last server-sent detail text (not only
+    ``status.name``).
+    """
+    err = grpclib.exceptions.GRPCError(Status.UNAVAILABLE, "RETRY_SENTINEL_MSG")
+    _install_grpc_outcome(monkeypatch, err)
+
+    transport = AsyncMock()
+    transport.get_channel = AsyncMock(return_value=object())
+
+    from custom_components.googlefindmy.SpotApi.spot_request import (
+        SpotRequestFailedAfterRetries,
+    )
+
+    with pytest.raises(SpotRequestFailedAfterRetries) as excinfo:
+        await _spot.async_spot_request(
+            "Scope", b"payload", cache=_DummyCache(), transport=transport
+        )
+
+    message = str(excinfo.value)
+    assert "UNAVAILABLE" in message
+    assert "RETRY_SENTINEL_MSG" in message
+
+
+def test_r9a_format_grpc_detail_message_details_and_empty() -> None:
+    """R9a helper: render message + details, and stay empty when neither is set.
+
+    ``_format_grpc_detail`` appends the server-sent ``message`` and (when present)
+    the structured ``details`` to the SpotError message, and returns an empty
+    string when the GRPCError carries neither (so a status-only error reads
+    cleanly).
+    """
+    with_message = grpclib.exceptions.GRPCError(
+        Status.FAILED_PRECONDITION, "detail-text"
+    )
+    assert _spot._format_grpc_detail(with_message) == ": detail-text"
+
+    with_details = grpclib.exceptions.GRPCError(
+        Status.FAILED_PRECONDITION, "msg", ["extra-1", "extra-2"]
+    )
+    rendered = _spot._format_grpc_detail(with_details)
+    assert "msg" in rendered
+    assert "extra-1" in rendered
+
+    status_only = grpclib.exceptions.GRPCError(Status.FAILED_PRECONDITION)
+    assert _spot._format_grpc_detail(status_only) == ""
 
 
 # ---------------------------------------------------------------------------

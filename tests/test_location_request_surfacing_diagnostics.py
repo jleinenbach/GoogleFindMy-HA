@@ -186,3 +186,20 @@ async def test_r9c_surfacing_includes_nested_grpc_cause_detail(
     ]
     structured_text = " ".join(rec.getMessage() for rec in structured_records)
     assert grpc_detail in structured_text
+
+
+async def test_format_cause_chain_breaks_on_cyclic_cause() -> None:
+    """R9c helper: a self-referential cause chain terminates (no infinite loop).
+
+    A pathological ``__cause__`` cycle must be broken by the seen-set guard so the
+    diagnostic formatter stays bounded. The rendered string lists each distinct
+    exception exactly once.
+    """
+    first = RuntimeError("first")
+    second = ValueError("second")
+    first.__cause__ = second
+    second.__cause__ = first  # cycle back to the first exception
+
+    rendered = location_request._format_cause_chain(first)
+
+    assert rendered == "RuntimeError: first -> ValueError: second"

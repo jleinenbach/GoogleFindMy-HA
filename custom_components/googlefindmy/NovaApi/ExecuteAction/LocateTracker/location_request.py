@@ -49,6 +49,27 @@ from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanen
 _LOGGER = logging.getLogger(__name__)
 
 
+def _format_cause_chain(exc: BaseException, *, max_depth: int = 8) -> str:
+    """Render the full exception cause chain as a ``Type: msg -> Type: msg`` string.
+
+    R9c: a single ``str(exc)`` only shows the outermost error, so a gRPC server
+    detail nested two levels deep (surfacing -> SpotError -> GRPCError) is lost.
+    Walk ``__cause__`` (explicit ``raise ... from``) and fall back to
+    ``__context__`` (implicit chaining) so the structured diagnostic record carries
+    the deepest server detail. Bounded depth and a seen-set guard against cycles.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(parts) < max_depth:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " -> ".join(parts)
+
+
 class _DecryptLocationsCallable(Protocol):
     async def __call__(
         self, device_update: Any, *, cache: TokenCache
@@ -785,7 +806,19 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # result -- that swallow is the original bug this fix removes.
         raise
     except Exception as e:
-        _LOGGER.error("Error requesting location for %s: %s", name, e)
+        # R6 (AGENTS.md Section 5 redaction): the raw device display name must not
+        # leak into a user-facing WARNING/ERROR. Surface only the error type and
+        # cause chain here; keep the name at DEBUG only (Name@DEBUG, PR #1129). This
+        # path handles a single device, so there is no meaningful index to report.
+        # R9c: include the FULL cause chain (Type: msg -> Type: msg) so a gRPC
+        # server detail nested two levels deep (surfacing -> SpotError -> GRPCError)
+        # survives instead of being overwritten by the outermost ``str(exc)``.
+        _LOGGER.error(
+            "Error requesting location (%s): %s",
+            type(e).__name__,
+            _format_cause_chain(e),
+        )
+        _LOGGER.debug("Location request failure detail for %s", name)
         _LOGGER.debug("Traceback: %s", traceback.format_exc())
         return []
     finally:

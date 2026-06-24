@@ -48,6 +48,7 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_k
     OwnerKeyInfo,
     async_get_owner_key,
 )
+from custom_components.googlefindmy.SpotApi.spot_request import SpotError
 from google.protobuf.message import DecodeError
 
 if TYPE_CHECKING:
@@ -285,15 +286,41 @@ class OwnReportIdentityMismatchError(DecryptionError):
     """
 
 
-def _classify_owner_key_failure(exc: Exception, *, context: str) -> DecryptionError:
-    """Map a low-level owner-key lookup failure to a specific DecryptionError.
+class OwnerKeyLookupTransientError(Exception):
+    """Raised when the owner-key lookup did not complete for a transient reason.
+
+    Base class is ``Exception`` deliberately, NOT ``DecryptionError`` and NOT
+    ``RuntimeError``: a partial/trailers-only server response, a network/gRPC
+    transport failure or any otherwise unclassified owner-key retrieval miss is a
+    TRANSIENT condition, not a credential defect. Because it is not a
+    ``DecryptionError`` it is never caught by the coordinator's
+    ``except DecryptionError`` blocks and never reaches the account-wide reauth
+    verdict (Option B); because it is not a ``RuntimeError`` it is not swallowed by
+    a broad ``except RuntimeError`` (e.g. ``api.py``). It carries NO "stale" /
+    "re-authenticate" claim: the credentials are presumed valid and the right
+    recovery is an ordinary retry/skip, never an account re-authentication.
+    """
+
+
+def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
+    """Map a low-level owner-key lookup failure to a specific error class.
 
     ``async_get_owner_key`` collapses distinct root causes into either an
     ``InvalidTag`` (wrong/stale shared key) or a ``RuntimeError`` (missing/empty
-    shared key, or a generic failure). This helper restores the discriminator as a
-    typed subclass so the failure class name appears in logs and the coordinator
-    can pick the correct recovery path. The caller preserves the original error
-    via ``raise ... from exc``.
+    shared key, a partial server-field response, or a generic failure). This helper
+    restores the discriminator as a typed class so the failure class name appears
+    in logs and the coordinator can pick the correct recovery path. The caller
+    preserves the original error via ``raise ... from exc``.
+
+    Deterministic, field-specific matching (first match wins):
+      (a) ``InvalidTag`` -> ``SharedKeyMismatchError`` (genuine credential defect).
+      (b) a local "shared key ... missing or empty" bundle ->
+          ``SharedKeyMissingError`` (genuine credential defect).
+      (c) a partial server-field response (``encryptedOwnerKeyAndMetadata`` /
+          ``encryptedOwnerKey`` / "Decrypted owner_key is empty") ->
+          ``OwnerKeyLookupTransientError`` (transient server condition).
+      (d) everything else (default, inverted) -> ``OwnerKeyLookupTransientError``
+          (no "stale" / "re-authenticate" guess).
     """
     if isinstance(exc, InvalidTag):
         return SharedKeyMismatchError(
@@ -301,14 +328,26 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> DecryptionEr
             "key is stale or incompatible with this account. A fresh secrets.json "
             "is required (re-authentication)."
         )
-    if isinstance(exc, RuntimeError) and "missing or empty" in str(exc):
+    text = str(exc).lower()
+    if "shared key" in text and "missing or empty" in text:
         return SharedKeyMissingError(
             f"Shared key is missing or empty during {context} (incomplete bundle). "
             "Re-import a complete secrets.json."
         )
-    return DecryptionError(
-        f"Owner key decryption failed during {context} (shared key may be stale). "
-        "Re-authenticate to refresh crypto keys."
+    if (
+        "encryptedownerkeyandmetadata" in text
+        or "encryptedownerkey" in text
+        or "decrypted owner_key is empty" in text
+    ):
+        return OwnerKeyLookupTransientError(
+            "Owner key retrieval did not complete (transient): the server response "
+            "was incomplete. The crypto keys are presumed valid; this will be "
+            "retried."
+        )
+    return OwnerKeyLookupTransientError(
+        "Owner key retrieval did not complete (transient): the lookup failed for "
+        "an unclassified reason. The crypto keys are presumed valid; this will be "
+        "retried."
     )
 
 
@@ -443,7 +482,22 @@ async def async_retrieve_identity_key(
     owner_key_version = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
     try:
         owner_key_info: OwnerKeyInfo = await async_get_owner_key(cache=cache)
+    except SpotError as exc:
+        # Typed transport/gRPC failure: always transient, never "stale". Caught
+        # before the generic block so a network/timeout/status error never lands
+        # in the speculative reauth path (Q5 invariant).
+        _LOGGER.debug(
+            "Owner-key lookup phase=%s hit a transient SpotError: %s",
+            "initial lookup",
+            type(exc).__name__,
+        )
+        raise OwnerKeyLookupTransientError(
+            "Owner key retrieval did not complete (transient): the SPOT request "
+            "failed at the transport/gRPC layer. The crypto keys are presumed "
+            "valid; this will be retried."
+        ) from exc
     except (InvalidTag, RuntimeError) as exc:
+        _LOGGER.debug("Owner-key lookup phase=%s failed", "initial lookup")
         raise _classify_owner_key_failure(exc, context="initial lookup") from exc
 
     # --- Proactive Owner Key Version Mismatch Check ---
@@ -463,7 +517,21 @@ async def async_retrieve_identity_key(
         )
         try:
             owner_key_info = await async_get_owner_key(cache=cache, force_refresh=True)
+        except SpotError as exc:
+            # Typed transport/gRPC failure during the forced refresh: transient,
+            # never "stale" (caught before the generic block, Q5 invariant).
+            _LOGGER.debug(
+                "Owner-key lookup phase=%s hit a transient SpotError: %s",
+                "forced refresh",
+                type(exc).__name__,
+            )
+            raise OwnerKeyLookupTransientError(
+                "Owner key retrieval did not complete (transient): the SPOT "
+                "request failed at the transport/gRPC layer during refresh. The "
+                "crypto keys are presumed valid; this will be retried."
+            ) from exc
         except (InvalidTag, RuntimeError) as exc:
+            _LOGGER.debug("Owner-key lookup phase=%s failed", "forced refresh")
             raise _classify_owner_key_failure(exc, context="forced refresh") from exc
 
     # Build key sources list (matches eid_resolver pattern: try owner + shared)
@@ -1145,8 +1213,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 identity_key = identity_key_bytes
         except Exception as exc:  # pragma: no cover - diagnostics only
             _LOGGER.warning(
-                "[DECRYPT] Failed to unwrap 60-byte EIK: %s. "
-                "The owner key in secrets.json may be outdated.",
+                "[DECRYPT] Failed to unwrap 60-byte EIK: %s; retrying with raw key.",
                 type(exc).__name__,
             )
 

@@ -34,6 +34,7 @@ from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdat
 from custom_components.googlefindmy.SpotApi import spot_request as spot_request_module
 from custom_components.googlefindmy.SpotApi.spot_request import (
     SpotAuthPermanentError,
+    SpotError,
     SpotTrailersOnlyError,
 )
 from google.protobuf.message import DecodeError  # parse-time error type for protobufs
@@ -108,6 +109,11 @@ async def _spot_call_async(scope: str, payload: bytes, *, cache: TokenCache) -> 
         raise SpotApiEmptyResponseError(
             "Empty gRPC body (trailers-only) for GetEidInfoForE2eeDevices"
         ) from e
+    except SpotError:
+        # Type-preserving re-raise (R8): a typed SpotError (network/gRPC status)
+        # must NOT be flattened into a bare RuntimeError, or the typed-transient
+        # discriminator is erased through this defensive path (Q5 invariant).
+        raise
     except Exception as exc:  # pragma: no cover - defensive
         raise RuntimeError("Synchronous SPOT request helper failed.") from exc
 
