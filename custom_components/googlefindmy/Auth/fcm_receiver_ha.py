@@ -87,6 +87,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
     any_real_location_record,
     async_decrypt_location_response_locations,
@@ -3019,7 +3020,7 @@ class FcmReceiverHA:
                     err,
                 )
 
-    async def _decode_background_location_async(  # noqa: PLR0911
+    async def _decode_background_location_async(  # noqa: PLR0911, PLR0912
         self, entry_id: str, hex_string: str
     ) -> JSONDict:
         """Decode background location using protobuf decoders.
@@ -3066,6 +3067,22 @@ class FcmReceiverHA:
                     )
                     self._note_decrypt_failure_for_entry(
                         entry_id, stale=False, error=dec_err
+                    )
+                    return {}
+                except OwnerKeyLookupTransientError as transient_err:
+                    # A transient owner-key lookup miss (partial/trailers-only
+                    # server response, transport failure, otherwise unclassified
+                    # miss). The credentials are presumed valid, so this is NOT a
+                    # decrypt-failure budget event: do NOT call
+                    # _note_decrypt_failure_for_entry and do NOT escalate to reauth.
+                    # Pure severity downgrade to DEBUG; the next push/poll retries.
+                    # Catches the _OwnerKeyRederiveRequired subclass too (fail-safe).
+                    _LOGGER.debug(
+                        "Background location update skipped (transient owner-key "
+                        "miss, %s) for entry %s: %s; presumed valid keys, will retry",
+                        type(transient_err).__name__,
+                        entry_id,
+                        transient_err,
                     )
                     return {}
                 except InvalidTag:

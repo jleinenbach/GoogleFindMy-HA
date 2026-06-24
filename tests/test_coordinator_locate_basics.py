@@ -22,6 +22,7 @@ from homeassistant.exceptions import HomeAssistantError
 from custom_components.googlefindmy.const import DEFAULT_MIN_POLL_INTERVAL
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyLookupTransientError,
     SharedKeyMismatchError,
     StaleOwnerKeyError,
 )
@@ -309,6 +310,30 @@ class TestAsyncLocateDeviceDecryptFailure:
         assert result == {}
         coord.note_decrypt_failure.assert_called_once()
         assert coord.note_decrypt_failure.call_args.kwargs.get("stale") is False
+        coord.config_entry.async_start_reauth.assert_not_called()
+
+    async def test_transient_owner_key_lookup_returns_empty_no_reauth_counter(
+        self, coord: LocateStub
+    ) -> None:
+        """R4/AP5: a transient owner-key lookup miss during a manual locate degrades
+        to an empty result WITHOUT feeding the account-wide reauth counter.
+
+        ``OwnerKeyLookupTransientError`` is not a ``DecryptionError``, so the
+        dedicated ``except OwnerKeyLookupTransientError`` block (before the
+        ``DecryptionError`` handler) skips the device without calling
+        ``note_decrypt_failure`` and never starts a reauth flow.
+        """
+        coord.note_decrypt_failure = MagicMock(return_value=False)
+        coord.config_entry.async_start_reauth = MagicMock()
+        coord.api.async_get_device_location.side_effect = OwnerKeyLookupTransientError(
+            "Owner key retrieval did not complete (transient)."
+        )
+
+        result = await coord.async_locate_device("dev-1")
+
+        assert result == {}
+        coord.note_decrypt_failure.assert_not_called()
+        coord._set_auth_state.assert_not_called()
         coord.config_entry.async_start_reauth.assert_not_called()
 
     async def test_decrypt_failure_at_threshold_starts_reauth(

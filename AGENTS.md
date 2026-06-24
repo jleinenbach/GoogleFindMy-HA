@@ -431,6 +431,17 @@ Run `poetry lock` to fix the lock file.
 
 * Resolver scans currently seed three candidates: `ABSOLUTE` (wall-clock), `REL_PAIR` (pair-date anchored), and `REL_SECRETS` (secrets-creation anchored). Once a candidate yields a match, the resolver caches the winning epoch/offset per device to lock onto that timebase and narrow future rotation windows.
 
+### Owner-key error taxonomy (classify only from positive evidence)
+
+The owner-key decrypt chain is the source of the most user-confusing error messages, so the classifier must name the right layer and never guess a credential defect from a transient failure. The grounded facts:
+
+* **L1 - Key chain (directed):** `recovery -> application -> security_domain -> shared -> owner -> EIK`, where each stage decrypts the next (`KeyBackup/cloud_key_decryptor.py:443-449`). A fault low in the chain (EIK no longer matches server reports) is NOT the same as a fault high in the chain (wrong shared key); messages must name the layer, not collapse them.
+* **L2 - Owner key arrives encrypted from the server:** `DeviceUpdate.EncryptedOwnerKeyAndMetadata{encryptedOwnerKey, ownerKeyVersion, securityDomain}`, decrypted client-side with the `shared_key` via AES-GCM (`SpotApi/GetEidInfoForE2eeDevices/get_owner_key.py:181-197`, `ProtoDecoders/DeviceUpdate.proto:13-16`).
+* **L3 - InvalidTag == wrong shared key:** an AES-GCM `InvalidTag` at the owner-key decrypt is the ONLY positive signal that the shared key is wrong/stale; it propagates unchanged to `SharedKeyMismatchError` (account-wide; a fresh `secrets.json` is required).
+* **L4 - ownerKeyVersion mismatch == per-tracker:** a single tracker encrypted with an older owner-key version raises `StaleOwnerKeyError` and needs that one tracker re-paired, NOT an account re-authentication (`NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py:636-641`).
+* **L5 - Classifier discipline:** classify only from positive evidence. A transient or partial server response is NOT a credential defect, and the `context` labels ("initial lookup" / "forced refresh") are internal phase markers, never a first-setup indicator (`NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py:288-312`). Unknown/transient owner-key lookup misses map to `OwnerKeyLookupTransientError` (base `Exception`, not a `DecryptionError`), so they never reach the account-wide reauth path.
+* **L6 - Own vs. foreign reports:** an own report (`publicKeyRandom == b""`) is decrypted with `SHA256(EIK)` via AES-GCM; if ALL own reports of a device fail, the result is `OwnReportIdentityMismatchError` (per-device, a fresh `secrets.json` does not help) (`NovaApi/ExecuteAction/LocateTracker/decrypt_locations.py:1568-1574`).
+
 ---
 
 ## 2) Roles (right-sized)

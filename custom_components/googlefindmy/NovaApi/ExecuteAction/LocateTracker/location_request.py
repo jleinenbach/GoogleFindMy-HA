@@ -28,6 +28,9 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
+    OwnerKeyLookupTransientError,
+)
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
@@ -47,6 +50,27 @@ from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_inf
 from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _format_cause_chain(exc: BaseException, *, max_depth: int = 8) -> str:
+    """Render the full exception cause chain as a ``Type: msg -> Type: msg`` string.
+
+    R9c: a single ``str(exc)`` only shows the outermost error, so a gRPC server
+    detail nested two levels deep (surfacing -> SpotError -> GRPCError) is lost.
+    Walk ``__cause__`` (explicit ``raise ... from``) and fall back to
+    ``__context__`` (implicit chaining) so the structured diagnostic record carries
+    the deepest server detail. Bounded depth and a seen-set guard against cycles.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(parts) < max_depth:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " -> ".join(parts)
 
 
 class _DecryptLocationsCallable(Protocol):
@@ -390,6 +414,24 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                         _LOGGER.warning(
                             "Failed to process location data for %s: %s", name, err
                         )
+                    ctx.error = err
+                    ctx.event.set()
+                    return
+                except OwnerKeyLookupTransientError as err:
+                    # A transient owner-key lookup miss (partial/trailers-only
+                    # server response, transport failure, otherwise unclassified
+                    # miss; presumed-valid credentials). This is NOT a credential
+                    # defect, so it is logged at DEBUG and surfaced via ctx.error
+                    # WITHOUT touching any counter -- the awaiting coroutine
+                    # re-raises it so the coordinator sink performs a DEBUG skip.
+                    # Catches the _OwnerKeyRederiveRequired subclass too (fail-safe).
+                    _LOGGER.debug(
+                        "Transient owner-key lookup miss for %s (%s): %s; "
+                        "presumed valid credentials, will retry",
+                        name,
+                        type(err).__name__,
+                        err,
+                    )
                     ctx.error = err
                     ctx.event.set()
                     return
@@ -741,6 +783,14 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 raise ctx.error
             if isinstance(ctx.error, SpotAuthPermanentError):
                 raise ctx.error
+            # A transient owner-key lookup miss recorded by the decrypt callback
+            # (base Exception, NOT a DecryptionError) must propagate so the
+            # coordinator sink can perform a DEBUG skip without a counter touch.
+            # This is the only real arrival path for the transient type (AP3 records
+            # it on ctx.error); the broad outer ``except Exception`` would otherwise
+            # swallow it into an empty result.
+            if isinstance(ctx.error, OwnerKeyLookupTransientError):
+                raise ctx.error
             # A stale/incompatible shared key (SharedKeyMismatchError /
             # SharedKeyMissingError) or a per-tracker stale owner key
             # (StaleOwnerKeyError) is an auth-fatal crypto condition, not a
@@ -784,8 +834,26 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         # `except Exception` below would otherwise swallow it back into an empty
         # result -- that swallow is the original bug this fix removes.
         raise
+    except OwnerKeyLookupTransientError:
+        # Symmetry with ``except DecryptionError`` above: a transient owner-key miss
+        # surfacing through the outer try-body must propagate to the coordinator sink
+        # (DEBUG skip, no counter touch) instead of being swallowed by the broad
+        # ``except Exception`` into ``return []``.
+        raise
     except Exception as e:
-        _LOGGER.error("Error requesting location for %s: %s", name, e)
+        # R6 (AGENTS.md Section 5 redaction): the raw device display name must not
+        # leak into a user-facing WARNING/ERROR. Surface only the error type and
+        # cause chain here; keep the name at DEBUG only (Name@DEBUG, PR #1129). This
+        # path handles a single device, so there is no meaningful index to report.
+        # R9c: include the FULL cause chain (Type: msg -> Type: msg) so a gRPC
+        # server detail nested two levels deep (surfacing -> SpotError -> GRPCError)
+        # survives instead of being overwritten by the outermost ``str(exc)``.
+        _LOGGER.error(
+            "Error requesting location (%s): %s",
+            type(e).__name__,
+            _format_cause_chain(e),
+        )
+        _LOGGER.debug("Location request failure detail for %s", name)
         _LOGGER.debug("Traceback: %s", traceback.format_exc())
         return []
     finally:
