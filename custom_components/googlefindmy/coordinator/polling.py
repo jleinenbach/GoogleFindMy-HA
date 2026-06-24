@@ -53,7 +53,6 @@ from ..const import (
 )
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
-    OwnerKeyLookupTransientError,
     OwnReportIdentityMismatchError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
@@ -480,13 +479,6 @@ class PollingOperations(_MixinBase):
           refute them, so they keep their reauth prompt (the Codex finding class).
         """
         if cycle_decrypt_error is None:
-            return False
-        if not isinstance(cycle_decrypt_error, DecryptionError):
-            # A transient owner-key lookup miss (OwnerKeyLookupTransientError, base
-            # Exception, NOT a DecryptionError) is never an account-wide credential
-            # failure. Option B already keeps it out of the per-device
-            # ``except DecryptionError`` blocks; this is the defense-in-depth guard
-            # so the shared discriminator never drives a transient miss into reauth.
             return False
         if not cycle_had_successful_decrypt:
             return True
@@ -2099,23 +2091,6 @@ class PollingOperations(_MixinBase):
                         self._consecutive_timeouts = 0
                         if last_exception is None:
                             last_exception = stale_err
-                        continue
-                    except OwnerKeyLookupTransientError as owner_transient_err:
-                        # Transient owner-key lookup miss (partial server response,
-                        # network/gRPC failure). NOT a credential defect and NOT a
-                        # DecryptionError, so it never reaches the account-wide
-                        # reauth verdict (_finalize_cycle_decrypt_state). Treat it as
-                        # an ordinary per-device skip: keep polling the other
-                        # devices, do NOT advance the decrypt-failure counter and do
-                        # NOT set cycle_decrypt_error. Must precede the
-                        # DecryptionError handler; the explicit catch keeps a
-                        # transient miss from aborting the whole cycle.
-                        _LOGGER.debug(
-                            "Owner-key lookup for %s skipped (transient): %s",
-                            dev_name,
-                            owner_transient_err,
-                        )
-                        self._consecutive_timeouts = 0
                         continue
                     except DecryptionError as dec_err:
                         # Defer the cycle-failure bookkeeping (cycle_failed /

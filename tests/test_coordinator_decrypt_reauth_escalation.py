@@ -40,23 +40,6 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 
 from .helpers.polling_mixin_stub import PollingStub
 
-# AP3 introduces ``OwnerKeyLookupTransientError`` (base ``Exception``, NOT a
-# ``DecryptionError``). Until it lands, import it softly so the new R4 transient
-# contracts go RED on the missing symbol, while every unchanged escalation test in
-# this module stays green instead of erroring out the whole collection.
-try:
-    from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (  # noqa: E501
-        OwnerKeyLookupTransientError,
-    )
-
-    _TRANSIENT_AVAILABLE = True
-except ImportError:  # pragma: no cover - RED phase before AP3 lands the class
-
-    class OwnerKeyLookupTransientError(Exception):  # type: ignore[no-redef]
-        """Local placeholder so R4 tests fail (not error) before AP3."""
-
-    _TRANSIENT_AVAILABLE = False
-
 
 def _make_stub(monotonic: Callable[[], float] | None = None) -> PollingStub:
     """Return a PollingStub seeded with the decrypt-escalation state fields.
@@ -779,62 +762,3 @@ def test_finalize_clean_cycle_stays_success() -> None:
     assert reauth_exc is None
     assert stub._consecutive_decrypt_failures == 0
     assert stub._crypto_status_state == CryptoStatus.OK
-
-
-# ---------------------------------------------------------------------------
-# R4: a transient owner-key lookup error must NOT drive the account-wide reauth
-# path. With Option B (the transient class is NOT a DecryptionError) the per-device
-# ``except DecryptionError`` block never catches it, so it never reaches the
-# escalation counter. These contracts go RED until AP3 lands the real class.
-# ---------------------------------------------------------------------------
-
-
-def test_r4_transient_class_exists_and_is_not_a_decryption_error() -> None:
-    """RED (R4 / Option B): the transient class exists and is NOT a DecryptionError.
-
-    This is the structural guarantee that keeps a transient owner-key miss out of
-    the account-wide reauth path: because it is not a ``DecryptionError`` subclass,
-    the per-device ``except DecryptionError`` blocks (``polling.py`` /
-    ``locate.py``) cannot catch it and feed it to ``note_decrypt_failure`` /
-    ``_resolve_cycle_decrypt_outcome``. RED today: the symbol does not exist
-    (``_TRANSIENT_AVAILABLE`` is False).
-    """
-    assert _TRANSIENT_AVAILABLE, (
-        "OwnerKeyLookupTransientError must be importable from decrypt_locations (AP3)"
-    )
-    assert not issubclass(OwnerKeyLookupTransientError, DecryptionError)
-
-
-def test_r4_transient_is_not_account_wide_failure() -> None:
-    """RED (R4): the per-cycle predicate must not treat a transient error as a
-    decrypt failure that advances/escalates the account-wide reauth budget.
-
-    ``_decrypt_failure_is_account_wide`` is the single discriminator that the
-    escalation verdict shares. A transient owner-key lookup error (not a
-    ``DecryptionError``) must never be classified as an account-wide decrypt
-    failure, even when no sibling decrypted this cycle. RED today: the class does
-    not exist, so the contract cannot hold.
-    """
-    assert _TRANSIENT_AVAILABLE, "OwnerKeyLookupTransientError missing (AP3)"
-    stub = _make_stub()
-    transient = OwnerKeyLookupTransientError("retrieval did not complete; transient")
-
-    assert stub._decrypt_failure_is_account_wide(transient, False) is False
-    assert stub._decrypt_failure_is_account_wide(transient, True) is False
-    stub._set_auth_state.assert_not_called()
-
-
-def test_r4_existing_invalid_tag_escalation_unchanged() -> None:
-    """Regression guard for R4: the genuine ``SharedKeyMismatchError`` (InvalidTag)
-    escalation must stay intact while the transient carve-out is added.
-
-    Mirrors ``test_t4_...`` so the transient routing change cannot silently weaken
-    the legitimate reauth path: N consecutive account-wide failures still escalate.
-    """
-    stub = _make_stub()
-    err = SharedKeyMismatchError("stale shared key")
-
-    for _ in range(_MAX_DECRYPT_FAILURES - 1):
-        assert stub.note_decrypt_failure(stale=False, error=err, device="dev") is False
-    assert stub.note_decrypt_failure(stale=False, error=err, device="dev") is True
-    stub._set_auth_state.assert_called_once()

@@ -18,7 +18,6 @@ from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
-    OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
 )
 
@@ -249,100 +248,6 @@ async def test_decode_background_location_semantic_only_does_not_clear_counter(
     coordinator.note_background_decrypt_success.assert_not_called()
     coordinator.note_decrypt_failure.assert_not_called()
     entry.async_start_reauth.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_decode_background_location_transient_owner_key_is_skipped_without_counter_touch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """INVARIANT (AP8 characterization, post-fix): a transient owner-key miss in the
-    background decode yields an empty result WITHOUT touching the reauth counter.
-
-    ``OwnerKeyLookupTransientError`` has base ``Exception`` and is now caught by the
-    dedicated scoped ``except OwnerKeyLookupTransientError`` branch inside
-    ``_decode_background_location_async`` (added in AP9, Path A), which logs at DEBUG
-    and returns ``{}`` without calling ``_note_decrypt_failure_for_entry``.
-
-    This test pins the counter-safety and empty-result halves of the contract, which
-    held both before and after the fix (the sibling test
-    ``..._downgrades_to_debug`` pins the DEBUG severity that the fix added). A
-    transient is not a decrypt-failure budget event, so the counter stays untouched.
-    """
-    receiver, coordinator, entry = _receiver_with_coordinator(escalate=True)
-    receiver._entry_caches["entry-1"] = MagicMock()
-
-    note_failure = MagicMock()
-    monkeypatch.setattr(receiver, "_note_decrypt_failure_for_entry", note_failure)
-
-    monkeypatch.setattr(
-        fcm_receiver_ha.decoder_module,
-        "parse_device_update_protobuf",
-        MagicMock(return_value=MagicMock()),
-    )
-    monkeypatch.setattr(
-        fcm_receiver_ha,
-        "async_decrypt_location_response_locations",
-        AsyncMock(side_effect=OwnerKeyLookupTransientError("owner key lookup timed out")),
-    )
-
-    result = await receiver._decode_background_location_async("entry-1", "deadbeef")
-
-    # (1) counter untouched: the failure-budget hook is NOT called.
-    note_failure.assert_not_called()
-    # (2) return value is the empty result.
-    assert result == {}
-
-
-@pytest.mark.asyncio
-async def test_decode_background_location_transient_owner_key_downgrades_to_debug(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """GREEN (AP9 Path A): a transient owner-key miss is a pure severity downgrade.
-
-    The transient type is caught inside the scoped block BEFORE ``InvalidTag`` and
-    logged at DEBUG (not ERROR), the failure-budget hook is NOT called, and the
-    result is the empty mapping. This is the GREEN counterpart of the
-    characterization test above (which only pinned counter + return value); it adds
-    the severity assertion that drives the AP9 implementation.
-    """
-    receiver, coordinator, entry = _receiver_with_coordinator(escalate=True)
-    receiver._entry_caches["entry-1"] = MagicMock()
-
-    note_failure = MagicMock()
-    monkeypatch.setattr(receiver, "_note_decrypt_failure_for_entry", note_failure)
-
-    monkeypatch.setattr(
-        fcm_receiver_ha.decoder_module,
-        "parse_device_update_protobuf",
-        MagicMock(return_value=MagicMock()),
-    )
-    monkeypatch.setattr(
-        fcm_receiver_ha,
-        "async_decrypt_location_response_locations",
-        AsyncMock(side_effect=OwnerKeyLookupTransientError("owner key lookup timed out")),
-    )
-
-    import logging
-
-    caplog.set_level(logging.DEBUG, logger=fcm_receiver_ha.__name__)
-
-    result = await receiver._decode_background_location_async("entry-1", "deadbeef")
-
-    # (1) counter untouched.
-    note_failure.assert_not_called()
-    # (2) empty result.
-    assert result == {}
-    # (3) no ERROR record for a transient; the dedicated DEBUG record is present.
-    error_records = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
-    assert not error_records, (
-        "transient owner-key miss must not be logged at ERROR; "
-        f"got {[r.getMessage() for r in error_records]}"
-    )
-    debug_text = " ".join(
-        rec.getMessage() for rec in caplog.records if rec.levelno == logging.DEBUG
-    )
-    assert "transient owner-key" in debug_text.lower()
 
 
 def test_note_decrypt_success_for_entry_swallows_coordinator_errors() -> None:

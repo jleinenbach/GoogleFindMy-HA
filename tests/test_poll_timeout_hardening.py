@@ -94,19 +94,6 @@ class _EmptyResultAPI:
         return []
 
 
-class _TransientOwnerKeyAPI:
-    """API stub raising a transient owner-key lookup error per device."""
-
-    async def async_get_device_location(self, _dev_id: str, _dev_name: str):
-        from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-            OwnerKeyLookupTransientError,
-        )
-
-        raise OwnerKeyLookupTransientError(
-            "Owner key retrieval did not complete (transient)."
-        )
-
-
 def _make_coordinator(
     monkeypatch: pytest.MonkeyPatch,
     loop: asyncio.AbstractEventLoop,
@@ -169,38 +156,6 @@ def test_outer_poll_budget_covers_http_plus_fcm_phases() -> None:
         POLL_DEVICE_OUTER_TIMEOUT_S
         >= NOVA_REQUEST_TOTAL_TIMEOUT_S + LOCATION_REQUEST_TIMEOUT_S
     )
-
-
-def test_transient_owner_key_lookup_skips_device_without_escalation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """R4/AP5: a transient owner-key lookup error skips the device as an ordinary
-    cycle event and never drives the account-wide reauth budget.
-
-    ``OwnerKeyLookupTransientError`` is caught by the dedicated handler (before the
-    ``DecryptionError`` block) which continues to the next device without
-    advancing the consecutive decrypt-failure counter or setting an auth state, so
-    a transient miss cannot trip a spurious reauth.
-    """
-    loop = asyncio.new_event_loop()
-    devices = [{"id": "dev-transient", "name": "Transient Tag"}]
-    coordinator = _make_coordinator(
-        monkeypatch, loop, _TransientOwnerKeyAPI(), devices
-    )
-    coordinator._consecutive_decrypt_failures = 0
-    set_auth_state = AsyncMock()
-    coordinator._set_auth_state = set_auth_state
-
-    try:
-        loop.run_until_complete(
-            coordinator._async_start_poll_cycle(devices, force=True)
-        )
-    finally:
-        drain_loop(loop)
-
-    # Transient miss did not feed the account-wide reauth path.
-    assert coordinator._consecutive_decrypt_failures == 0
-    set_auth_state.assert_not_called()
 
 
 def test_empty_location_logs_info_not_warning(

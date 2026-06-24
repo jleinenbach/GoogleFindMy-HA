@@ -27,7 +27,6 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from ..const import DEFAULT_MIN_POLL_INTERVAL
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
-    OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
 )
 from ..NovaApi.nova_request import (
@@ -601,23 +600,6 @@ class LocateOperations(_MixinBase):
                 # DecryptionError handler below -- it is a subclass.
                 self.note_decrypt_failure(stale=True, error=stale_err, device=name)
                 self.note_error(stale_err, where="async_locate_device", device=name)
-                return {}
-            except OwnerKeyLookupTransientError as transient_err:
-                # Transient owner-key lookup miss (partial server response,
-                # network/gRPC failure). NOT a credential defect: do NOT feed the
-                # account-wide reauth counter and do NOT escalate. Treat it as a
-                # plain skip (empty result), like a "no pending report" cycle, so a
-                # transient single-device failure never drives a spurious reauth.
-                # Must precede the DecryptionError handler; it is NOT a subclass, so
-                # this explicit catch keeps it out of the escalation path.
-                _LOGGER.debug(
-                    "Manual locate for %s skipped (transient owner-key lookup): %s",
-                    name,
-                    transient_err,
-                )
-                self.note_error(
-                    transient_err, where="async_locate_device", device=name
-                )
                 return {}
             except DecryptionError as dec_err:
                 # Account-wide stale/missing shared key. Feed the SAME escalation
