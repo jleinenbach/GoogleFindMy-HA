@@ -36,6 +36,44 @@ from custom_components.googlefindmy.ProtoDecoders import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Process-wide guard so the aggregate canonicless-device WARNING (how many devices
+# Google returned without a canonical ID) is announced only once per config entry,
+# despite get_devices_with_location running multiple times per poll. The key is the
+# pair (entry scope, count): entry scope (cache.entry_id) keeps two config entries
+# from silencing each other, and the count re-surfaces the WARNING only when the
+# number of affected devices changes (new information). The per-device name is logged
+# at DEBUG instead (not guarded), so enabling debug logging always reveals which
+# devices are affected.
+#
+# The guard maps an entry scope (cache.entry_id, or "<no-entry>" in stub mode) to the
+# LAST affected-device count that entry warned about. Storing the last count — rather
+# than a set of every count ever seen — is the correctness point: a count that returns
+# to an earlier value (1 -> 2 -> 1) still re-surfaces, because the comparison is against
+# the previous state, not membership in an all-time history that never forgets. A
+# recovery (count 0) drops the entry, so a later drop re-warns even if the count returns
+# to a pre-recovery value, and the map stays scoped to entries that are actually
+# affected. It is cleared per entry on config-entry unload/reload (see
+# async_unload_entry) so a reload re-arms the warning for a still-missing device; the
+# argument-free reset is the test-isolation hook.
+_last_canonicless_count_by_entry: dict[str, int] = {}
+
+
+def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
+    """Clear the canonicless-device warning guard.
+
+    Args:
+        entry_id: When ``None`` (test isolation), the whole guard is cleared. When an
+            entry id is given, only that entry's last-count is dropped, so unloading or
+            reloading one config entry re-arms its warning on the next poll without
+            disturbing other entries' guards. A whole-map clear per unload would
+            re-introduce the cross-entry coupling the keyed guard fixed.
+    """
+    if entry_id is None:
+        _last_canonicless_count_by_entry.clear()
+        return
+    _last_canonicless_count_by_entry.pop(entry_id, None)
+
+
 _text_format_module: Any | None = None
 
 
@@ -853,6 +891,14 @@ def get_devices_with_location(
 
     results: list[dict[str, Any]] = []
 
+    # Entry scope for the canonicless-device guard: cache.entry_id keeps two config
+    # entries from silencing each other's diagnostics. None in stub mode (cache absent).
+    entry_scope = getattr(cache, "entry_id", None) or "<no-entry>"
+
+    # Count devices Google returned without a usable canonical ID in this call, so the
+    # default-visible WARNING can report an aggregate count instead of per-device names.
+    canonicless_count = 0
+
     for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
         # FIX: For phones (IDENTIFIER_ANDROID), use only the FIRST canonical ID.
@@ -1130,6 +1176,7 @@ def get_devices_with_location(
             anchor_union["time_anchors_debug"] = dbg
 
         # Emit **exactly one** row per canonic ID.
+        emitted_for_device = 0
         for canonic in canonic_ids:
             cid = getattr(canonic, "id", None)
             if not (isinstance(cid, str) and cid):
@@ -1165,6 +1212,47 @@ def get_devices_with_location(
                     row[k] = v
 
             results.append(row)
+            emitted_for_device += 1
+
+        if emitted_for_device == 0:
+            # Google returned this device without a usable canonical ID, so no row was
+            # emitted and it silently vanishes from Home Assistant. Count it for the
+            # aggregate WARNING below, and name it at DEBUG only: the user-defined name
+            # is potentially identifying (AGENTS.md privacy guidance), so it is kept off
+            # the default-visible WARNING tier and surfaced only when the operator opts
+            # in by enabling debug logging. The DEBUG line is intentionally not guarded,
+            # so it always reveals the affected device once debug logging is turned on.
+            canonicless_count += 1
+            _LOGGER.debug(
+                "Device '%s' was returned without a canonical ID and is not shown "
+                "in Home Assistant. Make it findable again in the Find My Device app "
+                "(or your Google account), then reload the integration.",
+                device_name or "<unnamed>",
+            )
+
+    if canonicless_count:
+        # Default-visible aggregate: report only how many devices are affected, never
+        # their names. Re-arm per entry whenever the affected-device COUNT changes:
+        # compare against this entry's last warned count, so a stable count warns once
+        # while any change (a device dropped or recovered) re-surfaces it — including a
+        # count that returns to an earlier value (1 -> 2 -> 1), which a lifetime set of
+        # every count ever seen would wrongly suppress.
+        last_count = _last_canonicless_count_by_entry.get(entry_scope)
+        if last_count != canonicless_count:
+            _last_canonicless_count_by_entry[entry_scope] = canonicless_count
+            _LOGGER.warning(
+                "%d device(s) returned by Google without a canonical ID are not shown "
+                "in Home Assistant. Enable debug logging for "
+                "custom_components.googlefindmy to see which devices are affected, then "
+                "make them findable again in the Find My Device app (or your Google "
+                "account) and reload the integration.",
+                canonicless_count,
+            )
+    else:
+        # This entry currently has no affected devices: forget its last count so a later
+        # drop re-surfaces the warning even if the count returns to a pre-recovery value.
+        # Keeps the guard scoped to entries that are actually affected.
+        _last_canonicless_count_by_entry.pop(entry_scope, None)
 
     return results
 
