@@ -57,21 +57,33 @@ _LOGGER = logging.getLogger(__name__)
 # argument-free reset is the test-isolation hook.
 _last_canonicless_count_by_entry: dict[str, int] = {}
 
+# Process-wide map of the device names that were emitted (visible) in the PREVIOUS run of
+# get_devices_with_location for each entry scope. It powers the "was visible, now gone"
+# transition discriminator: a benign-class device (phone or reduced-listing accessory)
+# normally drops silently, but if it was visible last run and disappears now, that is a
+# real regression and is treated as warn-worthy. The set is rebuilt after every run from
+# the names actually emitted in that run (mirroring the per-run semantics of the count
+# guard above), so a transition warns at most once before falling back to silence. It is
+# cleared per entry on the same unload/reset hook as the count guard.
+_visible_device_names_by_entry: dict[str, set[str]] = {}
+
 
 def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
-    """Clear the canonicless-device warning guard.
+    """Clear the canonicless-device warning guard and the visibility-transition map.
 
     Args:
-        entry_id: When ``None`` (test isolation), the whole guard is cleared. When an
-            entry id is given, only that entry's last-count is dropped, so unloading or
-            reloading one config entry re-arms its warning on the next poll without
-            disturbing other entries' guards. A whole-map clear per unload would
-            re-introduce the cross-entry coupling the keyed guard fixed.
+        entry_id: When ``None`` (test isolation), both module-level maps are cleared
+            entirely. When an entry id is given, only that entry's keys are dropped from
+            both maps, so unloading or reloading one config entry re-arms its warning on
+            the next poll without disturbing other entries' guards. A whole-map clear per
+            unload would re-introduce the cross-entry coupling the keyed guard fixed.
     """
     if entry_id is None:
         _last_canonicless_count_by_entry.clear()
+        _visible_device_names_by_entry.clear()
         return
     _last_canonicless_count_by_entry.pop(entry_id, None)
+    _visible_device_names_by_entry.pop(entry_id, None)
 
 
 _text_format_module: Any | None = None
@@ -899,6 +911,11 @@ def get_devices_with_location(
     # default-visible WARNING can report an aggregate count instead of per-device names.
     canonicless_count = 0
 
+    # Names emitted (visible) in THIS run, captured to rebuild the visibility-transition
+    # map after the loop. Compared against the previous run's set, never the running one.
+    emitted_names_this_run: set[str] = set()
+    previously_visible_names = _visible_device_names_by_entry.get(entry_scope, set())
+
     for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
         # FIX: For phones (IDENTIFIER_ANDROID), use only the FIRST canonical ID.
@@ -1214,21 +1231,55 @@ def get_devices_with_location(
             results.append(row)
             emitted_for_device += 1
 
-        if emitted_for_device == 0:
+        if emitted_for_device > 0:
+            # Remember this device as visible this run so a later disappearance can be
+            # told apart from a device that was never shown (the transition discriminator).
+            emitted_names_this_run.add(device_name)
+        else:
             # Google returned this device without a usable canonical ID, so no row was
-            # emitted and it silently vanishes from Home Assistant. Count it for the
-            # aggregate WARNING below, and name it at DEBUG only: the user-defined name
-            # is potentially identifying (AGENTS.md privacy guidance), so it is kept off
-            # the default-visible WARNING tier and surfaced only when the operator opts
-            # in by enabling debug logging. The DEBUG line is intentionally not guarded,
-            # so it always reveals the affected device once debug logging is turned on.
-            canonicless_count += 1
-            _LOGGER.debug(
-                "Device '%s' was returned without a canonical ID and is not shown "
-                "in Home Assistant. Make it findable again in the Find My Device app "
-                "(or your Google account), then reload the integration.",
-                device_name or "<unnamed>",
-            )
+            # emitted and it silently vanishes from Home Assistant. Severity tracks
+            # actionability: a benign class (an Android phone, or a reduced listing with
+            # no 'information' block such as a Bluetooth accessory) drops as expected for
+            # its class and is located -- if at all -- via the Locate flow, so it only
+            # logs at DEBUG. It becomes warn-worthy only when it is tracker-shaped (has an
+            # 'information' block and is not Android) OR when it was visible in the
+            # previous run and is now gone (a real regression). The per-device name stays
+            # at DEBUG (AGENTS.md privacy guidance); the default-visible tier is the count
+            # WARNING below. has_information_block is recomputed locally because the
+            # binding above lives inside the `if not encrypted_identity_key:` block and is
+            # not in scope when a key was present.
+            has_information_block = device.HasField("information")
+            benign = is_android_device or not has_information_block
+            was_visible = device_name in previously_visible_names
+            warn_worthy = (not benign) or was_visible
+
+            if warn_worthy:
+                canonicless_count += 1
+                _LOGGER.debug(
+                    "Device '%s' was returned without a canonical ID and is not shown "
+                    "in Home Assistant. Make it findable again in the Find My Device app "
+                    "(or your Google account), then reload the integration.",
+                    device_name or "<unnamed>",
+                )
+            else:
+                # Benign class, expected for this device type and not actionable: log at
+                # DEBUG with no remediation hint (no "reload"/"findable again") so the line
+                # is not mistaken for a problem the user can fix.
+                _LOGGER.debug(
+                    "Device '%s' was returned without a canonical ID in this listing and "
+                    "is not shown as its own entity. This is expected for this device "
+                    "class (phones and Bluetooth accessories are located via the owner's "
+                    "Locate flow, not as standalone Find My Device entries); no action is "
+                    "required.",
+                    device_name or "<unnamed>",
+                )
+
+    # Rebuild the per-entry visibility set from the names emitted in THIS run, strictly
+    # after the device loop so the transition check inside the loop compared against the
+    # PREVIOUS run's set. Dropped devices (no row emitted) are intentionally excluded, so
+    # a device that disappears next run is recognised as a "was visible, now gone"
+    # transition exactly once.
+    _visible_device_names_by_entry[entry_scope] = emitted_names_this_run
 
     if canonicless_count:
         # Default-visible aggregate: report only how many devices are affected, never
