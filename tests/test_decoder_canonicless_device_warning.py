@@ -131,3 +131,69 @@ def test_valid_canonic_id_produces_row_and_no_warning(
 
     assert len(results) == 1
     assert _canonicless_warnings(caplog) == []
+
+
+def test_same_name_in_distinct_entries_each_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two config entries with a same-named canonicless device each get a warning.
+
+    The de-duplication guard is process-wide, so a name-only key would let the first
+    entry's warning silence the second entry's genuinely different device. The guard
+    key must therefore include the per-entry scope (``cache.entry_id``).
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_phone_device(name="Shared Name", canonic_ids=[])]
+    )
+    cache_a = SimpleNamespace(entry_id="entry-A")
+    cache_b = SimpleNamespace(entry_id="entry-B")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(device_list, cache=cache_a)
+        decoder.get_devices_with_location(device_list, cache=cache_b)
+
+    assert len(_canonicless_warnings(caplog)) == 2
+
+
+def test_same_name_within_single_list_each_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two same-named canonicless devices in one list each get their own warning.
+
+    Within a single account a name-only key collapses distinct devices, so the second
+    same-named device would be silenced. The per-device position disambiguates them.
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[
+            _make_phone_device(name="Twin", canonic_ids=[]),
+            _make_phone_device(name="Twin", canonic_ids=[]),
+        ]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        results = decoder.get_devices_with_location(device_list, cache=cache)
+
+    assert results == []
+    assert len(_canonicless_warnings(caplog)) == 2
+
+
+def test_same_device_in_one_entry_warns_once_across_calls(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The entry-scoped key still de-duplicates the same device across poll calls.
+
+    Disambiguating by entry and position must not regress the original guarantee: a
+    single persistent canonicless device in one entry warns only once, even though
+    ``get_devices_with_location`` runs repeatedly per poll.
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_phone_device(name="Lost Pixel", canonic_ids=[])]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(device_list, cache=cache)
+        decoder.get_devices_with_location(device_list, cache=cache)
+
+    assert len(_canonicless_warnings(caplog)) == 1

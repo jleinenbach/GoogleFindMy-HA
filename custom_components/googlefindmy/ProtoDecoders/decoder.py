@@ -38,12 +38,14 @@ _LOGGER = logging.getLogger(__name__)
 
 # Process-wide guard so each canonicless device (returned by Google without a
 # canonical ID) is announced only once, despite get_devices_with_location running
-# multiple times per poll. Keyed by device name (the only stable handle a
-# canonicless device has). The naming mirrors main.py's _warned_bad_identifier_devices,
-# but the scope differs: that is a per-coordinator instance attribute, while this is a
-# module-level set shared across config entries and only cleared by the test reset hook
-# (a re-discovered device warns again only after a process restart).
-_warned_canonicless_devices: set[str] = set()
+# multiple times per poll. The key is the triple (entry scope, device position,
+# device name): entry scope (cache.entry_id) keeps two config entries from silencing
+# each other, and the position disambiguates same-named/unnamed siblings within one
+# account, since a canonicless device has no canonical ID to key on. The naming mirrors
+# main.py's _warned_bad_identifier_devices, but the scope differs: that is a
+# per-coordinator instance attribute, while this is a module-level set only cleared by
+# the test reset hook (a re-discovered device warns again only after a process restart).
+_warned_canonicless_devices: set[tuple[str, int, str]] = set()
 
 
 def _reset_canonicless_warning_state() -> None:
@@ -868,7 +870,13 @@ def get_devices_with_location(
 
     results: list[dict[str, Any]] = []
 
-    for device in getattr(device_list, "deviceMetadata", []):
+    # Entry scope for the canonicless-device guard: cache.entry_id keeps two config
+    # entries from silencing each other's diagnostics. None in stub mode (cache absent).
+    entry_scope = getattr(cache, "entry_id", None) or "<no-entry>"
+
+    for device_index, device in enumerate(
+        getattr(device_list, "deviceMetadata", [])
+    ):
         # Resolve canonic IDs for this device (Android vs. generic path)
         # FIX: For phones (IDENTIFIER_ANDROID), use only the FIRST canonical ID.
         # Phones can have multiple canonical IDs in the array (e.g., after re-pairing),
@@ -1186,16 +1194,21 @@ def get_devices_with_location(
         if emitted_for_device == 0:
             # Google returned this device without a usable canonical ID, so no row
             # was emitted and it silently vanishes from Home Assistant. Surface it
-            # once per process so the user can act, de-duplicated by device name
-            # (the only stable handle a canonicless device has).
-            dedup_key = device_name or "<unnamed>"
-            if dedup_key not in _warned_canonicless_devices:
-                _warned_canonicless_devices.add(dedup_key)
+            # once per process so the user can act. The guard key separates the
+            # human-facing display name from the de-duplication identity: it scopes by
+            # config entry (so two entries do not silence each other) and by device
+            # position (so same-named/unnamed siblings within one account each warn),
+            # since a canonicless device has no canonical ID to key on. For a diagnostic
+            # this errs toward warning twice over silently missing a device.
+            display_name = device_name or "<unnamed>"
+            guard_key = (entry_scope, device_index, display_name)
+            if guard_key not in _warned_canonicless_devices:
+                _warned_canonicless_devices.add(guard_key)
                 _LOGGER.warning(
                     "Device '%s' was returned without a canonical ID and is not "
                     "shown in Home Assistant. Make it findable again in the Find My "
                     "Device app (or your Google account), then reload the integration.",
-                    dedup_key,
+                    display_name,
                 )
 
     return results
