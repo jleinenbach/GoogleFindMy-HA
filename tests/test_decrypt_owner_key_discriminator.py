@@ -29,6 +29,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyInvalidError,
     SharedKeyMismatchError,
     SharedKeyMissingError,
     StaleOwnerKeyError,
@@ -47,7 +48,6 @@ from custom_components.googlefindmy.SpotApi.spot_request import (
     SpotGrpcStatusError,
     SpotNetworkError,
 )
-from tests.helpers.config_entries_stub import install_config_entries_stubs
 
 # AP3 introduces ``OwnerKeyLookupTransientError`` (NOT a ``DecryptionError``
 # subclass; base ``Exception``). Until then this symbol does not exist. Import it
@@ -78,6 +78,12 @@ def test_liskov_subclasses_are_decryption_errors() -> None:
     assert issubclass(SharedKeyMismatchError, DecryptionError)
     assert issubclass(SharedKeyMissingError, DecryptionError)
     assert issubclass(StaleOwnerKeyError, DecryptionError)
+    # OwnerKeyInvalidError is a reauth-worthy credential defect: it MUST be a
+    # DecryptionError (so ``except DecryptionError`` escalates it to reauth) and
+    # MUST NOT be an OwnerKeyLookupTransientError (which the poll/locate paths skip
+    # as a benign transient miss).
+    assert issubclass(OwnerKeyInvalidError, DecryptionError)
+    assert not issubclass(OwnerKeyInvalidError, OwnerKeyLookupTransientError)
 
 
 def test_t2_invalid_tag_maps_to_shared_key_mismatch() -> None:
@@ -175,6 +181,55 @@ def test_f6_shared_key_missing_verbatim_string_is_characterized() -> None:
     exc = RuntimeError("Shared key is missing or empty; cannot decrypt owner key")
     result = _classify_owner_key_failure(exc, context="initial lookup")
     assert isinstance(result, SharedKeyMissingError)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # get_owner_key.py:421 -- owner key absent/invalid after retrieval.
+        "Owner key is missing or invalid; please re-authenticate.",
+        # get_owner_key.py:442 -- owner key decoded but is not a valid hex/base64 key.
+        "Invalid owner_key format (expect 32-byte key in hex or base64).",
+        # get_owner_key.py:465 -- owner key has the wrong byte length.
+        "Owner key must be exactly 32 bytes long.",
+    ],
+)
+def test_local_owner_key_defect_is_reauth_worthy_not_transient(message: str) -> None:
+    """A LOCAL owner-key validity defect must stay reauth-worthy (Codex P2 fix).
+
+    ``async_get_owner_key`` raises these deterministic ``RuntimeError`` strings
+    when the locally stored owner key is missing/invalid, malformed, or the wrong
+    length. The inverted default (branch d) would swallow them as
+    ``OwnerKeyLookupTransientError``, which the poll/locate paths skip silently --
+    so an account with a corrupted owner key would never be prompted to re-import
+    secrets. Branch (b2) keeps them as ``OwnerKeyInvalidError`` (a reauth-worthy
+    ``DecryptionError``), not a transient miss.
+    """
+    result = _classify_owner_key_failure(RuntimeError(message), context="initial lookup")
+    assert isinstance(result, OwnerKeyInvalidError)
+    assert isinstance(result, DecryptionError)
+    assert not isinstance(result, OwnerKeyLookupTransientError)
+    text = str(result).lower()
+    # The reauth recovery is surfaced, not hidden behind a "transient/retry" claim.
+    assert "re-authentication" in text
+    assert "transient" not in text
+
+
+def test_local_owner_key_defect_does_not_collide_with_server_field_transient() -> None:
+    """The (b2) owner-key-defect anchor must not steal the (c) server-field cases.
+
+    ``"Missing or empty 'encryptedOwnerKey'"`` and ``"Decrypted owner_key is empty
+    or invalid type"`` are partial-server-response conditions and MUST stay
+    ``OwnerKeyLookupTransientError`` (transient), even though they mention the words
+    "owner" and "invalid". Only the deterministic local-defect wordings map to
+    ``OwnerKeyInvalidError``.
+    """
+    for server_msg in (
+        "Missing or empty 'encryptedOwnerKey'",
+        "Decrypted owner_key is empty or invalid type",
+    ):
+        result = _classify_owner_key_failure(RuntimeError(server_msg), context="x")
+        assert type(result) is OwnerKeyLookupTransientError
 
 
 @pytest.mark.asyncio
@@ -615,8 +670,15 @@ async def test_r10_outer_layer_still_raises_auth_failed_with_neutral_wording(
     no longer claim ``auth/session issue`` or ``re-authenticate``. RED today: the
     ``:360-364`` branch raises ``ConfigEntryAuthFailed`` with exactly that
     speculative wording.
+
+    Asserts against the ``ConfigEntryAuthFailed`` already present on ``_gok`` (the
+    shared ``homeassistant.exceptions`` stub installed once by ``conftest``). It
+    must NOT call ``install_config_entries_stubs(_gok)``: that rebinds the module
+    global to a fresh stub class without restoring it, so a later test that catches
+    the shared ``ConfigEntryAuthFailed`` would miss what ``_gok`` raises -- an
+    order-dependent contamination. No module mutation here keeps the suite
+    order-independent.
     """
-    install_config_entries_stubs(_gok)
 
     async def _inner_boom(*_a: object, **_k: object) -> Any:
         raise _eidreq.SpotApiEmptyResponseError("trailers only")

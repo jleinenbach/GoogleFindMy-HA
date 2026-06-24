@@ -267,6 +267,25 @@ class SharedKeyMissingError(DecryptionError):
     """
 
 
+class OwnerKeyInvalidError(DecryptionError):
+    """Raised when the LOCALLY stored owner key is structurally invalid.
+
+    Account-wide credential defect, NOT a transient miss: the owner key was
+    obtained from the local cache/credentials but is missing, malformed (not a
+    valid hex/base64 key), or has the wrong length. Retrying can never repair such
+    a deterministic local defect, so it must surface as a reauth-worthy
+    ``DecryptionError`` (a fresh secrets.json is required), exactly like the
+    shared-key failures above.
+
+    Kept a DISTINCT ``DecryptionError`` subclass (NOT ``OwnerKeyLookupTransientError``)
+    so the failure class name is diagnosable in logs and the coordinator routes it
+    to the account-wide reauth path instead of swallowing it as a transient lookup
+    miss. Contrast ``OwnerKeyLookupTransientError`` (base ``Exception``), which is
+    reserved for partial/trailers-only server responses, transport failures and
+    otherwise unclassified misses where the credentials are presumed valid.
+    """
+
+
 class OwnReportIdentityMismatchError(DecryptionError):
     """Raised when a device's OWN server reports all fail authentication.
 
@@ -316,11 +335,28 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
       (a) ``InvalidTag`` -> ``SharedKeyMismatchError`` (genuine credential defect).
       (b) a local "shared key ... missing or empty" bundle ->
           ``SharedKeyMissingError`` (genuine credential defect).
+      (b2) a local owner-key validity defect (the stored owner key is missing,
+          malformed, or the wrong length) -> ``OwnerKeyInvalidError`` (genuine
+          credential defect; deterministic, never fixed by a retry, so it must
+          stay reauth-worthy and must NOT be swallowed by the transient default).
       (c) a partial server-field response (``encryptedOwnerKeyAndMetadata`` /
           ``encryptedOwnerKey`` / "Decrypted owner_key is empty") ->
           ``OwnerKeyLookupTransientError`` (transient server condition).
       (d) everything else (default, inverted) -> ``OwnerKeyLookupTransientError``
           (no "stale" / "re-authenticate" guess).
+
+    The order matters: (b2) anchors on owner-key validity wordings that are
+    distinct from the (c) server-field tokens, so a deterministic local defect is
+    classified before the transient fallthrough can hide it.
+
+    Scope of (b2): it covers only STRUCTURAL defects of an owner key that was
+    already obtained (missing/invalid value after retrieval, malformed encoding,
+    wrong length). Precondition failures raised BEFORE retrieval -- e.g.
+    ``get_owner_key.py``'s "Username is not configured" -- deliberately stay on the
+    transient default (d): an unset username can be a cold-start race (the username
+    cache is not populated yet), and escalating it to reauth would reintroduce the
+    cry-wolf prompt this classifier exists to avoid. They are NOT structural
+    owner-key defects, so they are intentionally not folded into (b2).
     """
     if isinstance(exc, InvalidTag):
         return SharedKeyMismatchError(
@@ -333,6 +369,16 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
         return SharedKeyMissingError(
             f"Shared key is missing or empty during {context} (incomplete bundle). "
             "Re-import a complete secrets.json."
+        )
+    if (
+        "owner key is missing or invalid" in text
+        or "invalid owner_key format" in text
+        or "owner key must be exactly" in text
+    ):
+        return OwnerKeyInvalidError(
+            f"The locally stored owner key is invalid during {context} (missing, "
+            "malformed, or wrong length). A fresh secrets.json is required "
+            "(re-authentication)."
         )
     if (
         "encryptedownerkeyandmetadata" in text
