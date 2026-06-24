@@ -292,6 +292,9 @@ def test_recovery_then_redrop_warns_again(
     with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
         decoder.get_devices_with_location(missing, cache=cache)
         decoder.get_devices_with_location(healthy, cache=cache)
+        # The healthy poll itself must stay silent on the default-visible tier: only the
+        # first drop has warned so far.
+        assert len(_canonicless_warnings(caplog)) == 1
         decoder.get_devices_with_location(missing, cache=cache)
 
     assert len(_canonicless_warnings(caplog)) == 2
