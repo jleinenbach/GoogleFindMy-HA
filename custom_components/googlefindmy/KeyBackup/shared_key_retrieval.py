@@ -53,6 +53,23 @@ SHARED_KEY_LEN = 32
 _CACHE_KEY_BASE = "shared_key"  # canonical per-entry key in entry-scoped mode
 
 
+class SharedKeyUnavailableError(RuntimeError):
+    """The shared key is genuinely absent and cannot be obtained here.
+
+    Raised when an entry has no usable cached shared key and retrieval is
+    impossible in the current context (e.g. non-interactive / HA mode, where the
+    key must be pre-populated from the secrets bundle). This is a *genuine
+    credential defect*, not a transient miss: the user must re-import a complete
+    secrets bundle.
+
+    It is a ``RuntimeError`` subclass so the existing owner-key handlers that
+    catch ``(InvalidTag, RuntimeError)`` keep catching it. Downstream classifiers
+    (see ``decrypt_locations._classify_owner_key_failure``) key on this *type*
+    rather than the message wording, so the absent-key case escalates to reauth
+    robustly even if the human-readable message changes.
+    """
+
+
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
@@ -203,7 +220,7 @@ async def _retrieve_shared_key_hex() -> str:
                 "Ensure Chrome/Chromium is installed for the browser-based flow."
             ) from err
 
-    raise RuntimeError(
+    raise SharedKeyUnavailableError(
         "Shared key not available in non-interactive environment. "
         "Provide the key via secrets bundle or run the CLI with --reauth."
     )

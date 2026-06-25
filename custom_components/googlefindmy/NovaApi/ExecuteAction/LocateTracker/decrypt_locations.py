@@ -35,6 +35,7 @@ from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     decrypt_eik,
 )
 from custom_components.googlefindmy.KeyBackup.shared_key_retrieval import (
+    SharedKeyUnavailableError,
     async_get_shared_key,
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypted_location import (
@@ -367,8 +368,13 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
           so a transient text that merely contains "401" (e.g. "retry after 4012
           ms") stays transient. See AP3.
       (a) ``InvalidTag`` -> ``SharedKeyMismatchError`` (genuine credential defect).
-      (b) a local "shared key ... missing or empty" bundle ->
-          ``SharedKeyMissingError`` (genuine credential defect).
+      (b) the shared key is genuinely absent/empty -> ``SharedKeyMissingError``
+          (genuine credential defect). Recognised primarily by the TYPED
+          ``SharedKeyUnavailableError`` raised at the retrieval source (robust to
+          message wording, e.g. the non-interactive "shared key not available"
+          case), and as a fallback by the legacy local "shared key ... missing or
+          empty" message of the defensive empty-return guard in
+          ``get_owner_key``.
       (b2) a local owner-key STRUCTURE defect (the stored owner key is missing,
           malformed, or the wrong length) -> ``_OwnerKeyRederiveRequired`` (an
           INTERNAL re-derive signal, NOT reauth). The defect is re-derivable from
@@ -412,7 +418,9 @@ def _classify_owner_key_failure(exc: Exception, *, context: str) -> Exception:
             "is required (re-authentication)."
         )
     text = str(exc).lower()
-    if "shared key" in text and "missing or empty" in text:
+    if isinstance(exc, SharedKeyUnavailableError) or (
+        "shared key" in text and "missing or empty" in text
+    ):
         return SharedKeyMissingError(
             f"Shared key is missing or empty during {context} (incomplete bundle). "
             "Re-import a complete secrets.json."
