@@ -1905,15 +1905,22 @@ class GoogleFindMyCoordinator(
                 else:
                     last_poll_age_s = None
 
+                # Runtime ``self.data`` snapshot rows carry the radius under
+                # ``accuracy``; ``accuracy_m`` is only produced later by
+                # ``_as_ha_attributes()`` for HA entity attributes. Prefer the
+                # HA-shaped key when present (defensive), else read the snapshot
+                # field, so the bucket is populated on the normal runtime path.
+                accuracy_raw = row.get("accuracy_m")
+                if accuracy_raw is None:
+                    accuracy_raw = row.get("accuracy")
+
                 entries.append(
                     {
                         "index": index,
                         "device_class": _device_class(slot.get("device_type")),
                         "last_poll_age_s": last_poll_age_s,
                         "last_fix_age_s": last_fix_age_s,
-                        "last_accuracy_bucket": _accuracy_bucket(
-                            row.get("accuracy_m")
-                        ),
+                        "last_accuracy_bucket": _accuracy_bucket(accuracy_raw),
                         "is_own_report": row.get("is_own_report", None),
                         "has_key": bool(slot.get("encrypted_identity_key")),
                     }

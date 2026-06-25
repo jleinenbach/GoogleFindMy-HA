@@ -331,10 +331,18 @@ def test_per_device_never_polled_slot_missing_defaults() -> None:
     assert entry["is_own_report"] is None
 
 
-def test_per_device_accuracy_bucketed_not_raw() -> None:
-    """A5/A8: a raw accuracy float is bucketed, never echoed verbatim."""
+@pytest.mark.parametrize("accuracy_field", ["accuracy", "accuracy_m"])
+def test_per_device_accuracy_bucketed_not_raw(accuracy_field: str) -> None:
+    """A5/A8: a raw accuracy float is bucketed, never echoed verbatim.
+
+    The runtime ``self.data`` snapshot rows carry the radius under
+    ``accuracy``; ``accuracy_m`` is only produced later by
+    ``_as_ha_attributes()`` for HA entity attributes. The diagnostics must read
+    the snapshot field, so both the real ``accuracy`` path and a defensive
+    ``accuracy_m`` fallback have to bucket correctly.
+    """
     coordinator = _PerDeviceCoordinator(
-        data=[{"device_id": "dev-acc", "accuracy_m": 137.4, "is_own_report": False}],
+        data=[{"device_id": "dev-acc", accuracy_field: 137.4, "is_own_report": False}],
     )
     entry = coordinator.build_per_device_diagnostics()[0]  # type: ignore[attr-defined]
     assert entry["last_accuracy_bucket"] == "50-200"
