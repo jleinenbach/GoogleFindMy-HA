@@ -667,6 +667,9 @@ class CacheOperations(_MixinBase):
             if n_seen_norm < _Y2K_EPOCH_SECONDS:
                 self.increment_stat("invalid_ts_drop_count")
                 self.increment_stat("drop_reason_invalid_ts")
+                # Corrupt (pre-Y2K) timestamp: alarming sub-bucket. Increment
+                # only (cumulative), unlike the canonicless absolute assign.
+                self.increment_stat("invalid_ts_drop_warn")
                 _LOGGER.debug(
                     "Rejecting update for %s: timestamp too old (%s)",
                     device_id,
@@ -694,6 +697,9 @@ class CacheOperations(_MixinBase):
         ):
             self.increment_stat("invalid_ts_drop_count")
             self.increment_stat("drop_reason_invalid_ts")
+            # Regressed/out-of-order timestamp: benign sub-bucket. Increment
+            # only (cumulative), unlike the canonicless absolute assign.
+            self.increment_stat("invalid_ts_drop_benign")
             _LOGGER.debug(
                 "Rejecting update for %s: timestamp regressed (%s < %s)",
                 device_id,
