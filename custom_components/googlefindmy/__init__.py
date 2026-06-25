@@ -7724,12 +7724,24 @@ async def _async_save_secrets_data(
     owner_key = secrets_data.get("owner_key")
     shared_key = secrets_data.get("shared_key")
     if not shared_key:
-        _LOGGER.warning(
-            "No 'shared_key' found in secrets bundle for %s. "
-            "FMDN network (crowdsourced) location reports will fail to decrypt. "
-            "Re-authenticate to obtain a current secrets.json that includes the shared_key.",
-            google_email or "(unknown)",
-        )
+        # The trigger is solely the missing shared_key; the locally present
+        # owner_key only selects how wide the outage is described.
+        if owner_key:
+            _LOGGER.warning(
+                "No 'shared_key' found in secrets bundle for %s. "
+                "Crowdsourced/FMDN locations cannot be decrypted now; "
+                "own-device locations will fail when the owner key rotates "
+                "(it can only be refreshed with the shared_key). "
+                "Re-import a complete secrets.json.",
+                google_email or "(unknown)",
+            )
+        else:
+            _LOGGER.warning(
+                "No 'shared_key' found in secrets bundle for %s. "
+                "No location can be decrypted. "
+                "Re-import a complete secrets.json.",
+                google_email or "(unknown)",
+            )
     if google_email:
         email_key = str(google_email)
         try:
@@ -8490,6 +8502,16 @@ async def async_unload_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
     """
 
     parent_entry_id = getattr(entry, "parent_entry_id", None)
+
+    # Re-arm the decoder's canonicless-device warning for this scope. That guard is
+    # process-wide and survives a config-entry reload (the module stays imported), so
+    # without this an unchanged affected-device count would stay suppressed across a
+    # reload and silently hide a still-missing device. The guard key is the parent
+    # entry's token-cache id, so clear the parent scope (not the subentry id).
+    from .ProtoDecoders.decoder import _reset_canonicless_warning_state
+
+    _reset_canonicless_warning_state(parent_entry_id or entry.entry_id)
+
     if parent_entry_id:
         return await _async_unload_subentry(hass, entry)
     return await _async_unload_parent_entry(hass, entry)

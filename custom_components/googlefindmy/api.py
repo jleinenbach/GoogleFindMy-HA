@@ -46,6 +46,7 @@ from .const import (
 from .NovaApi import nova_request
 from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyLookupTransientError,
     any_real_location_record,
 )
 from .NovaApi.ExecuteAction.LocateTracker.location_request import (
@@ -357,7 +358,12 @@ def _build_can_ring_index(
     """
     index: dict[str, bool] = {}
     try:
-        devices = get_devices_with_location(parsed_device_list, cache=cache)
+        # Capability probe only: stay diagnostically silent so this pass does not consume
+        # the canonicless visibility transition or pop the count guard (CQS). The main poll
+        # below emits the diagnostics exactly once per poll.
+        devices = get_devices_with_location(
+            parsed_device_list, cache=cache, emit_canonicless_diagnostics=False
+        )
     except Exception:
         devices = []
 
@@ -698,7 +704,11 @@ class GoogleFindMyAPI:
             self._device_capabilities.update(cap_index)
 
         devices_by_id: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        device_rows = get_devices_with_location(parsed, cache=token_cache)
+        # Main poll: the single pass per poll that emits the canonicless diagnostics and
+        # updates the cross-poll visibility/count guards (CQS, see decoder gate).
+        device_rows = get_devices_with_location(
+            parsed, cache=token_cache, emit_canonicless_diagnostics=True
+        )
         if device_rows:
             for device in device_rows:
                 canonical_id = device.get("id")
@@ -1354,6 +1364,15 @@ class GoogleFindMyAPI:
             # Re-raise it so the coordinator can count it and escalate to a reauth
             # flow (or per-tracker repair). This is the layer that must stay
             # transparent for the location_request fix to have any effect.
+            raise
+
+        except OwnerKeyLookupTransientError:
+            # A transient owner-key lookup miss (base Exception, NOT a
+            # DecryptionError and NOT a RuntimeError): the transient must reach the
+            # coordinator sink for a DEBUG skip without a counter touch. The broad
+            # `except Exception` below would otherwise turn it into an empty result,
+            # hiding the transient from the coordinator. Analog to the A1
+            # `except DecryptionError: raise` guard above.
             raise
 
         except RuntimeError as err:

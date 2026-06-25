@@ -20,14 +20,6 @@
           "secrets_json": "Conteúdo do arquivo secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Método 2: Token OAuth individual",
-        "description": "Insira seu token OAuth e o endereço de e-mail do Google obtidos por meio de um processo manual de autenticação.",
-        "data": {
-          "oauth_token": "Token OAuth",
-          "google_email": "Endereço de e-mail do Google"
-        }
-      },
       "device_selection": {
         "title": "Configurações de consulta",
         "description": "Os dispositivos recém-descobertos aparecem desativados e podem ser ativados nas configurações do dispositivo. ",
@@ -55,8 +47,7 @@
         "title": "Reautenticar",
         "description": "Suas credenciais para **{email}** parecem ser inválidas ou expiradas. ",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)",
-          "new_oauth_token": "Novo token OAuth"
+          "secrets_json": "Novo secrets.json (conteúdo completo)"
         }
       },
       "migrate_complete": {
@@ -69,6 +60,7 @@
       "invalid_auth": "Autenticação inválida. ",
       "invalid_token": "Token/e-mail inválido fornecido ou campos obrigatórios ausentes.",
       "invalid_json": "Formato JSON inválido no conteúdo do secrets.json.",
+      "keys_missing": "secrets.json não contém a chave de criptografia (shared_key); não é possível descriptografar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "no_devices": "Nenhum dispositivo encontrado. ",
       "cannot_connect": "Falha ao conectar-se à API do Google. ",
       "dependency_not_ready": "As dependências de integração necessárias estão faltando. ",
@@ -83,6 +75,7 @@
       "cannot_connect": "Falha ao conectar-se ao Encontre Meu Dispositivo do Google.",
       "dependency_not_ready": "As dependências do Encontre Meu Dispositivo do Google não estão instaladas. ",
       "invalid_discovery_info": "A carga de descoberta era inválida. ",
+      "keys_missing": "secrets.json não contém a chave de criptografia (shared_key); não é possível descriptografar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "reauth_successful": "Reautenticação bem-sucedida.",
       "migration_successful": "Migração concluída.",
       "migration_failed": "A migração falhou. ",
@@ -241,12 +234,7 @@
         "title": "Atualizar credenciais (opcional)",
         "description": "Atualize as credenciais sem expor os valores existentes. ",
         "data": {
-          "secrets_json": "Novo secrets.json (conteúdo completo)",
-          "oauth_token": "Novo token OAuth",
-          "google_email": "E-mail do Google",
           "new_secrets_json": "Novo secrets.json (conteúdo completo)",
-          "new_oauth_token": "Novo token OAuth",
-          "new_google_email": "E-mail do Google",
           "subentry": "Grupo de recursos"
         },
         "data_description": {
@@ -316,6 +304,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON inválido no conteúdo do secrets.json.",
+      "keys_missing": "secrets.json não contém a chave de criptografia (shared_key); não é possível descriptografar localizações. Gere-o novamente com a obtenção completa das chaves: a CLI incluída (main.py) obtém ambas as chaves automaticamente, ou no GoogleFindMyTools selecione um dispositivo para localizar antes de exportar.",
       "invalid": "A validação falhou. ",
       "invalid_auth": "Autenticação inválida. ",
       "cannot_connect": "Falha ao conectar-se à API do Google.",

@@ -20,14 +20,6 @@
           "secrets_json": "Inhalt der secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Methode 2: Manueller OAuth-Token",
-        "description": "Gib deinen OAuth-Token und deine Google-E-Mail-Adresse aus dem manuellen Anmeldeprozess ein.",
-        "data": {
-          "oauth_token": "OAuth-Token",
-          "google_email": "Google-E-Mail-Adresse"
-        }
-      },
       "device_selection": {
         "title": "Abfrageeinstellungen",
         "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)\n\nGoogle-Home-Filter: Standardmäßig aktiviert mit den Schlüsselwörtern nest/google/home/mini/hub/display/chromecast/speaker. Für Google-/Nest-/Chromecast-Erkennungen werden die Koordinaten der Home-Zone eingesetzt und wiederholte \"home\"-Meldungen 15 Minuten lang entprellt. Passe die Schlüsselwörter hier an, wenn deine Geräte andere Namen verwenden.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nTipp: Du kannst entweder den vollständigen Inhalt einer neuen secrets.json einfügen **oder** einen neuen OAuth-Token und deine E-Mail-Adresse angeben.",
+        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nHinweis: Die Konto-E-Mail-Adresse ist für diese erneute Authentifizierung fest vorgegeben; um ein anderes Konto zu nutzen, entferne die Integration und füge sie neu hinzu.",
         "data": {
-          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "new_oauth_token": "Neuer OAuth-Token"
+          "secrets_json": "Neue secrets.json (vollständiger Inhalt)"
         }
       },
       "migrate_complete": {
@@ -69,6 +60,7 @@
       "invalid_auth": "Ungültige Authentifizierung. Bitte gib einen frischen Token ein und/oder melde dich erneut an.",
       "invalid_token": "Ungültige E-Mail/Token oder erforderliche Felder fehlen.",
       "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
+      "keys_missing": "secrets.json enthält keinen Verschlüsselungsschlüssel (shared_key); Standorte können nicht entschlüsselt werden. Erzeuge die Datei mit vollständigem Schlüsselabruf neu: Die mitgelieferte CLI (main.py) holt beide Schlüssel automatisch, oder wähle in GoogleFindMyTools vor dem Export ein Gerät zur Ortung aus.",
       "no_devices": "Keine Geräte gefunden. Bitte stelle sicher, dass „Mein Gerät finden“ in deinem Google-Konto aktiviert ist.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen. Dies ist möglicherweise ein vorübergehendes Problem – bitte versuche es später erneut.",
       "dependency_not_ready": "Erforderliche Integrationsabhängigkeiten fehlen. Installiere die Anforderungen von Google Find My Device und starte Home Assistant neu.",
@@ -83,6 +75,7 @@
       "cannot_connect": "Verbindung zu Google Find My Device fehlgeschlagen.",
       "dependency_not_ready": "Google Find My Device-Abhängigkeiten sind nicht installiert. Installiere die Anforderungen und versuche es erneut.",
       "invalid_discovery_info": "Die Discovery-Nutzlast war ungültig. Überprüfe die Anmeldedaten und versuche es erneut.",
+      "keys_missing": "secrets.json enthält keinen Verschlüsselungsschlüssel (shared_key); Standorte können nicht entschlüsselt werden. Erzeuge die Datei mit vollständigem Schlüsselabruf neu: Die mitgelieferte CLI (main.py) holt beide Schlüssel automatisch, oder wähle in GoogleFindMyTools vor dem Export ein Gerät zur Ortung aus.",
       "reauth_successful": "Erneute Authentifizierung erfolgreich.",
       "migration_successful": "Migration abgeschlossen.",
       "migration_failed": "Migration fehlgeschlagen. Entferne die Integration und füge sie erneut hinzu.",
@@ -239,14 +232,9 @@
       },
       "credentials": {
         "title": "Anmeldedaten aktualisieren (optional)",
-        "description": "Aktualisiere deine Anmeldedaten, ohne bestehende Werte preiszugeben. Gib genau eine Methode an:\n\n• Vollständigen Inhalt einer neuen **secrets.json** einfügen\n**oder**\n• Neuen **OAuth-Token** und **Google-E-Mail** eingeben.\n\nFalls angegeben, werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "Aktualisiere deine Anmeldedaten. Bestehende Werte werden aus Sicherheitsgründen nicht angezeigt.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nNach dem Absenden werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
-          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "oauth_token": "Neuer OAuth-Token",
-          "google_email": "Google-E-Mail",
           "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "new_oauth_token": "Neuer OAuth-Token",
-          "new_google_email": "Google-E-Mail",
           "subentry": "Funktionsgruppe"
         },
         "data_description": {
@@ -316,6 +304,7 @@
     },
     "error": {
       "invalid_json": "Ungültiges JSON-Format im Inhalt der secrets.json.",
+      "keys_missing": "secrets.json enthält keinen Verschlüsselungsschlüssel (shared_key); Standorte können nicht entschlüsselt werden. Erzeuge die Datei mit vollständigem Schlüsselabruf neu: Die mitgelieferte CLI (main.py) holt beide Schlüssel automatisch, oder wähle in GoogleFindMyTools vor dem Export ein Gerät zur Ortung aus.",
       "invalid": "Validierung fehlgeschlagen. Bitte überprüfe deine Eingabe.",
       "invalid_auth": "Ungültige Authentifizierung. Bitte gib einen frischen Token ein und/oder melde dich erneut an.",
       "cannot_connect": "Verbindung zur Google-API fehlgeschlagen.",

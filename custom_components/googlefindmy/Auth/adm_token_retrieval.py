@@ -189,6 +189,16 @@ def _is_non_retryable_auth(err: Exception) -> bool:
     return any(pattern in text for pattern in _NON_RETRYABLE_PATTERNS)
 
 
+def is_non_retryable_auth_kind(err: Exception) -> bool:
+    """Return True only when the structured error_kind marks a definitively
+    non-recoverable auth failure. Substring-free counterpart to
+    _is_non_retryable_auth: callers outside the retry loop (e.g. the decrypt
+    owner-key classifier) must NOT inherit the HTTP-status substring matching
+    (a transient string like 'retry after 4012 ms' contains '401')."""
+    kind = getattr(err, "error_kind", "")
+    return isinstance(kind, str) and kind.lower() in _NON_RETRYABLE_KINDS
+
+
 async def _seed_username_in_cache(username: str, *, cache: TokenCache) -> None:
     """Ensure the canonical username cache key is populated (idempotent)."""
     if cache is None:

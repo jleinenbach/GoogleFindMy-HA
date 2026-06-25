@@ -98,7 +98,9 @@ def test_process_device_list_response_scales_e7_coordinates(
     ]
 
     monkeypatch.setattr(
-        api_module, "get_devices_with_location", lambda message, cache=None: device_rows
+        api_module,
+        "get_devices_with_location",
+        lambda message, cache=None, **_kwargs: device_rows,
     )
 
     devices = api._process_device_list_response("beadfeed")

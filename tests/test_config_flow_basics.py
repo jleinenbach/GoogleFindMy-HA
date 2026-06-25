@@ -586,6 +586,8 @@ class TestInterpretCredentialsChoice:
         secrets = {
             "googleHomeUsername": "user@example.com",
             "aas_token": "aas_token_value_padding_xxxxxxx",
+            # A shared_key is required to pass the single-key import gate.
+            "shared_key": "DDEEFF",
         }
         method, email, cands, err = cf._interpret_credentials_choice(
             {
@@ -603,8 +605,13 @@ class TestInterpretCredentialsChoice:
         assert err is None
 
     def test_secrets_path_invalid_token(self) -> None:
-        # Email valid but no plausible tokens → invalid_token.
-        secrets = {"googleHomeUsername": "user@example.com", "aas_token": "short"}
+        # Email valid but no plausible tokens → invalid_token. A shared_key is
+        # present so the single-key gate passes and the token check is reached.
+        secrets = {
+            "googleHomeUsername": "user@example.com",
+            "aas_token": "short",
+            "shared_key": "DDEEFF",
+        }
         method, _email, _cands, err = cf._interpret_credentials_choice(
             {
                 "secrets_json": json.dumps(secrets),
@@ -1105,6 +1112,8 @@ class TestNormalizeAndValidateDiscoveryPayload:
         secrets = {
             "googleHomeUsername": "user@example.com",
             "aas_token": "aas_token_value_padding_xxxxxxx",
+            # A shared_key is required to pass the single-key discovery gate.
+            "shared_key": "DDEEFF",
         }
         payload = {cf.DATA_SECRET_BUNDLE: secrets}
         result = cf._normalize_and_validate_discovery_payload(payload)
@@ -1118,6 +1127,8 @@ class TestNormalizeAndValidateDiscoveryPayload:
         secrets = {
             "googleHomeUsername": "user@example.com",
             "aas_token": "aas_token_value_padding_xxxxxxx",
+            # A shared_key is required to pass the single-key discovery gate.
+            "shared_key": "DDEEFF",
         }
         payload = {
             cf.CONF_GOOGLE_EMAIL: "user@example.com",

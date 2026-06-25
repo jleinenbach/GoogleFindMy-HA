@@ -158,6 +158,22 @@ def _monotonic_to_wall_seconds(last_mono: float | None) -> float | None:
     return max(0.0, now_wall - (now_mono - float(last_mono)))
 
 
+def _ha_core_version() -> str | None:
+    """Return the Home Assistant core version string, or None if unavailable.
+
+    Read lazily from ``homeassistant.const.__version__`` (the stable public
+    API; ``hass.config.version`` is not). The import is guarded so stripped or
+    stubbed environments that omit ``__version__`` degrade to ``None`` instead
+    of breaking diagnostics collection.
+    """
+    try:
+        from homeassistant.const import __version__ as ha_version
+
+        return str(ha_version)
+    except Exception:
+        return None
+
+
 def _count_keywords(value: Any) -> int:
     """Count comma-separated keywords without exposing their content."""
     if not value:
@@ -447,10 +463,14 @@ async def async_get_config_entry_diagnostics(
         integration_meta = {
             "name": integ.name,
             "version": str(integ.version),
+            # Home Assistant core version: lets a maintainer correlate
+            # core-specific regressions.
+            "ha_core_version": _ha_core_version(),
         }
     except Exception:
-        # Stay resilient if loader fails in custom environments
-        integration_meta = {}
+        # Stay resilient if loader fails in custom environments. Still expose
+        # the core version (best-effort, may be None).
+        integration_meta = {"ha_core_version": _ha_core_version()}
 
     # --- Coordinator / runtime_data (typed container) ---
     coordinator: Any | None = None
@@ -637,6 +657,14 @@ async def async_get_config_entry_diagnostics(
             coordinator_block["setup_performance"] = setup_perf
         if recent_errors:
             coordinator_block["recent_errors"] = recent_errors
+
+        # Anonymized per-device telemetry (P1-3): opaque index plus seven coarse
+        # fields, no names/IDs/coordinates/keys. Resilient: [] on any failure.
+        try:
+            builder = getattr(coordinator, "build_per_device_diagnostics", None)
+            coordinator_block["devices"] = builder() if callable(builder) else []
+        except Exception:
+            coordinator_block["devices"] = []
 
         diag_buffer = getattr(coordinator, "_diag", None)
         if diag_buffer is not None and hasattr(diag_buffer, "to_dict"):

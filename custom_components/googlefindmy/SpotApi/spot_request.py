@@ -116,6 +116,27 @@ class SpotRequestFailedAfterRetries(SpotError):
     """Transient failures exhausted the retry budget."""
 
 
+def _format_grpc_detail(err: Any) -> str:
+    """Render the server-sent gRPC detail (message/details) for a SpotError message.
+
+    R9a: ``GRPCError.message`` is the server-set ``grpc-message`` trailer and
+    ``GRPCError.details`` the optional structured details (grpclib 0.4.9). Both are
+    server status text, not credentials, so they are safe to surface; the auth
+    bearer token is never part of this exception. Returns a leading ``": ..."``
+    suffix when any detail is present, otherwise an empty string. Only the
+    ``GRPCError`` branch may call this; the SpotNetworkError branches carry no
+    ``.message`` and would raise ``AttributeError``.
+    """
+    parts: list[str] = []
+    message = getattr(err, "message", None)
+    if message:
+        parts.append(str(message))
+    details = getattr(err, "details", None)
+    if details:
+        parts.append(str(details))
+    return f": {' '.join(parts)}" if parts else ""
+
+
 def _compute_delay(attempt: int) -> float:
     """Compute exponential backoff with jitter bounded to sixty seconds."""
 
@@ -270,10 +291,13 @@ async def async_spot_request(
                     await _async_sleep(_compute_delay(attempt))
                     continue
                 raise SpotRequestFailedAfterRetries(
-                    f"Transient gRPC error ({status.name}) after retries."
+                    f"Transient gRPC error ({status.name}) after retries"
+                    f"{_format_grpc_detail(err)}."
                 ) from err
 
-            raise SpotGrpcStatusError(f"gRPC error: {status.name}") from err
+            raise SpotGrpcStatusError(
+                f"gRPC error: {status.name}{_format_grpc_detail(err)}"
+            ) from err
 
         except (
             grpclib_exceptions.ProtocolError,

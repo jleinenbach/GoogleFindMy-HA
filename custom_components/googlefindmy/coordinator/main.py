@@ -157,6 +157,7 @@ from ..const import (
     coerce_ignored_mapping,
 )
 from ..ha_typing import DataUpdateCoordinator
+from ..ProtoDecoders import decoder
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -346,6 +347,53 @@ def _resolve_last_seen_from_attributes(
     if ts is not None:
         return ts
     return fallback
+
+
+# Privacy-hardened mapping helpers for the anonymized per-device diagnostics list
+# (P1-3). Kept as pure module functions so the boundary tables are testable in
+# isolation and contain no device identifiers.
+
+# device_type ints that map to the "phone" class (SpotDeviceType.DEVICE_TYPE_PHONE).
+_DEVICE_TYPE_PHONE = 20
+
+
+def _accuracy_bucket(accuracy_m: Any) -> str | None:
+    """Bucket a raw accuracy radius into a coarse, non-correlating class.
+
+    Half-open intervals: ``<10`` = [0,10), ``10-50`` = [10,50), ``50-200`` =
+    [50,200), ``>200`` = [200, inf). ``None`` or a negative/non-numeric value
+    collapses to ``None`` (a raw float would be re-identifying, POPETS'25).
+    """
+    if not isinstance(accuracy_m, (int, float)) or isinstance(accuracy_m, bool):
+        return None
+    if accuracy_m < 0 or not math.isfinite(accuracy_m):
+        return None
+    if accuracy_m < 10:
+        return "<10"
+    if accuracy_m < 50:
+        return "10-50"
+    if accuracy_m < 200:
+        return "50-200"
+    return ">200"
+
+
+def _round_age(age_seconds: float) -> int:
+    """Round an age in seconds to the nearest 10 s (sub-poll timing is hidden)."""
+    return int(round(age_seconds / 10) * 10)
+
+
+def _device_class(device_type: Any) -> str:
+    """Map a ``device_type`` slot int to a coarse three-class label.
+
+    ``20`` -> ``phone``; ``None`` or ``0`` (unknown) -> ``other``; any other
+    known int -> ``bt_tracker``. Deliberately abrupt (limitations note 3): the
+    maintainer needs phone vs. physical tracker vs. unknown, not a fine class.
+    """
+    if device_type == _DEVICE_TYPE_PHONE:
+        return "phone"
+    if device_type is None or device_type == 0:
+        return "other"
+    return "bt_tracker"
 
 
 def _as_ha_attributes(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -777,6 +825,13 @@ class GoogleFindMyCoordinator(
             "drop_reason_invalid_ts": 0,  # invalid/stale timestamps (detail bucket)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
+            # Canonicless drops on the last main poll (transition-independent
+            # diagnostics aggregate). Absolute per-poll values, not increments;
+            # listed here so the restore path (iterates self.stats.keys()) and the
+            # diagnostics stats block both see them.
+            "canonicless_drop_total": 0,
+            "canonicless_drop_benign": 0,
+            "canonicless_drop_warn": 0,
         }
         _LOGGER.debug("Initialized stats: %s", self.stats)
 
@@ -1783,6 +1838,96 @@ class GoogleFindMyCoordinator(
             self._increment_stat_on_loop(stat_name)
         else:
             self._run_on_hass_loop(self._increment_stat_on_loop, stat_name)
+
+    def _refresh_canonicless_drop_stats(self, entry_id: str | None) -> None:
+        """Pull the decoder's per-poll canonicless tally into ``self.stats``.
+
+        The decoder publishes the transition-independent drop tally for the entry
+        scope (written by the main poll); the coordinator mirrors it into the
+        three persisted stat counters. Values are set ABSOLUTELY (the accessor
+        already returns the per-poll aggregate, so a recovering count goes down)
+        rather than incremented, then persistence is scheduled so the values
+        survive a restart. A missing entry id is a no-op.
+        """
+        if not entry_id:
+            return
+        counts = decoder.get_canonicless_counts(entry_id)
+        self.stats["canonicless_drop_total"] = counts["total"]
+        self.stats["canonicless_drop_benign"] = counts["benign"]
+        self.stats["canonicless_drop_warn"] = counts["warn"]
+        self._schedule_stats_persist()
+
+    def build_per_device_diagnostics(self) -> list[dict[str, Any]]:
+        """Build the anonymized per-device telemetry list for diagnostics (P1-3).
+
+        Each entry carries an opaque position ``index`` over ``sorted(device_ids)``
+        plus exactly seven fields: ``device_class``, ``last_poll_age_s``,
+        ``last_fix_age_s``, ``last_accuracy_bucket``, ``is_own_report``,
+        ``has_key``. No names, canonical IDs, coordinates, or clear-text keys are
+        emitted. Empty/None ``self.data`` yields ``[]``; any failure degrades to
+        ``[]`` rather than leaking a partial record.
+        """
+        try:
+            rows = self.data or []
+            by_id: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                dev_id = row.get("device_id")
+                if isinstance(dev_id, str) and dev_id:
+                    by_id[dev_id] = row
+
+            now_epoch = time.time()
+            now_mono = time.monotonic()
+
+            entries: list[dict[str, Any]] = []
+            for index, dev_id in enumerate(sorted(by_id)):
+                row = by_id[dev_id]
+                slot = self._device_location_data.get(dev_id) or {}
+
+                last_seen = row.get("last_seen")
+                if isinstance(last_seen, (int, float)) and not isinstance(
+                    last_seen, bool
+                ):
+                    last_fix_age_s: int | None = _round_age(
+                        max(0.0, now_epoch - float(last_seen))
+                    )
+                else:
+                    last_fix_age_s = None
+
+                poll_mono = self._present_last_seen.get(dev_id)
+                if isinstance(poll_mono, (int, float)) and not isinstance(
+                    poll_mono, bool
+                ):
+                    last_poll_age_s: int | None = _round_age(
+                        max(0.0, now_mono - float(poll_mono))
+                    )
+                else:
+                    last_poll_age_s = None
+
+                # Runtime ``self.data`` snapshot rows carry the radius under
+                # ``accuracy``; ``accuracy_m`` is only produced later by
+                # ``_as_ha_attributes()`` for HA entity attributes. Prefer the
+                # HA-shaped key when present (defensive), else read the snapshot
+                # field, so the bucket is populated on the normal runtime path.
+                accuracy_raw = row.get("accuracy_m")
+                if accuracy_raw is None:
+                    accuracy_raw = row.get("accuracy")
+
+                entries.append(
+                    {
+                        "index": index,
+                        "device_class": _device_class(slot.get("device_type")),
+                        "last_poll_age_s": last_poll_age_s,
+                        "last_fix_age_s": last_fix_age_s,
+                        "last_accuracy_bucket": _accuracy_bucket(accuracy_raw),
+                        "is_own_report": row.get("is_own_report", None),
+                        "has_key": bool(slot.get("encrypted_identity_key")),
+                    }
+                )
+            return entries
+        except Exception:  # pragma: no cover - defensive: never break diagnostics
+            return []
 
     # Cache methods moved to cache.py (CacheOperations mixin):
     # get_device_location_data, prime_device_location_cache, seed_device_last_seen,

@@ -20,14 +20,6 @@
           "secrets_json": "Inhoud van secrets.json-bestand"
         }
       },
-      "individual_tokens": {
-        "title": "Methode 2: Individuele OAuth-token",
-        "description": "Voer je OAuth-token en Google-e-mailadres in die je hebt verkregen via een handmatige authenticatieprocedure.",
-        "data": {
-          "oauth_token": "OAuth-token",
-          "google_email": "Google-e-mailadres"
-        }
-      },
       "device_selection": {
         "title": "Polling-instellingen",
         "description": "Nieuw ontdekte apparaten verschijnen uitgeschakeld en kunnen worden ingeschakeld in de apparaatinstellingen. Configureer hier de algemene pollingparameters:\n• Locatie-pollinginterval: Hoe vaak een nieuwe pollingcyclus wordt gestart (60–3600 seconden)\n• Apparaat-pollingvertraging: Vertraging tussen het pollen van individuele apparaten binnen een cyclus (1–60 seconden)\n\nGoogle Home-filter: Standaard ingeschakeld met trefwoorden nest/google/home/mini/hub/display/chromecast/speaker. Voor Google/Nest/Chromecast-detecties worden de coördinaten van de Thuiszone ingevuld en worden herhaalde \"thuis\"-meldingen 15 minuten lang onderdrukt. Pas de trefwoorden hier aan als je apparaten andere namen gebruiken.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Opnieuw authenticeren",
-        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nJe kunt de volledige inhoud van een nieuwe **secrets.json** plakken **of** een nieuwe **OAuth-token** invoeren.\n\nOpmerking: Het account-e-mailadres staat vast voor deze herauthenticatie en kan hier niet worden gewijzigd.",
+        "description": "Je inloggegevens voor **{email}** lijken ongeldig of verlopen te zijn. Geef hieronder nieuwe inloggegevens op.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nOpmerking: Het account-e-mailadres staat vast voor deze herauthenticatie; om een ander account te gebruiken, verwijder de integratie en voeg deze opnieuw toe.",
         "data": {
-          "secrets_json": "Nieuwe secrets.json (volledige inhoud)",
-          "new_oauth_token": "Nieuwe OAuth-token"
+          "secrets_json": "Nieuwe secrets.json (volledige inhoud)"
         }
       },
       "migrate_complete": {
@@ -69,6 +60,7 @@
       "invalid_auth": "Ongeldige authenticatie. Geef een nieuwe token op en/of meld je opnieuw aan.",
       "invalid_token": "Ongeldige token/e-mail opgegeven of verplichte velden ontbreken.",
       "invalid_json": "Ongeldig JSON-formaat in secrets.json-inhoud.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "no_devices": "Geen apparaten gevonden. Zorg ervoor dat Vind mijn apparaat is ingeschakeld in je Google-account.",
       "cannot_connect": "Kan geen verbinding maken met de Google API. Dit kan tijdelijk zijn – probeer het later opnieuw.",
       "dependency_not_ready": "Vereiste integratie-afhankelijkheden ontbreken. Installeer de Google Find My Device-vereisten en herstart Home Assistant.",
@@ -83,6 +75,7 @@
       "cannot_connect": "Kan geen verbinding maken met Google Find My Device.",
       "dependency_not_ready": "Google Find My Device-afhankelijkheden zijn niet geïnstalleerd. Installeer de vereisten en probeer het opnieuw.",
       "invalid_discovery_info": "De discovery-payload was ongeldig. Controleer de inloggegevens en probeer het opnieuw.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "reauth_successful": "Herauthenticatie geslaagd.",
       "migration_successful": "Migratie voltooid.",
       "migration_failed": "Migratie mislukt. Verwijder de integratie en voeg deze opnieuw toe.",
@@ -239,14 +232,9 @@
       },
       "credentials": {
         "title": "Inloggegevens bijwerken (optioneel)",
-        "description": "Werk inloggegevens bij zonder bestaande waarden bloot te stellen. Geef precies één methode op:\n\n• Plak de volledige inhoud van een nieuwe **secrets.json**\n**of**\n• Voer een nieuwe **OAuth-token** en **Google-e-mail** in.\n\nIndien opgegeven, worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
+        "description": "Werk je inloggegevens bij. Bestaande waarden worden om veiligheidsredenen niet getoond.\n\nPlak de volledige inhoud van een nieuwe **secrets.json** (gegenereerd door GoogleFindMyTools uit te voeren).\n\nNa het verzenden worden de inloggegevens gevalideerd en opgeslagen; de integratie wordt opnieuw geladen zonder je entiteitsnamen te wijzigen.",
         "data": {
-          "secrets_json": "Nieuwe secrets.json (volledige inhoud)",
-          "oauth_token": "Nieuwe OAuth-token",
-          "google_email": "Google-e-mail",
           "new_secrets_json": "Nieuwe secrets.json (volledige inhoud)",
-          "new_oauth_token": "Nieuwe OAuth-token",
-          "new_google_email": "Google-e-mail",
           "subentry": "Functiegroep"
         },
         "data_description": {
@@ -316,6 +304,7 @@
     },
     "error": {
       "invalid_json": "Ongeldig JSON-formaat in secrets.json-inhoud.",
+      "keys_missing": "secrets.json bevat geen versleutelingssleutel (shared_key); locaties kunnen niet worden ontsleuteld. Genereer het opnieuw met volledige sleutelophaling: de meegeleverde CLI (main.py) haalt beide sleutels automatisch op, of selecteer in GoogleFindMyTools een apparaat om te lokaliseren vóór het exporteren.",
       "invalid": "Validatie mislukt. Controleer je invoer.",
       "invalid_auth": "Ongeldige authenticatie. Geef een nieuwe token op en/of meld je opnieuw aan.",
       "cannot_connect": "Kan geen verbinding maken met de Google API.",

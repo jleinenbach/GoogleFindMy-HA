@@ -1252,6 +1252,63 @@ def _extract_fcm_credentials_from_secrets(
     return None
 
 
+def _secrets_key_status(parsed: dict[str, Any]) -> tuple[bool, bool]:
+    """Report which E2EE keys are present in a parsed secrets bundle.
+
+    The single-key rule: ``has_shared`` is the only gate that decides whether a
+    bundle is importable. A bundle without a ``shared_key`` is a non-renewable
+    dead end (the owner key can only be refreshed with the shared key), so it
+    must be blocked regardless of the owner key. ``has_owner`` does NOT gate the
+    validation; it only selects the wording of the D2 seeding warning (an
+    owner-only bundle decrypts own-device locations until the owner key rotates,
+    whereas a bundle with neither key decrypts nothing).
+
+    A value counts as present only when it is a non-empty string after stripping
+    surrounding whitespace; no further structural assumptions are made about the
+    bundle.
+
+    Args:
+        parsed: A parsed (and normally already whitespace-normalized) bundle.
+
+    Returns:
+        A ``(has_shared, has_owner)`` tuple of booleans.
+    """
+
+    def _present(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    return _present(parsed.get("shared_key")), _present(parsed.get("owner_key"))
+
+
+def _reject_if_shared_key_missing(
+    parsed: dict[str, Any], errors: dict[str, str], *, slot: str = "base"
+) -> bool:
+    """Apply the single-key import gate to ``parsed``; report blocked bundles.
+
+    The single-key rule (see :func:`_secrets_key_status`) must hold at *every*
+    import surface. This is the one named guard the reauth confirm flow uses at
+    both of its persist sub-paths so the rule has a single call form rather than
+    being re-inlined per branch. When the bundle has no usable ``shared_key`` the
+    guard writes ``keys_missing`` into ``errors[slot]`` and returns ``True`` so
+    the caller can fall through to re-show the form without persisting.
+
+    Args:
+        parsed: An already-normalized secrets bundle.
+        errors: The flow's error mapping, mutated in place when blocked.
+        slot: The error slot to populate (``"base"`` for surfaces without a
+            dedicated field, like reauth).
+
+    Returns:
+        ``True`` if the bundle was rejected (caller must not persist), else
+        ``False``.
+    """
+    has_shared, _has_owner = _secrets_key_status(parsed)
+    if has_shared:
+        return False
+    errors[slot] = "keys_missing"
+    return True
+
+
 # ---------------------------
 # API probing helpers (signature-robust)
 # ---------------------------
@@ -1421,6 +1478,13 @@ def _interpret_credentials_choice(
             parsed = normalize_secrets_bundle(parsed)
         except (json.JSONDecodeError, TypeError):
             return "secrets", None, None, "invalid_json"
+
+        has_shared, _has_owner = _secrets_key_status(parsed)
+        if not has_shared:
+            # Single-key rule: a bundle without a shared_key is a non-renewable
+            # dead end (the owner key can never be refreshed) and is blocked,
+            # regardless of whether an owner_key is present.
+            return "secrets", None, None, "keys_missing"
 
         email = _extract_email_from_secrets(parsed) or ""
         cands = _extract_oauth_candidates_from_secrets(parsed)
@@ -1691,6 +1755,12 @@ def _normalize_and_validate_discovery_payload(
         # cleanup. A stray space in owner_key/shared_key breaks AES-GCM
         # decryption. normalize_secrets_bundle is idempotent and copies its input.
         secrets_dict = dict(normalize_secrets_bundle(secrets_raw))
+        # Single-key rule (parity with the paste/options import surfaces): a
+        # discovered bundle without a shared_key is a non-renewable dead end and
+        # is rejected here instead of being accepted as a valid discovery.
+        has_shared, _has_owner = _secrets_key_status(secrets_dict)
+        if not has_shared:
+            raise DiscoveryFlowError("keys_missing")
         secrets_bundle = MappingProxyType(secrets_dict)
         email_from_secrets = _extract_email_from_secrets(secrets_dict)
         if email_from_secrets:
@@ -3545,7 +3615,16 @@ class ConfigFlow(
                         if not isinstance(payload, Mapping):
                             errors["base"] = "invalid_token"
                         else:
-                            parsed: dict[str, Any] = dict(payload)
+                            # Normalize locally so the gate, the email/token
+                            # extraction, and the persisted bundle all operate on
+                            # the same whitespace-normalized, scoped-key-promoted
+                            # bundle, instead of depending on an implicit
+                            # invariant established by an upstream caller.
+                            # ``normalize_secrets_bundle`` is idempotent, so this
+                            # is a no-op when ``payload`` was already normalized.
+                            parsed: dict[str, Any] = normalize_secrets_bundle(
+                                dict(payload)
+                            )
                             extracted_email = normalize_email(
                                 _extract_email_from_secrets(parsed)
                             )
@@ -3558,7 +3637,18 @@ class ConfigFlow(
                                 if existing is not None:
                                     return self.async_abort(reason="already_configured")
                                 errors["base"] = "email_mismatch"
-                            else:
+                            # Single-key rule: a shared_key-less bundle is a
+                            # non-renewable dead end. Gate it BEFORE the token
+                            # probe, mirroring the initial/options/discovery
+                            # surfaces where the gate always dominates token
+                            # validation. This sits INSIDE the email-matches
+                            # branch so a foreign/already-configured bundle keeps
+                            # its email_mismatch/already_configured precedence
+                            # above. Hoisting the gate makes a shared_key-less
+                            # bundle with a dead token return the deterministic
+                            # ``keys_missing`` instead of masking it as
+                            # ``cannot_connect`` from a failed probe.
+                            elif not _reject_if_shared_key_missing(parsed, errors):
                                 try:
                                     chosen = await async_pick_working_token(
                                         self.hass,
@@ -3614,20 +3704,17 @@ class ConfigFlow(
                                             updated_data[DATA_AAS_TOKEN] = to_persist
                                         elif DATA_AAS_TOKEN in updated_data:
                                             updated_data.pop(DATA_AAS_TOKEN, None)
-                                        await self._async_clear_cached_aas_token(entry)
-                                        _reauth_shared = parsed.get("shared_key")
-                                        if _reauth_shared:
-                                            _LOGGER.info(
-                                                "Reauth for %s: shared_key present in secrets bundle",
-                                                fixed_email,
-                                            )
-                                        else:
-                                            _LOGGER.warning(
-                                                "Reauth for %s: no shared_key in secrets bundle — "
-                                                "FMDN crowdsourced reports cannot be decrypted. "
-                                                "Re-run GoogleFindMyTools to obtain the shared_key first.",
-                                                fixed_email,
-                                            )
+                                        await self._async_clear_cached_aas_token(
+                                            entry
+                                        )
+                                        # The single-key gate above already
+                                        # guaranteed a usable shared_key, so the
+                                        # persist runs unconditionally here; record
+                                        # the key for operators.
+                                        _LOGGER.info(
+                                            "Reauth for %s: shared_key present in secrets bundle",
+                                            fixed_email,
+                                        )
                                         success_reason = self.context.get(
                                             "reauth_success_reason_override",
                                             "reauth_successful",
@@ -3658,11 +3745,14 @@ class ConfigFlow(
                                 data=updated_data,
                                 reason="reauth_successful",
                             )
-                        if method == "secrets":
-                            if not isinstance(payload, Mapping):
-                                errors["base"] = "invalid_token"
-                            else:
-                                parsed = dict(payload)
+                        if method == "secrets" and isinstance(payload, Mapping):
+                            # Normalize once and gate on the SAME object that is
+                            # persisted, so the single-key gate and the stored
+                            # bundle can never disagree. An entry-scope guard
+                            # error must not become a bypass for a shared_key-less
+                            # (or whitespace-corrupted) bundle.
+                            parsed = normalize_secrets_bundle(dict(payload))
+                            if not _reject_if_shared_key_missing(parsed, errors):
                                 cands = _extract_oauth_candidates_from_secrets(parsed)
                                 token_first = cands[0][1] if cands else ""
                                 updated_data = {
@@ -3688,7 +3778,14 @@ class ConfigFlow(
                                     data=updated_data,
                                     reason="reauth_successful",
                                 )
-                    errors["base"] = _map_api_exc_to_error_key(err2)
+                        elif method == "secrets":
+                            # payload is not a Mapping: malformed deferral input.
+                            errors["base"] = "invalid_token"
+                    # Fall back to the generic mapped error only when the
+                    # deferral branch above did not already classify the failure
+                    # (for example the single-key gate setting ``keys_missing``);
+                    # do not clobber a more specific error.
+                    errors.setdefault("base", _map_api_exc_to_error_key(err2))
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -5845,8 +5942,19 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             except Exception:
                                 errors["new_secrets_json"] = "invalid_json"
                             else:
-                                cands = _extract_oauth_candidates_from_secrets(parsed)
-                                if not cands:
+                                has_shared, _has_owner = _secrets_key_status(parsed)
+                                if not has_shared:
+                                    # Single-key rule: reject a shared_key-less
+                                    # bundle before any persist/reload. Field
+                                    # slot (like invalid_json) because it is a
+                                    # correctable paste, not a bundle/network
+                                    # state.
+                                    errors["new_secrets_json"] = "keys_missing"
+                                elif not (
+                                    cands := _extract_oauth_candidates_from_secrets(
+                                        parsed
+                                    )
+                                ):
                                     errors["base"] = "invalid_token"
                                 else:
                                     try:

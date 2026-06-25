@@ -165,8 +165,9 @@ async def _retrieve_owner_key(
             ) from exc
         except SpotApiEmptyResponseError:
             _LOGGER.error(
-                "Owner key retrieval failed: SPOT returned empty/trailers-only body for "
-                "GetEidInfoForE2eeDevices (likely auth/session issue). Please re-authenticate."
+                "Owner key retrieval failed: SPOT returned an empty/trailers-only "
+                "response for GetEidInfoForE2eeDevices; the exact gRPC status is "
+                "logged for diagnosis."
             )
             raise
 
@@ -180,6 +181,16 @@ async def _retrieve_owner_key(
 
     metadata = getattr(eid_info, "encryptedOwnerKeyAndMetadata", None)
     if metadata is None:
+        # R9b: log WHICH eid_info fields the server populated (names only, never
+        # values/bytes) so a partial response is diagnosable beyond "Missing X".
+        _LOGGER.debug(
+            "eid_info field shape on missing metadata: populated=%s",
+            [
+                name
+                for name in ("encryptedOwnerKeyAndMetadata",)
+                if getattr(eid_info, name, None)
+            ],
+        )
         raise RuntimeError("Missing 'encryptedOwnerKeyAndMetadata' in eid_info")
 
     encrypted_owner_key = getattr(metadata, "encryptedOwnerKey", b"")
@@ -187,6 +198,21 @@ async def _retrieve_owner_key(
         not isinstance(encrypted_owner_key, (bytes, bytearray))
         or len(encrypted_owner_key) == 0
     ):
+        # R9b: list the metadata field NAMES the server populated (never values /
+        # decrypted bytes) so the missing-owner-key shape is visible at DEBUG.
+        _LOGGER.debug(
+            "eid_info.encryptedOwnerKeyAndMetadata field shape on missing "
+            "encryptedOwnerKey: populated=%s",
+            [
+                name
+                for name in (
+                    "encryptedOwnerKey",
+                    "ownerKeyVersion",
+                    "securityDomain",
+                )
+                if getattr(metadata, name, None)
+            ],
+        )
         raise RuntimeError(
             "Missing or empty 'encryptedOwnerKey' in eid_info.encryptedOwnerKeyAndMetadata"
         )
@@ -205,6 +231,13 @@ async def _retrieve_owner_key(
     owner_key_version = getattr(metadata, "ownerKeyVersion", None)
 
     if not isinstance(owner_key, (bytes, bytearray)) or len(owner_key) == 0:
+        # R9b: log the decrypted owner-key shape (type + length only, NEVER the
+        # bytes/value) so an empty/short result is diagnosable.
+        _LOGGER.debug(
+            "Decrypted owner_key shape on empty/invalid result: type=%s, len=%s",
+            type(owner_key).__name__,
+            len(owner_key) if isinstance(owner_key, (bytes, bytearray)) else "n/a",
+        )
         raise RuntimeError("Decrypted owner_key is empty or invalid type")
 
     _LOGGER.info(
@@ -358,9 +391,14 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
             force_refresh=force_refresh,
         )
     except SpotApiEmptyResponseError as exc:
+        # E3-W: ground the wording in the observed state only; the
+        # ConfigEntryAuthFailed type (and thus the reauth behavior) is kept
+        # UNCHANGED deliberately, because whether an empty/trailers-only response
+        # is transient or auth is not yet proven. The captured gRPC status (R9a)
+        # makes the next real incident diagnosable before any reclassification.
         raise ConfigEntryAuthFailed(
-            "Owner key retrieval failed: SPOT returned empty/trailers-only body"
-            " (auth/session issue). Please re-authenticate."
+            "Owner key retrieval failed: SPOT returned an empty/trailers-only "
+            "response; the exact gRPC status is logged for diagnosis."
         ) from exc
 
     cache_version: int | None = None

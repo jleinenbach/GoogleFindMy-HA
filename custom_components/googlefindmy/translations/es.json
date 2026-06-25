@@ -20,14 +20,6 @@
           "secrets_json": "Contenido del archivo secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Método 2: Token OAuth individual",
-        "description": "Introduce tu token OAuth y tu dirección de correo de Google obtenidos mediante un proceso de autenticación manual.",
-        "data": {
-          "oauth_token": "Token OAuth",
-          "google_email": "Dirección de correo de Google"
-        }
-      },
       "device_selection": {
         "title": "Ajustes de sondeo",
         "description": "Los dispositivos descubiertos recientemente aparecen desactivados y se pueden activar en la configuración del dispositivo. Configura aquí los parámetros generales de sondeo:\n• Intervalo de sondeo de ubicación: con qué frecuencia iniciar un nuevo ciclo de sondeo (60–3600 segundos)\n• Retardo entre sondeos de dispositivos: intervalo entre las consultas de cada dispositivo dentro de un ciclo (1–60 segundos)\n\nFiltro Google Home: activado por defecto con las palabras clave nest/google/home/mini/hub/display/chromecast/speaker. Sustituye las coordenadas de la zona Home para detecciones de Google/Nest/Chromecast y atenúa informes repetidos de \"home\" durante 15 minutos. Ajusta aquí las palabras clave si tus dispositivos usan otros nombres.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Volver a autenticar",
-        "description": "Las credenciales de **{email}** parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nConsejo: puedes pegar el contenido completo de un secrets.json reciente **o** facilitar un nuevo token OAuth y correo electrónico.",
+        "description": "Las credenciales de **{email}** parecen no ser válidas o han caducado. Proporciona nuevas credenciales a continuación.\n\nPega el contenido completo de un nuevo **secrets.json** (generado al ejecutar GoogleFindMyTools).\n\nNota: el correo de la cuenta es fijo para esta reautenticación; para usar otra cuenta, elimina la integración y vuelve a añadirla.",
         "data": {
-          "secrets_json": "Nuevo secrets.json (contenido completo)",
-          "new_oauth_token": "Nuevo token OAuth"
+          "secrets_json": "Nuevo secrets.json (contenido completo)"
         }
       },
       "migrate_complete": {
@@ -69,6 +60,7 @@
       "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "invalid_token": "Credenciales no válidas (token/correo) o faltan campos obligatorios.",
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "no_devices": "No se han encontrado dispositivos. Asegúrate de que ‘Encontrar mi dispositivo’ esté activado en tu cuenta de Google.",
       "cannot_connect": "No se pudo conectar con la API de Google. Puede ser un problema temporal: inténtalo de nuevo más tarde.",
       "dependency_not_ready": "Faltan dependencias de la integración. Instala los requisitos de Google Find My Device y reinicia Home Assistant.",
@@ -83,6 +75,7 @@
       "cannot_connect": "No se pudo conectar con Google Find My Device.",
       "dependency_not_ready": "Las dependencias de Google Find My Device no están instaladas. Instala los requisitos e inténtalo de nuevo.",
       "invalid_discovery_info": "La carga de descubrimiento no es válida. Verifica las credenciales y vuelve a intentarlo.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "reauth_successful": "Reautenticación correcta.",
       "migration_successful": "Migración completada.",
       "migration_failed": "Migración fallida. Elimina la integración y vuelve a agregarla.",
@@ -239,14 +232,9 @@
       },
       "credentials": {
         "title": "Actualizar credenciales (opcional)",
-        "description": "Actualiza credenciales sin exponer los valores existentes. Proporciona exactamente un método:\n\n• Pega el contenido completo de un **secrets.json** nuevo\n**o**\n• Introduce un **token OAuth** nuevo y **correo de Google**.\n\nSi se proporcionan, las credenciales se validarán y guardarán; la integración se recargará sin cambiar los nombres de tus entidades.",
+        "description": "Actualiza tus credenciales. Los valores existentes no se muestran por seguridad.\n\nPega el contenido completo de un nuevo **secrets.json** (generado al ejecutar GoogleFindMyTools).\n\nUna vez enviado, las credenciales se validan y guardan; la integración se recarga sin cambiar los nombres de tus entidades.",
         "data": {
-          "secrets_json": "Nuevo secrets.json (contenido completo)",
-          "oauth_token": "Nuevo token OAuth",
-          "google_email": "Correo de Google",
           "new_secrets_json": "Nuevo secrets.json (contenido completo)",
-          "new_oauth_token": "Nuevo token OAuth",
-          "new_google_email": "Correo de Google",
           "subentry": "Grupo de funciones"
         },
         "data_description": {
@@ -316,6 +304,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON no válido en el contenido de secrets.json.",
+      "keys_missing": "secrets.json no contiene la clave de cifrado (shared_key); no se pueden descifrar las ubicaciones. Vuelve a generarla con la recuperación completa de claves: la CLI incluida (main.py) obtiene ambas claves automáticamente, o en GoogleFindMyTools selecciona un dispositivo para localizar antes de exportar.",
       "invalid": "Falló la validación. Revisa tus datos.",
       "invalid_auth": "Autenticación no válida. Proporciona un token nuevo y/o vuelve a iniciar sesión.",
       "cannot_connect": "No se pudo conectar con la API de Google.",

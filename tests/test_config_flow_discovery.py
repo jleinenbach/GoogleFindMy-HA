@@ -39,6 +39,8 @@ def test_normalize_and_validate_discovery_payload() -> None:
             "google_email": "DiscoveryUser@example.com",
             "aas_token": "aas_et/DISCOVERY",
             "oauth_token": "manually/PERSIST",
+            # A shared_key is required to pass the single-key discovery gate.
+            "shared_key": "DDEEFF",
         }
     }
 
@@ -94,6 +96,8 @@ def test_discovery_string_payload_still_normalizes_after_refactor() -> None:
                 "google_email": "DiscoveryUser@example.com",
                 "aas_token": "aas_et/DISCOVERY",
                 "owner_key": "EEEE FFFF",
+                # A shared_key is required to pass the single-key discovery gate.
+                "shared_key": "DDEEFF",
             }
         )
     }
@@ -127,7 +131,10 @@ def test_async_step_discovery_new_entry(
         secrets_bundle: dict[str, Any] | None = None,
     ) -> str | None:
         assert email == "new.user@example.com"
-        assert secrets_bundle == {"aas_token": "aas_et/VALID_TOKEN_VALUE"}
+        assert secrets_bundle == {
+            "aas_token": "aas_et/VALID_TOKEN_VALUE",
+            "shared_key": "DDEEFF",
+        }
         return candidates[0][1]
 
     monkeypatch.setattr(config_flow, "async_pick_working_token", _fake_pick)
@@ -176,7 +183,11 @@ def test_async_step_discovery_new_entry(
 
         payload = {
             CONF_GOOGLE_EMAIL: "new.user@example.com",
-            "secrets_json": {"aas_token": "aas_et/VALID_TOKEN_VALUE"},
+            "secrets_json": {
+                "aas_token": "aas_et/VALID_TOKEN_VALUE",
+                # A shared_key is required to pass the single-key discovery gate.
+                "shared_key": "DDEEFF",
+            },
         }
 
         discovery_form = await flow.async_step_discovery(payload)
@@ -195,7 +206,8 @@ def test_async_step_discovery_new_entry(
         assert flow._auth_data.get(DATA_AUTH_METHOD) == config_flow._AUTH_METHOD_SECRETS  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_AAS_TOKEN) == "aas_et/VALID_TOKEN_VALUE"  # type: ignore[attr-defined]
         assert flow._auth_data.get(DATA_SECRET_BUNDLE) == {  # type: ignore[attr-defined]
-            "aas_token": "aas_et/VALID_TOKEN_VALUE"
+            "aas_token": "aas_et/VALID_TOKEN_VALUE",
+            "shared_key": "DDEEFF",
         }
         assert device_form["type"] == "form"
         assert device_form.get("step_id") == "device_selection"
@@ -215,7 +227,8 @@ def test_async_step_discovery_new_entry(
     assert created_entry["data"][DATA_AUTH_METHOD] == config_flow._AUTH_METHOD_SECRETS
     assert created_entry["data"][DATA_AAS_TOKEN] == "aas_et/VALID_TOKEN_VALUE"
     assert created_entry["data"][DATA_SECRET_BUNDLE] == {
-        "aas_token": "aas_et/VALID_TOKEN_VALUE"
+        "aas_token": "aas_et/VALID_TOKEN_VALUE",
+        "shared_key": "DDEEFF",
     }
     assert created_entry["data"].get(DATA_SUBENTRY_KEY) is None
     assert recorded_forms == ["discovery", "device_selection"]

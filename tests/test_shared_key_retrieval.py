@@ -250,8 +250,12 @@ async def test_force_refresh_tolerates_clear_failure() -> None:
 
 
 async def test_retrieve_raises_in_non_interactive_mode(no_tty_stdin: None) -> None:
-    with pytest.raises(RuntimeError, match="non-interactive environment"):
+    # The absent-key case raises the TYPED SharedKeyUnavailableError (a
+    # RuntimeError subclass) so downstream owner-key classification escalates to
+    # reauth on the exception type, not the message wording.
+    with pytest.raises(skr.SharedKeyUnavailableError, match="non-interactive environment"):
         await skr._retrieve_shared_key_hex()
+    assert issubclass(skr.SharedKeyUnavailableError, RuntimeError)
 
 
 async def test_retrieve_returns_interactive_result(

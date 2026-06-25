@@ -138,6 +138,11 @@ def test_phone_device_no_missing_key_warning(caplog: pytest.LogCaptureFixture) -
     """Phone devices should NOT trigger 'Missing Key' warnings.
 
     Phones get their keys from the Locate flow (FCM), not from list_devices.
+
+    Models the main poll (emit_canonicless_diagnostics=True): the hidden-key diagnostic
+    block (both its WARNING and its benign "Locate flow" DEBUG line) is gated to the main
+    poll, so the benign DEBUG line this test asserts on only appears there. The probe pass
+    silence is pinned separately in test_decoder_canonicless_device_warning.py (T5/T6).
     """
     from custom_components.googlefindmy.ProtoDecoders import decoder
 
@@ -146,7 +151,9 @@ def test_phone_device_no_missing_key_warning(caplog: pytest.LogCaptureFixture) -
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
         # Use cache=None to skip decryption attempts
-        results = decoder.get_devices_with_location(device_list, cache=None)
+        results = decoder.get_devices_with_location(
+            device_list, cache=None, emit_canonicless_diagnostics=True
+        )
 
     # Should produce a result (device was parsed)
     assert len(results) == 1
@@ -199,6 +206,10 @@ def test_tracker_device_missing_key_triggers_warning(
     """Tracker devices without keys SHOULD trigger 'Missing Key' warnings.
 
     This is the expected behavior for trackers that should have keys.
+
+    Models the main poll (emit_canonicless_diagnostics=True): the hidden-key diagnostic is
+    gated to the main poll so the capability probe stays diagnostically silent (CQS). The
+    probe-pass silence is pinned separately in test_decoder_canonicless_device_warning.py.
     """
     from custom_components.googlefindmy.ProtoDecoders import decoder
 
@@ -206,7 +217,9 @@ def test_tracker_device_missing_key_triggers_warning(
     device_list = SimpleNamespace(deviceMetadata=[tracker_device])
 
     with caplog.at_level(logging.DEBUG, logger="custom_components.googlefindmy"):
-        results = decoder.get_devices_with_location(device_list, cache=None)
+        results = decoder.get_devices_with_location(
+            device_list, cache=None, emit_canonicless_diagnostics=True
+        )
 
     assert len(results) == 1
     assert results[0]["name"] == "Moto Tag"

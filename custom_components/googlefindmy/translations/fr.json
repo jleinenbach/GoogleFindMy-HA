@@ -20,14 +20,6 @@
           "secrets_json": "Contenu du fichier secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Méthode 2 : Jeton OAuth individuel",
-        "description": "Saisissez votre jeton OAuth et votre adresse e-mail Google obtenus lors d’un processus d’authentification manuel.",
-        "data": {
-          "oauth_token": "Jeton OAuth",
-          "google_email": "Adresse e-mail Google"
-        }
-      },
       "device_selection": {
         "title": "Paramètres d’interrogation",
         "description": "Les nouveaux appareils détectés apparaissent désactivés et peuvent être activés dans les paramètres de l’appareil. Configurez ici les paramètres généraux d’interrogation :\n• Intervalle d’interrogation de position : fréquence de démarrage d’un nouveau cycle (60–3600 secondes)\n• Délai entre les interrogations d’appareil : intervalle entre les requêtes pour chaque appareil au sein d’un cycle (1–60 secondes)\n\nFiltre Google Home : activé par défaut avec les mots-clés nest/google/home/mini/hub/display/chromecast/speaker. Remplace les coordonnées de la zone Home pour les détections Google/Nest/Chromecast et ignore les rapports \"home\" répétés pendant 15 minutes. Ajustez ici les mots-clés si vos appareils utilisent d’autres noms.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Se réauthentifier",
-        "description": "Les identifiants de **{email}** semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nAstuce : vous pouvez soit coller le contenu complet d’un secrets.json récent **ou** fournir un nouveau jeton OAuth et une adresse e-mail.",
+        "description": "Les identifiants de **{email}** semblent invalides ou ont expiré. Veuillez fournir de nouveaux identifiants ci-dessous.\n\nCollez le contenu complet d’un nouveau **secrets.json** (généré en exécutant GoogleFindMyTools).\n\nRemarque : l’adresse e-mail du compte est fixe pour cette réauthentification ; pour utiliser un autre compte, supprimez l’intégration puis ajoutez-la de nouveau.",
         "data": {
-          "secrets_json": "Nouveau secrets.json (contenu complet)",
-          "new_oauth_token": "Nouveau jeton OAuth"
+          "secrets_json": "Nouveau secrets.json (contenu complet)"
         }
       },
       "migrate_complete": {
@@ -69,6 +60,7 @@
       "invalid_auth": "Authentification invalide. Fournissez un nouveau jeton et/ou reconnectez-vous.",
       "invalid_token": "Identifiants invalides (jeton/e-mail) ou champs requis manquants.",
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
+      "keys_missing": "secrets.json ne contient pas la clé de chiffrement (shared_key) ; les positions ne peuvent pas être déchiffrées. Régénérez-le avec une récupération complète des clés : la CLI fournie (main.py) récupère les deux clés automatiquement, ou dans GoogleFindMyTools sélectionnez un appareil à localiser avant l'export.",
       "no_devices": "Aucun appareil trouvé. Assurez-vous que « Localiser mon appareil » est activé sur votre compte Google.",
       "cannot_connect": "Échec de la connexion à l’API Google. Il peut s’agir d’un problème temporaire — réessayez plus tard.",
       "dependency_not_ready": "Des dépendances de l’intégration sont manquantes. Installez les dépendances requises de Google Find My Device et redémarrez Home Assistant.",
@@ -83,6 +75,7 @@
       "cannot_connect": "Échec de la connexion à Google Find My Device.",
       "dependency_not_ready": "Les dépendances de Google Find My Device ne sont pas installées. Installez les dépendances requises puis réessayez.",
       "invalid_discovery_info": "La charge de découverte est invalide. Vérifiez les identifiants et réessayez.",
+      "keys_missing": "secrets.json ne contient pas la clé de chiffrement (shared_key) ; les positions ne peuvent pas être déchiffrées. Régénérez-le avec une récupération complète des clés : la CLI fournie (main.py) récupère les deux clés automatiquement, ou dans GoogleFindMyTools sélectionnez un appareil à localiser avant l'export.",
       "reauth_successful": "Réauthentification réussie.",
       "migration_successful": "Migration terminée.",
       "migration_failed": "Échec de la migration. Supprimez puis réajoutez l’intégration.",
@@ -239,14 +232,9 @@
       },
       "credentials": {
         "title": "Mettre à jour les identifiants (optionnel)",
-        "description": "Mettez à jour les identifiants sans exposer les valeurs existantes. Fournissez exactement une méthode :\n\n• Coller le contenu complet d’un **secrets.json** neuf\n**ou**\n• Saisir un **jeton OAuth** neuf et une **adresse e-mail Google**.\n\nLe cas échéant, les identifiants seront validés et enregistrés ; l’intégration sera rechargée sans modifier les noms de vos entités.",
+        "description": "Mettez à jour vos identifiants. Les valeurs existantes ne sont pas affichées pour des raisons de sécurité.\n\nCollez le contenu complet d’un nouveau **secrets.json** (généré en exécutant GoogleFindMyTools).\n\nUne fois envoyés, les identifiants sont validés et enregistrés ; l’intégration est rechargée sans modifier les noms de vos entités.",
         "data": {
-          "secrets_json": "Nouveau secrets.json (contenu complet)",
-          "oauth_token": "Nouveau jeton OAuth",
-          "google_email": "Adresse e-mail Google",
           "new_secrets_json": "Nouveau secrets.json (contenu complet)",
-          "new_oauth_token": "Nouveau jeton OAuth",
-          "new_google_email": "Adresse e-mail Google",
           "subentry": "Groupe de fonctionnalités"
         },
         "data_description": {
@@ -316,6 +304,7 @@
     },
     "error": {
       "invalid_json": "Format JSON invalide dans le contenu de secrets.json.",
+      "keys_missing": "secrets.json ne contient pas la clé de chiffrement (shared_key) ; les positions ne peuvent pas être déchiffrées. Régénérez-le avec une récupération complète des clés : la CLI fournie (main.py) récupère les deux clés automatiquement, ou dans GoogleFindMyTools sélectionnez un appareil à localiser avant l'export.",
       "invalid": "Échec de la validation. Veuillez vérifier vos saisies.",
       "invalid_auth": "Authentification invalide. Fournissez un nouveau jeton et/ou reconnectez-vous.",
       "cannot_connect": "Échec de la connexion à l’API Google.",

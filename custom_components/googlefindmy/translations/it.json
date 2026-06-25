@@ -20,14 +20,6 @@
           "secrets_json": "Contenuto del file secrets.json"
         }
       },
-      "individual_tokens": {
-        "title": "Metodo 2: Token OAuth individuale",
-        "description": "Inserisci il token OAuth e l’indirizzo email Google ottenuti tramite il processo di autenticazione manuale.",
-        "data": {
-          "oauth_token": "Token OAuth",
-          "google_email": "Indirizzo email Google"
-        }
-      },
       "device_selection": {
         "title": "Impostazioni di interrogazione",
         "description": "I nuovi dispositivi rilevati appaiono disattivati e possono essere attivati nelle impostazioni del dispositivo. Configura qui i parametri generali di polling:\n• Intervallo di polling posizione: frequenza di avvio di un nuovo ciclo (60–3600 secondi)\n• Ritardo tra interrogazioni dei dispositivi: intervallo tra le richieste per ciascun dispositivo all’interno di un ciclo (1–60 secondi)\n\nFiltro Google Home: attivo per impostazione predefinita con le parole chiave nest/google/home/mini/hub/display/chromecast/speaker. Sostituisce le coordinate della zona Home per i rilevamenti Google/Nest/Chromecast e ignora le segnalazioni ripetute di \"home\" per 15 minuti. Regola qui le parole chiave se i tuoi dispositivi usano altri nomi.",
@@ -53,10 +45,9 @@
       },
       "reauth_confirm": {
         "title": "Riautenticazione",
-        "description": "Le credenziali di **{email}** sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nSuggerimento: puoi incollare il contenuto completo di un nuovo secrets.json **oppure** fornire un nuovo token OAuth e l’email.",
+        "description": "Le credenziali di **{email}** sembrano non valide o sono scadute. Fornisci nuove credenziali qui sotto.\n\nIncolla il contenuto completo di un nuovo **secrets.json** (generato eseguendo GoogleFindMyTools).\n\nNota: l’email dell’account è fissa per questa riautenticazione; per usare un altro account, rimuovi l’integrazione e aggiungila di nuovo.",
         "data": {
-          "secrets_json": "Nuovo secrets.json (contenuto completo)",
-          "new_oauth_token": "Nuovo token OAuth"
+          "secrets_json": "Nuovo secrets.json (contenuto completo)"
         }
       },
       "migrate_complete": {
@@ -69,6 +60,7 @@
       "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "invalid_token": "Credenziali non valide (token/e-mail) o campi obbligatori mancanti.",
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
+      "keys_missing": "secrets.json non contiene la chiave di crittografia (shared_key); le posizioni non possono essere decifrate. Rigeneralo con il recupero completo delle chiavi: la CLI inclusa (main.py) recupera entrambe le chiavi automaticamente, oppure in GoogleFindMyTools seleziona un dispositivo da localizzare prima di esportare.",
       "no_devices": "Nessun dispositivo trovato. Assicurati che ‘Trova il mio dispositivo’ sia attivato nel tuo account Google.",
       "cannot_connect": "Impossibile connettersi all’API di Google. Potrebbe trattarsi di un problema temporaneo — riprova più tardi.",
       "dependency_not_ready": "Mancano le dipendenze dell'integrazione. Installa i requisiti di Google Find My Device e riavvia Home Assistant.",
@@ -83,6 +75,7 @@
       "cannot_connect": "Impossibile connettersi a Google Find My Device.",
       "dependency_not_ready": "Le dipendenze di Google Find My Device non sono installate. Installa i requisiti e riprova.",
       "invalid_discovery_info": "Il payload di rilevamento non è valido. Controlla le credenziali e riprova.",
+      "keys_missing": "secrets.json non contiene la chiave di crittografia (shared_key); le posizioni non possono essere decifrate. Rigeneralo con il recupero completo delle chiavi: la CLI inclusa (main.py) recupera entrambe le chiavi automaticamente, oppure in GoogleFindMyTools seleziona un dispositivo da localizzare prima di esportare.",
       "reauth_successful": "Riautenticazione riuscita.",
       "migration_successful": "Migrazione completata.",
       "migration_failed": "Migrazione non riuscita. Rimuovi l'integrazione e aggiungila di nuovo.",
@@ -239,14 +232,9 @@
       },
       "credentials": {
         "title": "Aggiorna credenziali (opzionale)",
-        "description": "Aggiorna le credenziali senza esporre i valori esistenti. Fornisci esattamente un metodo:\n\n• Incolla il contenuto completo di un **secrets.json** nuovo\n**oppure**\n• Inserisci un **token OAuth** nuovo e **email Google**.\n\nSe fornite, le credenziali saranno convalidate e salvate; l’integrazione verrà ricaricata senza cambiare i nomi delle tue entità.",
+        "description": "Aggiorna le tue credenziali. I valori esistenti non vengono mostrati per motivi di sicurezza.\n\nIncolla il contenuto completo di un nuovo **secrets.json** (generato eseguendo GoogleFindMyTools).\n\nUna volta inviate, le credenziali vengono convalidate e salvate; l’integrazione viene ricaricata senza cambiare i nomi delle tue entità.",
         "data": {
-          "secrets_json": "Nuovo secrets.json (contenuto completo)",
-          "oauth_token": "Nuovo token OAuth",
-          "google_email": "Email Google",
           "new_secrets_json": "Nuovo secrets.json (contenuto completo)",
-          "new_oauth_token": "Nuovo token OAuth",
-          "new_google_email": "Email Google",
           "subentry": "Gruppo di funzionalità"
         },
         "data_description": {
@@ -316,6 +304,7 @@
     },
     "error": {
       "invalid_json": "Formato JSON non valido nel contenuto di secrets.json.",
+      "keys_missing": "secrets.json non contiene la chiave di crittografia (shared_key); le posizioni non possono essere decifrate. Rigeneralo con il recupero completo delle chiavi: la CLI inclusa (main.py) recupera entrambe le chiavi automaticamente, oppure in GoogleFindMyTools seleziona un dispositivo da localizzare prima di esportare.",
       "invalid": "Convalida non riuscita. Controlla i tuoi dati.",
       "invalid_auth": "Autenticazione non valida. Fornisci un nuovo token e/o accedi di nuovo.",
       "cannot_connect": "Impossibile connettersi all’API di Google.",

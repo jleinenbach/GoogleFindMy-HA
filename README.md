@@ -160,6 +160,9 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 >While going through the process in main.py to authenticate, you **MUST** go through **2 login processes!**  After the first login is successful, your available devices will be listed.  You must complete the next step to display location data for one of your devices.  You will then login again.  After you complete this step, you should see valid location data for your device, followed by several errors that are not important.  ONLY at this point are you ready to move on to the next step!
 3. Copy the entire contents of the secrets.json file.
     - Specifically, open the file in a text editor, select all, and copy.
+> [!IMPORTANT]
+> The encryption key (`shared_key`) is only retrieved during the **second** login, which happens when you actively **select a device to locate**. If you stop after the device list appears (skipping that step), the resulting `secrets.json` has no `shared_key` and Home Assistant will reject the import with a `keys_missing` error, because locations cannot be decrypted without it.
+> As an alternative to the external GoogleFindMyTools, the bundled CLI (`custom_components/googlefindmy/main.py`) fetches **both** keys automatically in a single run, without requiring you to select a device manually, so it is the more robust way to generate a complete `secrets.json`.
 
 ### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
 4. Add the integration to your Home Assistant install.
@@ -325,6 +328,36 @@ The integration provides a couple of Home Assistant Actions for use with automat
 ### No Location Data
 - Check if devices have moved recently (Find My devices may not update GPS when stationary)
 - Check battery levels (low battery may disable GPS reporting)
+
+### Chrome/ChromeDriver version mismatch (standalone auth scripts)
+When you run the standalone helper scripts (`get_oauth_token.py`,
+`Auth/auth_flow.py`, `KeyBackup/shared_key_flow.py`) from the command line,
+`undetected_chromedriver` downloads a driver for your installed Chrome version.
+If the Chrome-for-Testing **stable** channel has moved ahead of the Chrome build
+offered to your desktop (for example the driver targets Chrome 150 while only
+149 is installed), startup can abort with `only supports Chrome version 150`.
+
+The integration auto-detects the installed version and passes it through, so
+this usually resolves itself. If detection fails, or you need to pin a specific
+version, use the layered override (priority: **CLI flag > environment variable >
+auto-detection**):
+
+| Override | CLI flag | Environment variable |
+| --- | --- | --- |
+| Chrome binary path | `--chrome-path /path/to/chrome` | `GOOGLEFINDMY_CHROME_PATH` |
+| Chrome major version | `--chrome-version 149` | `GOOGLEFINDMY_CHROME_VERSION` |
+
+```bash
+# Pin the major version on the command line
+python custom_components/googlefindmy/get_oauth_token.py --chrome-version 149
+
+# Or via environment variables. These also cover the Home Assistant runtime
+# path, which has no command line of its own.
+export GOOGLEFINDMY_CHROME_VERSION=149
+export GOOGLEFINDMY_CHROME_PATH=/usr/bin/google-chrome
+```
+
+Run any of the scripts with `--help` to list the available options.
 
 ### Location updates stopped after an upgrade
 Location data is fetched **outbound** from Home Assistant to Google (FCM push plus Nova/SPOT polling); it does **not** depend on your Home Assistant internal or external URL configuration. If updates stop after upgrading the integration:
