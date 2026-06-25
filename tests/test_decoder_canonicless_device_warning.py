@@ -356,7 +356,7 @@ def test_transition_warns_exactly_once_per_poll_despite_double_call(
     probe (emit_canonicless_diagnostics=False) and the main poll (True). After "X" was
     visible, the probe pass on the dropped list must NOT touch the visibility map, so the
     main pass still sees "X" as previously visible and fires the transition WARNING exactly
-    once (``== 1``, not the pre-fix ``<= 1`` where the probe zertrat the map).
+    once (``== 1``, not the pre-fix ``<= 1`` where the probe clobbered the map).
     """
     cache = SimpleNamespace(entry_id="entry-A")
     visible = SimpleNamespace(

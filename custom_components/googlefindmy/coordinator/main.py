@@ -386,7 +386,7 @@ def _device_class(device_type: Any) -> str:
     """Map a ``device_type`` slot int to a coarse three-class label.
 
     ``20`` -> ``phone``; ``None`` or ``0`` (unknown) -> ``other``; any other
-    known int -> ``bt_tracker``. Deliberately abrupt (Negativprotokoll 3): the
+    known int -> ``bt_tracker``. Deliberately abrupt (limitations note 3): the
     maintainer needs phone vs. physical tracker vs. unknown, not a fine class.
     """
     if device_type == _DEVICE_TYPE_PHONE:
