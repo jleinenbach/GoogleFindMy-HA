@@ -1174,7 +1174,14 @@ def get_devices_with_location(
         # Phones (IDENTIFIER_ANDROID) and similar devices may not have keys in the
         # device listing payload, but keys ARE available via the Locate flow (FCM).
         # Only warn for tracker-like devices that unexpectedly lack keys.
-        if not encrypted_identity_key:
+        #
+        # This whole block is a diagnostic (logging only, no row/return effect), so it is
+        # gated to the main poll (emit_canonicless_diagnostics=True) for the same CQS
+        # reason as the canonicless drop diagnostics below: get_devices_with_location runs
+        # twice per poll (capability probe + main poll), and an ungated dump here would
+        # duplicate the "Missing Key" WARNING once per poll for every keyless tracker on
+        # the probe pass. The probe pass stays diagnostically silent.
+        if emit_canonicless_diagnostics and not encrypted_identity_key:
             ids_str = ", ".join(
                 [str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids]
             )

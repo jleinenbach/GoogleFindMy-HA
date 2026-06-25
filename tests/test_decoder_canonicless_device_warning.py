@@ -156,6 +156,20 @@ def _canonicless_debug_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
+def _missing_key_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the ``DEBUG STRUCTURE: Missing Key`` WARNING records (rendered).
+
+    These are the hidden-key diagnostic dump emitted for a tracker-shaped device that
+    lacks an ``encryptedIdentityKey``. Like the canonicless diagnostics, they are a
+    main-poll concern: the capability probe pass must stay diagnostically silent.
+    """
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "Missing Key" in rec.getMessage()
+    ]
+
+
 # ----------------------------------------------------------------------------------------
 # Benign classes (phone, accessory): silent WARNING tier, named DEBUG line, no remediation
 #
@@ -507,6 +521,54 @@ def test_emit_false_rows_match_emit_true(
 
     assert len(rows_probe) == 1
     assert rows_probe == rows_main
+
+
+def test_missing_key_diagnostics_silent_on_probe_pass(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T5: the hidden-key diagnostic dump is suppressed on the capability probe pass.
+
+    A tracker-shaped device (has an ``information`` block, not Android) that lacks an
+    ``encryptedIdentityKey`` triggers the ``DEBUG STRUCTURE: Missing Key`` WARNING dump.
+    That dump is a diagnostic, so the probe pass (emit_canonicless_diagnostics=False) must
+    stay silent: otherwise the capability probe duplicates the WARNING once per poll for
+    that device class, defeating the diagnostically-silent contract.
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_tracker_device(name="Keyless Tracker")]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=False
+        )
+
+    assert _missing_key_warnings(caplog) == []
+
+
+def test_missing_key_diagnostics_emitted_on_main_pass(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T6: the hidden-key diagnostic dump is preserved on the main poll.
+
+    The companion to T5: gating the dump must not silence it on the main poll
+    (emit_canonicless_diagnostics=True), where the tracker-shaped keyless device is a real
+    signal worth surfacing.
+    """
+    device_list = SimpleNamespace(
+        deviceMetadata=[_make_tracker_device(name="Keyless Tracker")]
+    )
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        decoder.get_devices_with_location(
+            device_list, cache=cache, emit_canonicless_diagnostics=True
+        )
+
+    warnings = _missing_key_warnings(caplog)
+    assert len(warnings) == 1
+    assert "Keyless Tracker" in warnings[0]
 
 
 # ----------------------------------------------------------------------------------------
