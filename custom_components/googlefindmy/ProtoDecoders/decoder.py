@@ -37,9 +37,12 @@ from custom_components.googlefindmy.ProtoDecoders import (
 _LOGGER = logging.getLogger(__name__)
 
 # Process-wide guard so the aggregate canonicless-device WARNING (how many devices
-# Google returned without a canonical ID) is announced only once per config entry,
-# despite get_devices_with_location running multiple times per poll. The key is the
-# pair (entry scope, count): entry scope (cache.entry_id) keeps two config entries
+# Google returned without a canonical ID) is announced only once per config entry.
+# get_devices_with_location still runs more than once per poll (a capability probe pass
+# plus the main poll), but only the main poll passes emit_canonicless_diagnostics=True
+# and touches this guard, so the diagnostics are emitted exactly once per poll (CQS). The
+# key is the pair (entry scope, count): entry scope (cache.entry_id) keeps two config
+# entries
 # from silencing each other, and the count re-surfaces the WARNING only when the
 # number of affected devices changes (new information). The per-device name is logged
 # at DEBUG instead (not guarded), so enabling debug logging always reveals which
@@ -61,11 +64,38 @@ _last_canonicless_count_by_entry: dict[str, int] = {}
 # get_devices_with_location for each entry scope. It powers the "was visible, now gone"
 # transition discriminator: a benign-class device (phone or reduced-listing accessory)
 # normally drops silently, but if it was visible last run and disappears now, that is a
-# real regression and is treated as warn-worthy. The set is rebuilt after every run from
-# the names actually emitted in that run (mirroring the per-run semantics of the count
-# guard above), so a transition warns at most once before falling back to silence. It is
-# cleared per entry on the same unload/reset hook as the count guard.
+# real regression and is treated as warn-worthy. The set is rebuilt from the names
+# actually emitted, but only on the main poll (emit_canonicless_diagnostics=True); the
+# capability probe pass leaves it untouched so the main poll reads the genuine previous
+# poll, not a set the probe already overwrote. A transition therefore warns at most once
+# before falling back to silence. It is cleared per entry on the same unload/reset hook
+# as the count guard.
 _visible_device_names_by_entry: dict[str, set[str]] = {}
+
+# Process-wide, entry-scoped tally of canonicless drops observed on the LAST main
+# poll, for the anonymized diagnostics aggregate (P1-2). Unlike the WARNING guard
+# above, this is transition-independent: each entry maps to {"total", "benign",
+# "warn"} where total == benign + warn and warn counts the tracker-shaped
+# (not-benign) drops only, with no "was visible" component. Only the main poll
+# (emit_canonicless_diagnostics=True) rewrites it; the capability probe leaves it
+# untouched (CQS). The coordinator reads it per poll via get_canonicless_counts.
+_canonicless_counts_by_entry: dict[str, dict[str, int]] = {}
+
+
+def get_canonicless_counts(entry_id: str) -> dict[str, int]:
+    """Return the last main-poll canonicless drop tally for an entry scope.
+
+    Args:
+        entry_id: The entry scope (``cache.entry_id`` or ``"<no-entry>"``).
+
+    Returns:
+        A ``{"total", "benign", "warn"}`` dict; all-zero for an entry that has
+        not yet recorded a main-poll drop tally.
+    """
+    counts = _canonicless_counts_by_entry.get(entry_id)
+    if counts is None:
+        return {"total": 0, "benign": 0, "warn": 0}
+    return dict(counts)
 
 
 def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
@@ -81,9 +111,11 @@ def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
     if entry_id is None:
         _last_canonicless_count_by_entry.clear()
         _visible_device_names_by_entry.clear()
+        _canonicless_counts_by_entry.clear()
         return
     _last_canonicless_count_by_entry.pop(entry_id, None)
     _visible_device_names_by_entry.pop(entry_id, None)
+    _canonicless_counts_by_entry.pop(entry_id, None)
 
 
 _text_format_module: Any | None = None
@@ -866,6 +898,7 @@ def get_devices_with_location(
     device_list: DeviceUpdate_pb2.DevicesList,
     *,
     cache: TokenCache | None = None,
+    emit_canonicless_diagnostics: bool = False,
 ) -> list[dict[str, Any]]:
     """Extract one consolidated row per canonic device ID from a device list.
 
@@ -885,6 +918,20 @@ def get_devices_with_location(
           in consumer code.
         * **Data Hygiene**: All numeric fields are coerced to `float`, validated
           for finiteness (no `NaN`/`Inf`), and sanitized before being returned.
+
+    Args:
+        device_list: The decoded ``DevicesList`` to extract rows from.
+        cache: Optional ``TokenCache``; when provided, encrypted payloads are
+            decrypted, otherwise sanitized stubs are returned.
+        emit_canonicless_diagnostics: Command-Query-Separation gate. The function
+            runs more than once per poll (a capability probe at ``api.py:361`` and
+            the main poll at ``api.py:702``). Only the main poll passes ``True`` and
+            is allowed to emit the canonicless drop diagnostics (DEBUG lines, the
+            aggregate count WARNING) and to mutate the module-level visibility/count
+            guards. The probe pass keeps the default ``False`` and stays silent and
+            side-effect free, so the main poll reads the genuine previous-poll
+            visibility set instead of one the probe already overwrote. Pure row
+            extraction (the query) is identical for both values.
 
     Returns:
         A list of device data dictionaries. Fields may be `None` if no valid
@@ -911,10 +958,24 @@ def get_devices_with_location(
     # default-visible WARNING can report an aggregate count instead of per-device names.
     canonicless_count = 0
 
+    # Transition-independent canonicless tally for the diagnostics aggregate (P1-2),
+    # kept separate from canonicless_count (which is warn-worthy AND transition-aware).
+    # total == benign + warn; warn counts the tracker-shaped (not-benign) drops only.
+    canonicless_total = 0
+    canonicless_benign = 0
+    canonicless_warn = 0
+
     # Names emitted (visible) in THIS run, captured to rebuild the visibility-transition
     # map after the loop. Compared against the previous run's set, never the running one.
     emitted_names_this_run: set[str] = set()
-    previously_visible_names = _visible_device_names_by_entry.get(entry_scope, set())
+    # Only the main poll reads (and below, rewrites) the cross-poll visibility set. The
+    # capability probe pass (emit_canonicless_diagnostics=False) short-circuits to an empty
+    # set so it neither sees nor mutates the transition state (CQS).
+    previously_visible_names = (
+        _visible_device_names_by_entry.get(entry_scope, set())
+        if emit_canonicless_diagnostics
+        else set()
+    )
 
     for device in getattr(device_list, "deviceMetadata", []):
         # Resolve canonic IDs for this device (Android vs. generic path)
@@ -1113,7 +1174,14 @@ def get_devices_with_location(
         # Phones (IDENTIFIER_ANDROID) and similar devices may not have keys in the
         # device listing payload, but keys ARE available via the Locate flow (FCM).
         # Only warn for tracker-like devices that unexpectedly lack keys.
-        if not encrypted_identity_key:
+        #
+        # This whole block is a diagnostic (logging only, no row/return effect), so it is
+        # gated to the main poll (emit_canonicless_diagnostics=True) for the same CQS
+        # reason as the canonicless drop diagnostics below: get_devices_with_location runs
+        # twice per poll (capability probe + main poll), and an ungated dump here would
+        # duplicate the "Missing Key" WARNING once per poll for every keyless tracker on
+        # the probe pass. The probe pass stays diagnostically silent.
+        if emit_canonicless_diagnostics and not encrypted_identity_key:
             ids_str = ", ".join(
                 [str(getattr(canonic_id, "id", "")) for canonic_id in canonic_ids]
             )
@@ -1235,21 +1303,35 @@ def get_devices_with_location(
             # Remember this device as visible this run so a later disappearance can be
             # told apart from a device that was never shown (the transition discriminator).
             emitted_names_this_run.add(device_name)
-        else:
+        elif emit_canonicless_diagnostics:
             # Google returned this device without a usable canonical ID, so no row was
-            # emitted and it silently vanishes from Home Assistant. Severity tracks
-            # actionability: a benign class (an Android phone, or a reduced listing with
-            # no 'information' block such as a Bluetooth accessory) drops as expected for
-            # its class and is located -- if at all -- via the Locate flow, so it only
-            # logs at DEBUG. It becomes warn-worthy only when it is tracker-shaped (has an
-            # 'information' block and is not Android) OR when it was visible in the
-            # previous run and is now gone (a real regression). The per-device name stays
-            # at DEBUG (AGENTS.md privacy guidance); the default-visible tier is the count
-            # WARNING below. has_information_block is recomputed locally because the
-            # binding above lives inside the `if not encrypted_identity_key:` block and is
-            # not in scope when a key was present.
+            # emitted and it silently vanishes from Home Assistant. Emitting the drop
+            # diagnostics is a query-side concern gated to the main poll: the capability
+            # probe pass (emit_canonicless_diagnostics=False) skips this whole branch, so
+            # it neither logs nor advances the count. Severity tracks actionability: a
+            # benign class (an Android phone, or a reduced listing with no 'information'
+            # block such as a Bluetooth accessory) drops as expected for its class and is
+            # located -- if at all -- via the Locate flow, so it only logs at DEBUG. It
+            # becomes warn-worthy only when it is tracker-shaped (has an 'information'
+            # block and is not Android) OR when it was visible in the previous run and is
+            # now gone (a real regression). The per-device name stays at DEBUG (AGENTS.md
+            # privacy guidance); the default-visible tier is the count WARNING below.
+            # has_information_block is recomputed locally because the binding above lives
+            # inside the `if not encrypted_identity_key:` block and is not in scope when a
+            # key was present.
             has_information_block = device.HasField("information")
             benign = is_android_device or not has_information_block
+
+            # Transition-independent diagnostics tally (P1-2): every canonicless
+            # drop counts once into total, then into benign or warn purely by
+            # class (no was_visible component). Deliberately decoupled from the
+            # warn_worthy logic below so the aggregate is deterministic per poll.
+            canonicless_total += 1
+            if benign:
+                canonicless_benign += 1
+            else:
+                canonicless_warn += 1
+
             was_visible = device_name in previously_visible_names
             warn_worthy = (not benign) or was_visible
 
@@ -1274,36 +1356,50 @@ def get_devices_with_location(
                     device_name or "<unnamed>",
                 )
 
-    # Rebuild the per-entry visibility set from the names emitted in THIS run, strictly
-    # after the device loop so the transition check inside the loop compared against the
-    # PREVIOUS run's set. Dropped devices (no row emitted) are intentionally excluded, so
-    # a device that disappears next run is recognised as a "was visible, now gone"
-    # transition exactly once.
-    _visible_device_names_by_entry[entry_scope] = emitted_names_this_run
+    # Diagnostics emission and the cross-poll guard mutations are gated to the main poll
+    # (emit_canonicless_diagnostics=True). The capability probe pass returns here without
+    # touching either module-level map, so the main poll always reads a previous-poll
+    # visibility set that the probe has not overwritten (CQS).
+    if emit_canonicless_diagnostics:
+        # Rebuild the per-entry visibility set from the names emitted in THIS run, strictly
+        # after the device loop so the transition check inside the loop compared against
+        # the PREVIOUS run's set. Dropped devices (no row emitted) are intentionally
+        # excluded, so a device that disappears next run is recognised as a "was visible,
+        # now gone" transition exactly once.
+        _visible_device_names_by_entry[entry_scope] = emitted_names_this_run
 
-    if canonicless_count:
-        # Default-visible aggregate: report only how many devices are affected, never
-        # their names. Re-arm per entry whenever the affected-device COUNT changes:
-        # compare against this entry's last warned count, so a stable count warns once
-        # while any change (a device dropped or recovered) re-surfaces it — including a
-        # count that returns to an earlier value (1 -> 2 -> 1), which a lifetime set of
-        # every count ever seen would wrongly suppress.
-        last_count = _last_canonicless_count_by_entry.get(entry_scope)
-        if last_count != canonicless_count:
-            _last_canonicless_count_by_entry[entry_scope] = canonicless_count
-            _LOGGER.warning(
-                "%d device(s) returned by Google without a canonical ID are not shown "
-                "in Home Assistant. Enable debug logging for "
-                "custom_components.googlefindmy to see which devices are affected, then "
-                "make them findable again in the Find My Device app (or your Google "
-                "account) and reload the integration.",
-                canonicless_count,
-            )
-    else:
-        # This entry currently has no affected devices: forget its last count so a later
-        # drop re-surfaces the warning even if the count returns to a pre-recovery value.
-        # Keeps the guard scoped to entries that are actually affected.
-        _last_canonicless_count_by_entry.pop(entry_scope, None)
+        # Publish the transition-independent diagnostics tally for this entry,
+        # set absolutely from this poll (the coordinator reads it per poll). The
+        # probe pass skips this block, so only the main poll writes the counts.
+        _canonicless_counts_by_entry[entry_scope] = {
+            "total": canonicless_total,
+            "benign": canonicless_benign,
+            "warn": canonicless_warn,
+        }
+
+        if canonicless_count:
+            # Default-visible aggregate: report only how many devices are affected, never
+            # their names. Re-arm per entry whenever the affected-device COUNT changes:
+            # compare against this entry's last warned count, so a stable count warns once
+            # while any change (a device dropped or recovered) re-surfaces it, including a
+            # count that returns to an earlier value (1 -> 2 -> 1), which a lifetime set of
+            # every count ever seen would wrongly suppress.
+            last_count = _last_canonicless_count_by_entry.get(entry_scope)
+            if last_count != canonicless_count:
+                _last_canonicless_count_by_entry[entry_scope] = canonicless_count
+                _LOGGER.warning(
+                    "%d device(s) returned by Google without a canonical ID are not shown "
+                    "in Home Assistant. Enable debug logging for "
+                    "custom_components.googlefindmy to see which devices are affected, then "
+                    "make them findable again in the Find My Device app (or your Google "
+                    "account) and reload the integration.",
+                    canonicless_count,
+                )
+        else:
+            # This entry currently has no affected devices: forget its last count so a
+            # later drop re-surfaces the warning even if the count returns to a
+            # pre-recovery value. Keeps the guard scoped to entries that are affected.
+            _last_canonicless_count_by_entry.pop(entry_scope, None)
 
     return results
 

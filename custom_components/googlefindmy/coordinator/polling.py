@@ -1231,6 +1231,10 @@ class PollingOperations(_MixinBase):
                 # 1) Fetch the lightweight FULL device list using the native async API
                 payload = await self.api.async_get_basic_device_list()
 
+                # Mirror the decoder's per-poll canonicless drop tally (written by
+                # the main poll inside the fetch above) into the persisted stats.
+                self._refresh_canonicless_drop_stats(self._entry_id())
+
                 # Success path: if we were in an auth error state, clear it now.
                 self._set_auth_state(failed=False)
                 self._set_api_status(ApiStatus.OK)
