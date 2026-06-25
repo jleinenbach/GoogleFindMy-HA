@@ -28,9 +28,15 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.example_data_provider import get_example_data
 from custom_components.googlefindmy.exceptions import MissingTokenCacheError
-from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
-    OwnerKeyLookupTransientError,
-)
+
+# NOTE: OwnerKeyLookupTransientError (from decrypt_locations) and
+# SpotApiEmptyResponseError (from get_eid_info_request) are intentionally NOT
+# imported at module scope. Both source modules are heavy protobuf/crypto
+# dependencies with dedicated lazy getters (_import_decrypt_locations_module /
+# _import_eid_info_module); a module-scope import would force them to load on
+# startup/listing paths that never process a locate callback (AGENTS.md import
+# deferral). They are resolved via getattr from the lazily imported modules at
+# their two use sites (the FCM callback and the locate path below).
 from custom_components.googlefindmy.NovaApi.ExecuteAction.nbe_execute_action import (
     create_action_request,
     serialize_action_request,
@@ -44,9 +50,6 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
 )
 from custom_components.googlefindmy.NovaApi.scopes import NOVA_ACTION_API_SCOPE
 from custom_components.googlefindmy.NovaApi.util import generate_random_uuid
-from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
-    SpotApiEmptyResponseError,
-)
 from custom_components.googlefindmy.SpotApi.spot_request import SpotAuthPermanentError
 
 _LOGGER = logging.getLogger(__name__)
@@ -321,6 +324,10 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                 )
                 StaleOwnerKeyError = cast(
                     type[Exception], getattr(decrypt_module, "StaleOwnerKeyError")
+                )
+                OwnerKeyLookupTransientError = cast(
+                    type[Exception],
+                    getattr(decrypt_module, "OwnerKeyLookupTransientError"),
                 )
                 SpotApiEmptyResponseError = cast(
                     type[Exception],
@@ -665,12 +672,21 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
     except Exception as err:  # pragma: no cover - defensive logging
         _LOGGER.debug("Failed to persist contributor mode timestamp: %s", err)
 
-    # Bind the decryption exception type locally: this module imports
-    # decrypt_locations lazily (see _import_decrypt_locations_module) to avoid a
-    # heavy import cycle, so the name is not available at module scope. It is used
-    # below to surface an auth-fatal stale-key failure instead of swallowing it.
+    # Bind the decryption / eid-info exception types locally: this module imports
+    # decrypt_locations and get_eid_info_request lazily (see the _import_* helpers)
+    # to avoid heavy protobuf/crypto imports at module scope, so these names are
+    # not available at module scope. They are used below to surface auth-fatal
+    # stale-key failures and transient/empty-response misses instead of swallowing
+    # them into an empty result.
     decrypt_module = _import_decrypt_locations_module()
+    eid_info_module = _import_eid_info_module()
     DecryptionError = cast(type[Exception], getattr(decrypt_module, "DecryptionError"))
+    OwnerKeyLookupTransientError = cast(
+        type[Exception], getattr(decrypt_module, "OwnerKeyLookupTransientError")
+    )
+    SpotApiEmptyResponseError = cast(
+        type[Exception], getattr(eid_info_module, "SpotApiEmptyResponseError")
+    )
 
     try:
         # Generate request UUID

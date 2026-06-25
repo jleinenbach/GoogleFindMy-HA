@@ -26,6 +26,7 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
 )
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
+    OwnerKeyLookupTransientError,
     StaleOwnerKeyError,
 )
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
@@ -54,6 +55,7 @@ def _patch_callback_imports(
         async_decrypt_location_response_locations=_raise_decrypt,
         DecryptionError=DecryptionError,
         StaleOwnerKeyError=StaleOwnerKeyError,
+        OwnerKeyLookupTransientError=OwnerKeyLookupTransientError,
     )
     eid_module = SimpleNamespace(SpotApiEmptyResponseError=SpotApiEmptyResponseError)
 
