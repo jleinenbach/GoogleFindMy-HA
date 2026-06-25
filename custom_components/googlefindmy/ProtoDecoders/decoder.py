@@ -72,6 +72,31 @@ _last_canonicless_count_by_entry: dict[str, int] = {}
 # as the count guard.
 _visible_device_names_by_entry: dict[str, set[str]] = {}
 
+# Process-wide, entry-scoped tally of canonicless drops observed on the LAST main
+# poll, for the anonymized diagnostics aggregate (P1-2). Unlike the WARNING guard
+# above, this is transition-independent: each entry maps to {"total", "benign",
+# "warn"} where total == benign + warn and warn counts the tracker-shaped
+# (not-benign) drops only, with no "was visible" component. Only the main poll
+# (emit_canonicless_diagnostics=True) rewrites it; the capability probe leaves it
+# untouched (CQS). The coordinator reads it per poll via get_canonicless_counts.
+_canonicless_counts_by_entry: dict[str, dict[str, int]] = {}
+
+
+def get_canonicless_counts(entry_id: str) -> dict[str, int]:
+    """Return the last main-poll canonicless drop tally for an entry scope.
+
+    Args:
+        entry_id: The entry scope (``cache.entry_id`` or ``"<no-entry>"``).
+
+    Returns:
+        A ``{"total", "benign", "warn"}`` dict; all-zero for an entry that has
+        not yet recorded a main-poll drop tally.
+    """
+    counts = _canonicless_counts_by_entry.get(entry_id)
+    if counts is None:
+        return {"total": 0, "benign": 0, "warn": 0}
+    return dict(counts)
+
 
 def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
     """Clear the canonicless-device warning guard and the visibility-transition map.
@@ -86,9 +111,11 @@ def _reset_canonicless_warning_state(entry_id: str | None = None) -> None:
     if entry_id is None:
         _last_canonicless_count_by_entry.clear()
         _visible_device_names_by_entry.clear()
+        _canonicless_counts_by_entry.clear()
         return
     _last_canonicless_count_by_entry.pop(entry_id, None)
     _visible_device_names_by_entry.pop(entry_id, None)
+    _canonicless_counts_by_entry.pop(entry_id, None)
 
 
 _text_format_module: Any | None = None
@@ -931,6 +958,13 @@ def get_devices_with_location(
     # default-visible WARNING can report an aggregate count instead of per-device names.
     canonicless_count = 0
 
+    # Transition-independent canonicless tally for the diagnostics aggregate (P1-2),
+    # kept separate from canonicless_count (which is warn-worthy AND transition-aware).
+    # total == benign + warn; warn counts the tracker-shaped (not-benign) drops only.
+    canonicless_total = 0
+    canonicless_benign = 0
+    canonicless_warn = 0
+
     # Names emitted (visible) in THIS run, captured to rebuild the visibility-transition
     # map after the loop. Compared against the previous run's set, never the running one.
     emitted_names_this_run: set[str] = set()
@@ -1280,6 +1314,17 @@ def get_devices_with_location(
             # key was present.
             has_information_block = device.HasField("information")
             benign = is_android_device or not has_information_block
+
+            # Transition-independent diagnostics tally (P1-2): every canonicless
+            # drop counts once into total, then into benign or warn purely by
+            # class (no was_visible component). Deliberately decoupled from the
+            # warn_worthy logic below so the aggregate is deterministic per poll.
+            canonicless_total += 1
+            if benign:
+                canonicless_benign += 1
+            else:
+                canonicless_warn += 1
+
             was_visible = device_name in previously_visible_names
             warn_worthy = (not benign) or was_visible
 
@@ -1315,6 +1360,15 @@ def get_devices_with_location(
         # excluded, so a device that disappears next run is recognised as a "was visible,
         # now gone" transition exactly once.
         _visible_device_names_by_entry[entry_scope] = emitted_names_this_run
+
+        # Publish the transition-independent diagnostics tally for this entry,
+        # set absolutely from this poll (the coordinator reads it per poll). The
+        # probe pass skips this block, so only the main poll writes the counts.
+        _canonicless_counts_by_entry[entry_scope] = {
+            "total": canonicless_total,
+            "benign": canonicless_benign,
+            "warn": canonicless_warn,
+        }
 
         if canonicless_count:
             # Default-visible aggregate: report only how many devices are affected, never

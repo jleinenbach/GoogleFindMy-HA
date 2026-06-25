@@ -134,6 +134,9 @@ class _MixinBase:
     def increment_stat(self, stat_name: str) -> None:
         raise NotImplementedError
 
+    def _refresh_canonicless_drop_stats(self, entry_id: str | None) -> None:
+        raise NotImplementedError
+
     def push_updated(
         self,
         device_ids: list[str] | None = None,
