@@ -398,6 +398,57 @@ def test_transition_warns_exactly_once_per_poll_despite_double_call(
     assert len(_canonicless_warnings(caplog)) == 1
 
 
+def test_double_decode_mixed_drop_warns_once_with_stable_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Mixed-device double-decode (viii): aggregate count is stable across the two passes.
+
+    This pins the exact regression Codex flagged for the within-poll double-decode in
+    ``api.py::_process_device_list_response`` (capability probe with
+    ``emit_canonicless_diagnostics=False`` followed by the main poll with ``True`` on the
+    SAME payload): a poll where a previously visible phone disappears WHILE a tracker-shaped
+    device is missing must surface the aggregate WARNING exactly once with count 2, not
+    twice (count 2 then count 1). Because every cross-poll mutation (the visibility set and
+    the count guard) is gated to the main poll, the probe pass cannot pop the just-gone
+    phone out of the previous-run set before the main pass reads it, so the transition stays
+    intact and the count does not decay between the two decodes.
+    """
+    cache = SimpleNamespace(entry_id="entry-A")
+
+    # Run 1 (main poll): make the phone "Pixel" visible so it enters the visibility set.
+    visible = SimpleNamespace(
+        deviceMetadata=[
+            _make_phone_device(name="Pixel", canonic_ids=[SimpleNamespace(id="cid-p")])
+        ]
+    )
+    decoder.get_devices_with_location(
+        visible, cache=cache, emit_canonicless_diagnostics=True
+    )
+
+    # Run 2 payload: "Pixel" disappears (benign class but previously visible -> warn-worthy)
+    # WHILE the tracker "Tracker" is canonicless (warn-worthy by class). Both warn, so the
+    # aggregate count is 2 on the main pass.
+    poll = SimpleNamespace(
+        deviceMetadata=[
+            _make_phone_device(name="Pixel", canonic_ids=[]),
+            _make_tracker_device(name="Tracker"),
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.googlefindmy"):
+        # Decode the SAME payload twice, exactly as api.py does within one poll:
+        decoder.get_devices_with_location(
+            poll, cache=cache, emit_canonicless_diagnostics=False
+        )  # capability probe: must stay silent and leave the guards untouched
+        decoder.get_devices_with_location(
+            poll, cache=cache, emit_canonicless_diagnostics=True
+        )  # main poll: the single diagnostic emission for this poll
+
+    warnings = _canonicless_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    assert "2 device(s)" in warnings[0], warnings[0]
+
+
 def test_valid_canonic_id_produces_row_and_no_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
