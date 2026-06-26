@@ -127,11 +127,7 @@ async def test_r6_surfacing_warning_omits_device_name_keeps_it_at_debug(
     )
     assert result == []
 
-    user_facing = [
-        rec
-        for rec in caplog.records
-        if rec.levelno >= logging.WARNING
-    ]
+    user_facing = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
     assert user_facing, "expected at least one user-facing surfacing record"
     for rec in user_facing:
         assert _SENTINEL_NAME not in rec.getMessage()

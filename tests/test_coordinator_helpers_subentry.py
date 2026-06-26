@@ -422,12 +422,8 @@ class TestExtractSubentryGroupKey:
 
     def test_falls_back_to_subentry_id(self):
         """Branch 2: missing ``data`` keys -> ``subentry_id`` is returned."""
-        assert (
-            extract_subentry_group_key(None, subentry_id="sub_x") == "sub_x"
-        )
-        assert (
-            extract_subentry_group_key({}, subentry_id="sub_y") == "sub_y"
-        )
+        assert extract_subentry_group_key(None, subentry_id="sub_x") == "sub_x"
+        assert extract_subentry_group_key({}, subentry_id="sub_y") == "sub_y"
 
     def test_subentry_id_coerced_to_str(self):
         """Branch 2 (coerce): non-string ``subentry_id`` is converted via ``str``."""
@@ -435,9 +431,7 @@ class TestExtractSubentryGroupKey:
 
     def test_hard_fallback_when_nothing_set(self):
         """Branch 3: both ``data`` and ``subentry_id`` absent -> ``fallback``."""
-        assert (
-            extract_subentry_group_key(None, subentry_id=None) == "core_tracking"
-        )
+        assert extract_subentry_group_key(None, subentry_id=None) == "core_tracking"
         assert (
             extract_subentry_group_key(None, subentry_id=None, fallback="custom_fb")
             == "custom_fb"

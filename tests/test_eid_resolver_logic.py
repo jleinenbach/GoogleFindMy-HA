@@ -14,6 +14,12 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 
 
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C)."""
+
+    return func(*args)
+
+
 @pytest.mark.asyncio
 async def test_relative_time_calculation_uses_elapsed_anchor(
     monkeypatch: pytest.MonkeyPatch,
@@ -35,6 +41,7 @@ async def test_relative_time_calculation_uses_elapsed_anchor(
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = MagicMock()
+    resolver.hass.async_add_executor_job = _run_in_executor
     resolver._locks = {}
     resolver._ensure_cache_defaults()
     resolver._refresh_lock = asyncio.Lock()
@@ -81,6 +88,7 @@ async def test_unix_basis_disabled_by_default(
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = MagicMock()
+    resolver.hass.async_add_executor_job = _run_in_executor
     resolver._locks = {}
     resolver._ensure_cache_defaults()
     resolver._refresh_lock = asyncio.Lock()

@@ -254,7 +254,10 @@ jobs:
         run: |
           set +e
           poetry run ruff check . 2>&1 | tee ruff_output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
+          CHECK_EXIT=${PIPESTATUS[0]}
+          poetry run ruff format --check . 2>&1 | tee -a ruff_output.txt
+          FORMAT_EXIT=${PIPESTATUS[0]}
+          EXIT_CODE=$(( CHECK_EXIT > FORMAT_EXIT ? CHECK_EXIT : FORMAT_EXIT ))
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
           exit $EXIT_CODE
 
@@ -414,7 +417,7 @@ jobs:
           PYTHONPATH: .
         run: |
           set -o pipefail
-          poetry run pytest -q --cov --cov-report=xml --cov-report=term --cov-fail-under=71 2>&1 | tee pytest_output.log
+          poetry run pytest -q --cov --cov-report=xml --cov-report=term --cov-fail-under=72 2>&1 | tee pytest_output.log
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

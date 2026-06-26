@@ -263,17 +263,19 @@ def _FcmPushClientFactory(*args: Any, **kwargs: Any) -> FcmPushClient[Any]:
 type JSONDict = dict[str, Any]
 type MutableJSONMapping = MutableMapping[str, Any]
 
-_MAX_SUPERVISOR_BACKOFF_S = 120.0    # cap retry delay at 2 minutes (was 4096s)
+_MAX_SUPERVISOR_BACKOFF_S = 120.0  # cap retry delay at 2 minutes (was 4096s)
 _BACKOFF_WARNING_THRESHOLD_S = 64.0  # warn after ~6 failed attempts
-_MAX_FATAL_AUTH_RETRIES = 3       # 401: max retries (60s, 120s, then give up)
-_MAX_FATAL_ENDPOINT_RETRIES = 7   # 404: max retries (30s-300s, Google rotates endpoints)
+_MAX_FATAL_AUTH_RETRIES = 3  # 401: max retries (60s, 120s, then give up)
+_MAX_FATAL_ENDPOINT_RETRIES = 7  # 404: max retries (30s-300s, Google rotates endpoints)
 # Defense 2: supervisor-level crash cap as a bulkhead around the inner-loop
 # poison-message filter (``fcmpushclient._listen`` Defense 1+3). When the FCM
 # client connects but loses the run-loop within ``_SHORT_RUN_THRESHOLD_S``
 # repeatedly, a persistent poison condition is suspected and the supervisor
 # stops looping to prevent unbounded retry pressure on Google + log spam.
 _MAX_CONSECUTIVE_SHORT_RUNS = 10
-_SHORT_RUN_THRESHOLD_S = 30.0  # strictly < 30s between pc.start() and STOPPED = short run
+_SHORT_RUN_THRESHOLD_S = (
+    30.0  # strictly < 30s between pc.start() and STOPPED = short run
+)
 _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
 
@@ -384,7 +386,9 @@ class FcmReceiverHA:
 
         self._fatal_error: str | None = None
         self._fatal_errors: dict[str, str] = {}
-        self._fatal_retry_counts: dict[str, int] = {}  # "entry:auth"|"entry:endpoint" -> count
+        self._fatal_retry_counts: dict[
+            str, int
+        ] = {}  # "entry:auth"|"entry:endpoint" -> count
 
         # Aggregate telemetry
         self.last_start_monotonic: float = 0.0
@@ -525,9 +529,8 @@ class FcmReceiverHA:
         skipped when an old generation would wipe the LIVE generation's
         diagnostics.
         """
-        return (
-            generation is not None
-            and generation != self._entry_generation.get(entry_id, 0)
+        return generation is not None and generation != self._entry_generation.get(
+            entry_id, 0
         )
 
     def _clear_fatal_error_for_entry(
@@ -1243,9 +1246,7 @@ class FcmReceiverHA:
                 self._pending_creds.pop(entry_id, None)
             return pc
 
-    def _discard_own_client(
-        self, entry_id: str, pc: FcmPushClient[Any]
-    ) -> None:
+    def _discard_own_client(self, entry_id: str, pc: FcmPushClient[Any]) -> None:
         """Remove *pc* from ``self.pcs`` only if it is still the live client.
 
         A supervisor cleans up the client it built by popping ``self.pcs``
@@ -1329,9 +1330,7 @@ class FcmReceiverHA:
             self._stop_evts[entry_id] = stop_evt
 
         async def _supervisor() -> None:  # noqa: PLR0912, PLR0915
-            nudge_evt = self._retry_nudge_evts.setdefault(
-                entry_id, asyncio.Event()
-            )
+            nudge_evt = self._retry_nudge_evts.setdefault(entry_id, asyncio.Event())
 
             async def _nudge_sleep(seconds: float) -> bool:
                 """Sleep up to *seconds*, returning True if nudged early."""
@@ -1399,13 +1398,9 @@ class FcmReceiverHA:
 
                         is_auth = getattr(err, "is_auth_error", False)
                         counter_key = (
-                            f"{entry_id}:auth"
-                            if is_auth
-                            else f"{entry_id}:endpoint"
+                            f"{entry_id}:auth" if is_auth else f"{entry_id}:endpoint"
                         )
-                        fatal_count = (
-                            self._fatal_retry_counts.get(counter_key, 0) + 1
-                        )
+                        fatal_count = self._fatal_retry_counts.get(counter_key, 0) + 1
                         # AP4 race guard: a teardown or a supersede may have
                         # purged/re-owned this entry mid-flight. A suppressed
                         # supervisor is stale for the ENTIRE retry-budget
@@ -1869,9 +1864,7 @@ class FcmReceiverHA:
                         # ``short_run_counter`` reset above stays unguarded (it
                         # cannot leak across incarnations).
                         if not self._entry_writes_suppressed(entry_id, generation):
-                            cap_was_latched = (
-                                entry_id in self._short_run_cap_latched
-                            )
+                            cap_was_latched = entry_id in self._short_run_cap_latched
                             if cap_was_latched:
                                 self._short_run_cap_latched.discard(entry_id)
                                 # Iter-16: a healthy run is also the moment to
@@ -1990,9 +1983,9 @@ class FcmReceiverHA:
         next attempt performs a full fresh handshake instead of looping on the
         same broken identity.
         """
-        return cls._is_reregisterable_id(gcm.get("android_id")) and cls._is_reregisterable_id(
-            gcm.get("security_token")
-        )
+        return cls._is_reregisterable_id(
+            gcm.get("android_id")
+        ) and cls._is_reregisterable_id(gcm.get("security_token"))
 
     async def _invalidate_fcm_tokens(
         self, entry_id: str, generation: int | None = None
@@ -2055,9 +2048,7 @@ class FcmReceiverHA:
                     pass
 
     @staticmethod
-    def _raise_if_fatal_client_error(
-        entry_id: str, err: ClientError
-    ) -> None:
+    def _raise_if_fatal_client_error(entry_id: str, err: ClientError) -> None:
         """Raise ``FatalRegistrationError`` for 401/404 client errors."""
         status_raw = getattr(err, "status", None)
         if status_raw is None:
@@ -2069,15 +2060,13 @@ class FcmReceiverHA:
 
         if status_int == _HTTP_UNAUTHORIZED:
             raise FatalRegistrationError(
-                f"FCM registration auth failed ({status_int}): "
-                "token renewal needed",
+                f"FCM registration auth failed ({status_int}): token renewal needed",
                 is_auth_error=True,
             ) from err
 
         if status_int == _HTTP_NOT_FOUND:
             raise FatalRegistrationError(
-                f"FCM registration endpoint not found ({status_int}): "
-                "may be transient",
+                f"FCM registration endpoint not found ({status_int}): may be transient",
                 is_auth_error=False,
             ) from err
 
@@ -2089,9 +2078,7 @@ class FcmReceiverHA:
         )
 
     @staticmethod
-    def _raise_if_fatal_http_error(
-        entry_id: str, err: FcmRegisterHTTPError
-    ) -> None:
+    def _raise_if_fatal_http_error(entry_id: str, err: FcmRegisterHTTPError) -> None:
         """Map ``FcmRegisterHTTPError`` to ``FatalRegistrationError``.
 
         ``FcmRegisterHTTPError`` is raised inside the firebase_messaging helper
@@ -2106,15 +2093,13 @@ class FcmReceiverHA:
 
         if status_int == _HTTP_UNAUTHORIZED:
             raise FatalRegistrationError(
-                f"FCM registration auth failed ({status_int}): "
-                "token renewal needed",
+                f"FCM registration auth failed ({status_int}): token renewal needed",
                 is_auth_error=True,
             ) from err
 
         if status_int == _HTTP_NOT_FOUND:
             raise FatalRegistrationError(
-                f"FCM registration endpoint not found ({status_int}): "
-                "may be transient",
+                f"FCM registration endpoint not found ({status_int}): may be transient",
                 is_auth_error=False,
             ) from err
 
@@ -2143,9 +2128,7 @@ class FcmReceiverHA:
             # If FCM tokens were invalidated (partial creds with only GCM
             # identity), re-register while preserving android_id.
             needs_reregister = (
-                isinstance(creds, dict)
-                and "gcm" in creds
-                and "fcm" not in creds
+                isinstance(creds, dict) and "gcm" in creds and "fcm" not in creds
             )
             # Publish this supervisor's captured generation for the handshake so
             # the synchronously-fired credentials callback gates on the driving

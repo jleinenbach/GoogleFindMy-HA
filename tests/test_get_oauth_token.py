@@ -114,7 +114,9 @@ def test_main_success_path(monkeypatch: pytest.MonkeyPatch) -> None:
     driver = _FakeDriver(cookie={"value": "token-abc"})
     captured: dict[str, Any] = {}
 
-    def fake_create_driver(*, chrome_path: Any, chrome_version: Any, headless: bool) -> Any:
+    def fake_create_driver(
+        *, chrome_path: Any, chrome_version: Any, headless: bool
+    ) -> Any:
         captured["chrome_path"] = chrome_path
         captured["chrome_version"] = chrome_version
         captured["headless"] = headless
@@ -137,9 +139,7 @@ def test_main_success_path(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_main_missing_cookie_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:
     driver = _FakeDriver(cookie=None)
 
-    monkeypatch.setattr(
-        chrome_driver, "create_driver", lambda **kwargs: driver
-    )
+    monkeypatch.setattr(chrome_driver, "create_driver", lambda **kwargs: driver)
     _patch_wait(monkeypatch)
 
     with pytest.raises(SystemExit) as excinfo:
@@ -192,16 +192,16 @@ def test_module_entrypoint_invokes_main(monkeypatch: pytest.MonkeyPatch) -> None
     captured: dict[str, Any] = {}
     driver = _FakeDriver(cookie={"value": "entry-token"})
 
-    def fake_create_driver(*, chrome_path: Any, chrome_version: Any, headless: bool) -> Any:
+    def fake_create_driver(
+        *, chrome_path: Any, chrome_version: Any, headless: bool
+    ) -> Any:
         captured["chrome_path"] = chrome_path
         captured["chrome_version"] = chrome_version
         return driver
 
     monkeypatch.setattr(chrome_driver, "create_driver", fake_create_driver)
     _patch_wait(monkeypatch)
-    monkeypatch.setattr(
-        sys, "argv", ["get_oauth_token.py", "--chrome-version", "150"]
-    )
+    monkeypatch.setattr(sys, "argv", ["get_oauth_token.py", "--chrome-version", "150"])
 
     runpy.run_path(get_oauth_token.__file__, run_name="__main__")
 

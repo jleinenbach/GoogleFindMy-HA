@@ -85,6 +85,12 @@ class _MixinBase:
     _subentry_metadata: dict[str, SubentryMetadata]
     _default_subentry_key_value: str
 
+    # AP-B2: pending debounce timer handles for EID-resolver refresh triggers.
+    # One per trigger site (central helper in identity.py, inline path in
+    # cache.py) so each site coalesces its own burst independently.
+    _eid_refresh_debounce_handle: asyncio.TimerHandle | None
+    _eid_inline_refresh_debounce_handle: asyncio.TimerHandle | None
+
     # Polling state
     _consecutive_timeouts: int
     _last_poll_result: str | None
@@ -168,9 +174,7 @@ class _MixinBase:
     def _get_google_home_filter(self) -> Any:
         raise NotImplementedError
 
-    def _set_auth_state(
-        self, *, failed: bool, reason: str | None = None
-    ) -> None:
+    def _set_auth_state(self, *, failed: bool, reason: str | None = None) -> None:
         raise NotImplementedError
 
     def note_decrypt_failure(
@@ -256,14 +260,10 @@ class _MixinBase:
     def _reindex_poll_targets_from_device_registry(self) -> None:
         raise NotImplementedError
 
-    def _extract_our_identifier(
-        self, device: dr.DeviceEntry
-    ) -> str | None:
+    def _extract_our_identifier(self, device: dr.DeviceEntry) -> str | None:
         raise NotImplementedError
 
-    def _ensure_service_device_exists(
-        self, entry: ConfigEntry | None = None
-    ) -> None:
+    def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         raise NotImplementedError
 
     def _ensure_device_name_cache(self) -> dict[str, str]:
@@ -276,9 +276,7 @@ class _MixinBase:
     ) -> int:
         raise NotImplementedError
 
-    def _sync_owner_index(
-        self, devices: list[dict[str, Any]] | None
-    ) -> None:
+    def _sync_owner_index(self, devices: list[dict[str, Any]] | None) -> None:
         raise NotImplementedError
 
     def _find_tracker_entity_entry(self, device_id: str) -> Any:
@@ -299,9 +297,7 @@ class _MixinBase:
     ) -> None:
         raise NotImplementedError
 
-    def _store_subentry_snapshots(
-        self, snapshot: Sequence[Mapping[str, Any]]
-    ) -> None:
+    def _store_subentry_snapshots(self, snapshot: Sequence[Mapping[str, Any]]) -> None:
         raise NotImplementedError
 
     def get_subentry_snapshot(
@@ -337,9 +333,7 @@ class _MixinBase:
     def _schedule_eid_resolver_refresh(self) -> None:
         raise NotImplementedError
 
-    def _register_identity_key(
-        self, device_id: str, identity_key: bytes
-    ) -> None:
+    def _register_identity_key(self, device_id: str, identity_key: bytes) -> None:
         raise NotImplementedError
 
     # ------------------------------------------------------------------
@@ -357,9 +351,7 @@ class _MixinBase:
     # ------------------------------------------------------------------
     # Cross-mixin methods: CacheOperations
     # ------------------------------------------------------------------
-    def get_device_location_data(
-        self, device_id: str
-    ) -> dict[str, Any] | None:
+    def get_device_location_data(self, device_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def update_device_cache(
@@ -394,12 +386,8 @@ class _MixinBase:
     ) -> None:
         raise NotImplementedError
 
-    def seed_device_last_seen(
-        self, device_id: str, ts: float
-    ) -> None:
+    def seed_device_last_seen(self, device_id: str, ts: float) -> None:
         raise NotImplementedError
 
-    def prime_device_location_cache(
-        self, device_id: str, data: dict[str, Any]
-    ) -> None:
+    def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         raise NotImplementedError

@@ -488,9 +488,7 @@ async def test_gcm_register_fatal_followed_by_transient_clears_latch(
         _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
         for _ in range(3)
     )
-    responses.append(
-        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
-    )
+    responses.append(_FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"}))
     responses.extend(
         _FakeResponse(500, "Internal Server Error", {"Content-Type": "text/plain"})
         for _ in range(4)
@@ -553,9 +551,7 @@ async def test_gcm_register_transient_followed_by_fatal_raises_final_status(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        await register.gcm_register(
-            {"androidId": 1, "securityToken": 2}, retries=8
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 401
 
@@ -574,9 +570,7 @@ async def test_gcm_register_fatal_followed_by_error_code_clears_latch(
     error body).
     """
     responses: list[_FakeResponse] = []
-    responses.append(
-        _FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"})
-    )
+    responses.append(_FakeResponse(401, "Unauthorized", {"Content-Type": "text/plain"}))
     responses.extend(
         _FakeResponse(
             200,
@@ -648,9 +642,7 @@ async def test_gcm_register_error_code_with_fatal_status_preserves_latch(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        await register.gcm_register(
-            {"androidId": 1, "securityToken": 2}, retries=8
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 401
 
@@ -698,9 +690,7 @@ async def test_gcm_register_transient_then_fatal_error_code_status_raises(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        await register.gcm_register(
-            {"androidId": 1, "securityToken": 2}, retries=8
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 401
 
@@ -823,9 +813,7 @@ async def test_gcm_register_classifier_independent_of_logger_output(
 
     with caplog.at_level(logging.WARNING):
         with pytest.raises(FcmRegisterHTTPError) as exc_info:
-            await register.gcm_register(
-                {"androidId": 1, "securityToken": 2}, retries=8
-            )
+            await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 404
     # Defense is independent of logger output: the silenced logger

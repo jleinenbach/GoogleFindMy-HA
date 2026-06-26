@@ -329,9 +329,7 @@ async def async_spot_request(
                 retries_used += 1
                 await _async_sleep(_compute_delay(attempt))
                 continue
-            raise SpotNetworkError(
-                "SSL transport teardown after retries."
-            ) from err
+            raise SpotNetworkError("SSL transport teardown after retries.") from err
 
         except TimeoutError as err:
             if retries_used < _SPOT_MAX_RETRIES:

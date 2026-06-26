@@ -823,6 +823,8 @@ class GoogleFindMyCoordinator(
             "invalid_ts_drop_count": 0,  # invalid or stale (< existing) timestamps
             "future_ts_drop_count": 0,  # timestamps too far in the future
             "drop_reason_invalid_ts": 0,  # invalid/stale timestamps (detail bucket)
+            "invalid_ts_drop_warn": 0,  # corrupt (pre-Y2K) timestamps (alarming sub-bucket of invalid_ts_drop_count)
+            "invalid_ts_drop_benign": 0,  # regressed/out-of-order timestamps (expected sub-bucket of invalid_ts_drop_count)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
             # Canonicless drops on the last main poll (transition-independent
@@ -1130,6 +1132,21 @@ class GoogleFindMyCoordinator(
         stats_save_task = getattr(self, "_stats_save_task", None)
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
+
+        # Cancel pending EID-resolver refresh debounce timers so no
+        # ``call_later`` callback fires (and creates a task) after unload.
+        for attr in (
+            "_eid_refresh_debounce_handle",
+            "_eid_inline_refresh_debounce_handle",
+        ):
+            handle = getattr(self, attr, None)
+            if handle is not None:
+                try:
+                    handle.cancel()
+                except Exception:
+                    pass
+                finally:
+                    setattr(self, attr, None)
 
         await self._async_unload()
 

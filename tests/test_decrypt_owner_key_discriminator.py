@@ -239,7 +239,9 @@ def test_local_owner_key_defect_requests_rederive_not_reauth(message: str) -> No
     no "re-authenticate" claim. RED today: HEAD still returns
     ``OwnerKeyInvalidError`` (a reauth-worthy ``DecryptionError``).
     """
-    result = _classify_owner_key_failure(RuntimeError(message), context="initial lookup")
+    result = _classify_owner_key_failure(
+        RuntimeError(message), context="initial lookup"
+    )
     assert type(result) is _OwnerKeyRederiveRequired
     # Fail-safe: a transient subclass, never a reauth-worthy DecryptionError.
     assert isinstance(result, OwnerKeyLookupTransientError)
@@ -335,7 +337,9 @@ async def test_e2ee_metadata_diagnostic_failure_logs_at_debug_not_warning(
         for record in caplog.records
         if "Failed to retrieve E2EE metadata for diagnostics" in record.getMessage()
     ]
-    assert diagnostic_records, "expected the best-effort diagnostic log line to be emitted"
+    assert diagnostic_records, (
+        "expected the best-effort diagnostic log line to be emitted"
+    )
     # Mutation-sharp: reverting debug -> warning flips levelno and fails this assertion.
     assert all(record.levelno == logging.DEBUG for record in diagnostic_records)
     assert not any(record.levelno == logging.WARNING for record in diagnostic_records)
@@ -352,7 +356,9 @@ async def test_owner_key_forced_refresh_invalid_tag_maps_to_mismatch(
         OwnerKeyInfo,
     )
 
-    async def _owner(*, cache: object, force_refresh: bool = False, **_kw: object) -> object:
+    async def _owner(
+        *, cache: object, force_refresh: bool = False, **_kw: object
+    ) -> object:
         if force_refresh:
             raise InvalidTag()
         return OwnerKeyInfo(key=b"\x00" * 32, version=1)
@@ -486,9 +492,7 @@ async def test_r8_sync_wrapper_preserves_spot_error_type(
 # ---------------------------------------------------------------------------
 
 
-def _install_grpc_outcome(
-    monkeypatch: pytest.MonkeyPatch, outcome: Exception
-) -> None:
+def _install_grpc_outcome(monkeypatch: pytest.MonkeyPatch, outcome: Exception) -> None:
     """Drive ``async_spot_request`` to hit ``outcome`` on the gRPC stream."""
 
     class _Stream:
@@ -516,9 +520,7 @@ def _install_grpc_outcome(
     monkeypatch.setattr(_spot, "_compute_delay", lambda attempt: 0.0)
     monkeypatch.setattr(_spot, "async_get_username", AsyncMock(return_value="user"))
     monkeypatch.setattr(_spot, "async_get_spot_token", AsyncMock(return_value="token"))
-    monkeypatch.setattr(
-        _spot, "async_get_adm_token_api", AsyncMock(return_value="adm")
-    )
+    monkeypatch.setattr(_spot, "async_get_adm_token_api", AsyncMock(return_value="adm"))
 
 
 @pytest.mark.asyncio

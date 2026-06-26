@@ -338,6 +338,18 @@ def _concurrency_block(hass: HomeAssistant) -> dict[str, int]:
     }
 
 
+def _crypto_block(info: dict[str, str | None]) -> dict[str, str | None]:
+    """Return a shallow copy of the ECDSA acceleration info for diagnostics.
+
+    Takes the already-materialized info dict (see
+    ``get_ecdsa_acceleration_info``) and copies it so the cached SSOT dict is
+    never mutated. No I/O and no defensive try/except here: the SSOT already
+    handles ``PackageNotFoundError`` internally, so there is no reachable
+    error branch to swallow (matches ``_concurrency_block`` style).
+    """
+    return dict(info)
+
+
 def _fcm_receiver_state(hass: HomeAssistant) -> dict[str, Any] | None:
     """Summarize FCM receiver runtime health without leaking internals."""
     bucket = hass.data.get(DOMAIN, {}) or {}
@@ -680,6 +692,11 @@ async def async_get_config_entry_diagnostics(
     concurrency = _concurrency_block(hass)
     fcm_state = _fcm_receiver_state(hass)
 
+    # ECDSA big-int backend + installed accelerator versions (global), cached by
+    # async_setup in hass.data. Read synchronously here (no I/O), consistent with
+    # every other diagnostics block; present once async_setup has materialized it.
+    crypto_info = (hass.data.get(DOMAIN, {}) or {}).get("ecdsa_acceleration_info")
+
     # EIK cache statistics (performance optimization metrics)
     # Import lazily to avoid circular import (diagnostics <- decrypt_locations <- __init__ <- diagnostics)
     from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -706,6 +723,8 @@ async def async_get_config_entry_diagnostics(
         "concurrency": concurrency,
         "eik_cache": eik_cache_stats,
     }
+    if crypto_info:
+        payload["crypto"] = _crypto_block(crypto_info)
     if coordinator_block:
         payload["coordinator"] = coordinator_block
     if fcm_state:

@@ -22,6 +22,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import issue_registry as ir
 
 from ..const import (
+    _EID_REFRESH_DEBOUNCE_S,
     CONF_GOOGLE_EMAIL,
     DATA_EID_RESOLVER,
     DOMAIN,
@@ -140,7 +141,21 @@ class IdentityOperations(_MixinBase):
         return issue_present
 
     def _schedule_eid_resolver_refresh(self) -> None:
-        """Refresh the global EID resolver when active device sets change."""
+        """Refresh the global EID resolver when active device sets change.
+
+        AP-B2 trigger-task debounce: the four read-only call sites that drive
+        this helper can fire back-to-back during an FCM burst. Without
+        coalescing, each call spawns its own ``async_create_task`` even though
+        the resolver only needs one rebuild. We hold a single pending timer
+        handle per coordinator instance: the first trigger arms a
+        ``loop.call_later`` timer, and any further trigger within
+        ``_EID_REFRESH_DEBOUNCE_S`` is dropped (no second task). When the timer
+        fires the handle is cleared *before* the task is created, so a trigger
+        arriving after the window still arms a fresh timer and produces a new
+        task (no swallowed window-change). The rebuild-vs-skip decision stays in
+        the AP-B1 skip guard, so debouncing the trigger never drops a real
+        change.
+        """
 
         hass = getattr(self, "hass", None)
         hass_data = getattr(hass, "data", None)
@@ -153,14 +168,36 @@ class IdentityOperations(_MixinBase):
 
         resolver = bucket.get(DATA_EID_RESOLVER)
         refresh = getattr(resolver, "async_refresh", None)
-        if callable(refresh):
-            create_task = getattr(self.hass, "async_create_task", None)
-            if callable(create_task):
-                create_task(refresh())
+        if not callable(refresh):
+            return
 
-    def _register_identity_key(
-        self, device_id: str, identity_key: bytes
-    ) -> None:
+        create_task = getattr(hass, "async_create_task", None)
+        if not callable(create_task):
+            return
+
+        def _spawn_refresh_task() -> None:
+            """Clear the debounce handle, then create the single refresh task."""
+            # Clear first so a trigger after the window arms a fresh timer.
+            self._eid_refresh_debounce_handle = None
+            create_task(refresh())
+
+        loop = getattr(hass, "loop", None)
+        call_later = getattr(loop, "call_later", None)
+        if not callable(call_later):
+            # No event loop available (e.g. minimal stubs): fall back to the
+            # legacy immediate behaviour so a refresh is never lost.
+            create_task(refresh())
+            return
+
+        # A timer is already pending for this window: coalesce this trigger.
+        if getattr(self, "_eid_refresh_debounce_handle", None) is not None:
+            return
+
+        self._eid_refresh_debounce_handle = call_later(
+            _EID_REFRESH_DEBOUNCE_S, _spawn_refresh_task
+        )
+
+    def _register_identity_key(self, device_id: str, identity_key: bytes) -> None:
         """Register a device's identity_key for shared tracker detection.
 
         Maintains a mapping from identity_key to all device_ids that share the

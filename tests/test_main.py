@@ -337,7 +337,9 @@ class TestAtomicWriteJson:
         assert json.loads(target.read_text(encoding="utf-8")) == payload
         assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
         # No orphan temp artifact left behind in the target directory.
-        leftovers = [p.name for p in target.parent.iterdir() if p.name != "secrets.json"]
+        leftovers = [
+            p.name for p in target.parent.iterdir() if p.name != "secrets.json"
+        ]
         assert leftovers == []
 
     def test_replace_failure_preserves_original_and_cleans_temp(
@@ -365,7 +367,9 @@ class TestAtomicWriteJson:
         # (ii) not a 0-byte / partial truncation.
         assert target.stat().st_size == len(original_bytes)
         # (iii) no orphan temp file lingering next to the target.
-        leftovers = [p.name for p in target.parent.iterdir() if p.name != "secrets.json"]
+        leftovers = [
+            p.name for p in target.parent.iterdir() if p.name != "secrets.json"
+        ]
         assert leftovers == []
 
     def test_chmod_failure_cleans_already_consumed_temp(
@@ -389,7 +393,9 @@ class TestAtomicWriteJson:
 
         # The replace already happened, so the target exists; no orphan temp.
         assert target.exists()
-        leftovers = [p.name for p in target.parent.iterdir() if p.name != "secrets.json"]
+        leftovers = [
+            p.name for p in target.parent.iterdir() if p.name != "secrets.json"
+        ]
         assert leftovers == []
 
 
@@ -398,7 +404,9 @@ class TestFileCacheSave:
     load-failure guard."""
 
     @staticmethod
-    def _make_cache(tmp_path, monkeypatch: pytest.MonkeyPatch, initial_json: str | None):  # type: ignore[no-untyped-def]
+    def _make_cache(
+        tmp_path, monkeypatch: pytest.MonkeyPatch, initial_json: str | None
+    ):  # type: ignore[no-untyped-def]
         from custom_components.googlefindmy import main as cli_main
         from custom_components.googlefindmy.Auth import token_cache
 

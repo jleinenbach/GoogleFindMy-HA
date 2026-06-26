@@ -162,7 +162,7 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
     - Specifically, open the file in a text editor, select all, and copy.
 > [!IMPORTANT]
 > The encryption key (`shared_key`) is only retrieved during the **second** login, which happens when you actively **select a device to locate**. If you stop after the device list appears (skipping that step), the resulting `secrets.json` has no `shared_key` and Home Assistant will reject the import with a `keys_missing` error, because locations cannot be decrypted without it.
-> As an alternative to the external GoogleFindMyTools, the bundled CLI (`custom_components/googlefindmy/main.py`) fetches **both** keys automatically in a single run, without requiring you to select a device manually, so it is the more robust way to generate a complete `secrets.json`.
+> As an alternative to the external GoogleFindMyTools, this repository ships a bundled copy of the same CLI that fetches **both** keys automatically in a single run, without requiring you to select a device manually, so it is the more robust way to generate a complete `secrets.json`. **To use it for the initial login you must run it from a flat folder:** copy the *contents* of `custom_components/googlefindmy/` into a fresh, empty directory (so that `main.py`, `Auth/`, `NovaApi/`, etc. sit directly at its top level) and run `python main.py` from there. The flat layout is required because the script auto-detects its location: when it is run in place at `custom_components/googlefindmy/main.py` it operates in Home Assistant mode and only lists devices from an **existing** `secrets.json`, so it will not open the Chrome login that creates the bundle.
 
 ### <ins>Authentication Part 2 (Home Assistant Steps)</ins>
 4. Add the integration to your Home Assistant install.
@@ -300,6 +300,39 @@ The integration provides a couple of Home Assistant Actions for use with automat
 - **Coordinator-driven updates:** Location and metadata are refreshed through Home Assistant's [`DataUpdateCoordinator`](https://developers.home-assistant.io/docs/integration_fetching_data/) with a default 300-second polling interval.  Staggered per-device delays keep API calls within Google's rate limits.
 - **Manual refresh:** Call the `googlefindmy.locate_device` action to request fresh data outside the scheduled polling cycle.  The integration debounces requests to avoid repeated queries that would exceed the appropriate polling guidance.
 - **Repair flows:** When authentication expires or Google invalidates API tokens, the integration raises a [Home Assistant repair issue](https://developers.home-assistant.io/docs/core/platform/repairs/) that guides you through reauthentication without removing the config entry.
+
+### Optional: faster legacy-tracker EID computation (advanced)
+
+Only **older** FMDN trackers exercise a pure-Python elliptic-curve path
+(SECP160r1) when computing rotating EIDs. Modern trackers use P-256, which is
+already C-backed (`cryptography`), so they are unaffected. For the legacy path,
+`python-ecdsa` automatically uses `gmpy2` (preferred) or `gmpy` for its modular
+arithmetic **if either is importable**, with no configuration. If neither is
+present, it falls back to pure Python.
+
+This is purely optional and the effect is small. After the polling/refresh
+optimizations in #1140 the legacy path runs rarely, and the measured speedup is
+modest: roughly **~1.15x on x86_64** for this small curve (not the "~3x" the
+library advertises for large operands). On weaker ARM CPUs it may be somewhat
+higher, but this is not quantified.
+
+You can verify which backend would be used (and which accelerator versions are
+installed) from the integration's diagnostics download (`crypto.ecdsa_acceleration`
+and `crypto.gmpy2_version`) or from a one-time DEBUG log line at startup. Note
+that this reports *import availability and installed version*, not guaranteed
+runtime acceleration: a broken `gmpy2` install would still appear installed
+while `python-ecdsa` silently falls back to pure Python.
+
+| Platform | gmpy2 wheel? | Effect on legacy path |
+|---|---|---|
+| x86_64 / aarch64 (glibc) | yes | small speedup (~1.15x x86_64), used automatically |
+| aarch64 (musl) | yes (>= 2.3.1) | small speedup, used automatically |
+| armv6 / armv7 (32-bit) | no | not installable, no effect |
+
+On **32-bit ARM (armv6/armv7)** there is no `gmpy2` wheel and a source build
+fails, so it cannot be used there. Because the effect is already small after the
+#1140 optimizations and only touches legacy trackers, installing `gmpy2` is a
+minor, optional tweak rather than a recommended step.
 
 ## Known limitations
 

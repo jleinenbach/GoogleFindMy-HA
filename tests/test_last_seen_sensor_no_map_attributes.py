@@ -61,7 +61,9 @@ async def _build_last_seen_sensor(
     "Async tests").
     """
 
-    del deterministic_config_subentry_id  # side effect: patches ensure_config_subentry_id
+    del (
+        deterministic_config_subentry_id
+    )  # side effect: patches ensure_config_subentry_id
 
     device_tracker = importlib.import_module(
         "custom_components.googlefindmy.device_tracker"

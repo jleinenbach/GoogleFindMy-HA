@@ -225,9 +225,7 @@ class RegistryOperations(_MixinBase):
         cache[func] = kwarg_name
         return kwarg_name
 
-    def _device_registry_allows_translation_update(
-        self, dev_reg: Any
-    ) -> bool:
+    def _device_registry_allows_translation_update(self, dev_reg: Any) -> bool:
         """Return True if the registry accepts translation metadata during updates."""
 
         cached = getattr(self, "_device_registry_supports_translation_update", None)
@@ -320,9 +318,7 @@ class RegistryOperations(_MixinBase):
         )
         self._schedule_eid_resolver_refresh()
 
-    def _extract_our_identifier(
-        self, device: dr.DeviceEntry
-    ) -> str | None:
+    def _extract_our_identifier(self, device: dr.DeviceEntry) -> str | None:
         """Return the first valid (DOMAIN, identifier) from a device, else None.
 
         Multi-account compatibility:
@@ -351,9 +347,7 @@ class RegistryOperations(_MixinBase):
                 return result
         return None
 
-    def _sync_owner_index(
-        self, devices: list[dict[str, Any]] | None
-    ) -> None:
+    def _sync_owner_index(self, devices: list[dict[str, Any]] | None) -> None:
         """Sync hass.data owner index for this entry (FCM fallback support)."""
         hass = getattr(self, "hass", None)
         entry_id = self._entry_id()
@@ -428,9 +422,7 @@ class RegistryOperations(_MixinBase):
         # callers relied on the old behavior, but return immediately.
         return
 
-    def _device_display_name(
-        self, dev: dr.DeviceEntry, fallback: str
-    ) -> str:
+    def _device_display_name(self, dev: dr.DeviceEntry, fallback: str) -> str:
         """Return the best human-friendly device name without sensitive data."""
         return _extract_display_name_impl(dev.name_by_user, dev.name, fallback)
 
@@ -439,9 +431,7 @@ class RegistryOperations(_MixinBase):
         entry = getattr(self, "config_entry", None)
         return getattr(entry, "entry_id", None)
 
-    def _config_entry_exists(
-        self, entry_id: str | None = None
-    ) -> bool:
+    def _config_entry_exists(self, entry_id: str | None = None) -> bool:
         """Return True when the coordinator's entry is still registered."""
         hass = getattr(self, "hass", None)
         config_entries = getattr(hass, "config_entries", None)
@@ -460,18 +450,14 @@ class RegistryOperations(_MixinBase):
 
         return True
 
-    def _redact_text(
-        self, value: str | None, max_len: int = 120
-    ) -> str:
+    def _redact_text(self, value: str | None, max_len: int = 120) -> str:
         """Return a short, redacted string variant suitable for logs/diagnostics."""
         if not value:
             return ""
         s = str(value)
         return s if len(s) <= max_len else (s[:max_len] + "…")
 
-    def _ensure_service_device_exists(
-        self, entry: ConfigEntry | None = None
-    ) -> None:
+    def _ensure_service_device_exists(self, entry: ConfigEntry | None = None) -> None:
         """Idempotently create/update the per-entry 'service device' in the device registry.
 
         This keeps diagnostic entities (e.g. polling/auth-status) grouped under a stable
@@ -1012,9 +998,7 @@ class RegistryOperations(_MixinBase):
     # Optional back-compat alias (some callers may use the public-style name)
     ensure_service_device_exists = _ensure_service_device_exists
 
-    def _find_tracker_entity_entry(
-        self, device_id: str
-    ) -> EntityRegistryEntry | None:
+    def _find_tracker_entity_entry(self, device_id: str) -> EntityRegistryEntry | None:
         """Return the registry entry for a tracker and migrate legacy unique IDs.
 
         Uses Phase 12 helpers for identifier extraction and unique_id generation.
@@ -1286,9 +1270,7 @@ class RegistryOperations(_MixinBase):
         )
         return None
 
-    def find_tracker_entity_entry(
-        self, device_id: str
-    ) -> EntityRegistryEntry | None:
+    def find_tracker_entity_entry(self, device_id: str) -> EntityRegistryEntry | None:
         """Public wrapper to expose tracker entity lookup to platforms."""
         return self._find_tracker_entity_entry(device_id)
 

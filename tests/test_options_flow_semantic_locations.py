@@ -102,7 +102,7 @@ async def test_semantic_locations_options_lifecycle() -> None:
             OPT_SEMANTIC_LOCATIONS: {
                 "Office": {"latitude": 1.0, "longitude": 2.0, "accuracy": 3.0}
             }
-        }
+        },
     )
     hass = _HassStub(entry)
 
@@ -216,7 +216,7 @@ async def test_semantic_location_edit_prefills_existing_values() -> None:
             OPT_SEMANTIC_LOCATIONS: {
                 "Büro": {"latitude": 50.0, "longitude": 10.0, "accuracy": 7.0}
             }
-        }
+        },
     )
     hass = _HassStub(entry)
 

@@ -3704,9 +3704,7 @@ class ConfigFlow(
                                             updated_data[DATA_AAS_TOKEN] = to_persist
                                         elif DATA_AAS_TOKEN in updated_data:
                                             updated_data.pop(DATA_AAS_TOKEN, None)
-                                        await self._async_clear_cached_aas_token(
-                                            entry
-                                        )
+                                        await self._async_clear_cached_aas_token(entry)
                                         # The single-key gate above already
                                         # guaranteed a usable shared_key, so the
                                         # persist runs unconditionally here; record
@@ -5546,12 +5544,17 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         if selector is not None:
             _register(
                 vol.Optional(OPT_CONTRIBUTOR_MODE),
-                selector({
-                    "select": {
-                        "options": [CONTRIBUTOR_MODE_HIGH_TRAFFIC, CONTRIBUTOR_MODE_IN_ALL_AREAS],
-                        "translation_key": "contributor_mode",
+                selector(
+                    {
+                        "select": {
+                            "options": [
+                                CONTRIBUTOR_MODE_HIGH_TRAFFIC,
+                                CONTRIBUTOR_MODE_IN_ALL_AREAS,
+                            ],
+                            "translation_key": "contributor_mode",
+                        }
                     }
-                }),
+                ),
             )
         else:
             _register(

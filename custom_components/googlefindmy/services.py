@@ -1020,7 +1020,10 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
 
         try:
             internal_url = get_url(
-                hass, allow_external=False, allow_cloud=False, allow_internal=True,
+                hass,
+                allow_external=False,
+                allow_cloud=False,
+                allow_internal=True,
             )
         except (HomeAssistantError, NoURLAvailableError):
             internal_url = None

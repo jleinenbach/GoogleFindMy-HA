@@ -79,6 +79,7 @@ def test_stale_timestamp_is_rejected_before_merge() -> None:
     assert stat_counts == {
         "invalid_ts_drop_count": 1,
         "drop_reason_invalid_ts": 1,
+        "invalid_ts_drop_benign": 1,
     }
 
 

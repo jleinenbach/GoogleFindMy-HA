@@ -111,7 +111,9 @@ def test_decode_hex_32_plain() -> None:
 
 
 def test_decode_hex_32_accepts_prefix_whitespace_and_uppercase() -> None:
-    spaced = "0X" + " ".join(_HEX_KEY[i : i + 2].upper() for i in range(0, len(_HEX_KEY), 2))
+    spaced = "0X" + " ".join(
+        _HEX_KEY[i : i + 2].upper() for i in range(0, len(_HEX_KEY), 2)
+    )
     assert skr._decode_hex_32(spaced) == _RAW_KEY
 
 
@@ -253,7 +255,9 @@ async def test_retrieve_raises_in_non_interactive_mode(no_tty_stdin: None) -> No
     # The absent-key case raises the TYPED SharedKeyUnavailableError (a
     # RuntimeError subclass) so downstream owner-key classification escalates to
     # reauth on the exception type, not the message wording.
-    with pytest.raises(skr.SharedKeyUnavailableError, match="non-interactive environment"):
+    with pytest.raises(
+        skr.SharedKeyUnavailableError, match="non-interactive environment"
+    ):
         await skr._retrieve_shared_key_hex()
     assert issubclass(skr.SharedKeyUnavailableError, RuntimeError)
 
@@ -295,9 +299,7 @@ async def test_retrieve_wraps_interactive_failure(
 # ---------------------------------------------------------------------------
 
 
-def _install_fake_flow(
-    monkeypatch: pytest.MonkeyPatch, return_value: Any
-) -> None:
+def _install_fake_flow(monkeypatch: pytest.MonkeyPatch, return_value: Any) -> None:
     """Inject a fake ``shared_key_flow`` module and a pass-through executor."""
     module = ModuleType("custom_components.googlefindmy.KeyBackup.shared_key_flow")
     module.request_shared_key_flow = lambda: return_value  # type: ignore[attr-defined]

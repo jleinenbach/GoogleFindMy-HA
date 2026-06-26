@@ -50,7 +50,9 @@ def _install(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
         def __init__(self, *_a: object, **_k: object) -> None:
             return None
 
-        def open(self, metadata: Any = None, timeout: float | None = None) -> _RaisingStream:
+        def open(
+            self, metadata: Any = None, timeout: float | None = None
+        ) -> _RaisingStream:
             return _RaisingStream(exc)
 
     monkeypatch.setattr(grpclib.client, "UnaryUnaryMethod", _StubMethod)

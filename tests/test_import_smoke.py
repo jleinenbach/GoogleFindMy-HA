@@ -24,9 +24,7 @@ import custom_components.googlefindmy as _pkg
 # Discover every module in the package tree once at collection time.
 _ALL_MODULES: list[str] = [
     mod_info.name
-    for mod_info in pkgutil.walk_packages(
-        _pkg.__path__, prefix=_pkg.__name__ + "."
-    )
+    for mod_info in pkgutil.walk_packages(_pkg.__path__, prefix=_pkg.__name__ + ".")
 ]
 
 

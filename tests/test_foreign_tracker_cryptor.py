@@ -74,9 +74,7 @@ class TestDecryptIdentityKeyLength:
 def _valid_eid() -> bytes:
     """Build a valid SECP160r1 EID (on-curve x-coordinate) for encrypt() inputs."""
     identity_key = b"\x01" * EIK_LENGTH
-    return generate_eid_variant(
-        identity_key, 0, EidVariant.LEGACY_SECP160R1_X20_BE
-    )
+    return generate_eid_variant(identity_key, 0, EidVariant.LEGACY_SECP160R1_X20_BE)
 
 
 class TestNonceFreshnessContract:
@@ -153,7 +151,9 @@ class TestRxToRyCofactorSafety:
             if ryy != 0 and pow(ryy, (p - 1) // 2, p) == p - 1:
                 non_residue_x = cand
                 break
-        assert non_residue_x is not None, "expected an off-curve x for the negative case"
+        assert non_residue_x is not None, (
+            "expected an off-curve x for the negative case"
+        )
         with pytest.raises(ValueError, match="not on the curve"):
             rx_to_ry(non_residue_x, curve_fp)
 

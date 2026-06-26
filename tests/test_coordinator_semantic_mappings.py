@@ -331,7 +331,9 @@ class _DecryptFailAPI:
         self._exc = exc
         self.calls = 0
 
-    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         self.calls += 1
         raise self._exc
 
@@ -359,7 +361,9 @@ async def test_poll_cycle_escalates_persistent_decrypt_failure_to_reauth() -> No
     # coordinator refresh and HA's automatic reauth would never fire).
     coordinator.config_entry.async_start_reauth = MagicMock()
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -393,7 +397,9 @@ class _DecryptThenSucceedAPI:
         self._fail = fail_times
         self.calls = 0
 
-    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         self.calls += 1
         if self.calls <= self._fail:
             raise self._exc
@@ -488,7 +494,9 @@ class _DecryptThenMetadataOnlyAPI:
         self._fail = fail_times
         self.calls = 0
 
-    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         self.calls += 1
         if self.calls <= self._fail:
             raise self._exc
@@ -538,7 +546,9 @@ class _DecryptThenSemanticAPI:
         self._fail = fail_times
         self.calls = 0
 
-    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         self.calls += 1
         if self.calls <= self._fail:
             raise self._exc
@@ -591,7 +601,9 @@ class _DecryptThenHiddenProofAPI:
         self._fail = fail_times
         self.calls = 0
 
-    async def async_get_device_location(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    async def async_get_device_location(
+        self, *_args: Any, **_kwargs: Any
+    ) -> dict[str, Any]:
         self.calls += 1
         if self.calls <= self._fail:
             raise self._exc
@@ -672,7 +684,9 @@ async def test_poll_cycle_partial_decrypt_failure_still_escalates() -> None:
 
     coordinator.config_entry.async_start_reauth = MagicMock()
     await coordinator._async_start_poll_cycle(devices)
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -712,7 +726,9 @@ async def test_poll_cycle_counts_multi_device_decrypt_failure_once() -> None:
     # Third consecutive cycle reaches the threshold -> escalate exactly once.
     coordinator.config_entry.async_start_reauth = MagicMock()
     await coordinator._async_start_poll_cycle(devices)
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -730,7 +746,9 @@ async def test_poll_cycle_nova_permanent_auth_starts_reauth() -> None:
 
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
 
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -750,7 +768,9 @@ async def test_poll_cycle_transient_nova_auth_starts_reauth_after_threshold() ->
 
     # Threshold cycle escalates exactly once.
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
 
 
 @pytest.mark.asyncio
@@ -786,7 +806,9 @@ async def test_poll_cycle_direct_config_entry_auth_failed_starts_reauth() -> Non
 
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
 
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
     assert any(kw.get("failed") for kw in auth_calls)
 
 
@@ -798,7 +820,9 @@ class _MixedDecryptAPI:
     tracker_key_outdated state to OK when a sibling decrypts successfully.
     """
 
-    def __init__(self, fail_id: str, exc: Exception, ok_payload: dict[str, Any]) -> None:
+    def __init__(
+        self, fail_id: str, exc: Exception, ok_payload: dict[str, Any]
+    ) -> None:
         self._fail_id = fail_id
         self._exc = exc
         self._ok_payload = ok_payload

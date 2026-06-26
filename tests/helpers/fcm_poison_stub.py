@@ -14,6 +14,7 @@ attribute names (``logger``, ``do_listen``, ``run_state``, ``config``,
 test instrumentation fields (``_loop_iteration_count``, ``_last_handled_id``,
 ``_after_iter_hook``) are exposed for the Aggregate-Anti-Cascading test.
 """
+
 from __future__ import annotations
 
 import logging

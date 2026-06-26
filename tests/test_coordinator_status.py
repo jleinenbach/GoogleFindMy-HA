@@ -810,7 +810,9 @@ def test_push_updated_subentry_index_uses_merged_snapshot(
     visible_arg = captured_index_calls[-1]
     assert visible_arg is not None, "F-9: index must receive merged_snapshot, not None"
     ids_seen = {
-        dev.get("device_id") or dev.get("id") for dev in visible_arg if isinstance(dev, dict)
+        dev.get("device_id") or dev.get("id")
+        for dev in visible_arg
+        if isinstance(dev, dict)
     }
     assert ids_seen == {"dev-1", "dev-2"}, (
         f"F-9: index must see both devices via merged_snapshot; got {ids_seen}"

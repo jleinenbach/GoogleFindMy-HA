@@ -55,8 +55,6 @@ class MissingNamespaceError(HomeAssistantError):
 class FatalRegistrationError(HomeAssistantError):
     """Raised when FCM registration fails with a fatal status code."""
 
-    def __init__(
-        self, message: str, *, is_auth_error: bool = False
-    ) -> None:
+    def __init__(self, message: str, *, is_auth_error: bool = False) -> None:
         super().__init__(message)
         self.is_auth_error = is_auth_error

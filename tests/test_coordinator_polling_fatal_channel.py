@@ -47,9 +47,7 @@ class TestClassifyFcmFatal:
             f"(persistent poison message suspected)"
         )
 
-        assert (
-            _classify_fcm_fatal(cap_message) == _FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED
-        )
+        assert _classify_fcm_fatal(cap_message) == _FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED
 
     def test_bare_prefix_is_also_excluded(self) -> None:
         """Defense is on the prefix alone, not the full message body."""
@@ -75,9 +73,7 @@ class TestClassifyFcmFatal:
         # start with the crash-loop prefix.
         msg = "Transient FCM error: connection reset"
 
-        assert (
-            _classify_fcm_fatal(msg) == _FCM_FATAL_CLASS_AUTH_AFTER_THRESHOLD
-        )
+        assert _classify_fcm_fatal(msg) == _FCM_FATAL_CLASS_AUTH_AFTER_THRESHOLD
 
     def test_wire_contract_cap_message_matches_prefix(self) -> None:
         """The cap-fire branch must produce a message the classifier excludes.
@@ -97,6 +93,4 @@ class TestClassifyFcmFatal:
         )
 
         assert cap_message.startswith(CRASH_LOOP_FATAL_PREFIX)
-        assert (
-            _classify_fcm_fatal(cap_message) == _FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED
-        )
+        assert _classify_fcm_fatal(cap_message) == _FCM_FATAL_CLASS_CRASH_LOOP_EXCLUDED

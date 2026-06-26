@@ -259,8 +259,7 @@ def test_t10_connectivity_identity_independent_of_translated_name() -> None:
 
     en = json.loads((_TRANSLATIONS_DIR / "en.json").read_text(encoding="utf-8"))
     assert (
-        en["entity"]["binary_sensor"]["connectivity"]["name"]
-        == "FCM Connection Status"
+        en["entity"]["binary_sensor"]["connectivity"]["name"] == "FCM Connection Status"
     )
 
 
@@ -269,9 +268,7 @@ def test_t10_connectivity_identity_independent_of_translated_name() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    "path", _all_translation_files(), ids=lambda p: p.name
-)
+@pytest.mark.parametrize("path", _all_translation_files(), ids=lambda p: p.name)
 def test_t11_encryption_key_status_present_and_complete(path: Path) -> None:
     """Every translation file defines the sensor name and all four states."""
 
@@ -289,9 +286,7 @@ def test_t11_encryption_key_status_present_and_complete(path: Path) -> None:
         assert isinstance(value, str) and value.strip(), f"{path.name} {key} empty"
 
 
-@pytest.mark.parametrize(
-    "path", _all_translation_files(), ids=lambda p: p.name
-)
+@pytest.mark.parametrize("path", _all_translation_files(), ids=lambda p: p.name)
 def test_t11_connectivity_rename_present(path: Path) -> None:
     """Every translation file carries the FCM-qualified connectivity name."""
 

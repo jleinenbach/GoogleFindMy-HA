@@ -34,6 +34,7 @@ from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaError,
     NovaHTTPError,
     NovaRateLimitError,
+    TTLPolicy,
     async_nova_request,
     register_cache_provider,
     unregister_cache_provider,
@@ -520,7 +521,9 @@ async def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> No
     await _run()
 
 
-async def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> None:
+async def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> (
+    None
+):
     """Invalid AAS tokens remove both namespaced and bare cache keys."""
 
     async def _run() -> None:
@@ -629,7 +632,11 @@ async def test_async_nova_request_returns_hex_only_on_http_200(
     session = _DummySession([_DummyResponse(200, b"\x10\x20")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -668,7 +675,11 @@ async def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
     session = _DummySession([_DummyResponse(200, b"\x10\x20")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -731,7 +742,11 @@ async def test_async_nova_request_raises_on_connection_setup_failure(
     session = _ConnFailingSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -801,7 +816,11 @@ async def test_async_nova_request_network_retry_uses_tiered_log_level(
     session = _ConnFailingSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -884,7 +903,11 @@ async def test_async_nova_request_marks_read_phase_failure_dispatched(
     session = _ReadFailingSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -971,7 +994,11 @@ async def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
     session = _MixedSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1051,7 +1078,11 @@ async def test_async_nova_request_latches_dispatch_across_http_status_exit(
     session = _WireThenHttpSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1122,7 +1153,11 @@ async def test_async_nova_request_latches_dispatch_on_pure_status_read(
     session = _StatusThenConnSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1169,7 +1204,11 @@ async def test_async_nova_request_pure_4xx_does_not_latch_dispatch(
     session = _DummySession([_DummyResponse(403, b"forbidden")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1220,7 +1259,11 @@ async def test_async_nova_request_non_retryable_5xx_does_not_latch_dispatch(
     session = _DummySession([_DummyResponse(status, b"nope")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1269,7 +1312,11 @@ async def test_async_nova_request_pure_429_does_not_latch_dispatch(
     session = _DummySession([_DummyResponse(429, b"slow down") for _ in range(7)])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1316,7 +1363,11 @@ async def test_async_nova_request_latch_survives_later_429(
     )
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -2813,6 +2864,135 @@ async def test_async_ttl_policy_accepts_legitimate_short_ttl_above_threshold() -
             await cache.close()
 
     await _run()
+
+
+async def test_async_ttl_policy_recalibration_logs_info_not_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The async recalibration path logs at INFO, not WARNING (severity downgrade).
+
+    A downward TTL recalibration after an unplanned 401 is correct, self-healing
+    behavior (a 6h probe re-explores the full lifetime upward), so the event is
+    not user-actionable and must not raise a WARNING.
+
+    Mutation sentinel: if the emitter is reverted to ``self.log.warning(...)``,
+    the level assertion turns red.
+    """
+
+    logger_name = "test_async_recal_info"
+
+    async def _run() -> None:
+        hass = _FakeHass()
+        cache = await TokenCache.create(hass, "entry-async-recal-info")
+        try:
+            namespace = "entry-async-recal-info"
+            username = "user@example.com"
+
+            async def _cache_get(key: str) -> Any:
+                return await cache.get(key)
+
+            async def _cache_set(key: str, value: Any) -> None:
+                await cache.set(key, value)
+
+            async def _refresh() -> str:
+                return "fresh-token"
+
+            policy = AsyncTTLPolicy(
+                username=username,
+                logger=logging.getLogger(logger_name),
+                get_value=_cache_get,
+                set_value=_cache_set,
+                refresh_fn=_refresh,
+                set_auth_header_fn=lambda _: None,
+                ns_prefix=namespace,
+            )
+
+            # best=7200s, observed=600s: above MIN_TTL (300s) yet markedly shorter
+            # (600 + 120 margin < 0.9 * 7200), so the recalibration branch fires.
+            original_ttl = 7200.0
+            await cache.set(policy.k_bestttl, original_ttl)
+            observed_ttl = 600.0
+            await cache.set(policy.k_issued, time.time() - observed_ttl)
+
+            with caplog.at_level(logging.INFO, logger=logger_name):
+                await policy.async_on_401(adaptive_downshift=True)
+
+            recal = [
+                r for r in caplog.records if "Unexpected short TTL" in r.getMessage()
+            ]
+            assert len(recal) == 1
+            assert recal[0].levelno == logging.INFO
+            assert not any(
+                r.levelno == logging.WARNING
+                and "Unexpected short TTL" in r.getMessage()
+                for r in caplog.records
+            )
+
+            # Behavior preserved: best TTL is still recalibrated to ~observed * 0.95.
+            best_ttl_after = await cache.get(policy.k_bestttl)
+            assert best_ttl_after is not None
+            assert abs(best_ttl_after - observed_ttl * 0.95) < 1.0
+
+        finally:
+            await cache.close()
+
+    await _run()
+
+
+def test_sync_ttl_policy_recalibration_logs_info_not_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The sync ``TTLPolicy.on_401`` recalibration path logs at INFO, not WARNING.
+
+    Twin of the async coverage above. The downward recalibration is benign and
+    self-healing, so it must not raise a WARNING.
+
+    Mutation sentinel: reverting the emitter to ``self.log.warning(...)`` turns
+    the level assertion red.
+    """
+
+    logger_name = "test_sync_recal_info"
+    store: dict[str, Any] = {}
+
+    def _get(key: str) -> Any:
+        return store.get(key)
+
+    def _set(key: str, value: Any) -> None:
+        if value is None:
+            store.pop(key, None)
+        else:
+            store[key] = value
+
+    policy = TTLPolicy(
+        username="user@example.com",
+        logger=logging.getLogger(logger_name),
+        get_value=_get,
+        set_value=_set,
+        refresh_fn=lambda: "fresh-token",
+        set_auth_header_fn=lambda _: None,
+        ns_prefix="entry-sync-recal-info",
+    )
+
+    # Mirror the async scenario: best=7200s, observed=600s triggers recalibration.
+    original_ttl = 7200.0
+    store[policy.k_bestttl] = original_ttl
+    observed_ttl = 600.0
+    store[policy.k_issued] = time.time() - observed_ttl
+
+    with caplog.at_level(logging.INFO, logger=logger_name):
+        policy.on_401(adaptive_downshift=True)
+
+    recal = [r for r in caplog.records if "Unexpected short TTL" in r.getMessage()]
+    assert len(recal) == 1
+    assert recal[0].levelno == logging.INFO
+    assert not any(
+        r.levelno == logging.WARNING and "Unexpected short TTL" in r.getMessage()
+        for r in caplog.records
+    )
+
+    # Behavior preserved: best TTL is still recalibrated to ~observed * 0.95.
+    # (_do_refresh clears only the token/issued keys, never k_bestttl.)
+    assert abs(float(store[policy.k_bestttl]) - observed_ttl * 0.95) < 1.0
 
 
 async def test_both_adm_and_aas_tokens_have_min_ttl_protection() -> None:

@@ -244,9 +244,7 @@ class LocateOperations(_MixinBase):
         return True
 
     # ---------------------------- Passthrough API ---------------------------
-    async def async_locate_device(
-        self, device_id: str
-    ) -> dict[str, Any]:
+    async def async_locate_device(self, device_id: str) -> dict[str, Any]:
         """Locate a device using the native async API (no executor).
 
         UX & gating:
@@ -615,9 +613,7 @@ class LocateOperations(_MixinBase):
                     name,
                     transient_err,
                 )
-                self.note_error(
-                    transient_err, where="async_locate_device", device=name
-                )
+                self.note_error(transient_err, where="async_locate_device", device=name)
                 return {}
             except DecryptionError as dec_err:
                 # Account-wide stale/missing shared key. Feed the SAME escalation
@@ -826,9 +822,7 @@ class LocateOperations(_MixinBase):
             # An aged-out key is no better than no key: the ring it referenced
             # auto-stopped long ago (the reload filter would discard it), so
             # targeting it could miss a current ring. Treat it as absent.
-            if cached_uuid is not None and self._cached_sound_uuid_is_stale(
-                device_id
-            ):
+            if cached_uuid is not None and self._cached_sound_uuid_is_stale(device_id):
                 _LOGGER.debug(
                     "Ignoring expired cached Play Sound UUID for %s", device_id
                 )
