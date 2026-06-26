@@ -7,6 +7,7 @@ Covers PLAN_HOTFIX_FCM_CASCADING_FAILURE AP-2 (`fcm_receiver_ha.py`):
 - 1 boundary test that pins `<` vs. `<=` drift on `_SHORT_RUN_THRESHOLD_S`
 - 1 cross-locale symmetry test for the `fcm_short_run_crash_loop` translation key
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -186,9 +187,7 @@ def _install_supervisor_mocks(
     monkeypatch.setattr(receiver, "_register_for_fcm_entry", register_mock)
 
     monkeypatch.setattr(fcm_receiver_ha.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(
-        fcm_receiver_ha.random, "uniform", lambda *_a, **_kw: 0.0
-    )
+    monkeypatch.setattr(fcm_receiver_ha.random, "uniform", lambda *_a, **_kw: 0.0)
 
     real_wait_for = asyncio.wait_for
 
@@ -237,7 +236,10 @@ async def test_short_run_triggers_repair_issue_after_threshold(
     receiver.attach_hass(SimpleNamespace())
 
     clock = _MonoClock(step=0.001)  # 1ms per call -> every run is short
-    clients = [_SupervisorPushClientStub(clock=clock) for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)]
+    clients = [
+        _SupervisorPushClientStub(clock=clock)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
     register_mock = _install_supervisor_mocks(
         monkeypatch, receiver, clock=clock, ensure_clients=clients
     )
@@ -349,9 +351,7 @@ async def test_long_run_resets_closure_counter(
     for idx in range(19):
         if idx == 9:
             clients.append(
-                _SupervisorPushClientStub(
-                    clock=clock, jump_on_run_state_read=60.0
-                )
+                _SupervisorPushClientStub(clock=clock, jump_on_run_state_read=60.0)
             )
         else:
             clients.append(_SupervisorPushClientStub(clock=clock))
@@ -381,10 +381,7 @@ async def test_re_registration_does_not_inherit_old_counter(
 
     clock = _MonoClock(step=0.001)
     # First supervisor: 9 short runs then we cancel.
-    clients_first = [
-        _SupervisorPushClientStub(clock=clock)
-        for _ in range(9)
-    ]
+    clients_first = [_SupervisorPushClientStub(clock=clock) for _ in range(9)]
     _install_supervisor_mocks(
         monkeypatch, receiver, clock=clock, ensure_clients=clients_first
     )
@@ -403,10 +400,7 @@ async def test_re_registration_does_not_inherit_old_counter(
 
     # Second supervisor: 9 more short runs. If the counter were shared, the
     # combined 18 runs would have crossed the threshold and re-fired.
-    clients_second = [
-        _SupervisorPushClientStub(clock=clock)
-        for _ in range(9)
-    ]
+    clients_second = [_SupervisorPushClientStub(clock=clock) for _ in range(9)]
     _install_supervisor_mocks(
         monkeypatch, receiver, clock=clock, ensure_clients=clients_second
     )
@@ -430,7 +424,10 @@ async def test_per_entry_supervisors_independent(
     clock_a = _MonoClock(step=0.001)
     clock_b = _MonoClock(step=0.001)
     # Entry A: 10 short runs (will trip the cap).
-    clients_a = [_SupervisorPushClientStub(clock=clock_a) for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)]
+    clients_a = [
+        _SupervisorPushClientStub(clock=clock_a)
+        for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
+    ]
     # Entry B: 5 healthy long runs (well above threshold).
     # ``jump_on_run_state_read`` (not ``jump_on_start``) is required so the
     # 60s elapse AFTER ``entry_start`` snapshot at Z. 960 and actually mark
@@ -515,7 +512,8 @@ async def test_fatal_retry_counts_orthogonal_to_short_run_path(
 
     # The short-run counter reached 5 (< 10), so no short-run issue.
     short_run_calls = [
-        c for c in create_issue.call_args_list
+        c
+        for c in create_issue.call_args_list
         if c.args[2].startswith("fcm_short_run_crash_loop_")
     ]
     assert len(short_run_calls) == 0
@@ -739,9 +737,7 @@ async def test_cap_latch_survives_registration_success_path(
 
     # Simulate ``_register_for_fcm_entry`` success path (Z. 1260) and the
     # credential-update path (Z. 2069). Neither must release the latch.
-    receiver._clear_fatal_error_for_entry(
-        entry_id, reason="Registration succeeded"
-    )
+    receiver._clear_fatal_error_for_entry(entry_id, reason="Registration succeeded")
     receiver._clear_fatal_error_for_entry(
         entry_id, reason="Credentials updated for entry"
     )
@@ -930,17 +926,11 @@ def test_iter16_force_true_clear_drops_cap_message_snapshot() -> None:
     receiver.attach_hass(SimpleNamespace())
 
     receiver._short_run_cap_latched.add("entry-force")
-    receiver._short_run_cap_messages["entry-force"] = (
-        "FCM short-run crash loop: ..."
-    )
-    receiver._fatal_errors["entry-force"] = (
-        "FCM short-run crash loop: ..."
-    )
+    receiver._short_run_cap_messages["entry-force"] = "FCM short-run crash loop: ..."
+    receiver._fatal_errors["entry-force"] = "FCM short-run crash loop: ..."
     receiver._fatal_error = "FCM short-run crash loop: ..."
 
-    receiver._clear_fatal_error_for_entry(
-        "entry-force", reason="Unload", force=True
-    )
+    receiver._clear_fatal_error_for_entry("entry-force", reason="Unload", force=True)
 
     assert "entry-force" not in receiver._short_run_cap_latched
     assert "entry-force" not in receiver._short_run_cap_messages
@@ -995,11 +985,11 @@ async def test_healthy_run_releases_cap_latch_and_fatal_state(
         _SupervisorPushClientStub(clock=clock)
         for _ in range(_MAX_CONSECUTIVE_SHORT_RUNS)
     ]
-    healthy_client = _SupervisorPushClientStub(
-        clock=clock, jump_on_run_state_read=60.0
-    )
+    healthy_client = _SupervisorPushClientStub(clock=clock, jump_on_run_state_read=60.0)
     _install_supervisor_mocks(
-        monkeypatch, receiver, clock=clock,
+        monkeypatch,
+        receiver,
+        clock=clock,
         ensure_clients=[*short_clients, healthy_client],
     )
     create_issue, delete_issue = _install_ir_capture(monkeypatch)
@@ -1070,9 +1060,7 @@ async def test_long_run_boundary_exactly_30s_does_not_count_as_short(
     # first clock-observable event INSIDE the monitor loop, AFTER the
     # snapshot. Then ``time.monotonic() - entry_start == 30.0`` exactly.
     stub = _SupervisorPushClientStub(clock=clock, jump_on_run_state_read=30.0)
-    _install_supervisor_mocks(
-        monkeypatch, receiver, clock=clock, ensure_clients=[stub]
-    )
+    _install_supervisor_mocks(monkeypatch, receiver, clock=clock, ensure_clients=[stub])
     create_issue, _ = _install_ir_capture(monkeypatch)
 
     await receiver._start_supervisor_for_entry(entry_id, None)
@@ -1121,9 +1109,9 @@ def test_translation_key_present_in_all_locales(integration_root: Path) -> None:
         entry = data["issues"][key]
         assert isinstance(entry, dict), f"{label}: {key!r} must be a dict"
         assert entry.get("title", "").strip(), f"{label}: empty title for {key!r}"
-        assert (
-            entry.get("description", "").strip()
-        ), f"{label}: empty description for {key!r}"
+        assert entry.get("description", "").strip(), (
+            f"{label}: empty description for {key!r}"
+        )
         assert len(entry["description"]) >= 50, (
             f"{label}: description too short ({len(entry['description'])} chars) "
             f"for a repair-issue body"
@@ -1195,9 +1183,7 @@ async def test_cap_fire_terminates_outer_loop_without_helper_safety_net(
     register_mock = AsyncMock(return_value=True)
     monkeypatch.setattr(receiver, "_register_for_fcm_entry", register_mock)
     monkeypatch.setattr(fcm_receiver_ha.asyncio, "sleep", AsyncMock())
-    monkeypatch.setattr(
-        fcm_receiver_ha.random, "uniform", lambda *_a, **_kw: 0.0
-    )
+    monkeypatch.setattr(fcm_receiver_ha.random, "uniform", lambda *_a, **_kw: 0.0)
 
     real_wait_for = asyncio.wait_for
 
@@ -1303,8 +1289,7 @@ async def test_pre_start_failure_does_not_advance_cap_counter(
     # 15 stubs that NEVER set become_started -> run_state stays None on
     # every read -> ``became_started`` stays False in the supervisor.
     clients = [
-        _SupervisorPushClientStub(clock=clock, become_started=False)
-        for _ in range(15)
+        _SupervisorPushClientStub(clock=clock, become_started=False) for _ in range(15)
     ]
     register_mock = _install_supervisor_mocks(
         monkeypatch, receiver, clock=clock, ensure_clients=clients
@@ -1351,9 +1336,7 @@ async def test_mixed_burst_only_counts_real_short_runs_toward_cap(
         clients.append(_SupervisorPushClientStub(clock=clock))
     # 3 transient outages (become_started=False) -- must be ignored by the cap
     for _ in range(3):
-        clients.append(
-            _SupervisorPushClientStub(clock=clock, become_started=False)
-        )
+        clients.append(_SupervisorPushClientStub(clock=clock, become_started=False))
     # 5 more real short-runs -- together with the first 5 these are the 10
     # consecutive REAL short-runs that fire the cap.
     for _ in range(5):
@@ -1414,9 +1397,7 @@ async def test_long_pre_start_does_not_release_cap_latch(
     stub = _SupervisorPushClientStub(
         clock=clock, jump_on_run_state_read=60.0, become_started=False
     )
-    _install_supervisor_mocks(
-        monkeypatch, receiver, clock=clock, ensure_clients=[stub]
-    )
+    _install_supervisor_mocks(monkeypatch, receiver, clock=clock, ensure_clients=[stub])
     _create_issue, delete_issue = _install_ir_capture(monkeypatch)
 
     await receiver._start_supervisor_for_entry(entry_id, None)
@@ -1435,7 +1416,8 @@ async def test_long_pre_start_does_not_release_cap_latch(
     # ``fcm_short_run_crash_loop_*`` key.)
     cap_issue_key = f"fcm_short_run_crash_loop_{entry_id}"
     cap_deletes = [
-        call for call in delete_issue.call_args_list
+        call
+        for call in delete_issue.call_args_list
         if len(call.args) >= 3 and call.args[2] == cap_issue_key
     ]
     assert cap_deletes == [], (
@@ -1550,9 +1532,7 @@ async def test_micro_window_crash_advances_cap_via_observable_latch(
     cap_issue_call = create_issue.call_args
     assert cap_issue_call.args[2] == f"fcm_short_run_crash_loop_{entry_id}"
     assert entry_id in receiver._short_run_cap_latched
-    assert receiver._fatal_errors[entry_id].startswith(
-        "FCM short-run crash loop"
-    )
+    assert receiver._fatal_errors[entry_id].startswith("FCM short-run crash loop")
 
 
 @pytest.mark.asyncio
@@ -1853,9 +1833,7 @@ def test_unregister_coordinator_tombstones_and_purges() -> None:
     """AP4 (finding 4a): unregister tombstones the entry and purges its state."""
     receiver = FcmReceiverHA()
     eid = "entry-unreg-tombstone"
-    coord = SimpleNamespace(
-        config_entry=make_config_entry(entry_id=eid), cache=None
-    )
+    coord = SimpleNamespace(config_entry=make_config_entry(entry_id=eid), cache=None)
     receiver._fatal_retry_counts[f"{eid}:auth"] = 3
     receiver._entry_health[eid] = True
     receiver.creds[eid] = {"gcm": {}}
@@ -1876,9 +1854,7 @@ def test_register_coordinator_clears_tombstone(
     receiver.attach_hass(SimpleNamespace())
     eid = "entry-reload"
     receiver._unregistered.add(eid)
-    coord = SimpleNamespace(
-        config_entry=make_config_entry(entry_id=eid), cache=None
-    )
+    coord = SimpleNamespace(config_entry=make_config_entry(entry_id=eid), cache=None)
 
     # The supervisor dispatch is irrelevant here; neutralise it so the test
     # does not leak an un-awaited coroutine.

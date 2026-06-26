@@ -127,8 +127,7 @@ def test_allowlist_has_no_stale_entries() -> None:
     stale = sorted(
         rel
         for rel in LEGACY_ALLOWLIST
-        if rel not in known
-        or _has_path_header(_REPO_ROOT / rel, rel)
+        if rel not in known or _has_path_header(_REPO_ROOT / rel, rel)
     )
     assert not stale, (
         "Stale LEGACY_ALLOWLIST entries (file now has a header or no longer exists); "

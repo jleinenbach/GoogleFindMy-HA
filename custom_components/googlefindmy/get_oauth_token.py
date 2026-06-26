@@ -61,9 +61,7 @@ def _parse_cli_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(
-    *, chrome_path: str | None = None, chrome_version: int | None = None
-) -> None:
+def main(*, chrome_path: str | None = None, chrome_version: int | None = None) -> None:
     """Get OAuth token for Google Find My Device."""
 
     print("=" * 60)

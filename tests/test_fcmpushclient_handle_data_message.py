@@ -12,6 +12,7 @@ states ``None``/``{}`` after the accompanying guard reorder in
 ``fcmpushclient.py`` moves the ``if not self.credentials: return`` check ahead
 of the ``["gcm"]["app_id"]`` dereference; the poison stub is left untouched.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -77,9 +78,7 @@ class TestHandleDataMessage:
         assert client.callback.called
 
     @pytest.mark.parametrize("credentials", [None, {}], ids=["none", "empty"])
-    def test_missing_credentials_guard_returns(
-        self, credentials: Any
-    ) -> None:
+    def test_missing_credentials_guard_returns(self, credentials: Any) -> None:
         """Missing credentials (``None`` or ``{}``) -> guard returns early (R4).
 
         After the production reorder the ``if not self.credentials: return``
@@ -163,9 +162,7 @@ class TestHandleDataMessage:
 
         client._handle_data_message(msg)
 
-        client._try_increment_error_count.assert_called_once_with(
-            ErrorType.NOTIFY
-        )
+        client._try_increment_error_count.assert_called_once_with(ErrorType.NOTIFY)
         assert not client._reset_error_count.called
 
     def test_successful_decrypt_resets_stale_key_failure_counter(self) -> None:

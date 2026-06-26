@@ -126,18 +126,14 @@ class CacheOperations(_MixinBase):
     including cache updates, location fusion, and metadata persistence.
     """
 
-    def get_device_location_data(
-        self, device_id: str
-    ) -> dict[str, Any] | None:
+    def get_device_location_data(self, device_id: str) -> dict[str, Any] | None:
         """Return the cached location data for a single device (copy)."""
         raw = self._device_location_data.get(device_id)
         if not isinstance(raw, dict):
             return None
         return dict(raw)
 
-    def prime_device_location_cache(
-        self, device_id: str, data: dict[str, Any]
-    ) -> None:
+    def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         """Prime the internal location cache with externally-provided data.
 
         This is intended for test fixtures or bootstrap scenarios where the
@@ -152,15 +148,11 @@ class CacheOperations(_MixinBase):
         else:
             self._device_location_data[device_id] = dict(data)
 
-    def seed_device_last_seen(
-        self, device_id: str, timestamp: float
-    ) -> None:
+    def seed_device_last_seen(self, device_id: str, timestamp: float) -> None:
         """Seed a device's last-seen timestamp for cache initialization."""
         self._present_last_seen[device_id] = timestamp
 
-    def _track_device_interval(
-        self, device_id: str, last_seen: float | None
-    ) -> None:
+    def _track_device_interval(self, device_id: str, last_seen: float | None) -> None:
         """Track last_seen history to predict future poll targets."""
         if last_seen is None:
             return
@@ -260,9 +252,7 @@ class CacheOperations(_MixinBase):
         hass_obj = getattr(self, "hass", None)
         if hass_obj is None:
             return
-        domain_bucket = (
-            hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
-        )
+        domain_bucket = hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
         if not isinstance(domain_bucket, dict):
             return
         eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
@@ -889,7 +879,10 @@ class CacheOperations(_MixinBase):
         # degenerates to a meaningless 50/50 average that injects jitter.
         # Accept the newer data as-is instead of blending.
         # Placed after trusted-anchor checks so anchored devices stay pinned.
-        if existing_acc == DEFAULT_ACCURACY_FALLBACK_M and new_acc == DEFAULT_ACCURACY_FALLBACK_M:
+        if (
+            existing_acc == DEFAULT_ACCURACY_FALLBACK_M
+            and new_acc == DEFAULT_ACCURACY_FALLBACK_M
+        ):
             return True
 
         # Clear jump - no overlap, accept as-is

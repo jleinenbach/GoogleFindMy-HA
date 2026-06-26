@@ -59,7 +59,9 @@ def test_shared_key_unavailable_is_typed_runtimeerror() -> None:
     ``except (InvalidTag, RuntimeError)`` owner-key handlers keep catching it and
     the existing non-interactive retrieval test stays green.
     """
-    assert _SYMBOL_PRESENT, "SharedKeyUnavailableError must exist (typed absent-key signal)"
+    assert _SYMBOL_PRESENT, (
+        "SharedKeyUnavailableError must exist (typed absent-key signal)"
+    )
     assert issubclass(SharedKeyUnavailableError, RuntimeError)
 
 
@@ -73,7 +75,9 @@ def test_typed_absent_shared_key_maps_to_reauth() -> None:
     RED today: HEAD has no typed branch, so this falls into the transient
     default.
     """
-    assert _SYMBOL_PRESENT, "SharedKeyUnavailableError must exist (typed absent-key signal)"
+    assert _SYMBOL_PRESENT, (
+        "SharedKeyUnavailableError must exist (typed absent-key signal)"
+    )
     exc = SharedKeyUnavailableError(_NON_INTERACTIVE_ABSENT_MESSAGE)
     result = _classify_owner_key_failure(exc, context="initial lookup")
     assert isinstance(result, SharedKeyMissingError)
@@ -89,7 +93,9 @@ def test_typed_absent_shared_key_robust_to_wording() -> None:
     instead of silently regressing to the transient default (the exact fragility
     the substring matcher had).
     """
-    assert _SYMBOL_PRESENT, "SharedKeyUnavailableError must exist (typed absent-key signal)"
+    assert _SYMBOL_PRESENT, (
+        "SharedKeyUnavailableError must exist (typed absent-key signal)"
+    )
     exc = SharedKeyUnavailableError("shared key cannot be obtained right now")
     result = _classify_owner_key_failure(exc, context="forced refresh")
     assert isinstance(result, SharedKeyMissingError)

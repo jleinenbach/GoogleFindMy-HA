@@ -189,9 +189,7 @@ async def test_reauth_gate_precedes_probe_when_token_dead_and_shared_missing(
     ``keys_missing`` and ``async_pick_working_token`` is never called for this
     bundle.
     """
-    flow, _entry, captured = _build_reauth_flow(
-        monkeypatch, pick_returns_none=True
-    )
+    flow, _entry, captured = _build_reauth_flow(monkeypatch, pick_returns_none=True)
 
     result = await _run_reauth(flow, _shared_missing_bundle())
 

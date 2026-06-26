@@ -188,7 +188,9 @@ def test_poll_auth_failure_raises_auth_failed(monkeypatch: pytest.MonkeyPatch) -
     finally:
         drain_loop(loop)
 
-    coordinator.config_entry.async_start_reauth.assert_called_once_with(coordinator.hass)
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
     assert coordinator.last_update_success is False
     assert isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
 

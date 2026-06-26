@@ -1,5 +1,6 @@
 # tests/test_fcm_crypto_header_parsing.py
 """Tests for FcmPushClient._extract_header_param."""
+
 from __future__ import annotations
 
 import pytest

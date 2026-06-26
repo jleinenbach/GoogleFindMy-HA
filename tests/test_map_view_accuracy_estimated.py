@@ -33,9 +33,7 @@ from tests.test_map_view_unique_id_resolution import (
 )
 
 
-def _install_history(
-    monkeypatch: pytest.MonkeyPatch, states: list[Any]
-) -> None:
+def _install_history(monkeypatch: pytest.MonkeyPatch, states: list[Any]) -> None:
     """Install a recorder history stub returning ``states`` for the entity."""
 
     def _stub_history(

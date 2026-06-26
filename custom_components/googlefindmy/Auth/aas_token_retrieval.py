@@ -284,9 +284,7 @@ async def _exchange_oauth_for_aas(
                 },
                 exc_info=err,
             )
-            new_err = RuntimeError(
-                "gpsoauth authentication failed (kind=auth_error)"
-            )
+            new_err = RuntimeError("gpsoauth authentication failed (kind=auth_error)")
             new_err.error_kind = "auth_error"  # type: ignore[attr-defined]
             raise new_err from err
         # Some callers (and test doubles) raise a plain ``RuntimeError`` with a

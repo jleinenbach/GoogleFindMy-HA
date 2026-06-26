@@ -18,6 +18,7 @@ async def _run_in_executor(func, *args):
 
     return func(*args)
 
+
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_FRAME_TYPE,

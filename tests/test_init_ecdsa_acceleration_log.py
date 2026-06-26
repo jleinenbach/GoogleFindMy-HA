@@ -29,9 +29,7 @@ def test_logs_backend_and_version(caplog: pytest.LogCaptureFixture) -> None:
             "ecdsa_version": "0.19.1",
         }
     )
-    records = [
-        r for r in caplog.records if "ECDSA big-int backend" in r.getMessage()
-    ]
+    records = [r for r in caplog.records if "ECDSA big-int backend" in r.getMessage()]
     assert len(records) == 1
     message = records[0].getMessage()
     assert "gmpy2" in message

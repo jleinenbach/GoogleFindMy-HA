@@ -107,9 +107,7 @@ class _FakeCache:
 
 def _eid_info(*, encrypted: Any = ENC, version: Any = 7) -> SimpleNamespace:
     """Build a fake EID-info object with the metadata attribute chain."""
-    metadata = SimpleNamespace(
-        encryptedOwnerKey=encrypted, ownerKeyVersion=version
-    )
+    metadata = SimpleNamespace(encryptedOwnerKey=encrypted, ownerKeyVersion=version)
     return SimpleNamespace(encryptedOwnerKeyAndMetadata=metadata)
 
 
@@ -124,7 +122,9 @@ def _patch_retrieval(
     """Patch the four module-level dependencies; return mocks for assertions."""
     if eid_info is None:
         eid_info = _eid_info()
-    m_eid = AsyncMock(side_effect=eid_exc) if eid_exc else AsyncMock(return_value=eid_info)
+    m_eid = (
+        AsyncMock(side_effect=eid_exc) if eid_exc else AsyncMock(return_value=eid_info)
+    )
     m_shared = AsyncMock(return_value=shared)
     m_decrypt = MagicMock(return_value=decrypted)
     m_username = AsyncMock(return_value="resolved@user.example")
@@ -261,9 +261,7 @@ async def test_rl8_force_refresh_bypasses_cache(
     user = "u@e.co"  # <= 13 chars -> exercises the redaction "else" branch
     cache.seed(_user_cache_key(user), {"key": OTHER32.hex(), "version": 0})
 
-    info = await gok.async_get_owner_key(
-        cache=cache, username=user, force_refresh=True
-    )
+    info = await gok.async_get_owner_key(cache=cache, username=user, force_refresh=True)
 
     assert info.key == KEY32  # fresh value, NOT the seeded OTHER32
     mocks["eid"].assert_awaited_once()  # retrieval happened despite cache hit
@@ -301,9 +299,7 @@ async def test_rl10_empty_response_maps_to_auth_failed(
 async def test_rl11_permanent_auth_error_maps_to_auth_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_retrieval(
-        monkeypatch, eid_exc=gok.SpotAuthPermanentError("invalid session")
-    )
+    _patch_retrieval(monkeypatch, eid_exc=gok.SpotAuthPermanentError("invalid session"))
     cache = _FakeCache()
 
     with pytest.raises(gok.ConfigEntryAuthFailed, match="session invalid"):

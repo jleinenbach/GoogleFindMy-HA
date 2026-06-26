@@ -533,9 +533,7 @@ def test_get_chrome_version_windows_prefer_binary_skips_registry(
     # overridden binary's own version (149) must win instead. Without the skip
     # this would return 152, so the assertion is mutation-sharp.
     assert (
-        chrome_driver.get_chrome_version(
-            "C:/portable/chrome.exe", prefer_binary=True
-        )
+        chrome_driver.get_chrome_version("C:/portable/chrome.exe", prefer_binary=True)
         == 149
     )
 
@@ -1163,7 +1161,9 @@ def test_strategy_no_version_success_with_path(
     uc_module = chrome_driver._get_uc_module()
     monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
 
-    def fake_chrome(*, options: Any, version_main: int | None = None, **k: object) -> object:
+    def fake_chrome(
+        *, options: Any, version_main: int | None = None, **k: object
+    ) -> object:
         captured["binary"] = options.binary_location
         captured["version_main"] = version_main
         return fake_driver
@@ -1186,7 +1186,9 @@ def test_strategy_headless_success_with_path(
     uc_module = chrome_driver._get_uc_module()
     monkeypatch.setattr(uc_module, "ChromeOptions", FakeChromeOptions)
 
-    def fake_chrome(*, options: Any, version_main: int | None = None, **k: object) -> object:
+    def fake_chrome(
+        *, options: Any, version_main: int | None = None, **k: object
+    ) -> object:
         captured["binary"] = options.binary_location
         captured["headless"] = "--headless" in options.arguments
         return fake_driver

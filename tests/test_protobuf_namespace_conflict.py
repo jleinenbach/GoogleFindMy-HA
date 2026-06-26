@@ -360,8 +360,13 @@ class TestProtobufSerializationRoundTrip:
         assert d.userDefinedDeviceName == "TestTracker"
         assert d.identifierInformation.canonicIds.canonicId[0].id == "abc123"
         assert d.identifierInformation.type == DeviceUpdate_pb2.IDENTIFIER_SPOT
-        assert d.information.deviceRegistration.encryptedUserSecrets.encryptedIdentityKey == b"\x01\x02\x03"
-        assert d.information.deviceRegistration.encryptedUserSecrets.ownerKeyVersion == 5
+        assert (
+            d.information.deviceRegistration.encryptedUserSecrets.encryptedIdentityKey
+            == b"\x01\x02\x03"
+        )
+        assert (
+            d.information.deviceRegistration.encryptedUserSecrets.ownerKeyVersion == 5
+        )
 
     def test_device_update_execute_action_roundtrip(self) -> None:
         from custom_components.googlefindmy.ProtoDecoders import DeviceUpdate_pb2
@@ -377,7 +382,9 @@ class TestProtobufSerializationRoundTrip:
         req2.ParseFromString(data)
         assert req2.scope.type == DeviceUpdate_pb2.SPOT_DEVICE
         assert req2.scope.device.canonicId.id == "dev-xyz"
-        assert req2.action.startSound.component == DeviceUpdate_pb2.DEVICE_COMPONENT_LEFT
+        assert (
+            req2.action.startSound.component == DeviceUpdate_pb2.DEVICE_COMPONENT_LEFT
+        )
         assert req2.requestMetadata.requestUuid == "uuid-123"
 
     def test_device_update_location_roundtrip(self) -> None:

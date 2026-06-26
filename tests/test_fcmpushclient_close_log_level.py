@@ -13,6 +13,7 @@ consume the warn rate-limit, and still signals the worker to stop. Before this
 suite ``_handle_message`` ran at ~0 % on the unit level (the poison stub mocks
 it away), so the changed branch had no coverage.
 """
+
 from __future__ import annotations
 
 import logging

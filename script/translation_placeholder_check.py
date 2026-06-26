@@ -147,9 +147,7 @@ def _extract_issue_placeholders(data: object) -> dict[str, set[str]]:
     ``_load_locale_placeholders`` (for each ``translations/*.json``) so the
     extraction stays in sync between SSOT and locales.
     """
-    issues = (
-        data.get("issues") if isinstance(data, dict) else None
-    ) or {}
+    issues = (data.get("issues") if isinstance(data, dict) else None) or {}
     out: dict[str, set[str]] = {}
     if not isinstance(issues, dict):
         return out
@@ -281,8 +279,7 @@ def _apply_assign_to_keys(
     ):
         slice_node = target.slice
         if not (
-            isinstance(slice_node, ast.Constant)
-            and isinstance(slice_node.value, str)
+            isinstance(slice_node, ast.Constant) and isinstance(slice_node.value, str)
         ):
             return _DRIFT_SENTINEL
         new_keys = set(keys) if keys is not None else set()

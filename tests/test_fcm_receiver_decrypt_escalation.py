@@ -23,7 +23,9 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 )
 
 
-def _receiver_with_coordinator(*, escalate: bool) -> tuple[FcmReceiverHA, MagicMock, MagicMock]:
+def _receiver_with_coordinator(
+    *, escalate: bool
+) -> tuple[FcmReceiverHA, MagicMock, MagicMock]:
     receiver = FcmReceiverHA()
     hass = MagicMock()
     receiver._hass = hass
@@ -188,9 +190,7 @@ async def test_decode_background_location_metadata_only_does_not_clear_counter(
     monkeypatch.setattr(
         fcm_receiver_ha,
         "async_decrypt_location_response_locations",
-        AsyncMock(
-            return_value=[{"metadata_only": True, "owner_key_version": 7}]
-        ),
+        AsyncMock(return_value=[{"metadata_only": True, "owner_key_version": 7}]),
     )
 
     result = await receiver._decode_background_location_async("entry-1", "deadbeef")
@@ -282,7 +282,9 @@ async def test_decode_background_location_transient_owner_key_is_skipped_without
     monkeypatch.setattr(
         fcm_receiver_ha,
         "async_decrypt_location_response_locations",
-        AsyncMock(side_effect=OwnerKeyLookupTransientError("owner key lookup timed out")),
+        AsyncMock(
+            side_effect=OwnerKeyLookupTransientError("owner key lookup timed out")
+        ),
     )
 
     result = await receiver._decode_background_location_async("entry-1", "deadbeef")
@@ -320,7 +322,9 @@ async def test_decode_background_location_transient_owner_key_downgrades_to_debu
     monkeypatch.setattr(
         fcm_receiver_ha,
         "async_decrypt_location_response_locations",
-        AsyncMock(side_effect=OwnerKeyLookupTransientError("owner key lookup timed out")),
+        AsyncMock(
+            side_effect=OwnerKeyLookupTransientError("owner key lookup timed out")
+        ),
     )
 
     import logging
@@ -349,7 +353,9 @@ def test_note_decrypt_success_for_entry_swallows_coordinator_errors() -> None:
     """The push success path must never break: a misbehaving coordinator is
     swallowed exactly like the failure path."""
     receiver, coordinator, entry = _receiver_with_coordinator(escalate=False)
-    coordinator.note_background_decrypt_success = MagicMock(side_effect=RuntimeError("boom"))
+    coordinator.note_background_decrypt_success = MagicMock(
+        side_effect=RuntimeError("boom")
+    )
 
     # Must not raise.
     receiver._note_decrypt_success_for_entry("entry-1")

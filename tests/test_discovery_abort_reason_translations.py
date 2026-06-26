@@ -129,8 +129,7 @@ def test_discovery_validator_reasons_are_resolvable_abort_reasons() -> None:
     unresolved = {
         reason
         for reason in raised
-        if reason not in abort_reasons
-        and reason not in _HA_CORE_COMMON_ABORT_REASONS
+        if reason not in abort_reasons and reason not in _HA_CORE_COMMON_ABORT_REASONS
     }
     assert not unresolved, (
         "Discovery-rejection reasons surface via async_abort but are missing "

@@ -113,7 +113,10 @@ def _methods_raising_not_implemented(class_node: ast.ClassDef) -> set[str]:
                         names.add(node.name)
                     elif isinstance(exc, ast.Call):
                         func = exc.func
-                        if isinstance(func, ast.Name) and func.id == "NotImplementedError":
+                        if (
+                            isinstance(func, ast.Name)
+                            and func.id == "NotImplementedError"
+                        ):
                             names.add(node.name)
     return names
 
@@ -158,9 +161,7 @@ def main_tree() -> ast.Module:
 def coordinator_node(main_tree: ast.Module) -> ast.ClassDef:
     """Return the GoogleFindMyCoordinator ClassDef AST node."""
     node = _find_class_node(main_tree, "GoogleFindMyCoordinator")
-    assert node is not None, (
-        "GoogleFindMyCoordinator class not found in main.py"
-    )
+    assert node is not None, "GoogleFindMyCoordinator class not found in main.py"
     return node
 
 
@@ -211,9 +212,7 @@ class TestNoRuntimeNotImplementedForDUCMethods:
         """
         runtime_methods = _get_runtime_method_names(mixin_base_node)
         raising_methods = _methods_raising_not_implemented(mixin_base_node)
-        dangerous_at_runtime = (
-            runtime_methods & raising_methods & _DANGEROUS_METHODS
-        )
+        dangerous_at_runtime = runtime_methods & raising_methods & _DANGEROUS_METHODS
         assert not dangerous_at_runtime, (
             f"REGRESSION: _MixinBase defines runtime stubs that raise "
             f"NotImplementedError for DataUpdateCoordinator methods: "
@@ -237,8 +236,7 @@ class TestMROStructure:
         """
         bases = _get_class_base_names(coordinator_node)
         assert "DataUpdateCoordinator" in bases, (
-            "GoogleFindMyCoordinator does not inherit from "
-            "DataUpdateCoordinator."
+            "GoogleFindMyCoordinator does not inherit from DataUpdateCoordinator."
         )
         duc_idx = bases.index("DataUpdateCoordinator")
         # All mixin Operations classes should come before DUC
@@ -328,9 +326,7 @@ class TestMixinBaseAudit:
             assert path.exists(), f"Missing file: {path}"
             tree = _parse_file(path)
             cls_node = _find_class_node(tree, class_name)
-            assert cls_node is not None, (
-                f"Class {class_name} not found in {filename}"
-            )
+            assert cls_node is not None, f"Class {class_name} not found in {filename}"
             bases = _get_class_base_names(cls_node)
             assert "_MixinBase" in bases, (
                 f"{class_name} in {filename} does not inherit from "

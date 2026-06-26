@@ -129,9 +129,7 @@ def test_poll_cycle_transient_owner_key_skips_device_without_counter_touch(
     """
     loop = asyncio.new_event_loop()
     devices = [{"id": "dev-transient", "name": "Transient Tag"}]
-    coordinator = _make_coordinator(
-        monkeypatch, loop, _TransientOwnerKeyAPI(), devices
-    )
+    coordinator = _make_coordinator(monkeypatch, loop, _TransientOwnerKeyAPI(), devices)
     coordinator._consecutive_decrypt_failures = 0
 
     note_decrypt_failure = MagicMock(return_value=False)

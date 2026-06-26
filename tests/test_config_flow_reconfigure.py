@@ -76,7 +76,12 @@ def _build_reconfigure_flow(entry: SimpleNamespace) -> config_flow.ConfigFlow:
 async def test_reconfigure_flow_skips_already_configured_abort() -> None:
     """Reconfigure source should route to async_step_reconfigure without aborting."""
 
-    entry = make_config_entry(entry_id="entry-1", title="Find My", subentries={}, runtime_data=SimpleNamespace())
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
     entry.unique_id = entry.data[CONF_GOOGLE_EMAIL]
 
@@ -101,7 +106,12 @@ async def test_reconfigure_flow_skips_already_configured_abort() -> None:
 async def test_reconfigure_reload_recreates_subentries_and_platforms() -> None:
     """Reload after reconfigure should recreate subentries with stable IDs."""
 
-    entry = make_config_entry(entry_id="entry-1", title="Find My", subentries={}, runtime_data=SimpleNamespace())
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
     flow = config_flow.ConfigFlow()
     hass = SimpleNamespace()
@@ -199,7 +209,12 @@ async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -
 
     caplog.set_level(logging.WARNING)
 
-    entry = make_config_entry(entry_id="entry-1", title="Find My", subentries={}, runtime_data=SimpleNamespace())
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
 
     flow = config_flow.ConfigFlow()
@@ -230,7 +245,12 @@ async def test_reconfigure_reload_logs_false(caplog: pytest.LogCaptureFixture) -
 async def test_reconfigure_forces_device_list_refresh() -> None:
     """Mark forced device list refresh on reconfigure and call coordinator hook."""
 
-    entry = make_config_entry(entry_id="entry-1", title="Find My", subentries={}, runtime_data=SimpleNamespace())
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
 
     refresh_calls: list[tuple[str | None, bool]] = []
@@ -294,7 +314,12 @@ async def test_reconfigure_reload_logs_deferred_failures(
 
     caplog.set_level(logging.WARNING)
 
-    entry = make_config_entry(entry_id="entry-1", title="Find My", subentries={}, runtime_data=SimpleNamespace())
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
 
     flow = config_flow.ConfigFlow()
@@ -353,7 +378,12 @@ async def test_reconfigure_reload_logs_when_scheduler_missing(
 
     caplog.set_level(logging.ERROR)
 
-    entry = make_config_entry(entry_id="entry-1", title="Find My", subentries={}, runtime_data=SimpleNamespace())
+    entry = make_config_entry(
+        entry_id="entry-1",
+        title="Find My",
+        subentries={},
+        runtime_data=SimpleNamespace(),
+    )
     entry.data[CONF_GOOGLE_EMAIL] = "existing@example.com"
 
     flow = config_flow.ConfigFlow()

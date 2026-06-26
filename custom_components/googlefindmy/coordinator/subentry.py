@@ -243,9 +243,7 @@ class SubentryOperations(_MixinBase):
 
         return [tracker_definition, service_definition]
 
-    def _schedule_core_subentry_repair(
-        self, missing_keys: set[str]
-    ) -> None:
+    def _schedule_core_subentry_repair(self, missing_keys: set[str]) -> None:
         """Schedule a repair task to recreate missing core subentries."""
 
         if not missing_keys:
@@ -802,9 +800,7 @@ class SubentryOperations(_MixinBase):
             set(self._subentry_metadata.keys()),
         )
 
-    def _store_subentry_snapshots(
-        self, snapshot: Sequence[Mapping[str, Any]]
-    ) -> None:
+    def _store_subentry_snapshots(self, snapshot: Sequence[Mapping[str, Any]]) -> None:
         """Persist grouped snapshots for subentry-aware consumers."""
 
         grouped = self._group_snapshot_by_subentry(snapshot)
@@ -812,16 +808,12 @@ class SubentryOperations(_MixinBase):
             key: tuple(entries) for key, entries in grouped.items()
         }
 
-    def _resolve_subentry_key_for_feature(
-        self, feature: str
-    ) -> str:
+    def _resolve_subentry_key_for_feature(self, feature: str) -> str:
         """Return the subentry key for a platform feature without warnings."""
 
         return self._feature_to_subentry.get(feature, self._default_subentry_key())
 
-    def get_subentry_key_for_feature(
-        self, feature: str
-    ) -> str:
+    def get_subentry_key_for_feature(self, feature: str) -> str:
         """Return the subentry key responsible for a platform feature."""
 
         warnings.warn(
@@ -882,9 +874,7 @@ class SubentryOperations(_MixinBase):
             return []
         return [dict(row) for row in entries]
 
-    def is_device_visible_in_subentry(
-        self, subentry_key: str, device_id: str
-    ) -> bool:
+    def is_device_visible_in_subentry(self, subentry_key: str, device_id: str) -> bool:
         """Return True if a device is visible within the subentry scope.
 
         Handles both raw device IDs and namespaced identifiers (ENTRY_ID:DEVICE_ID)

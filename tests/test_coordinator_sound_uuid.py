@@ -316,7 +316,10 @@ def test_is_sound_uuid_expired_boundary() -> None:
 
     now = 10_000.0
     # Exactly at the boundary is not yet expired (strictly greater-than).
-    assert is_sound_uuid_expired(now - SOUND_UUID_MAX_AGE_S, now, SOUND_UUID_MAX_AGE_S) is False
+    assert (
+        is_sound_uuid_expired(now - SOUND_UUID_MAX_AGE_S, now, SOUND_UUID_MAX_AGE_S)
+        is False
+    )
     # One second past the boundary is expired.
     assert (
         is_sound_uuid_expired(now - SOUND_UUID_MAX_AGE_S - 1, now, SOUND_UUID_MAX_AGE_S)

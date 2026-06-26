@@ -187,9 +187,7 @@ async def test_r4_structure_defect_persists_after_refresh_is_transient(
         await _dl.async_retrieve_identity_key(_registration(), cache=object())
 
     assert fake.force_refresh_calls == 1
-    warning_records = [
-        rec for rec in caplog.records if rec.levelno == logging.WARNING
-    ]
+    warning_records = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
     assert len(warning_records) == 1
     # The structure defect must never be re-routed to a DecryptionError/reauth.
     transient_exc = OwnerKeyLookupTransientError

@@ -401,9 +401,7 @@ class TestExtractSubentryLinks:
 
     def test_config_entries_only_returns_hub_marker(self):
         """Branch 4: device has config_entries but no subentry -> {None}."""
-        device = SimpleNamespace(
-            config_entries=["e1"], config_subentry_id=None
-        )
+        device = SimpleNamespace(config_entries=["e1"], config_subentry_id=None)
         assert extract_subentry_links(device, "e1") == {None}
 
     def test_no_attributes_returns_empty(self):
@@ -474,27 +472,24 @@ class TestIsHubDeviceCheck:
 
     def test_device_id_match(self):
         """Branch 1: device_id == hub_device_id -> True."""
-        assert (
-            is_hub_device_check("dev-1", "dev-1", set(), self._PARENT) is True
-        )
+        assert is_hub_device_check("dev-1", "dev-1", set(), self._PARENT) is True
 
     def test_identifier_match_in_set(self):
         """Branch 2: parent_identifier in identifiers -> True."""
         assert (
-            is_hub_device_check("dev-x", "hub-y", {self._PARENT}, self._PARENT)
-            is True
+            is_hub_device_check("dev-x", "hub-y", {self._PARENT}, self._PARENT) is True
         )
 
     def test_no_match_returns_false(self):
         """Branch 3: neither ID nor identifier match -> False."""
         assert (
-            is_hub_device_check(
-                "dev-x", "hub-y", {(_DOMAIN, "other")}, self._PARENT
-            )
+            is_hub_device_check("dev-x", "hub-y", {(_DOMAIN, "other")}, self._PARENT)
             is False
         )
 
-    @pytest.mark.parametrize("identifiers", [None, "string-not-collection", b"bytes", {"k": "v"}])
+    @pytest.mark.parametrize(
+        "identifiers", [None, "string-not-collection", b"bytes", {"k": "v"}]
+    )
     def test_non_collection_identifiers_returns_false(self, identifiers):
         """Branch 4: identifiers not a proper Collection -> False."""
         assert is_hub_device_check("dev-x", None, identifiers, self._PARENT) is False
@@ -529,27 +524,19 @@ class TestResolveTrackerSubentryCandidate:
 
     def test_entry_id_mismatch_returns_none(self):
         """Branch 2b: candidate != entry_tracker_id -> None."""
-        assert (
-            resolve_tracker_subentry_candidate("other", "etrk", {"etrk"}) is None
-        )
+        assert resolve_tracker_subentry_candidate("other", "etrk", {"etrk"}) is None
 
     def test_entry_id_match_but_not_in_set(self):
         """Branch 2c: matches entry_tracker_id but tracker set rejects it -> None."""
-        assert (
-            resolve_tracker_subentry_candidate("etrk", "etrk", {"other"}) is None
-        )
+        assert resolve_tracker_subentry_candidate("etrk", "etrk", {"other"}) is None
 
     def test_entry_id_match_empty_set_allowed(self):
         """Branch 2d: entry_tracker_id matches and set is empty -> candidate."""
-        assert (
-            resolve_tracker_subentry_candidate("etrk", "etrk", set()) == "etrk"
-        )
+        assert resolve_tracker_subentry_candidate("etrk", "etrk", set()) == "etrk"
 
     def test_no_entry_id_candidate_in_set(self):
         """Branch 3a: no entry_tracker_id, candidate in set -> candidate."""
-        assert (
-            resolve_tracker_subentry_candidate("c", None, {"c", "d"}) == "c"
-        )
+        assert resolve_tracker_subentry_candidate("c", None, {"c", "d"}) == "c"
 
     def test_no_entry_id_candidate_not_in_set(self):
         """Branch 3b: no entry_tracker_id, candidate not in set -> None."""
@@ -575,7 +562,9 @@ class _SubentryStub:
         no_data: bool = False,
     ) -> None:
         self.subentry_type = subentry_type
-        self.data: Any = None if no_data else {"group_key": group_key} if group_key else {}
+        self.data: Any = (
+            None if no_data else {"group_key": group_key} if group_key else {}
+        )
 
 
 _SVC_TYPE = "google_service"
@@ -597,7 +586,9 @@ class TestExtractServiceSubentryIds:
             42: _SubentryStub(subentry_type=_SVC_TYPE),
             "ok-1": _SubentryStub(subentry_type=_SVC_TYPE),
         }
-        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {"ok-1"}
+        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {
+            "ok-1"
+        }
 
     def test_provisional_skipped_unless_matches(self):
         """Branch 3a: '*-provisional' is skipped unless it equals current service id."""
@@ -606,10 +597,9 @@ class TestExtractServiceSubentryIds:
             "active-1": _SubentryStub(subentry_type=_SVC_TYPE),
         }
         # No entry_service_subentry_id -> provisional dropped
-        assert (
-            extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY)
-            == {"active-1"}
-        )
+        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {
+            "active-1"
+        }
 
     def test_provisional_included_when_matches(self):
         """Branch 3b: provisional id equal to entry_service_subentry_id is kept."""
@@ -624,12 +614,16 @@ class TestExtractServiceSubentryIds:
     def test_match_by_subentry_type(self):
         """Branch 4: subentry_type == subentry_type_service -> include."""
         entries = {"sub-1": _SubentryStub(subentry_type=_SVC_TYPE)}
-        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {"sub-1"}
+        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {
+            "sub-1"
+        }
 
     def test_match_by_group_key(self):
         """Branch 5: data.group_key == service_subentry_key -> include."""
         entries = {"sub-2": _SubentryStub(group_key=_SVC_KEY)}
-        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {"sub-2"}
+        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {
+            "sub-2"
+        }
 
     def test_non_matching_subentry_ignored(self):
         """Branch 6: neither type nor group_key matches -> excluded."""
@@ -640,7 +634,9 @@ class TestExtractServiceSubentryIds:
         """Edge: subentry with no usable data mapping -> group_key falls back."""
         entries = {"sub-4": _SubentryStub(subentry_type=_SVC_TYPE, no_data=True)}
         # type matches -> still included
-        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {"sub-4"}
+        assert extract_service_subentry_ids(entries, None, _SVC_TYPE, _SVC_KEY) == {
+            "sub-4"
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -730,25 +726,20 @@ class TestExtractCanonicalDeviceId:
     def test_namespaced_match_preferred(self):
         """Branch 6: namespaced match takes priority over simple."""
         ids = {(_DOMAIN, "e1:dev-ns"), (_DOMAIN, "dev-simple")}
-        assert (
-            extract_canonical_device_id(ids, _DOMAIN, entry_id="e1") == "dev-ns"
-        )
+        assert extract_canonical_device_id(ids, _DOMAIN, entry_id="e1") == "dev-ns"
 
     def test_namespaced_mismatch_skipped(self):
         """Branch 7: namespaced but wrong entry -> skipped, falls back to simple."""
         ids = {(_DOMAIN, "other-entry:dev-x"), (_DOMAIN, "dev-fallback")}
         assert (
-            extract_canonical_device_id(ids, _DOMAIN, entry_id="e1")
-            == "dev-fallback"
+            extract_canonical_device_id(ids, _DOMAIN, entry_id="e1") == "dev-fallback"
         )
 
     def test_service_prefix_skipped(self):
         """Branch 8a: service_prefix matches -> skipped."""
         ids = {(_DOMAIN, "svc:thing"), (_DOMAIN, "real-dev")}
         assert (
-            extract_canonical_device_id(
-                ids, _DOMAIN, service_prefix="svc:"
-            )
+            extract_canonical_device_id(ids, _DOMAIN, service_prefix="svc:")
             == "real-dev"
         )
 
@@ -778,9 +769,7 @@ class TestBuildEntityUniqueIdCandidates:
 
     def test_canonical_first(self):
         """Branch 1: canonical 'entry:sub:dev' has highest priority."""
-        cands = build_entity_unique_id_candidates(
-            "dev-1", "e1", "sub-id", _DOMAIN
-        )
+        cands = build_entity_unique_id_candidates("dev-1", "e1", "sub-id", _DOMAIN)
         assert cands[0] == "e1:sub-id:dev-1"
 
     def test_subentry_key_variant_included_when_different(self):
@@ -801,24 +790,18 @@ class TestBuildEntityUniqueIdCandidates:
 
     def test_entry_device_format(self):
         """Branch 3: 'entry:dev' is always added when both present."""
-        cands = build_entity_unique_id_candidates(
-            "dev-1", "e1", None, _DOMAIN
-        )
+        cands = build_entity_unique_id_candidates("dev-1", "e1", None, _DOMAIN)
         assert "e1:dev-1" in cands
 
     def test_domain_underscore_formats(self):
         """Branch 4+5: 'domain_entry_dev' and 'domain_dev' variants."""
-        cands = build_entity_unique_id_candidates(
-            "dev-1", "e1", None, _DOMAIN
-        )
+        cands = build_entity_unique_id_candidates("dev-1", "e1", None, _DOMAIN)
         assert f"{_DOMAIN}_e1_dev-1" in cands
         assert f"{_DOMAIN}_dev-1" in cands
 
     def test_no_entry_id_still_emits_legacy(self):
         """Edge: entry_id missing -> only legacy 'domain_dev' returned."""
-        cands = build_entity_unique_id_candidates(
-            "dev-1", None, None, _DOMAIN
-        )
+        cands = build_entity_unique_id_candidates("dev-1", None, None, _DOMAIN)
         assert cands == [f"{_DOMAIN}_dev-1"]
 
     def test_no_device_id_returns_empty(self):
@@ -891,8 +874,14 @@ class TestMatchEntityByDeviceId:
         """Branch 1: device_id must be a non-empty str."""
         assert (
             match_entity_by_device_id(
-                "ignored", "e1", device_id, "e1",
-                "device_tracker", "googlefindmy", "device_tracker", "googlefindmy",
+                "ignored",
+                "e1",
+                device_id,
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is False
         )
@@ -901,9 +890,14 @@ class TestMatchEntityByDeviceId:
         """Branch 2a: entity_domain != domain -> False."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_dev-1", "e1", "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "sensor", "googlefindmy",
+                "googlefindmy_e1_dev-1",
+                "e1",
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "sensor",
+                "googlefindmy",
             )
             is False
         )
@@ -912,9 +906,14 @@ class TestMatchEntityByDeviceId:
         """Branch 2b: entity_platform != platform -> False."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_dev-1", "e1", "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "device_tracker", "other_platform",
+                "googlefindmy_e1_dev-1",
+                "e1",
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "other_platform",
             )
             is False
         )
@@ -923,9 +922,14 @@ class TestMatchEntityByDeviceId:
         """Branch 3: config_entry_id != target_entry_id -> False."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_dev-1", "e2", "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "device_tracker", "googlefindmy",
+                "googlefindmy_e1_dev-1",
+                "e2",
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is False
         )
@@ -934,9 +938,14 @@ class TestMatchEntityByDeviceId:
         """Branch 3b: target_entry_id=None -> entry filter not applied."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_dev-1", "any-entry", "dev-1", None,
-                "device_tracker", "googlefindmy",
-                "device_tracker", "googlefindmy",
+                "googlefindmy_e1_dev-1",
+                "any-entry",
+                "dev-1",
+                None,
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is True
         )
@@ -945,9 +954,14 @@ class TestMatchEntityByDeviceId:
         """Branch 3c: config_entry_id=None but target set -> filter skipped."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_dev-1", None, "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "device_tracker", "googlefindmy",
+                "googlefindmy_e1_dev-1",
+                None,
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is True
         )
@@ -957,9 +971,14 @@ class TestMatchEntityByDeviceId:
         """Branch 4: unique_id must be ``str`` to be matched."""
         assert (
             match_entity_by_device_id(
-                uid, "e1", "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "device_tracker", "googlefindmy",
+                uid,
+                "e1",
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is False
         )
@@ -968,9 +987,14 @@ class TestMatchEntityByDeviceId:
         """Branch 5a: device_id must appear in unique_id -> True."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_dev-1_extra", "e1", "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "device_tracker", "googlefindmy",
+                "googlefindmy_e1_dev-1_extra",
+                "e1",
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is True
         )
@@ -979,9 +1003,14 @@ class TestMatchEntityByDeviceId:
         """Branch 5b: device_id absent from unique_id -> False."""
         assert (
             match_entity_by_device_id(
-                "googlefindmy_e1_other-dev", "e1", "dev-1", "e1",
-                "device_tracker", "googlefindmy",
-                "device_tracker", "googlefindmy",
+                "googlefindmy_e1_other-dev",
+                "e1",
+                "dev-1",
+                "e1",
+                "device_tracker",
+                "googlefindmy",
+                "device_tracker",
+                "googlefindmy",
             )
             is False
         )

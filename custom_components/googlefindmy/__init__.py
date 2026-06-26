@@ -6103,7 +6103,9 @@ def _read_installed_version_sync() -> str | None:
 
 async def _async_read_installed_version(hass: HomeAssistant) -> str | None:
     """Return the on-disk manifest version without blocking the event loop."""
-    version: str | None = await hass.async_add_executor_job(_read_installed_version_sync)
+    version: str | None = await hass.async_add_executor_job(
+        _read_installed_version_sync
+    )
     return version
 
 
@@ -7863,7 +7865,10 @@ async def _async_refresh_device_urls(hass: HomeAssistant) -> None:
 
     try:
         internal_url = get_url(
-            hass, allow_external=False, allow_cloud=False, allow_internal=True,
+            hass,
+            allow_external=False,
+            allow_cloud=False,
+            allow_internal=True,
         )
     except (HomeAssistantError, NoURLAvailableError):
         internal_url = None
