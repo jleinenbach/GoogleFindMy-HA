@@ -891,7 +891,7 @@ class TTLPolicy:
                         )
                     # If clearly shorter than our current model (>10% shorter), recalibrate.
                     elif best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(best):
-                        self.log.warning(
+                        self.log.info(
                             "Unexpected short TTL – recalibrating best known TTL with safety buffer."
                         )
                         safe_calibration = age_sec * 0.95
@@ -1280,7 +1280,7 @@ class AsyncTTLPolicy(TTLPolicy):
                         elif best and (age_sec + self.TTL_MARGIN_SEC) < 0.9 * float(
                             best
                         ):
-                            self.log.warning(
+                            self.log.info(
                                 "Unexpected short TTL – recalibrating best known TTL with safety buffer (async)."
                             )
                             safe_calibration = age_sec * 0.95
