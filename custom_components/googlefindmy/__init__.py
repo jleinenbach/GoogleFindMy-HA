@@ -2372,6 +2372,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
 
     device_owner_index: dict[str, str]
+    ecdsa_acceleration_info: dict[str, str | None]
     entries: dict[str, RuntimeData]
     eid_resolver: GoogleFindMyEIDResolver
     fcm_lock: asyncio.Lock
@@ -6236,6 +6237,25 @@ async def _async_ensure_restart_required_check(
             _LOGGER.debug("Registered %s restart-required watchdog", DOMAIN)
 
 
+def _log_ecdsa_acceleration(info: dict[str, str | None]) -> None:
+    """Log once which big-int backend python-ecdsa would use (DEBUG only).
+
+    Pure formatter: takes the already-materialized info dict (see
+    ``get_ecdsa_acceleration_info``) and performs no I/O itself, so it is safe
+    to call from the event loop. The caller is responsible for materializing
+    ``info`` in an executor. ``gmpy2_version`` is substituted with
+    "not installed" when absent so the record never logs the literal "None".
+    """
+    backend = info.get("ecdsa_acceleration")
+    gmpy2_dist = info.get("gmpy2_version") or "not installed"
+    _LOGGER.debug(
+        "ECDSA big-int backend python-ecdsa would use: %s (gmpy2 dist: %s); "
+        "install gmpy2 to accelerate the legacy SECP160r1 EID path.",
+        backend,
+        gmpy2_dist,
+    )
+
+
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """Set up the integration namespace and register global services.
 
@@ -6282,6 +6302,21 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     # Arm the global restart-required watchdog exactly once. async_setup_entry
     # re-arms it after a last-entry reload tears it down (see helper docstring).
     await _async_ensure_restart_required_check(hass, bucket)
+
+    # Determine the ECDSA big-int backend (and installed accelerator versions)
+    # once per process, then cache it in hass.data so the diagnostics dump can
+    # read it synchronously, exactly like every other diagnostics block (none of
+    # them performs its own I/O). The first materialization performs filesystem
+    # I/O (find_spec + dist-info read), so it runs in an executor here, in setup,
+    # never in the event-loop-bound diagnostics path. The pure logger then
+    # formats the result without blocking the event loop.
+    from .FMDNCrypto._lazy_crypto import (  # noqa: PLC0415
+        get_ecdsa_acceleration_info,
+    )
+
+    ecdsa_info = await hass.async_add_executor_job(get_ecdsa_acceleration_info)
+    bucket["ecdsa_acceleration_info"] = ecdsa_info
+    _log_ecdsa_acceleration(ecdsa_info)
 
     return True
 
