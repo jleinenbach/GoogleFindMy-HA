@@ -1643,91 +1643,82 @@ class GoogleFindMyEIDResolver:
             )
         return generated
 
-    @staticmethod
-    def _rotation_time_counters(now_unix: int) -> tuple[tuple[int, int], ...]:
-        """Return ``(period, now_unix // period)`` for every rotation period.
-
-        One ``time_counter`` term per rotation period actually used by the
-        generator (1024 s standard, 900 s and 3600 s phone windows), sorted by
-        period for a stable order. These terms are essential to the build
-        signature: a single 1024 s term would miss the 900 s / 3600 s
-        phone-window rollovers and leave those trackers unresolvable (F5).
-        Because ``ROTATION_PERIOD_3600 == 4 * ROTATION_PERIOD_900``, the 3600 s
-        term can never roll over in isolation, but it is kept as an explicit,
-        independent term so the signature stays correct if the periods change.
-        """
-
-        return tuple(
-            (period, now_unix // period)
-            for period in sorted(
-                (ROTATION_PERIOD, ROTATION_PERIOD_900, ROTATION_PERIOD_3600)
-            )
-        )
-
-    def _build_signature(self, work_items: list[WorkItem], *, now_unix: int) -> str:
+    def _build_signature(
+        self,
+        work_items: list[WorkItem],
+        *,
+        now_unix: int,
+        params: RotationParams,
+    ) -> str:
         """Return a deterministic signature of the active-device build inputs.
 
         The signature is the skip-guard key for the expensive build phase: if it
         is unchanged, re-running the build would reproduce a byte-identical
         lookup table, so it can be safely skipped.
 
-        It hashes the per-period rotation ``time_counter`` terms from
-        ``_rotation_time_counters`` plus, for every work item, the fields the
-        build output actually depends on. The plan named the five core fields
-        ``(registry_id, key_bytes, locked_variant, basis_hint, rotation_ts)``;
-        this implementation additionally folds in the other build-output inputs
-        carried by the work item so the skip can never produce a stale table
-        (the explicit correctness-preserving / bit-identical constraint
-        overrides the narrower field list -- see AP-B1 report, SA-8 breadth):
+        Correctness model (Variant B -- fold the computed specs, not a time
+        formula). The expensive, skipped part of the build is the per-variant
+        crypto in ``_generate_eids_from_spec`` / ``_compute_flags_xor_mask``. Its
+        only inputs are the ``VariantSpec`` items the build loop fans out, which
+        are a deterministic, *pure* function of each work item and ``now_unix``:
+        ``_compute_time_windows`` (-> ``_compute_lock_windows`` /
+        ``_compute_relative_windows`` / ``_dedupe_windows``) reads the learned
+        ``_known_offsets`` snapshot but mutates no resolver state, and
+        ``_compute_variants`` is pure. The signature therefore replays exactly
+        that window/variant derivation and folds its *content* in: if the spec
+        set is identical the crypto output is byte-identical, so the skip is
+        correct by construction.
 
-        * ``canonical_id`` / ``config_entry_id`` -- emitted into every
-          ``EIDMatch`` produced for the item;
-        * ``identity.pair_date`` / ``identity.secrets_creation_date`` -- the
-          relative-window anchors used in ``_compute_relative_windows``;
-        * the learned ``_known_offsets`` entries for the item's ``registry_id``
-          -- they narrow the scan window in ``_compute_relative_windows``.
+        Folding the realized window timestamps (rather than a ``now_unix //
+        period`` term) closes the phase-relative drift gap: the lock-tracking
+        index is ``(now_unix - created_at) // period`` and the relative index is
+        ``(now_unix - anchor) // period``, so a non-period-aligned anchor rolls
+        a drift window at a different ``now_unix`` than the absolute rollover --
+        two clocks could share the old absolute-counter signature yet need
+        different window sets. By hashing the windows the build actually
+        produces, a missing or added drift window always changes the digest.
 
-        Sorting makes the digest independent of identity iteration order.
+        Per work item the digest additionally folds the identity fields that
+        reach the build output but never the window math -- ``registry_id`` /
+        ``canonical_id`` / ``config_entry_id`` are emitted verbatim into every
+        ``EIDMatch``. Sorting makes the digest independent of iteration order.
         """
 
         hasher = hashlib.blake2b(digest_size=32)
-        # Per-period rotation counters. Each term flips when its rotation window
-        # advances, forcing a rebuild on rollover.
-        for period, counter in self._rotation_time_counters(now_unix):
-            hasher.update(b"P")
-            hasher.update(f"{period}:{counter}".encode())
 
         def _item_key(item: WorkItem) -> tuple[str, ...]:
-            variant = "" if item.locked_variant is None else item.locked_variant.value
-            basis = "" if item.basis_hint is None else item.basis_hint
-            rotation = "" if item.rotation_ts is None else str(item.rotation_ts)
-            pair_date = (
-                "" if item.identity.pair_date is None else str(item.identity.pair_date)
-            )
-            secrets_date = (
-                ""
-                if item.identity.secrets_creation_date is None
-                else str(item.identity.secrets_creation_date)
-            )
-            # Learned offsets keyed by (registry_id, basis) for this item, sorted
-            # for stability and serialized into one field.
-            offsets = ";".join(
-                f"{offset_basis}={offset}"
-                for (reg, offset_basis), offset in sorted(self._known_offsets.items())
-                if reg == item.registry_id
-            )
-            return (
+            # Identity fields that flow straight into ``EIDMatch`` output but are
+            # invisible to the window/variant derivation below.
+            fields: list[str] = [
                 item.registry_id,
-                item.key_bytes.hex(),
-                variant,
-                basis,
-                rotation,
                 item.canonical_id,
                 item.config_entry_id,
-                pair_date,
-                secrets_date,
-                offsets,
+                item.key_bytes.hex(),
+                "" if item.locked_variant is None else item.locked_variant.value,
+            ]
+            # Replay the pure window/variant derivation and fold the realized
+            # specs. ``_compute_time_windows`` is read-only with respect to
+            # ``self`` (it only reads the ``_known_offsets`` snapshot); see the
+            # AP-C offload contract. The realized spec set fully determines the
+            # skipped crypto output, so identical specs => identical lookup.
+            windows, invalid_hint = self._compute_time_windows(
+                item, now_unix=now_unix, params=params
             )
+            fields.append("1" if invalid_hint else "0")
+            for window in windows:
+                for variant_spec in self._compute_variants(item, window):
+                    fields.append(
+                        "|".join(
+                            (
+                                variant_spec.variant.value,
+                                str(int(variant_spec.include_reverse)),
+                                window.time_basis,
+                                str(variant_spec.window.timestamp),
+                                str(variant_spec.window.semantic_offset),
+                            )
+                        )
+                    )
+            return tuple(fields)
 
         for key in sorted(_item_key(item) for item in work_items):
             hasher.update(b"W")
@@ -1768,7 +1759,9 @@ class GoogleFindMyEIDResolver:
         # signature means the hint state is unchanged; any newly invalid hint
         # changes ``basis_hint`` (read back from _known_timebases), which changes
         # the signature and forces a rebuild that runs the pop.
-        build_signature = self._build_signature(work_items, now_unix=now_unix)
+        build_signature = self._build_signature(
+            work_items, now_unix=now_unix, params=rotation_params
+        )
         if self._last_build_signature == build_signature:
             _LOGGER.debug(
                 "Refresh stage: build signature unchanged, skipping rebuild "
@@ -2007,6 +2000,7 @@ class GoogleFindMyEIDResolver:
         basis: HeuristicBasis,
         variant: EidVariant,
         anchor: int | None,
+        drift_offsets: tuple[int, ...] = (-1, 0, 1),
     ) -> list[HeuristicEidResult]:
         """Memoized wrapper around ``generate_heuristic_eid`` (AP-SWEEP).
 
@@ -2026,8 +2020,11 @@ class GoogleFindMyEIDResolver:
         ``(t // period) * period`` over the same time value the crypto aligns
         (``now_unix`` for ABSOLUTE, ``now_unix - anchor`` for RELATIVE).
         Invalidation is implicit: a new window or re-keying yields a fresh key
-        and stale entries age out via the LRU. ``drift_offsets`` is the
-        constant default at both call sites, so it is not part of the key.
+        and stale entries age out via the LRU. ``drift_offsets`` defaults to the
+        same value the underlying generator uses; it is folded into the key (and
+        forwarded explicitly rather than relying on the callee default) so a
+        future caller that varies it can never be served a stale entry. The
+        added key cardinality is negligible (one constant tuple in practice).
         """
 
         if basis == HeuristicBasis.RELATIVE and anchor is not None and anchor > 0:
@@ -2047,6 +2044,7 @@ class GoogleFindMyEIDResolver:
             basis,
             variant,
             anchor,
+            drift_offsets,
         )
         cached = self._heuristic_memo.get(cache_key)
         if cached is not None:
@@ -2059,6 +2057,7 @@ class GoogleFindMyEIDResolver:
             basis=basis,
             variant=variant,
             anchor=anchor,
+            drift_offsets=drift_offsets,
         )
         self._heuristic_memo.put(cache_key, results)
         return results

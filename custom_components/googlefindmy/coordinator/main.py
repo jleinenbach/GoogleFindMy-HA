@@ -1133,6 +1133,21 @@ class GoogleFindMyCoordinator(
         if stats_save_task and not stats_save_task.done():
             stats_save_task.cancel()
 
+        # Cancel pending EID-resolver refresh debounce timers so no
+        # ``call_later`` callback fires (and creates a task) after unload.
+        for attr in (
+            "_eid_refresh_debounce_handle",
+            "_eid_inline_refresh_debounce_handle",
+        ):
+            handle = getattr(self, attr, None)
+            if handle is not None:
+                try:
+                    handle.cancel()
+                except Exception:
+                    pass
+                finally:
+                    setattr(self, attr, None)
+
         await self._async_unload()
 
     async def _async_unload(self) -> None:

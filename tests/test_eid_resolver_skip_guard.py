@@ -37,7 +37,11 @@ import pytest
 
 from custom_components.googlefindmy import eid_resolver as resolver_mod
 from custom_components.googlefindmy.coordinator import DeviceIdentity
-from custom_components.googlefindmy.eid_resolver import GoogleFindMyEIDResolver
+from custom_components.googlefindmy.eid_resolver import (
+    GoogleFindMyEIDResolver,
+    WindowCandidate,
+    WindowSpec,
+)
 from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
     ROTATION_PERIOD,
     ROTATION_PERIOD_900,
@@ -45,56 +49,56 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 )
 
 
-def test_rotation_time_counters_cover_all_three_periods() -> None:
-    """The signature must carry one time_counter term per rotation period.
-
-    This pins the *independent* presence of the 1024 s, 900 s, and 3600 s terms.
-    The 3600 s term cannot be isolated by a clock rollover (every 3600 s
-    boundary is also a 900 s boundary, since 3600 == 4 * 900), so its standalone
-    contribution is asserted here directly rather than via the rebuild path.
-    """
-
-    now_unix = 1_234_567
-    counters = GoogleFindMyEIDResolver._rotation_time_counters(now_unix)
-
-    by_period = dict(counters)
-    assert set(by_period) == {
-        ROTATION_PERIOD,
-        ROTATION_PERIOD_900,
-        ROTATION_PERIOD_3600,
-    }
-    assert by_period[ROTATION_PERIOD] == now_unix // ROTATION_PERIOD
-    assert by_period[ROTATION_PERIOD_900] == now_unix // ROTATION_PERIOD_900
-    assert by_period[ROTATION_PERIOD_3600] == now_unix // ROTATION_PERIOD_3600
-
-
-def test_build_signature_changes_when_only_3600_counter_differs(
+def test_signature_folds_realized_window_timestamps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two clocks with equal 1024 s/900 s counters but a different 3600 s
-    counter would be physically impossible (3600 == 4 * 900), so we pin the
-    3600 s term's effect on the signature by injecting the counter tuple
-    directly: dropping the 3600 s term changes the digest, proving it is hashed.
+    """The signature replays ``_compute_time_windows`` and folds its content.
+
+    Variant B (correctness by construction): the skipped crypto consumes only
+    the realized window/variant specs, so the signature must change iff that
+    spec set changes. Here we hold the work item and clock fixed but inject one
+    extra realized window via ``_compute_time_windows``; the digest must move,
+    proving the windows -- not a ``now_unix // period`` formula -- drive the key.
     """
 
     resolver = _build_refreshable_resolver()
-    work_items: list = []
-    now_unix = 230_400  # all counters on a boundary
-
-    full = resolver._build_signature(work_items, now_unix=now_unix)
-
-    # Recompute with the 3600 s term suppressed to confirm it participates.
-    # monkeypatch auto-restores the staticmethod wrapper after the test.
     monkeypatch.setattr(
-        GoogleFindMyEIDResolver,
-        "_rotation_time_counters",
-        staticmethod(
-            lambda n: tuple((p, n // p) for p in (ROTATION_PERIOD, ROTATION_PERIOD_900))
-        ),
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
     )
-    without_3600 = resolver._build_signature(work_items, now_unix=now_unix)
+    params = resolver._build_rotation_params()
+    items = resolver._collect_work_items([_identity()], now_unix=1024)
 
-    assert full != without_3600
+    baseline = resolver._build_signature(items, now_unix=1024, params=params)
+
+    real_windows = GoogleFindMyEIDResolver._compute_time_windows
+
+    def _extra_window(
+        self: GoogleFindMyEIDResolver, work_item, *, now_unix, params
+    ):  # type: ignore[no-untyped-def]
+        windows, invalid_hint = real_windows(
+            self, work_item, now_unix=now_unix, params=params
+        )
+        extra = WindowSpec(
+            time_basis="synthetic",
+            candidate_value=now_unix,
+            windows=(
+                WindowCandidate(
+                    timestamp=now_unix + params.rotation_period,
+                    semantic_offset=params.rotation_period,
+                    time_basis="synthetic",
+                    candidate_value=now_unix,
+                ),
+            ),
+        )
+        return [*windows, extra], invalid_hint
+
+    monkeypatch.setattr(
+        GoogleFindMyEIDResolver, "_compute_time_windows", _extra_window
+    )
+    with_extra = resolver._build_signature(items, now_unix=1024, params=params)
+
+    assert baseline != with_extra
 
 
 def _close_coro(coro: object, name: object = None) -> None:
@@ -348,20 +352,22 @@ async def test_rotation_window_rollover_forces_rebuild(
     period: int,
     label: str,
 ) -> None:
-    """Crossing any single rotation window changes the signature -> rebuild.
+    """Advancing the clock across a rotation boundary forces a rebuild.
 
-    The phone-window protection (F5): a one-period signature would miss the
-    900 s / 3600 s rollovers. We pick a base time and a one-second advance that
-    flips the ``//period`` counter under test, then assert the rebuild fires.
+    Under Variant B the signature folds the realized window timestamps, which
+    derive from ``now_unix`` (the unix basis is ``now_unix`` itself, with a
+    drift/tz-padded window), so advancing the clock shifts the window set and
+    forces a rebuild. We pick a base time and a one-second advance that flips
+    the ``//period`` counter under test, then assert the rebuild fires; this
+    keeps the original phone-window intent (no stale lookup across a rollover)
+    while exercising the new realized-window signature.
 
     Note on 3600 s: because ``ROTATION_PERIOD_3600 == 4 * ROTATION_PERIOD_900``,
     every 3600 s boundary is also a 900 s boundary, so a 3600 s rollover can
     never be isolated from the 900 s counter (a mathematical property of the
     periods, not a test defect). For 1024 s and 900 s we require exact
     isolation; for 3600 s we require that the target counter flips (the 900 s
-    counter is allowed to flip with it). The independent contribution of the
-    3600 s term to the signature is pinned by the mutation cross-check
-    documented in the AP-B1 report.
+    counter is allowed to flip with it).
     """
 
     resolver = _build_refreshable_resolver()
@@ -397,3 +403,174 @@ async def test_rotation_window_rollover_forces_rebuild(
     assert finalize_calls["count"] == 2, (
         f"rotation window {label} rollover did not force a rebuild"
     )
+
+
+def _lock_identity() -> DeviceIdentity:
+    """Return an identity that resolves through the lock-tracking window path."""
+
+    return DeviceIdentity(
+        registry_id="registry-id",
+        canonical_id="canonical-id",
+        identity_key=b"\xaa" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+    )
+
+
+def _install_lock(resolver: GoogleFindMyEIDResolver, *, created_at: int) -> None:
+    """Register a non-legacy lock so ``_compute_lock_windows`` produces windows.
+
+    ``rotation_timestamp=0`` is a valid (non-``None``) counter, so the lock is
+    kept rather than discarded as legacy; ``created_at`` is phase-offset from the
+    rotation period so the lock-tracking index ``(now - created_at) // period``
+    rolls at a different ``now`` than the absolute ``now // period`` counter.
+    """
+
+    resolver._locks["registry-id"] = resolver_mod.EIDGenerationLock(
+        device_id="registry-id",
+        canonical_id="canonical-id",
+        variant=resolver_mod.EidVariant.LEGACY_SECP160R1_X20_BE.value,
+        advertisement_reversed=False,
+        eid_length=20,
+        rotation_timestamp=0,
+        frame_type=None,
+        time_basis="lock_tracking",
+        created_at=created_at,
+    )
+    # Keep the lock confirmed at both clock points so ``_purge_stale_locks`` does
+    # not drop it between the two refreshes.
+    resolver._last_lock_confirmation["registry-id"] = created_at
+
+
+@pytest.mark.asyncio
+async def test_phase_offset_lock_window_drift_forces_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a phase-offset lock must rebuild when a drift window appears.
+
+    Repro of the AP-B1 skip-guard correctness defect. With ``created_at=500`` and
+    period 1024, the lock-tracking window set is ``{0, 1024, 2048}`` at
+    ``now=1100`` but ``{0, 1024, 2048, 3072}`` at ``now=1524`` -- a genuine extra
+    drift window. Both clocks share ``now // 1024 == 1``, so the old
+    absolute-counter signature was identical and wrongly skipped the rebuild,
+    serving a stale lookup missing the 3072 window. The Variant B signature folds
+    the realized lock windows, so the spec change forces a rebuild here.
+    """
+
+    resolver = _build_refreshable_resolver()
+    _install_lock(resolver, created_at=500)
+    finalize_calls = _install_common_patches(
+        monkeypatch, identities=[_lock_identity()]
+    )
+    # Re-arm the confirmation timestamp on every purge so the lock survives.
+    monkeypatch.setattr(
+        GoogleFindMyEIDResolver,
+        "_purge_stale_locks",
+        lambda self, *, now: None,
+    )
+
+    monkeypatch.setattr(time, "time", lambda: 1100.0)
+    await resolver._refresh_cache()
+    assert finalize_calls["count"] == 1
+
+    monkeypatch.setattr(time, "time", lambda: 1524.0)
+    await resolver._refresh_cache()
+    assert finalize_calls["count"] == 2, (
+        "phase-offset lock drift window did not force a rebuild"
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase_offset_relative_window_drift_forces_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a phase-offset pairing anchor must rebuild on window drift.
+
+    Repro of the AP-B1 skip-guard correctness defect on the relative path. With
+    ``pair_date=500`` the relative window set grows from ``...6144`` at
+    ``now=1100`` to ``...7168`` at ``now=1524``. Both clocks share
+    ``now // 1024 == 1``, so the old absolute-counter signature was identical and
+    wrongly skipped the rebuild. The Variant B signature folds the realized
+    relative windows, so the extra window forces a rebuild.
+    """
+
+    resolver = _build_refreshable_resolver()
+    identity = DeviceIdentity(
+        registry_id="registry-id",
+        canonical_id="canonical-id",
+        identity_key=b"\xaa" * 32,
+        encrypted_identity_key=None,
+        owner_key_version=None,
+        device_type=None,
+        config_entry_id="entry-id",
+        fast_pair_model_id=None,
+        pair_date=500,
+    )
+    finalize_calls = _install_common_patches(monkeypatch, identities=[identity])
+
+    monkeypatch.setattr(time, "time", lambda: 1100.0)
+    await resolver._refresh_cache()
+    assert finalize_calls["count"] == 1
+
+    monkeypatch.setattr(time, "time", lambda: 1524.0)
+    await resolver._refresh_cache()
+    assert finalize_calls["count"] == 2, (
+        "phase-offset relative drift window did not force a rebuild"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mutation_old_absolute_counter_signature_misses_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation guard: the pre-fix absolute-counter signature would not rebuild.
+
+    Pins that the new regression tests above genuinely catch the defect rather
+    than passing trivially. We rebuild the *old* signature logic (the per-period
+    ``now // period`` counters plus the static work-item fields, with no realized
+    windows) and assert it is byte-identical across ``now=1100`` and
+    ``now=1524`` for the phase-offset lock case -- i.e. the old guard would have
+    skipped the rebuild and served the stale lookup.
+    """
+
+    resolver = _build_refreshable_resolver()
+    monkeypatch.setattr(
+        "custom_components.googlefindmy.eid_resolver.ENABLE_ABSOLUTE_UNIX_BASIS",
+        True,
+    )
+    _install_lock(resolver, created_at=500)
+
+    def _legacy_signature(work_items: list, *, now_unix: int) -> str:
+        import hashlib
+
+        hasher = hashlib.blake2b(digest_size=32)
+        for period in sorted(
+            (ROTATION_PERIOD, ROTATION_PERIOD_900, ROTATION_PERIOD_3600)
+        ):
+            hasher.update(b"P")
+            hasher.update(f"{period}:{now_unix // period}".encode())
+        for item in sorted(
+            (i.registry_id, i.key_bytes.hex(), str(i.rotation_ts)) for i in work_items
+        ):
+            hasher.update(b"W")
+            for field_value in item:
+                hasher.update(field_value.encode())
+                hasher.update(b"\x00")
+        return hasher.hexdigest()
+
+    items_1100 = resolver._collect_work_items([_lock_identity()], now_unix=1100)
+    items_1524 = resolver._collect_work_items([_lock_identity()], now_unix=1524)
+
+    legacy_1100 = _legacy_signature(items_1100, now_unix=1100)
+    legacy_1524 = _legacy_signature(items_1524, now_unix=1524)
+    # The old logic could not tell the two clocks apart: it would have skipped.
+    assert legacy_1100 == legacy_1524
+
+    params = resolver._build_rotation_params()
+    fixed_1100 = resolver._build_signature(items_1100, now_unix=1100, params=params)
+    fixed_1524 = resolver._build_signature(items_1524, now_unix=1524, params=params)
+    # The Variant B signature does tell them apart: it rebuilds.
+    assert fixed_1100 != fixed_1524

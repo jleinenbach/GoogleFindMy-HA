@@ -381,3 +381,77 @@ def test_sites_have_independent_debounce_handles() -> None:
 
     loop.fire_all()
     assert len(coordinator.hass._created_tasks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: shutdown cancels pending debounce timers (no task after unload)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_cancels_pending_debounce_handles() -> None:
+    """``async_shutdown`` cancels both armed EID debounce timers.
+
+    Without the cancel a pending ``call_later`` callback would still fire after
+    unload and create an ``async_create_task`` against a torn-down coordinator.
+    Both handles are cancelled and cleared.
+    """
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+
+    central = _FakeTimerHandle()
+    # Leave the inline handle unset to also cover the ``handle is None`` skip.
+    coordinator._eid_refresh_debounce_handle = central
+    coordinator._eid_inline_refresh_debounce_handle = None
+
+    # Stub the rest of the shutdown surface so we exercise only the new cancel.
+    coordinator._cancel_pending_subentry_repair = lambda: None
+    coordinator._dr_unsub = None
+    coordinator._short_retry_cancel = None
+    coordinator._stats_save_task = None
+
+    async def _async_unload() -> None:
+        return None
+
+    coordinator._async_unload = _async_unload
+
+    await coordinator.async_shutdown()
+
+    assert central.cancelled is True
+    assert coordinator._eid_refresh_debounce_handle is None
+    assert coordinator._eid_inline_refresh_debounce_handle is None
+
+
+@pytest.mark.asyncio
+async def test_async_shutdown_swallows_handle_cancel_error() -> None:
+    """A raising ``cancel()`` on a debounce handle must not break shutdown.
+
+    The cancel is wrapped defensively (mirroring ``_short_retry_cancel``); a
+    handle whose ``cancel`` raises is still cleared and shutdown completes.
+    """
+
+    from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
+
+    class _RaisingHandle:
+        def cancel(self) -> None:
+            raise RuntimeError("boom")
+
+    coordinator = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coordinator._eid_refresh_debounce_handle = _RaisingHandle()
+    coordinator._eid_inline_refresh_debounce_handle = _RaisingHandle()
+    coordinator._cancel_pending_subentry_repair = lambda: None
+    coordinator._dr_unsub = None
+    coordinator._short_retry_cancel = None
+    coordinator._stats_save_task = None
+
+    async def _async_unload() -> None:
+        return None
+
+    coordinator._async_unload = _async_unload
+
+    await coordinator.async_shutdown()
+
+    assert coordinator._eid_refresh_debounce_handle is None
+    assert coordinator._eid_inline_refresh_debounce_handle is None
