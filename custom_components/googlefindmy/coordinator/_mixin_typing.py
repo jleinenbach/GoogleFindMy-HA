@@ -85,6 +85,12 @@ class _MixinBase:
     _subentry_metadata: dict[str, SubentryMetadata]
     _default_subentry_key_value: str
 
+    # AP-B2: pending debounce timer handles for EID-resolver refresh triggers.
+    # One per trigger site (central helper in identity.py, inline path in
+    # cache.py) so each site coalesces its own burst independently.
+    _eid_refresh_debounce_handle: asyncio.TimerHandle | None
+    _eid_inline_refresh_debounce_handle: asyncio.TimerHandle | None
+
     # Polling state
     _consecutive_timeouts: int
     _last_poll_result: str | None

@@ -164,6 +164,24 @@ TOKEN_REFRESH_COOLDOWN_S: int = 180
 This cooldown is shared across all token regeneration buttons (AAS/ADM).
 """
 
+# EID resolver refresh trigger debounce policy
+_EID_REFRESH_DEBOUNCE_S: float = 3.0
+"""Debounce window (seconds) coalescing EID-resolver refresh *triggers*.
+
+Several read-only call sites and one inline cache path each request a resolver
+refresh whenever an active device set or identity changes. Under an FCM burst
+these requests arrive back-to-back, and without coalescing each one spawns its
+own ``async_create_task(resolver.async_refresh())``. This window collapses such
+bursts to a single scheduled task.
+
+The value (3.0 s, sensible band 2-5 s) is deliberately small relative to the
+device poll delay (``device_poll_delay`` 5-15 s) and the location poll interval
+(``location_poll_interval`` 300-600 s), so a legitimate change is still picked
+up promptly while same-burst triggers within 3 s coalesce. The debounce only
+delays *task creation*; the actual rebuild-vs-skip decision stays with the
+AP-B1 skip guard inside the resolver, so a genuine change is never dropped.
+"""
+
 # Quality/logic thresholds
 DEFAULT_ALLOW_HISTORY_FALLBACK: bool = False
 DEFAULT_SEMANTIC_DETECTION_RADIUS: float = (
@@ -623,6 +641,7 @@ __all__ = [
     "DEFAULT_OPTIONS",
     "CONFIG_FIELDS",
     "TOKEN_REFRESH_COOLDOWN_S",
+    "_EID_REFRESH_DEBOUNCE_S",
     "SERVICE_LOCATE_DEVICE",
     "SERVICE_PLAY_SOUND",
     "SERVICE_STOP_SOUND",
