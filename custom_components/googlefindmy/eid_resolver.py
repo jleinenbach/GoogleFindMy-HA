@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast, runtime_checkable
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -91,6 +93,72 @@ _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
     EidVariant.MODERN_P256_X32_LE_SCALAR: (MODERN_EID_LENGTH, P256_ORDER),
     EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
 }
+
+# Per-variant crypto memoization (AP-A).
+# Both EID derivation (generate_eid_variant) and the flags XOR mask
+# (compute_flags_xor_mask) are pure functions of their inputs and run once per
+# (key, time_counter, variant/curve) tuple on every rotation refresh. A bounded
+# LRU per resolver instance turns the repeated within-rotation and
+# back-to-back-refresh recomputation into a dict lookup while staying byte-exact.
+#
+# functools.lru_cache is deliberately NOT used: as a method decorator it keys on
+# ``self`` (and pins it), leaking the resolver and preventing per-instance caches.
+# The minimal OrderedDict+Lock helper below keys only on the crypto inputs.
+#
+# _EID_MEMO_MAXSIZE = 512: 13 devices x 5 variants x 4 concurrently live
+# time_counter windows ~= 260, x ~2 headroom -> 512 (next power of two).
+_EID_MEMO_MAXSIZE = 512
+# _EID_MASK_MEMO_MAXSIZE = 512: same dimensioning; mask key cardinality is
+# <= devices x windows x 2 curves < 512 (no per-variant fan-out for the mask).
+_EID_MASK_MEMO_MAXSIZE = 512
+
+
+class _BoundedLRUCache:
+    """Thread-safe bounded LRU keyed on hashable crypto inputs.
+
+    A tiny instance-bound replacement for ``functools.lru_cache`` that keys on
+    explicit input tuples rather than ``self``. The lock guards only the
+    OrderedDict lookup/store, never the wrapped crypto call, so concurrent
+    worker threads (AP-C) can run the actual derivation in parallel and only
+    serialize on the cheap dict access.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        """Initialize an empty cache bounded to ``maxsize`` entries."""
+
+        self._maxsize = maxsize
+        self._store: OrderedDict[Any, Any] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: Any) -> Any:
+        """Return the cached value for ``key`` or ``None`` on a miss.
+
+        ``None`` is never stored as a value, so a ``None`` return is an
+        unambiguous miss signal for the callers in this module.
+        """
+
+        with self._lock:
+            if key not in self._store:
+                return None
+            # Mark as most-recently-used.
+            self._store.move_to_end(key)
+            return self._store[key]
+
+    def put(self, key: Any, value: Any) -> None:
+        """Store ``value`` under ``key``, evicting the LRU entry past maxsize."""
+
+        with self._lock:
+            self._store[key] = value
+            self._store.move_to_end(key)
+            while len(self._store) > self._maxsize:
+                self._store.popitem(last=False)
+
+    def __len__(self) -> int:
+        """Return the current number of cached entries."""
+
+        with self._lock:
+            return len(self._store)
+
 
 # Strategy Configuration
 # ENABLE_ABSOLUTE_UNIX_BASIS: If True, scans for EIDs based on absolute Unix time (Deep Scan).
@@ -752,6 +820,16 @@ class GoogleFindMyEIDResolver:
     )
     _ble_scan_info: dict[str, BLEScanInfo] = field(init=False, default_factory=dict)
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
+    # Per-variant crypto memoization caches (AP-A). Declared as slots-backed
+    # dataclass fields; stubs that bypass __init__ get them seeded by
+    # _ensure_cache_defaults under its hasattr guard.
+    _eid_memo: _BoundedLRUCache = field(
+        init=False, default_factory=lambda: _BoundedLRUCache(_EID_MEMO_MAXSIZE)
+    )
+    _flags_mask_memo: _BoundedLRUCache = field(
+        init=False,
+        default_factory=lambda: _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE),
+    )
 
     def __post_init__(self) -> None:
         """Set up caches and schedule the first rotation-aligned refresh."""
@@ -804,6 +882,13 @@ class GoogleFindMyEIDResolver:
             self._ble_scan_info = {}
         if not hasattr(self, "_cached_identities"):
             self._cached_identities = []
+        # Per-variant crypto memoization caches (AP-A). Initialized here under
+        # the same hasattr guard as the _known_* defaults so stubs that bypass
+        # __init__ (and call _ensure_cache_defaults directly) get them too.
+        if not hasattr(self, "_eid_memo"):
+            self._eid_memo = _BoundedLRUCache(_EID_MEMO_MAXSIZE)
+        if not hasattr(self, "_flags_mask_memo"):
+            self._flags_mask_memo = _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE)
 
     def _clear_lock_state(self, device_id: str) -> bool:
         """Remove all cached state associated with a device lock."""
@@ -1562,7 +1647,7 @@ class GoogleFindMyEIDResolver:
                         variant_spec.variant, (LEGACY_EID_LENGTH, None)
                     )
                     try:
-                        xor_mask = compute_flags_xor_mask(
+                        xor_mask = self._compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
                             curve_byte_len=curve_len,
@@ -1653,14 +1738,63 @@ class GoogleFindMyEIDResolver:
         time_counter: int,
         variant: EidVariant,
     ) -> bytes:
-        """Generate an EID for a specific profile."""
+        """Generate an EID for a specific profile.
 
-        return generate_eid_variant(
+        Memoized per resolver instance on ``(key_bytes, time_counter,
+        variant)``. The derivation is pure, so a hit returns the byte-identical
+        EID without recomputation. Cache invalidation is implicit: key rotation
+        changes ``time_counter`` and re-keying changes ``key_bytes``, both of
+        which produce a fresh key and let stale entries age out via the LRU.
+        """
+
+        cache_key = (key_bytes, time_counter, variant)
+        cached = self._eid_memo.get(cache_key)
+        if cached is not None:
+            return cast(bytes, cached)
+
+        # Compute outside the cache lock so parallel workers (AP-C) are not
+        # serialized on the crypto call.
+        eid_bytes = generate_eid_variant(
             key_bytes,
             time_counter,
             variant,
             strict=False,
         )
+        self._eid_memo.put(cache_key, eid_bytes)
+        return eid_bytes
+
+    def _compute_flags_xor_mask(
+        self,
+        key_bytes: bytes,
+        time_counter: int,
+        *,
+        curve_byte_len: int,
+        curve_order: int | None,
+    ) -> int:
+        """Memoized wrapper around ``compute_flags_xor_mask``.
+
+        Keyed per resolver instance on ``(key_bytes, time_counter,
+        curve_byte_len, curve_order)``. The mask is a pure function of these
+        inputs, so a hit returns the identical integer without recomputation.
+        Invalidation is implicit via key rotation, identical to
+        ``_generate_variant``.
+        """
+
+        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order)
+        cached = self._flags_mask_memo.get(cache_key)
+        if cached is not None:
+            return cast(int, cached)
+
+        # Compute outside the cache lock so parallel workers (AP-C) are not
+        # serialized on the crypto call.
+        mask = compute_flags_xor_mask(
+            key_bytes,
+            time_counter,
+            curve_byte_len=curve_byte_len,
+            curve_order=curve_order,
+        )
+        self._flags_mask_memo.put(cache_key, mask)
+        return mask
 
     async def _collect_device_secrets(self) -> list[DeviceIdentity]:
         """Retrieve active tracker identities from all loaded coordinators."""
