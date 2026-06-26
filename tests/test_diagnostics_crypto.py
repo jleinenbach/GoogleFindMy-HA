@@ -19,6 +19,7 @@ import pytest
 from custom_components.googlefindmy import diagnostics
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.diagnostics import _crypto_block
+from tests.helpers.config_entries_stub import make_config_entry
 
 # Each async test below carries an explicit ``@pytest.mark.asyncio`` marker
 # (required by tests/test_guard_async_test_marker.py); the one sync test stays
@@ -50,12 +51,11 @@ def _patch_loader(monkeypatch: pytest.MonkeyPatch) -> None:
 def _make_entry_and_hass(
     domain_bucket: dict[str, Any],
 ) -> tuple[SimpleNamespace, SimpleNamespace]:
-    entry = SimpleNamespace(
-        entry_id="entry-crypto",
-        version=1,
+    # Canonical config-entry stub (tests/AGENTS.md: new tests MUST use
+    # make_config_entry, never ad-hoc SimpleNamespace entries). It guarantees
+    # data/options are real dicts; the hass object stays a local SimpleNamespace.
+    entry = make_config_entry(
         domain=DOMAIN,
-        data={},
-        options={},
         runtime_data=SimpleNamespace(coordinator=None),
     )
     hass = SimpleNamespace(data={DOMAIN: domain_bucket})
