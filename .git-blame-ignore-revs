@@ -1,0 +1,8 @@
+# Revisions to ignore in `git blame`.
+#
+# Activate locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub honors this file automatically in its web blame view.
+
+# style: apply ruff format across repository (ruff 0.14.14), PR #1145
+8c0b5fce44d7047bb3ea239f0a4f244cf0698d2c
