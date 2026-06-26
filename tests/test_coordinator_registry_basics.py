@@ -132,9 +132,7 @@ class TestConfigEntryExists:
         coord.hass.config_entries.async_get_entry = MagicMock(return_value=None)
         assert coord._config_entry_exists() is False
 
-    def test_getter_raises_returns_true_defensively(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_getter_raises_returns_true_defensively(self, coord: RegistryStub) -> None:
         def _boom(_eid: str) -> Any:
             raise RuntimeError("registry corrupted")
 
@@ -262,9 +260,7 @@ class TestKwargsNeedLegacyRetry:
 class TestConfigSubentryKwargName:
     """Cover signature-based detection, caching, and defensive fallbacks."""
 
-    def test_returns_config_subentry_id_when_present(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_returns_config_subentry_id_when_present(self, coord: RegistryStub) -> None:
         def api(*, config_subentry_id: str | None = None) -> None: ...
 
         assert (
@@ -282,9 +278,7 @@ class TestConfigSubentryKwargName:
             == "add_config_subentry_id"
         )
 
-    def test_var_keyword_returns_config_subentry_id(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_var_keyword_returns_config_subentry_id(self, coord: RegistryStub) -> None:
         def api(**kwargs: Any) -> None: ...
 
         assert (
@@ -394,18 +388,12 @@ class TestAllowsTranslationUpdate:
         coord._device_registry_supports_translation_update = False
         assert coord._device_registry_allows_translation_update(MagicMock()) is False
 
-    def test_missing_update_helper_returns_false(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_missing_update_helper_returns_false(self, coord: RegistryStub) -> None:
         dev_reg = SimpleNamespace()  # no async_update_device attribute
-        assert (
-            coord._device_registry_allows_translation_update(dev_reg) is False
-        )
+        assert coord._device_registry_allows_translation_update(dev_reg) is False
         assert coord._device_registry_supports_translation_update is False
 
-    def test_both_translation_params_returns_true(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_both_translation_params_returns_true(self, coord: RegistryStub) -> None:
         def async_update_device(
             device_id: str,
             *,
@@ -424,9 +412,7 @@ class TestAllowsTranslationUpdate:
         ) -> None: ...
 
         dev_reg = SimpleNamespace(async_update_device=async_update_device)
-        assert (
-            coord._device_registry_allows_translation_update(dev_reg) is False
-        )
+        assert coord._device_registry_allows_translation_update(dev_reg) is False
 
     def test_signature_failure_returns_false(
         self, coord: RegistryStub, monkeypatch: pytest.MonkeyPatch
@@ -437,9 +423,7 @@ class TestAllowsTranslationUpdate:
             raise TypeError("C extension")
 
         monkeypatch.setattr(inspect, "signature", _raise)
-        assert (
-            coord._device_registry_allows_translation_update(dev_reg) is False
-        )
+        assert coord._device_registry_allows_translation_update(dev_reg) is False
 
 
 # ---------------------------------------------------------------------------
@@ -450,9 +434,7 @@ class TestAllowsTranslationUpdate:
 class TestCallDeviceRegistryApi:
     """B1..B10: kwargs handling, retry, fallback paths."""
 
-    def test_no_base_kwargs_calls_with_empty_kwargs(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_no_base_kwargs_calls_with_empty_kwargs(self, coord: RegistryStub) -> None:
         call = MagicMock(return_value="ok")
         assert coord._call_device_registry_api(call) == "ok"
         call.assert_called_once_with()
@@ -489,9 +471,7 @@ class TestCallDeviceRegistryApi:
         coord._call_device_registry_api(api, base_kwargs={"config_subentry_id": "s1"})
         assert captured == {"seen": "s1"}
 
-    def test_typeerror_without_legacy_match_reraises(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_typeerror_without_legacy_match_reraises(self, coord: RegistryStub) -> None:
         def api(*, name: str) -> None:
             raise TypeError("unrelated error about 'name'")
 
@@ -549,9 +529,7 @@ class TestCallDeviceRegistryApi:
         attempts: list[dict[str, Any]] = []
 
         def api(*, config_subentry_id: str | None = None, name: str = "") -> str:
-            attempts.append(
-                {"config_subentry_id": config_subentry_id, "name": name}
-            )
+            attempts.append({"config_subentry_id": config_subentry_id, "name": name})
             if config_subentry_id == "missing":
                 raise UnknownSubEntry()
             return "ok"
@@ -579,44 +557,30 @@ class TestExtractOurIdentifier:
         device = SimpleNamespace(identifiers=set())
         assert coord._extract_our_identifier(device) is None
 
-    def test_only_foreign_identifiers_returns_none(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_only_foreign_identifiers_returns_none(self, coord: RegistryStub) -> None:
         device = SimpleNamespace(identifiers={("other-domain", "xyz")})
         assert coord._extract_our_identifier(device) is None
 
     def test_entry_scoped_identifier_returns_raw_device_id(
         self, coord: RegistryStub
     ) -> None:
-        device = SimpleNamespace(
-            identifiers={(DOMAIN, "entry-xyz:dev-1")}
-        )
+        device = SimpleNamespace(identifiers={(DOMAIN, "entry-xyz:dev-1")})
         assert coord._extract_our_identifier(device) == "dev-1"
 
-    def test_legacy_identifier_returns_device_id(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_legacy_identifier_returns_device_id(self, coord: RegistryStub) -> None:
         device = SimpleNamespace(identifiers={(DOMAIN, "dev-legacy")})
         assert coord._extract_our_identifier(device) == "dev-legacy"
 
-    def test_service_device_identifier_returns_none(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_service_device_identifier_returns_none(self, coord: RegistryStub) -> None:
         # SERVICE_DEVICE_IDENTIFIER_PREFIX-based identifiers are not tracker IDs;
         # the helper filters them out at parse time.
         device = SimpleNamespace(
-            identifiers={
-                (DOMAIN, f"{SERVICE_DEVICE_IDENTIFIER_PREFIX}entry-xyz")
-            }
+            identifiers={(DOMAIN, f"{SERVICE_DEVICE_IDENTIFIER_PREFIX}entry-xyz")}
         )
         assert coord._extract_our_identifier(device) is None
 
-    def test_legacy_service_identifier_returns_none(
-        self, coord: RegistryStub
-    ) -> None:
-        device = SimpleNamespace(
-            identifiers={(DOMAIN, LEGACY_SERVICE_IDENTIFIER)}
-        )
+    def test_legacy_service_identifier_returns_none(self, coord: RegistryStub) -> None:
+        device = SimpleNamespace(identifiers={(DOMAIN, LEGACY_SERVICE_IDENTIFIER)})
         assert coord._extract_our_identifier(device) is None
 
 
@@ -633,9 +597,7 @@ class TestSyncOwnerIndex:
         # Should not raise.
         coord._sync_owner_index([{"canonicalId": "abc"}])
 
-    def test_no_entry_id_returns_early(
-        self, coord_no_entry: RegistryStub
-    ) -> None:
+    def test_no_entry_id_returns_early(self, coord_no_entry: RegistryStub) -> None:
         coord_no_entry._sync_owner_index([{"canonicalId": "abc"}])
         assert "device_owner_index" not in coord_no_entry.hass.data.get(DOMAIN, {})
 
@@ -675,31 +637,20 @@ class TestSyncOwnerIndex:
 
     def test_non_string_canonical_is_coerced(self, coord: RegistryStub) -> None:
         coord._sync_owner_index([{"id": 12345}])
-        assert (
-            coord.hass.data[DOMAIN]["device_owner_index"]["12345"] == "entry-xyz"
-        )
+        assert coord.hass.data[DOMAIN]["device_owner_index"]["12345"] == "entry-xyz"
 
-    def test_empty_canonical_after_strip_skipped(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_empty_canonical_after_strip_skipped(self, coord: RegistryStub) -> None:
         coord._sync_owner_index([{"id": "   "}])
         assert coord.hass.data.get(DOMAIN, {}).get("device_owner_index", {}) == {}
 
     def test_existing_owner_from_other_entry_not_overwritten(
         self, coord: RegistryStub
     ) -> None:
-        coord.hass.data[DOMAIN] = {
-            "device_owner_index": {"shared": "entry-other"}
-        }
+        coord.hass.data[DOMAIN] = {"device_owner_index": {"shared": "entry-other"}}
         coord._sync_owner_index([{"id": "shared"}])
-        assert (
-            coord.hass.data[DOMAIN]["device_owner_index"]["shared"]
-            == "entry-other"
-        )
+        assert coord.hass.data[DOMAIN]["device_owner_index"]["shared"] == "entry-other"
 
-    def test_stale_entries_for_this_entry_are_pruned(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_stale_entries_for_this_entry_are_pruned(self, coord: RegistryStub) -> None:
         coord.hass.data[DOMAIN] = {
             "device_owner_index": {
                 "stale": "entry-xyz",
@@ -847,17 +798,13 @@ class TestReindexPollTargets:
 class TestFindTrackerEntityEntry:
     """Wraps :meth:`_find_tracker_entity_entry`; pure delegation."""
 
-    def test_passes_device_id_and_returns_result(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_passes_device_id_and_returns_result(self, coord: RegistryStub) -> None:
         sentinel = SimpleNamespace(entity_id="device_tracker.x")
         coord._find_tracker_entity_entry = MagicMock(return_value=sentinel)  # type: ignore[method-assign]
 
         assert coord.find_tracker_entity_entry("dev-1") is sentinel
         coord._find_tracker_entity_entry.assert_called_once_with("dev-1")
 
-    def test_returns_none_when_inner_returns_none(
-        self, coord: RegistryStub
-    ) -> None:
+    def test_returns_none_when_inner_returns_none(self, coord: RegistryStub) -> None:
         coord._find_tracker_entity_entry = MagicMock(return_value=None)  # type: ignore[method-assign]
         assert coord.find_tracker_entity_entry("missing") is None

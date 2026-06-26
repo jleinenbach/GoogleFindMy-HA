@@ -87,9 +87,7 @@ def _build_refreshable_resolver() -> GoogleFindMyEIDResolver:
     async def _async_noop(payload: object = None) -> None:
         return None
 
-    resolver._store = SimpleNamespace(
-        async_load=lambda: None, async_save=_async_noop
-    )
+    resolver._store = SimpleNamespace(async_load=lambda: None, async_save=_async_noop)
     resolver._unsub_interval = None
     resolver._unsub_alignment = None
     resolver._refresh_lock = asyncio.Lock()
@@ -318,9 +316,7 @@ async def test_second_refresh_cache_recomputes_no_crypto(
         "custom_components.googlefindmy.eid_resolver.MIN_UNIX_WINDOW_SIZE",
         8,
     )
-    monkeypatch.setattr(
-        GoogleFindMyEIDResolver, "_collect_device_secrets", _collect
-    )
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_collect_device_secrets", _collect)
     monkeypatch.setattr(
         GoogleFindMyEIDResolver,
         "_normalize_identities",

@@ -1782,13 +1782,15 @@ class GoogleFindMyEIDResolver:
         # The cooperative ``asyncio.sleep(0)`` yield is gone because no event
         # loop exists inside the worker thread; running the whole build off-loop
         # keeps the loop reactive without per-item yields.
-        lookup, lookup_metadata, invalid_hint_ids = (
-            await self.hass.async_add_executor_job(
-                self._build_lookup_sync,
-                work_items,
-                now_unix,
-                rotation_params,
-            )
+        (
+            lookup,
+            lookup_metadata,
+            invalid_hint_ids,
+        ) = await self.hass.async_add_executor_job(
+            self._build_lookup_sync,
+            work_items,
+            now_unix,
+            rotation_params,
         )
 
         # Loop-side ``self.*`` mutations (single-threaded, no executor in flight).

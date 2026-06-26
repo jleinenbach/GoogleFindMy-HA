@@ -713,15 +713,9 @@ def merge_cache_row(
                 # Gaussian-distributed position errors.  Factor 0.5 keeps
                 # us permissive enough for genuine movement while still
                 # suppressing jitter.
-                existing_acc = safe_accuracy(
-                    _coerce_float(existing.get("accuracy"))
-                )
-                incoming_acc = safe_accuracy(
-                    _coerce_float(incoming.get("accuracy"))
-                )
-                adaptive_threshold = (
-                    math.sqrt(existing_acc**2 + incoming_acc**2) * 0.5
-                )
+                existing_acc = safe_accuracy(_coerce_float(existing.get("accuracy")))
+                incoming_acc = safe_accuracy(_coerce_float(incoming.get("accuracy")))
+                adaptive_threshold = math.sqrt(existing_acc**2 + incoming_acc**2) * 0.5
                 allow_update = dist > adaptive_threshold
             except Exception:
                 allow_update = False

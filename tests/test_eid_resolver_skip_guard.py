@@ -73,9 +73,7 @@ def test_signature_folds_realized_window_timestamps(
 
     real_windows = GoogleFindMyEIDResolver._compute_time_windows
 
-    def _extra_window(
-        self: GoogleFindMyEIDResolver, work_item, *, now_unix, params
-    ):  # type: ignore[no-untyped-def]
+    def _extra_window(self: GoogleFindMyEIDResolver, work_item, *, now_unix, params):  # type: ignore[no-untyped-def]
         windows, invalid_hint = real_windows(
             self, work_item, now_unix=now_unix, params=params
         )
@@ -93,9 +91,7 @@ def test_signature_folds_realized_window_timestamps(
         )
         return [*windows, extra], invalid_hint
 
-    monkeypatch.setattr(
-        GoogleFindMyEIDResolver, "_compute_time_windows", _extra_window
-    )
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_compute_time_windows", _extra_window)
     with_extra = resolver._build_signature(items, now_unix=1024, params=params)
 
     assert baseline != with_extra
@@ -462,9 +458,7 @@ async def test_phase_offset_lock_window_drift_forces_rebuild(
 
     resolver = _build_refreshable_resolver()
     _install_lock(resolver, created_at=500)
-    finalize_calls = _install_common_patches(
-        monkeypatch, identities=[_lock_identity()]
-    )
+    finalize_calls = _install_common_patches(monkeypatch, identities=[_lock_identity()])
     # Re-arm the confirmation timestamp on every purge so the lock survives.
     monkeypatch.setattr(
         GoogleFindMyEIDResolver,

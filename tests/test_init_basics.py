@@ -191,7 +191,9 @@ class TestComputeEntityScoreBasics:
     def test_missing_state_object_does_not_credit_state_points(self) -> None:
         """A state lookup miss must not award the +3 active-state points."""
 
-        entity = _make_entity("sensor.never_seen", translation_key="k", disabled_by=None)
+        entity = _make_entity(
+            "sensor.never_seen", translation_key="k", disabled_by=None
+        )
         hass = _make_hass({})  # no state recorded
 
         # translation_key (+4) + enabled (+3) + no state ⇒ 7
@@ -213,9 +215,7 @@ class TestPickCanonicalEntityEntryBasics:
         stronger = _make_entity("sensor.strong", translation_key="k", disabled_by=None)
         hass = _make_hass({"sensor.strong": _make_state("on")})
 
-        canonical = _pick_canonical_entity_entry(
-            hass, [weaker, stronger]
-        )
+        canonical = _pick_canonical_entity_entry(hass, [weaker, stronger])
 
         assert canonical is stronger
 
@@ -408,9 +408,7 @@ class TestDefaultButtonSubentryIdentifierBasics:
         assert result == "btn-id"
 
     def test_falls_back_to_device_tracker(self) -> None:
-        result = _default_button_subentry_identifier(
-            {"device_tracker": "tracker-id"}
-        )
+        result = _default_button_subentry_identifier({"device_tracker": "tracker-id"})
 
         assert result == "tracker-id"
 
@@ -632,9 +630,7 @@ class TestNormalizeDeviceIdentifierBasics:
         device = SimpleNamespace(config_entries={"entry-1"})
 
         assert (
-            _normalize_device_identifier(
-                device, "entry-1:sub-1:google-device-7"
-            )
+            _normalize_device_identifier(device, "entry-1:sub-1:google-device-7")
             == "google-device-7"
         )
 
@@ -643,9 +639,7 @@ class TestNormalizeDeviceIdentifierBasics:
 
         device = SimpleNamespace(config_entries=set())
 
-        assert (
-            _normalize_device_identifier(device, "foo:bar:baz") == "baz"
-        )
+        assert _normalize_device_identifier(device, "foo:bar:baz") == "baz"
 
     def test_trailing_empty_segment_falls_back_to_ident(self) -> None:
         """Empty last segment must not blank the identifier."""
@@ -718,12 +712,7 @@ class TestParseButtonUniqueIdBasics:
         return SimpleNamespace(entry_id="entry-1")
 
     def test_returns_none_for_empty_unique_id(self) -> None:
-        assert (
-            _parse_button_unique_id(
-                "", self._entry(), {}, "core_tracking"
-            )
-            is None
-        )
+        assert _parse_button_unique_id("", self._entry(), {}, "core_tracking") is None
 
     def test_returns_none_for_non_string_unique_id(self) -> None:
         assert (
@@ -741,9 +730,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = f"{DOMAIN}_entry-1:sub-7:device-A_play_sound"
 
-        parts = _parse_button_unique_id(
-            unique, self._entry(), {}, "core_tracking"
-        )
+        parts = _parse_button_unique_id(unique, self._entry(), {}, "core_tracking")
 
         assert parts is not None
         assert parts.entry_id == "entry-1"
@@ -784,9 +771,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = f"{DOMAIN}_other-entry:sub-1:device_play_sound"
 
-        result = _parse_button_unique_id(
-            unique, self._entry(), {}, "core_tracking"
-        )
+        result = _parse_button_unique_id(unique, self._entry(), {}, "core_tracking")
 
         assert result is None
 
@@ -795,9 +780,7 @@ class TestParseButtonUniqueIdBasics:
 
         unique = "entry-1_device-X_custom"  # ``custom`` is not in suffix tuple
 
-        parts = _parse_button_unique_id(
-            unique, self._entry(), {}, "core_tracking"
-        )
+        parts = _parse_button_unique_id(unique, self._entry(), {}, "core_tracking")
 
         assert parts is not None
         assert parts.action == "custom"

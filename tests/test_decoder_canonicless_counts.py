@@ -149,9 +149,7 @@ def test_counts_are_transition_independent() -> None:
     cache = SimpleNamespace(entry_id="entry-A")
     visible = SimpleNamespace(
         deviceMetadata=[
-            _make_phone_device(
-                name="X", canonic_ids=[SimpleNamespace(id="cid-x")]
-            )
+            _make_phone_device(name="X", canonic_ids=[SimpleNamespace(id="cid-x")])
         ]
     )
     dropped = SimpleNamespace(deviceMetadata=[_make_phone_device(name="X")])
@@ -239,9 +237,7 @@ def test_probe_pass_does_not_write_counts(
 def test_reset_clears_counts() -> None:
     """The argument-free reset clears the counts map (test isolation)."""
     cache = SimpleNamespace(entry_id="entry-A")
-    device_list = SimpleNamespace(
-        deviceMetadata=[_make_tracker_device(name="Tracker")]
-    )
+    device_list = SimpleNamespace(deviceMetadata=[_make_tracker_device(name="Tracker")])
     decoder.get_devices_with_location(
         device_list, cache=cache, emit_canonicless_diagnostics=True
     )
@@ -260,11 +256,13 @@ def test_entry_scoped_reset_isolates_counts() -> None:
     list_a = SimpleNamespace(deviceMetadata=[_make_tracker_device(name="A")])
     list_b = SimpleNamespace(deviceMetadata=[_make_tracker_device(name="B")])
     decoder.get_devices_with_location(
-        list_a, cache=SimpleNamespace(entry_id="entry-A"),
+        list_a,
+        cache=SimpleNamespace(entry_id="entry-A"),
         emit_canonicless_diagnostics=True,
     )
     decoder.get_devices_with_location(
-        list_b, cache=SimpleNamespace(entry_id="entry-B"),
+        list_b,
+        cache=SimpleNamespace(entry_id="entry-B"),
         emit_canonicless_diagnostics=True,
     )
 

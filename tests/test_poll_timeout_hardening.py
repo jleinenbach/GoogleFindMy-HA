@@ -184,9 +184,7 @@ def test_transient_owner_key_lookup_skips_device_without_escalation(
     """
     loop = asyncio.new_event_loop()
     devices = [{"id": "dev-transient", "name": "Transient Tag"}]
-    coordinator = _make_coordinator(
-        monkeypatch, loop, _TransientOwnerKeyAPI(), devices
-    )
+    coordinator = _make_coordinator(monkeypatch, loop, _TransientOwnerKeyAPI(), devices)
     coordinator._consecutive_decrypt_failures = 0
     set_auth_state = AsyncMock()
     coordinator._set_auth_state = set_auth_state

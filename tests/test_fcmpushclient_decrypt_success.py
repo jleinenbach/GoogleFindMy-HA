@@ -16,6 +16,7 @@ Discipline:
   attribute, so the test is deterministic without real ECE crypto material and
   without disturbing ``http_ece`` globally (plan AE1).
 """
+
 from __future__ import annotations
 
 from base64 import urlsafe_b64encode
@@ -104,6 +105,4 @@ def test_decrypt_raw_data_returns_decrypted_via_patched_http_decrypt(
     assert captured["auth_secret"] == secret_bytes
     assert captured["version"] == "aesgcm"
     # The real P-256 key object parsed by load_der_private_key was forwarded.
-    assert isinstance(
-        captured["private_key"], ec.EllipticCurvePrivateKey
-    )
+    assert isinstance(captured["private_key"], ec.EllipticCurvePrivateKey)

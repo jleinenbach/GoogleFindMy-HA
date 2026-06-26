@@ -84,7 +84,9 @@ def callback(
 ) -> TypingCallable[[GoogleHomeFilter, Event | None], None]:
     """Typed wrapper around Home Assistant's callback decorator."""
 
-    return cast("TypingCallable[[GoogleHomeFilter, Event | None], None]", ha_callback(func))
+    return cast(
+        "TypingCallable[[GoogleHomeFilter, Event | None], None]", ha_callback(func)
+    )
 
 
 # Keep local names for zone attributes to avoid fragile imports.

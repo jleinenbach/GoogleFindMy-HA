@@ -323,7 +323,9 @@ async def async_setup_entry(  # noqa: PLR0915
         domain_data = hass.data.get(DOMAIN)
         if not isinstance(domain_data, dict):
             return None
-        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+        return cast(
+            "GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER)
+        )
 
     def _add_tracker_scope(  # noqa: PLR0915
         tracker_key: str,
@@ -968,7 +970,9 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
         domain_data = self.hass.data.get(DOMAIN)
         if not isinstance(domain_data, dict):
             return None
-        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+        return cast(
+            "GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER)
+        )
 
     @property
     def is_on(self) -> bool | None:
@@ -994,7 +998,9 @@ class GoogleFindMyUWTModeSensor(GoogleFindMyDeviceEntity, BinarySensorEntity):
         if not self.coordinator_has_device():
             return False
         try:
-            if self._device_id is not None and hasattr(self.coordinator, "is_device_present"):
+            if self._device_id is not None and hasattr(
+                self.coordinator, "is_device_present"
+            ):
                 return bool(self.coordinator.is_device_present(self._device_id))
         except Exception:
             pass

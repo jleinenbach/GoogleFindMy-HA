@@ -741,9 +741,7 @@ async def test_register_raises_fatal_on_fcm_register_http_401() -> None:
 
     class _PcRaising401:
         async def checkin_or_register(self) -> dict[str, str]:
-            raise FcmRegisterHTTPError(
-                "fcm_install fatal status 401", status=401
-            )
+            raise FcmRegisterHTTPError("fcm_install fatal status 401", status=401)
 
     receiver.pcs[entry_id] = _PcRaising401()
 
@@ -764,9 +762,7 @@ async def test_register_raises_fatal_on_fcm_register_http_404() -> None:
 
     class _PcRaising404:
         async def checkin_or_register(self) -> dict[str, str]:
-            raise FcmRegisterHTTPError(
-                "fcm_register fatal status 404", status=404
-            )
+            raise FcmRegisterHTTPError("fcm_register fatal status 404", status=404)
 
     receiver.pcs[entry_id] = _PcRaising404()
 

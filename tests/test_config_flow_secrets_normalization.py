@@ -152,7 +152,9 @@ def test_non_mapping_input_returned_unchanged() -> None:
 
 # A realistic 32-byte (64 hex chars) shared key value.
 _SHARED_HEX = "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00"
-_SHARED_HEX_2 = "00ffeeddccbbaa998877665544332211090f8e7d6c5b4a3a291807f6e5d4c3b2a1"[:64]
+_SHARED_HEX_2 = "00ffeeddccbbaa998877665544332211090f8e7d6c5b4a3a291807f6e5d4c3b2a1"[
+    :64
+]
 
 
 def test_scoped_only_shared_key_promoted_to_top_level() -> None:

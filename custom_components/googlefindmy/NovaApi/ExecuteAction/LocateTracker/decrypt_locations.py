@@ -641,9 +641,7 @@ async def async_retrieve_identity_key(
                 "presumed valid; this will be retried."
             ) from exc2
         except (InvalidTag, RuntimeError) as exc2:
-            reclassified = _classify_owner_key_failure(
-                exc2, context="forced re-derive"
-            )
+            reclassified = _classify_owner_key_failure(exc2, context="forced re-derive")
             if isinstance(reclassified, _OwnerKeyRederiveRequired):
                 # R4 default: still structurally defective AFTER a successful-HTTP
                 # re-derive -> transient + WARNING-once (no reauth without an

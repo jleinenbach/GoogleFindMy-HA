@@ -122,9 +122,7 @@ async def test_transient_owner_key_error_reaches_ctx_error_at_debug(
     assert isinstance(ctx.error, OwnerKeyLookupTransientError)
 
     # SOLL (RED today): no ERROR record for a transient; severity is DEBUG.
-    error_records = [
-        rec for rec in caplog.records if rec.levelno >= logging.ERROR
-    ]
+    error_records = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
     assert not error_records, (
         "transient owner-key failure must not be logged at ERROR; "
         f"got {[r.getMessage() for r in error_records]}"

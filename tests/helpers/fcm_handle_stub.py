@@ -14,6 +14,7 @@ Why a *new* builder instead of reusing ``FcmPushClientSlim``: that stub mocks
 (plan R2-R8) an additive builder is required; the poison stub is left
 untouched.
 """
+
 from __future__ import annotations
 
 import logging
@@ -56,9 +57,7 @@ def make_data_message(
         SimpleNamespace(key="subtype", value=subtype),
     ]
     if message_type is not None:
-        app_data.insert(
-            0, SimpleNamespace(key="message_type", value=message_type)
-        )
+        app_data.insert(0, SimpleNamespace(key="message_type", value=message_type))
     return SimpleNamespace(
         app_data=app_data,
         persistent_id=persistent_id,

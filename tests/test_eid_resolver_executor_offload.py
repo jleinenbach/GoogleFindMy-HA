@@ -129,9 +129,7 @@ async def test_build_runs_on_worker_thread_not_the_loop(
         seen_idents.append(threading.get_ident())
         return real_build(self, *args, **kwargs)
 
-    monkeypatch.setattr(
-        GoogleFindMyEIDResolver, "_build_lookup_sync", _recording_build
-    )
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_build_lookup_sync", _recording_build)
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -257,9 +255,7 @@ async def test_build_tolerates_flags_mask_failure_in_worker(
     def _boom(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("mask boom")
 
-    monkeypatch.setattr(
-        GoogleFindMyEIDResolver, "_compute_flags_xor_mask", _boom
-    )
+    monkeypatch.setattr(GoogleFindMyEIDResolver, "_compute_flags_xor_mask", _boom)
 
     loop = asyncio.get_running_loop()
     with ThreadPoolExecutor(max_workers=1) as pool:

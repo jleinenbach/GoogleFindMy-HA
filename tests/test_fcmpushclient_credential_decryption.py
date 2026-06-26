@@ -17,6 +17,7 @@ message while silently dropping it. The iter-3 fix wraps every credential
 decode surface and raises ``CredentialDecryptionError`` instead, so the
 discriminator is the exception TYPE rather than the message text.
 """
+
 from __future__ import annotations
 
 from base64 import urlsafe_b64encode
@@ -38,9 +39,7 @@ def test_missing_keys_section_raises_typed_error() -> None:
     """``credentials["keys"]`` absent -> CredentialDecryptionError."""
     credentials: dict[str, object] = {"gcm": {"app_id": "x"}}
     with pytest.raises(CredentialDecryptionError, match="missing FCM key material"):
-        FcmPushClient._decrypt_raw_data(
-            credentials, "crypto", "salt", b"raw"
-        )
+        FcmPushClient._decrypt_raw_data(credentials, "crypto", "salt", b"raw")
 
 
 def test_invalid_key_value_types_raise_typed_error() -> None:
@@ -48,12 +47,8 @@ def test_invalid_key_value_types_raise_typed_error() -> None:
     credentials: dict[str, object] = {
         "keys": {"private": 42, "secret": None},
     }
-    with pytest.raises(
-        CredentialDecryptionError, match="contain invalid key values"
-    ):
-        FcmPushClient._decrypt_raw_data(
-            credentials, "crypto", "salt", b"raw"
-        )
+    with pytest.raises(CredentialDecryptionError, match="contain invalid key values"):
+        FcmPushClient._decrypt_raw_data(credentials, "crypto", "salt", b"raw")
 
 
 def test_non_base64_key_material_raises_typed_error() -> None:
@@ -71,9 +66,7 @@ def test_non_base64_key_material_raises_typed_error() -> None:
     with pytest.raises(
         CredentialDecryptionError, match="failed base64 decode"
     ) as exc_info:
-        FcmPushClient._decrypt_raw_data(
-            credentials, _b64(b"k"), _b64(b"s"), b"raw"
-        )
+        FcmPushClient._decrypt_raw_data(credentials, _b64(b"k"), _b64(b"s"), b"raw")
     # __cause__ chain preserves the underlying binascii.Error for diagnostics.
     assert exc_info.value.__cause__ is not None
 
@@ -99,9 +92,7 @@ def test_non_ascii_in_private_key_raises_typed_error() -> None:
     with pytest.raises(
         CredentialDecryptionError, match="failed base64 decode"
     ) as exc_info:
-        FcmPushClient._decrypt_raw_data(
-            credentials, _b64(b"k"), _b64(b"s"), b"raw"
-        )
+        FcmPushClient._decrypt_raw_data(credentials, _b64(b"k"), _b64(b"s"), b"raw")
     # __cause__ preserves the underlying UnicodeEncodeError for diagnostics.
     assert exc_info.value.__cause__ is not None
     assert isinstance(exc_info.value.__cause__, UnicodeError)
@@ -122,9 +113,7 @@ def test_non_ascii_in_secret_raises_typed_error() -> None:
     with pytest.raises(
         CredentialDecryptionError, match="failed base64 decode"
     ) as exc_info:
-        FcmPushClient._decrypt_raw_data(
-            credentials, _b64(b"k"), _b64(b"s"), b"raw"
-        )
+        FcmPushClient._decrypt_raw_data(credentials, _b64(b"k"), _b64(b"s"), b"raw")
     assert isinstance(exc_info.value.__cause__, UnicodeError)
 
 
@@ -150,9 +139,7 @@ def test_corrupted_der_private_key_raises_typed_error() -> None:
     with pytest.raises(
         CredentialDecryptionError, match="failed DER private-key parse"
     ) as exc_info:
-        FcmPushClient._decrypt_raw_data(
-            credentials, _b64(b"k"), _b64(b"s"), b"raw"
-        )
+        FcmPushClient._decrypt_raw_data(credentials, _b64(b"k"), _b64(b"s"), b"raw")
     # __cause__ preserves the underlying cryptography error for diagnostics.
     assert exc_info.value.__cause__ is not None
 

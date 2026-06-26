@@ -463,9 +463,7 @@ class TestExtractOauthCandidatesFromSecrets:
         data = {
             "fcm_credentials": {
                 "installation": {"token": "fcm_install_token_padding_xxxx"},
-                "fcm": {
-                    "registration": {"token": "fcm_register_token_padding_xx"}
-                },
+                "fcm": {"registration": {"token": "fcm_register_token_padding_xx"}},
             }
         }
         cands = cf._extract_oauth_candidates_from_secrets(data)
@@ -488,7 +486,10 @@ class TestExtractFcmCredentialsFromSecrets:
 
     def test_returns_dict_when_present(self) -> None:
         creds = {"installation": {"token": "x"}}
-        assert cf._extract_fcm_credentials_from_secrets({"fcm_credentials": creds}) is creds
+        assert (
+            cf._extract_fcm_credentials_from_secrets({"fcm_credentials": creds})
+            is creds
+        )
 
     def test_returns_none_when_absent(self) -> None:
         assert cf._extract_fcm_credentials_from_secrets({}) is None
@@ -692,7 +693,9 @@ class TestInterpretReauthChoice:
             {"secrets_json": json.dumps(payload), "new_oauth_token": ""}
         )
         assert method == "secrets"
-        assert isinstance(data, dict) and data["googleHomeUsername"] == "user@example.com"
+        assert (
+            isinstance(data, dict) and data["googleHomeUsername"] == "user@example.com"
+        )
         assert err is None
 
     def test_secrets_path_invalid_json(self) -> None:
@@ -790,9 +793,7 @@ class TestIsDiscoveryUpdateInfo:
 class TestRegisterDependencyError:
     """Empiricism: lines 653-663 — single-shot record for "base" field."""
 
-    def test_records_import_failed_once(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_records_import_failed_once(self, caplog: pytest.LogCaptureFixture) -> None:
         caplog.set_level(logging.ERROR, logger=cf._LOGGER.name)
         errors: dict[str, str] = {}
         cf._register_dependency_error(errors, ImportError("boom"))
@@ -891,9 +892,7 @@ class TestResolveEntryEmailForLookup:
         assert raw == "opts@example.com"
         assert normalized == "opts@example.com"
 
-    def test_no_email_returns_none_pair(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_email_returns_none_pair(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_pkg = SimpleNamespace()
         monkeypatch.setattr(
             "custom_components.googlefindmy.config_flow.import_integration_package",
@@ -945,9 +944,7 @@ class TestFindEntryByEmail:
         hass = self._make_hass_with_entries([])
         assert cf._find_entry_by_email(hass, "") is None
 
-    def test_matches_normalized_email(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_matches_normalized_email(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_pkg = SimpleNamespace()
         monkeypatch.setattr(
             "custom_components.googlefindmy.config_flow.import_integration_package",
@@ -968,9 +965,7 @@ class TestFindEntryByEmail:
         result = cf._find_entry_by_email(hass, "MATCH@example.com")
         assert result is e1
 
-    def test_no_match_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_match_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_pkg = SimpleNamespace()
         monkeypatch.setattr(
             "custom_components.googlefindmy.config_flow.import_integration_package",
@@ -997,7 +992,10 @@ class TestSubentryOptionProperty:
     def test_subentry_id_returns_attribute_when_present(self) -> None:
         sub = SimpleNamespace(subentry_id="abc")
         opt = cf._SubentryOption(
-            key="k", label="L", subentry=sub, visible_device_ids=()  # type: ignore[arg-type]
+            key="k",
+            label="L",
+            subentry=sub,
+            visible_device_ids=(),  # type: ignore[arg-type]
         )
         assert opt.subentry_id == "abc"
 
@@ -1010,7 +1008,10 @@ class TestSubentryOptionProperty:
     def test_subentry_id_none_when_attribute_absent(self) -> None:
         # A subentry object without subentry_id attribute → getattr returns None.
         opt = cf._SubentryOption(
-            key="k", label="L", subentry=SimpleNamespace(), visible_device_ids=()  # type: ignore[arg-type]
+            key="k",
+            label="L",
+            subentry=SimpleNamespace(),
+            visible_device_ids=(),  # type: ignore[arg-type]
         )
         assert opt.subentry_id is None
 
@@ -1184,9 +1185,7 @@ class TestNormalizeAndValidateDiscoveryPayload:
             cf.CONF_OAUTH_TOKEN: "a" * 32,
         }
         result = cf._normalize_and_validate_discovery_payload(payload)
-        assert any(
-            label == cf.CONF_OAUTH_TOKEN for label, _token in result.candidates
-        )
+        assert any(label == cf.CONF_OAUTH_TOKEN for label, _token in result.candidates)
 
     def test_title_propagated_when_string(self) -> None:
         payload = {

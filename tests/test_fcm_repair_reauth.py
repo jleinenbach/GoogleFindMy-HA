@@ -92,9 +92,7 @@ async def test_transient_404_below_cap_does_not_escalate(
 ) -> None:
     """T1: 404 rotation below ``_MAX_FATAL_ENDPOINT_RETRIES`` must not escalate."""
     entry_id = "entry-id"
-    receiver, hass, create_issue, delete_issue = _make_receiver(
-        monkeypatch, entry_id
-    )
+    receiver, hass, create_issue, delete_issue = _make_receiver(monkeypatch, entry_id)
 
     # Three transient 404s (n=1..3, well below the cap of 7), then success.
     register_mock = AsyncMock(
@@ -114,9 +112,7 @@ async def test_transient_404_below_cap_does_not_escalate(
     # No fixable issue raised: transient rotation cleared before the give-up.
     assert _reauth_calls(create_issue, entry_id) == []
     # On the successful registration the recovery delete still fires.
-    delete_issue.assert_any_call(
-        hass, DOMAIN, f"fcm_reauth_required_{entry_id}"
-    )
+    delete_issue.assert_any_call(hass, DOMAIN, f"fcm_reauth_required_{entry_id}")
 
 
 @pytest.mark.asyncio
@@ -125,9 +121,7 @@ async def test_permanent_404_at_cap_raises_fixable_issue(
 ) -> None:
     """T2: 404 reaching the cap raises exactly one fixable reauth issue."""
     entry_id = "entry-id"
-    receiver, hass, create_issue, _delete_issue = _make_receiver(
-        monkeypatch, entry_id
-    )
+    receiver, hass, create_issue, _delete_issue = _make_receiver(monkeypatch, entry_id)
 
     # Seven consecutive 404s -> fatal_count == _MAX_FATAL_ENDPOINT_RETRIES (7).
     register_mock = AsyncMock(
@@ -160,9 +154,7 @@ async def test_permanent_401_at_cap_raises_fixable_issue(
 ) -> None:
     """T3: 401 reaching the auth cap raises the fixable reauth issue."""
     entry_id = "entry-id"
-    receiver, _hass, create_issue, _delete_issue = _make_receiver(
-        monkeypatch, entry_id
-    )
+    receiver, _hass, create_issue, _delete_issue = _make_receiver(monkeypatch, entry_id)
 
     # Three consecutive 401s -> fatal_count == _MAX_FATAL_AUTH_RETRIES (3).
     register_mock = AsyncMock(
@@ -202,9 +194,7 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
     entry = SimpleNamespace(async_start_reauth=MagicMock(return_value=None))
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_get_entry=lambda entry_id: (
-                entry if entry_id == "entry-id" else None
-            )
+            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
         )
     )
     flow = repairs.FcmReauthRepairFlow("entry-id")
@@ -232,9 +222,7 @@ async def test_fix_flow_confirm_aborts_to_keep_issue_open() -> None:
     entry = SimpleNamespace(async_start_reauth=MagicMock(return_value=None))
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_get_entry=lambda entry_id: (
-                entry if entry_id == "entry-id" else None
-            )
+            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
         )
     )
     flow = repairs.FcmReauthRepairFlow("entry-id")
@@ -312,9 +300,7 @@ async def test_successful_register_deletes_fixable_issue(
 ) -> None:
     """T5: a successful (re-)registration clears the fixable issue."""
     entry_id = "entry-id"
-    receiver, hass, _create_issue, delete_issue = _make_receiver(
-        monkeypatch, entry_id
-    )
+    receiver, hass, _create_issue, delete_issue = _make_receiver(monkeypatch, entry_id)
 
     register_mock = AsyncMock(side_effect=[True])
     monkeypatch.setattr(receiver, "_register_for_fcm_entry", register_mock)
@@ -322,7 +308,5 @@ async def test_successful_register_deletes_fixable_issue(
     await receiver._start_supervisor_for_entry(entry_id, None)
     await asyncio.wait_for(receiver.supervisors[entry_id], timeout=5.0)
 
-    delete_issue.assert_any_call(
-        hass, DOMAIN, f"fcm_reauth_required_{entry_id}"
-    )
+    delete_issue.assert_any_call(hass, DOMAIN, f"fcm_reauth_required_{entry_id}")
     delete_issue.assert_any_call(hass, DOMAIN, f"fcm_stuck_{entry_id}")

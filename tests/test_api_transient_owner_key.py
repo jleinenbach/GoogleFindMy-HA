@@ -57,9 +57,7 @@ async def test_async_get_device_location_reraises_transient_owner_key(
         raise transient
 
     # Patch the API-LOCAL binding, not the source module (api.py imported the name).
-    monkeypatch.setattr(
-        api_module, "get_location_data_for_device", _raise_transient
-    )
+    monkeypatch.setattr(api_module, "get_location_data_for_device", _raise_transient)
 
     api = _make_api()
 

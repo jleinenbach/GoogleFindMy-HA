@@ -53,7 +53,9 @@ class _DevRegStub:
         self.devices.append(device)
         return device
 
-    def async_update_device(self, device_id: str, **kwargs: Any) -> SimpleNamespace | None:
+    def async_update_device(
+        self, device_id: str, **kwargs: Any
+    ) -> SimpleNamespace | None:
         """Stub used by ``_device_registry_allows_translation_update`` (signature only)."""
 
         self.update_calls.append({"device_id": device_id, **kwargs})

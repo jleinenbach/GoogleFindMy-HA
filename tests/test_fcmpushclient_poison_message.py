@@ -15,6 +15,7 @@ The Aggregate-Anti-Cascading-Invariant test runs 100 poison messages followed
 by one valid sentinel and proves Defense 1 prevents the supervisor-restart
 cascade reported on Home Assistant Core 2026.6.x.
 """
+
 from __future__ import annotations
 
 import binascii
@@ -250,8 +251,7 @@ async def test_rate_limit_kicks_in_after_threshold(
     assert client.config.log_warn_limit == 5
 
     messages = [
-        make_poison_data_message(f"poison-{i:03d}", kind="padding")
-        for i in range(20)
+        make_poison_data_message(f"poison-{i:03d}", kind="padding") for i in range(20)
     ]
     client._receive_msg = _stream_messages(client, messages)
     client._handle_message = _make_handle_side_effect(
@@ -393,10 +393,14 @@ async def test_unmarked_value_error_is_treated_as_per_message_poison(
     msg = make_poison_data_message("poison-011", kind="value")
     client._receive_msg = _stream_messages(client, [msg])
     client._handle_message = _make_handle_side_effect(
-        [ValueError("Could not deserialize key data (the data may be in an "
-                    "incorrect format, the provided password may be incorrect, "
-                    "it may be encrypted with an unsupported algorithm, or it "
-                    "may be an unsupported key type)")]
+        [
+            ValueError(
+                "Could not deserialize key data (the data may be in an "
+                "incorrect format, the provided password may be incorrect, "
+                "it may be encrypted with an unsupported algorithm, or it "
+                "may be an unsupported key type)"
+            )
+        ]
     )
 
     await client._listen()
@@ -506,7 +510,9 @@ async def test_sustained_ece_failures_escalate_to_credential_error(
     caplog.set_level(logging.ERROR)
     client = FcmPushClientSlim()
     n = _MAX_CONSECUTIVE_DECRYPT_FAILURES
-    messages = [make_poison_data_message(f"ece-{i:03d}", kind="value") for i in range(n)]
+    messages = [
+        make_poison_data_message(f"ece-{i:03d}", kind="value") for i in range(n)
+    ]
     client._receive_msg = _stream_messages(client, messages)
     client._handle_message = _make_handle_side_effect(
         [http_ece.ECEException("Decryption error: bad auth tag")] * n
@@ -541,7 +547,9 @@ async def test_ece_failures_below_threshold_stay_poison(
     caplog.set_level(logging.WARNING)
     client = FcmPushClientSlim()
     n = _MAX_CONSECUTIVE_DECRYPT_FAILURES - 1
-    messages = [make_poison_data_message(f"ece-{i:03d}", kind="value") for i in range(n)]
+    messages = [
+        make_poison_data_message(f"ece-{i:03d}", kind="value") for i in range(n)
+    ]
     client._receive_msg = _stream_messages(client, messages)
     client._handle_message = _make_handle_side_effect(
         [http_ece.ECEException("Decryption error: bad auth tag")] * n

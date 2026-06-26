@@ -469,9 +469,7 @@ async def _render_map_with_states(
     entry = make_config_entry(entry_id="entry-id", runtime_data=coordinator)
     hass = _StubHass([entry])
 
-    monkeypatch.setattr(
-        map_view, "_resolve_coordinator_class", lambda: SimpleNamespace
-    )
+    monkeypatch.setattr(map_view, "_resolve_coordinator_class", lambda: SimpleNamespace)
 
     registry_entry = _StubRegistryEntry(
         entity_id="device_tracker.device123",
@@ -555,9 +553,7 @@ async def test_accuracy_filter_drops_points_with_missing_accuracy(
     unknown.attributes.pop("gps_accuracy", None)
     unknown.attributes["last_seen"] = 1704067300.0
 
-    response = await _render_map_with_states(
-        monkeypatch, [unknown], {"accuracy": "10"}
-    )
+    response = await _render_map_with_states(monkeypatch, [unknown], {"accuracy": "10"})
 
     assert response.status == 200
     assert "showing 0 points" in response.text.lower()
@@ -574,9 +570,7 @@ async def test_accuracy_filter_drops_points_with_zero_accuracy(
     zeroed.attributes["gps_accuracy"] = 0.0
     zeroed.attributes["last_seen"] = 1704067300.0
 
-    response = await _render_map_with_states(
-        monkeypatch, [zeroed], {"accuracy": "10"}
-    )
+    response = await _render_map_with_states(monkeypatch, [zeroed], {"accuracy": "10"})
 
     assert response.status == 200
     assert "showing 0 points" in response.text.lower()
@@ -643,9 +637,7 @@ async def test_invalid_accuracy_rendered_as_fallback_when_filter_off(
     unknown.attributes.pop("gps_accuracy", None)
     unknown.attributes["last_seen"] = 1704067300.0
 
-    response = await _render_map_with_states(
-        monkeypatch, [unknown], {"accuracy": "0"}
-    )
+    response = await _render_map_with_states(monkeypatch, [unknown], {"accuracy": "0"})
 
     assert response.status == 200
     assert "showing 1 points" in response.text.lower()

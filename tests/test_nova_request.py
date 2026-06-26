@@ -521,7 +521,9 @@ async def test_async_ttl_policy_refresh_preserves_existing_startup_probe() -> No
     await _run()
 
 
-async def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> None:
+async def test_async_ttl_policy_clears_namespaced_aas_token_on_invalid_refresh() -> (
+    None
+):
     """Invalid AAS tokens remove both namespaced and bare cache keys."""
 
     async def _run() -> None:
@@ -630,7 +632,11 @@ async def test_async_nova_request_returns_hex_only_on_http_200(
     session = _DummySession([_DummyResponse(200, b"\x10\x20")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -669,7 +675,11 @@ async def test_async_nova_request_raises_before_wire_on_pre_dispatch_failure(
     session = _DummySession([_DummyResponse(200, b"\x10\x20")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -732,7 +742,11 @@ async def test_async_nova_request_raises_on_connection_setup_failure(
     session = _ConnFailingSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -802,7 +816,11 @@ async def test_async_nova_request_network_retry_uses_tiered_log_level(
     session = _ConnFailingSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -885,7 +903,11 @@ async def test_async_nova_request_marks_read_phase_failure_dispatched(
     session = _ReadFailingSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -972,7 +994,11 @@ async def test_async_nova_request_latches_dispatch_across_mixed_retry_sequence(
     session = _MixedSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1052,7 +1078,11 @@ async def test_async_nova_request_latches_dispatch_across_http_status_exit(
     session = _WireThenHttpSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1123,7 +1153,11 @@ async def test_async_nova_request_latches_dispatch_on_pure_status_read(
     session = _StatusThenConnSession()
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1170,7 +1204,11 @@ async def test_async_nova_request_pure_4xx_does_not_latch_dispatch(
     session = _DummySession([_DummyResponse(403, b"forbidden")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1221,7 +1259,11 @@ async def test_async_nova_request_non_retryable_5xx_does_not_latch_dispatch(
     session = _DummySession([_DummyResponse(status, b"nope")])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1270,7 +1312,11 @@ async def test_async_nova_request_pure_429_does_not_latch_dispatch(
     session = _DummySession([_DummyResponse(429, b"slow down") for _ in range(7)])
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 
@@ -1317,7 +1363,11 @@ async def test_async_nova_request_latch_survives_later_429(
     )
 
     async def _fake_get_adm_token(
-        username: str | None = None, *, retries: int = 2, backoff: float = 1.0, cache: Any
+        username: str | None = None,
+        *,
+        retries: int = 2,
+        backoff: float = 1.0,
+        cache: Any,
     ) -> str:
         return "resolved-token"
 

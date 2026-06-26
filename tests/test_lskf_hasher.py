@@ -118,7 +118,9 @@ def test_ct2_get_lskf_hash_length_and_type() -> None:
 # ---------------------------------------------------------------------------
 # CT-3 / CT-4 — input sensitivity with cheap N=2 (delegating patch, F-2)
 # ---------------------------------------------------------------------------
-def _fast_hash(*, password: bytes, salt: bytes, N: int, r: int, p: int, dkLen: int) -> bytes:
+def _fast_hash(
+    *, password: bytes, salt: bytes, N: int, r: int, p: int, dkLen: int
+) -> bytes:
     """Delegate to the real pyscrypt but with cheap params (ignores N=4096/r=8).
 
     Used only to prove that ``get_lskf_hash`` forwards its inputs into the
@@ -164,7 +166,9 @@ def test_ct6_hash_pin_prints_pin_and_hash(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """``hash_pin`` prints both the PIN and the hash (documents VA-LSKF-3)."""
-    monkeypatch.setattr(lskf_hasher.pyscrypt, "hash", MagicMock(return_value=b"\x02" * 32))
+    monkeypatch.setattr(
+        lskf_hasher.pyscrypt, "hash", MagicMock(return_value=b"\x02" * 32)
+    )
     monkeypatch.setattr(
         lskf_hasher, "get_example_data", lambda key: "00112233445566778899aabbccddeeff"
     )
@@ -179,7 +183,9 @@ def test_ct6_hash_pin_prints_pin_and_hash(
 
 def test_ct7_hash_pin_type_safety_net(monkeypatch: pytest.MonkeyPatch) -> None:
     """A non-bytes return from the derivation trips the ``TypeError`` guard."""
-    monkeypatch.setattr(lskf_hasher.pyscrypt, "hash", MagicMock(return_value="not-bytes"))
+    monkeypatch.setattr(
+        lskf_hasher.pyscrypt, "hash", MagicMock(return_value="not-bytes")
+    )
     monkeypatch.setattr(
         lskf_hasher, "get_example_data", lambda key: "00112233445566778899aabbccddeeff"
     )

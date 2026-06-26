@@ -498,7 +498,9 @@ async def async_setup_entry(
             domain_data = hass.data.get(DOMAIN)
             if not isinstance(domain_data, dict):
                 return None
-            return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+            return cast(
+                "GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER)
+            )
 
         def _build_entities() -> list[SensorEntity]:
             """Build sensor entities for visible devices in the current subentry."""
@@ -1429,7 +1431,9 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
         domain_data = self.hass.data.get(DOMAIN)
         if not isinstance(domain_data, dict):
             return None
-        return cast("GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER))
+        return cast(
+            "GoogleFindMyEIDResolver | None", domain_data.get(DATA_EID_RESOLVER)
+        )
 
     @property
     def native_value(self) -> int | None:
@@ -1456,7 +1460,9 @@ class GoogleFindMyBLEBatterySensor(GoogleFindMyDeviceEntity, RestoreSensor):
             return False
 
         try:
-            if self._device_id is not None and hasattr(self.coordinator, "is_device_present"):
+            if self._device_id is not None and hasattr(
+                self.coordinator, "is_device_present"
+            ):
                 raw = self.coordinator.is_device_present(self._device_id)
                 present = bool(raw) if not isinstance(raw, bool) else raw
                 if present:

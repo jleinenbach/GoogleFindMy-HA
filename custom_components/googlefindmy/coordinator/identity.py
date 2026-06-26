@@ -197,9 +197,7 @@ class IdentityOperations(_MixinBase):
             _EID_REFRESH_DEBOUNCE_S, _spawn_refresh_task
         )
 
-    def _register_identity_key(
-        self, device_id: str, identity_key: bytes
-    ) -> None:
+    def _register_identity_key(self, device_id: str, identity_key: bytes) -> None:
         """Register a device's identity_key for shared tracker detection.
 
         Maintains a mapping from identity_key to all device_ids that share the

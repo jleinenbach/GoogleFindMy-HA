@@ -76,9 +76,7 @@ def _raw_p256_scalar() -> bytes:
 def _uncompressed_pub() -> bytes:
     """Return a fresh 65-byte uncompressed SEC1 P-256 public key."""
     key = ec.generate_private_key(ec.SECP256R1())
-    return key.public_key().public_bytes(
-        Encoding.X962, PublicFormat.UncompressedPoint
-    )
+    return key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
 
 
 def _build_shared_blob(ikm: bytes, plaintext: bytes, aad: bytes) -> bytes:
@@ -128,7 +126,9 @@ def test_rl1b_non_aligned_ciphertext_raises() -> None:
     """RL-1b: a 20-byte (non block-aligned) ciphertext must raise."""
     iv = bytes(16)
     ciphertext = bytes(20)  # 20 % 16 != 0
-    with pytest.raises(ValueError, match="AES-CBC ciphertext is not block-size aligned"):
+    with pytest.raises(
+        ValueError, match="AES-CBC ciphertext is not block-size aligned"
+    ):
         decrypt_aes_cbc_no_padding(KEY16, iv + ciphertext, iv_length=16)
 
 
@@ -271,17 +271,13 @@ def test_ct15_derived_key_ecdh_mode_roundtrip() -> None:
 
 def test_ct16_derive_shared_secret_short_private_key_raises() -> None:
     """CT-16: a private key buffer shorter than 32 bytes raises."""
-    with pytest.raises(
-        ValueError, match="Private key buffer too short"
-    ):
+    with pytest.raises(ValueError, match="Private key buffer too short"):
         derive_shared_secret(bytes(31), _uncompressed_pub())
 
 
 def test_ct17_derive_shared_secret_bad_public_key_length_raises() -> None:
     """CT-17: a public key that is not 65 bytes raises."""
-    with pytest.raises(
-        ValueError, match="Public key must be 65 bytes"
-    ):
+    with pytest.raises(ValueError, match="Public key must be 65 bytes"):
         derive_shared_secret(_raw_p256_scalar(), bytes(64))
 
 

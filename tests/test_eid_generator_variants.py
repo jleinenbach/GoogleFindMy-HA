@@ -431,9 +431,7 @@ def test_heuristic_single_rejects_wrong_key_length() -> None:
     """The single-EID heuristic helper must reject a short EIK."""
 
     with pytest.raises(ValueError, match="Identity Key"):
-        _generate_heuristic_eid_single(
-            SAMPLE_EIK[:4], 0, EidVariant.MODERN_P256_X32_BE
-        )
+        _generate_heuristic_eid_single(SAMPLE_EIK[:4], 0, EidVariant.MODERN_P256_X32_BE)
 
 
 def test_heuristic_single_rejects_unknown_variant() -> None:

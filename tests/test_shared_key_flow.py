@@ -166,9 +166,7 @@ def test_create_driver_failure_returns_none(
 def test_returns_shared_key_hex_on_set_vault_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    payload = json.dumps(
-        {"method": "setVaultSharedKeys", "vaultKeys": "raw-keys"}
-    )
+    payload = json.dumps({"method": "setVaultSharedKeys", "vaultKeys": "raw-keys"})
     driver = _FakeDriver([payload])
     raw_key = bytes(range(8))
     _patch_flow(monkeypatch, driver, shared_key=raw_key)

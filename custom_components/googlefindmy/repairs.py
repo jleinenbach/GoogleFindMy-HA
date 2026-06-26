@@ -70,9 +70,7 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
                 return self.async_abort(reason="reauth_started")
             return self.async_create_entry(data={})
 
-        return self.async_show_form(
-            step_id="confirm", data_schema=vol.Schema({})
-        )
+        return self.async_show_form(step_id="confirm", data_schema=vol.Schema({}))
 
     def _async_start_reauth(self) -> bool:
         """Start the config-entry reauth flow, defensively.
