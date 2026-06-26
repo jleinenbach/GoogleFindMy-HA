@@ -10,6 +10,7 @@ outside the hot path; ``resolve_eid`` only performs lookups.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import threading
@@ -830,6 +831,11 @@ class GoogleFindMyEIDResolver:
         init=False,
         default_factory=lambda: _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE),
     )
+    # Deterministic signature of the last successful build phase (AP-B1).
+    # ``None`` means "no successful build yet", so the first refresh never
+    # skips. Declared as a slots-backed dataclass field; stubs that bypass
+    # __init__ get it seeded by _ensure_cache_defaults under its hasattr guard.
+    _last_build_signature: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Set up caches and schedule the first rotation-aligned refresh."""
@@ -889,6 +895,10 @@ class GoogleFindMyEIDResolver:
             self._eid_memo = _BoundedLRUCache(_EID_MEMO_MAXSIZE)
         if not hasattr(self, "_flags_mask_memo"):
             self._flags_mask_memo = _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE)
+        # Build-phase skip-guard signature (AP-B1). Same hasattr guard as the
+        # AP-A memo caches so stubs that bypass __init__ get the default too.
+        if not hasattr(self, "_last_build_signature"):
+            self._last_build_signature = None
 
     def _clear_lock_state(self, device_id: str) -> bool:
         """Remove all cached state associated with a device lock."""
@@ -1608,6 +1618,100 @@ class GoogleFindMyEIDResolver:
             )
         return generated
 
+    @staticmethod
+    def _rotation_time_counters(now_unix: int) -> tuple[tuple[int, int], ...]:
+        """Return ``(period, now_unix // period)`` for every rotation period.
+
+        One ``time_counter`` term per rotation period actually used by the
+        generator (1024 s standard, 900 s and 3600 s phone windows), sorted by
+        period for a stable order. These terms are essential to the build
+        signature: a single 1024 s term would miss the 900 s / 3600 s
+        phone-window rollovers and leave those trackers unresolvable (F5).
+        Because ``ROTATION_PERIOD_3600 == 4 * ROTATION_PERIOD_900``, the 3600 s
+        term can never roll over in isolation, but it is kept as an explicit,
+        independent term so the signature stays correct if the periods change.
+        """
+
+        return tuple(
+            (period, now_unix // period)
+            for period in sorted(
+                (ROTATION_PERIOD, ROTATION_PERIOD_900, ROTATION_PERIOD_3600)
+            )
+        )
+
+    def _build_signature(self, work_items: list[WorkItem], *, now_unix: int) -> str:
+        """Return a deterministic signature of the active-device build inputs.
+
+        The signature is the skip-guard key for the expensive build phase: if it
+        is unchanged, re-running the build would reproduce a byte-identical
+        lookup table, so it can be safely skipped.
+
+        It hashes the per-period rotation ``time_counter`` terms from
+        ``_rotation_time_counters`` plus, for every work item, the fields the
+        build output actually depends on. The plan named the five core fields
+        ``(registry_id, key_bytes, locked_variant, basis_hint, rotation_ts)``;
+        this implementation additionally folds in the other build-output inputs
+        carried by the work item so the skip can never produce a stale table
+        (the explicit correctness-preserving / bit-identical constraint
+        overrides the narrower field list -- see AP-B1 report, SA-8 breadth):
+
+        * ``canonical_id`` / ``config_entry_id`` -- emitted into every
+          ``EIDMatch`` produced for the item;
+        * ``identity.pair_date`` / ``identity.secrets_creation_date`` -- the
+          relative-window anchors used in ``_compute_relative_windows``;
+        * the learned ``_known_offsets`` entries for the item's ``registry_id``
+          -- they narrow the scan window in ``_compute_relative_windows``.
+
+        Sorting makes the digest independent of identity iteration order.
+        """
+
+        hasher = hashlib.blake2b(digest_size=32)
+        # Per-period rotation counters. Each term flips when its rotation window
+        # advances, forcing a rebuild on rollover.
+        for period, counter in self._rotation_time_counters(now_unix):
+            hasher.update(b"P")
+            hasher.update(f"{period}:{counter}".encode())
+
+        def _item_key(item: WorkItem) -> tuple[str, ...]:
+            variant = "" if item.locked_variant is None else item.locked_variant.value
+            basis = "" if item.basis_hint is None else item.basis_hint
+            rotation = "" if item.rotation_ts is None else str(item.rotation_ts)
+            pair_date = (
+                "" if item.identity.pair_date is None else str(item.identity.pair_date)
+            )
+            secrets_date = (
+                ""
+                if item.identity.secrets_creation_date is None
+                else str(item.identity.secrets_creation_date)
+            )
+            # Learned offsets keyed by (registry_id, basis) for this item, sorted
+            # for stability and serialized into one field.
+            offsets = ";".join(
+                f"{offset_basis}={offset}"
+                for (reg, offset_basis), offset in sorted(self._known_offsets.items())
+                if reg == item.registry_id
+            )
+            return (
+                item.registry_id,
+                item.key_bytes.hex(),
+                variant,
+                basis,
+                rotation,
+                item.canonical_id,
+                item.config_entry_id,
+                pair_date,
+                secrets_date,
+                offsets,
+            )
+
+        for key in sorted(_item_key(item) for item in work_items):
+            hasher.update(b"W")
+            for field_value in key:
+                hasher.update(field_value.encode())
+                hasher.update(b"\x00")
+
+        return hasher.hexdigest()
+
     async def _refresh_cache(self) -> None:
         """Rebuild the EID lookup table for all active devices."""
 
@@ -1625,6 +1729,30 @@ class GoogleFindMyEIDResolver:
         _LOGGER.debug("Refresh start: %d identities discovered", len(identities))
         work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
+
+        # Skip-guard (AP-B1): the build phase below is a pure function of the
+        # work items and the per-period rotation counters. When the signature is
+        # unchanged, rebuilding would reproduce a byte-identical lookup table, so
+        # we keep the existing one and skip the expensive CacheBuilder fan-out.
+        # The cheap mandatory side effects above (_purge_stale_locks,
+        # _cached_identities, _collect_device_secrets) and the invalid-hint
+        # bookkeeping in _collect_work_items still run on every trigger. The
+        # build-loop's own ``_known_timebases.pop`` (invalid-hint) is safe to
+        # skip: ``invalid_hint`` is a pure function of the work item's
+        # ``basis_hint`` (plus its lock-derived window basis), so an unchanged
+        # signature means the hint state is unchanged; any newly invalid hint
+        # changes ``basis_hint`` (read back from _known_timebases), which changes
+        # the signature and forces a rebuild that runs the pop.
+        build_signature = self._build_signature(work_items, now_unix=now_unix)
+        if self._last_build_signature == build_signature:
+            _LOGGER.debug(
+                "Refresh stage: build signature unchanged, skipping rebuild "
+                "(%d work items, %d cached EIDs)",
+                len(work_items),
+                len(self._lookup),
+            )
+            return
+
         builder = CacheBuilder()
         _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
@@ -1679,6 +1807,9 @@ class GoogleFindMyEIDResolver:
                 _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
 
         self._lookup, self._lookup_metadata = builder.finalize()
+        # Record the signature only after a successful build so a failure leaves
+        # the guard cleared and the next trigger rebuilds (AP-B1).
+        self._last_build_signature = build_signature
         _LOGGER.debug(
             "Refresh stage: finalize complete (lookup=%d, metadata=%d)",
             len(self._lookup),
