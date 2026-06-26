@@ -19,7 +19,10 @@ violations may be added outside the allowlist.
 Detection is strict on purpose: an offender is a ``SimpleNamespace`` call that
 carries ``entry_id`` *and* at least one of ``data``/``options`` -- the exact
 shape the rule names. Sub-entry stubs that carry ``entry_id`` without
-``data``/``options`` are intentionally not flagged.
+``data``/``options`` are intentionally not flagged. Likewise out of scope (no
+current occurrence in the test tree): aliased imports
+(``from types import SimpleNamespace as SN``) and keyword-splat constructions
+(``SimpleNamespace(**base)``), which the ``ast`` keyword inspection cannot see.
 
 Scope note: this guard covers ``tests/test_*.py`` only, matching the rule's
 "New tests" addressee and excluding the factory itself
