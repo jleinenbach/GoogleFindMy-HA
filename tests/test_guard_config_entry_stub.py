@@ -196,7 +196,12 @@ def test_allowlist_has_no_stale_entries() -> None:
     offenders_by_file = {rel: _offending_stubs(path) for path, rel in _iter_test_files()}
     stale: list[str] = []
     for rel, frozen in sorted(LEGACY_ALLOWLIST.items()):
-        if rel not in offenders_by_file:
+        if frozen < 1:
+            stale.append(
+                f"{rel}: frozen baseline {frozen} (< 1); a fully migrated file must "
+                "be removed from the allowlist, not kept at zero"
+            )
+        elif rel not in offenders_by_file:
             stale.append(f"{rel}: file no longer exists")
         elif len(offenders_by_file[rel]) < frozen:
             stale.append(
