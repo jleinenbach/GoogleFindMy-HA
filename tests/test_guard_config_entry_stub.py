@@ -13,14 +13,28 @@ The rule is plain prose with no linter behind it, so omissions pass
 ``ruff``/``mypy`` silently and only surface in review (the Codex finding on
 PR #1142 is the latest instance). This guard fails loudly instead, mirroring
 the sibling ``test_guard_async_test_marker`` and ``test_guard_path_header``
-guards: the legacy files below are frozen as a documented backlog, and no new
-violations may be added outside the allowlist.
+guards.
 
-Detection is strict on purpose: an offender is a ``SimpleNamespace`` call that
-carries ``entry_id`` *and* at least one of ``data``/``options`` -- the exact
-shape the rule names. Sub-entry stubs that carry ``entry_id`` without
-``data``/``options`` are intentionally not flagged. Likewise out of scope (no
-current occurrence in the test tree): aliased imports
+Two design choices keep the guard honest and non-disruptive:
+
+* **Per-file count ratchet, not a whole-file skip.** ``LEGACY_ALLOWLIST`` maps
+  each pre-existing offender file to the *number* of ad-hoc stubs it currently
+  carries, and that count may only shrink. A whole-file skip would freeze the
+  baseline at file granularity and let a *new* ad-hoc stub be appended to an
+  already-listed config-flow/coordinator module unseen -- the single most
+  likely edit path. Pinning the count instead means any new stub raises the
+  file above its frozen baseline and fails the guard; migrating stubs away
+  lowers the count and the stale self-test demands the frozen number follow.
+
+* **Sub-entry stubs are excluded from the predicate.** A config *sub-entry*
+  legitimately shares the ``entry_id`` + ``data``/``options`` shape but carries
+  sub-entry-only markers (``subentry_type``, ``parent_entry_id``,
+  ``config_subentry_id``, ``subentry_id``). ``make_config_entry`` builds a
+  ConfigEntry, the wrong object type for a sub-entry, so flagging these would
+  force contributors to misuse the factory or pad the allowlist. They are not
+  what ``tests/AGENTS.md`` addresses and are deliberately not counted.
+
+Out of scope (no current occurrence in the test tree): aliased imports
 (``from types import SimpleNamespace as SN``) and keyword-splat constructions
 (``SimpleNamespace(**base)``), which the ``ast`` keyword inspection cannot see.
 
@@ -40,32 +54,41 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TESTS_DIR = _REPO_ROOT / "tests"
 
-# Pre-existing test files that build config entries via ad-hoc ``SimpleNamespace``
-# stubs and predate this guard. Do not add new entries; use ``make_config_entry``
-# in new tests instead. Shrinking this list (by migrating call sites to the
-# factory, as the wave-based migration in tests/AGENTS.md invites) is welcome.
-LEGACY_ALLOWLIST: set[str] = {
-    "tests/test_config_flow.py",
-    "tests/test_config_flow_basic.py",
-    "tests/test_config_flow_basics.py",
-    "tests/test_config_flow_initial_auth.py",
-    "tests/test_coordinator_device_registry.py",
-    "tests/test_coordinator_subentry_repair.py",
-    "tests/test_coordinator_subentry_visibility.py",
-    "tests/test_coordinator_timeout.py",
-    "tests/test_coordinator_visibility_availability.py",
-    "tests/test_device_identifier_normalization.py",
-    "tests/test_device_tracker.py",
-    "tests/test_eid_data_flow.py",
-    "tests/test_init_basics.py",
-    "tests/test_metadata_helpers.py",
-    "tests/test_poll_timeout_hardening.py",
-    "tests/test_services_refresh_device_urls.py",
-    "tests/test_spot_grpc_client.py",
-    "tests/test_subentry_manager_registry_resolution.py",
-    "tests/test_subentry_setup_trigger.py",
-    "tests/test_transient_owner_key_propagation.py",
-    "tests/test_unload_subentry_cleanup.py",
+# Keyword markers that identify a config *sub-entry* stub. Any one of these on a
+# ``SimpleNamespace(entry_id=..., data=...)`` call means the construct models a
+# ConfigSubentry, for which ``make_config_entry`` is the wrong factory; such
+# calls are excluded from the predicate below.
+_SUBENTRY_MARKERS = frozenset(
+    {"subentry_type", "parent_entry_id", "config_subentry_id", "subentry_id"}
+)
+
+# Pre-existing ad-hoc ``SimpleNamespace`` config-entry stubs, frozen per file as
+# a count ratchet: ``repo-relative path -> number of offending stubs``. The
+# count may only decrease. Adding a stub to one of these files raises it above
+# the frozen number and fails the main guard; removing/migrating stubs lowers
+# the real count and the stale self-test requires the frozen number to follow
+# (drop the entry once a file reaches zero). Do not raise any number and do not
+# add new files; use ``make_config_entry`` in new tests instead. The baseline is
+# regenerated programmatically (subentry-excluded predicate), never hand-edited.
+LEGACY_ALLOWLIST: dict[str, int] = {
+    "tests/test_config_flow.py": 1,
+    "tests/test_config_flow_basic.py": 2,
+    "tests/test_config_flow_basics.py": 6,
+    "tests/test_config_flow_initial_auth.py": 3,
+    "tests/test_coordinator_device_registry.py": 7,
+    "tests/test_coordinator_subentry_repair.py": 1,
+    "tests/test_coordinator_subentry_visibility.py": 2,
+    "tests/test_coordinator_timeout.py": 3,
+    "tests/test_coordinator_visibility_availability.py": 3,
+    "tests/test_device_identifier_normalization.py": 2,
+    "tests/test_device_tracker.py": 2,
+    "tests/test_eid_data_flow.py": 1,
+    "tests/test_init_basics.py": 1,
+    "tests/test_metadata_helpers.py": 1,
+    "tests/test_poll_timeout_hardening.py": 1,
+    "tests/test_services_refresh_device_urls.py": 4,
+    "tests/test_spot_grpc_client.py": 1,
+    "tests/test_transient_owner_key_propagation.py": 1,
 }
 
 
@@ -75,9 +98,12 @@ def _is_config_entry_stub(call: ast.Call) -> bool:
     Strict shape: the callee resolves to ``SimpleNamespace`` (both the bare
     ``SimpleNamespace(...)`` and the attribute form ``types.SimpleNamespace(...)``)
     and the keyword set carries ``entry_id`` together with at least one of
-    ``data``/``options`` -- the exact construction tests/AGENTS.md forbids. A
-    bare ``entry_id`` without ``data``/``options`` (e.g. a sub-entry stub) is
-    deliberately not flagged.
+    ``data``/``options`` -- the exact construction tests/AGENTS.md forbids.
+
+    Two shapes are deliberately not flagged: a bare ``entry_id`` without
+    ``data``/``options``, and a config *sub-entry* stub (identified by any
+    marker in :data:`_SUBENTRY_MARKERS`), for which ``make_config_entry`` would
+    build the wrong object type.
     """
     func = call.func
     if isinstance(func, ast.Name):
@@ -89,21 +115,25 @@ def _is_config_entry_stub(call: ast.Call) -> bool:
     if name != "SimpleNamespace":
         return False
     keywords = {kw.arg for kw in call.keywords if kw.arg is not None}
-    return "entry_id" in keywords and ("data" in keywords or "options" in keywords)
+    if "entry_id" not in keywords or not ("data" in keywords or "options" in keywords):
+        return False
+    if keywords & _SUBENTRY_MARKERS:
+        return False
+    return True
 
 
-def _offending_stubs(path: Path) -> list[tuple[int, str]]:
-    """Return ``(lineno, construct)`` for every ad-hoc config-entry stub in ``path``.
+def _offending_stubs(path: Path) -> list[int]:
+    """Return the line number of every ad-hoc config-entry stub in ``path``.
 
     ``ast.parse`` deliberately propagates ``SyntaxError`` rather than swallowing
     it, so a broken test file fails loudly instead of silently passing the guard.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    offenders: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _is_config_entry_stub(node):
-            offenders.append((node.lineno, "SimpleNamespace(entry_id=, data=/options=)"))
-    return offenders
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _is_config_entry_stub(node)
+    ]
 
 
 def _iter_test_files() -> list[tuple[Path, str]]:
@@ -124,48 +154,56 @@ def _iter_test_files() -> list[tuple[Path, str]]:
     return files
 
 
-def test_new_tests_use_make_config_entry_factory() -> None:
-    """Fail loudly if a non-allowlisted test builds an ad-hoc config-entry stub."""
-    offenses: list[tuple[str, int, str]] = []
+def test_no_new_or_grown_adhoc_config_entry_stubs() -> None:
+    """Fail if any test file carries more ad-hoc config-entry stubs than frozen."""
+    violations: list[str] = []
     for path, rel in _iter_test_files():
-        if rel in LEGACY_ALLOWLIST:
-            continue
-        for lineno, construct in _offending_stubs(path):
-            offenses.append((rel, lineno, construct))
+        offenders = _offending_stubs(path)
+        frozen = LEGACY_ALLOWLIST.get(rel, 0)
+        if len(offenders) > frozen:
+            lines = ", ".join(str(lineno) for lineno in offenders)
+            violations.append(
+                f"File: {rel}\n"
+                f"Frozen baseline: {frozen} ad-hoc config-entry stub(s)\n"
+                f"Found now: {len(offenders)} on line(s) {lines}\n"
+            )
 
-    if offenses:
-        lines = [
-            f"File: {file}\nLine: {lineno}\nConstruct: {construct}\n"
-            for file, lineno, construct in offenses
-        ]
+    if violations:
         message = (
             "CONFIG-ENTRY STUB CONTRACT VIOLATION DETECTED!\n"
             "------------------------------------------------------------\n"
-            + "\n".join(lines)
+            + "\n".join(violations)
             + "WHY THIS IS WRONG:\n"
             "tests/AGENTS.md requires new tests to build config entries via\n"
             "tests.helpers.config_entries_stub.make_config_entry(...). Ad-hoc\n"
             "SimpleNamespace stubs that omit or null data/options bypass the\n"
             "factory's dict guarantee and are the structural cause of the\n"
-            "AttributeError failures fixed in PR #172.\n\n"
+            "AttributeError failures fixed in PR #172. The per-file baseline is\n"
+            "a ratchet: it may shrink, never grow.\n\n"
             "HOW TO FIX:\n"
-            "Replace the SimpleNamespace stub with:\n"
+            "Replace the new SimpleNamespace stub with:\n"
             "    from tests.helpers.config_entries_stub import make_config_entry\n"
             "    entry = make_config_entry(entry_id=..., data={...}, options={...})\n"
+            "(A config sub-entry stub -- carrying subentry_type/parent_entry_id/\n"
+            "config_subentry_id -- is not flagged and needs no change.)\n"
             "------------------------------------------------------------\n"
         )
         pytest.fail(message)
 
 
 def test_allowlist_has_no_stale_entries() -> None:
-    """Allowlisted files that vanished or lost the offender shape must leave the list."""
-    known = {rel for _, rel in _iter_test_files()}
-    stale = sorted(
-        rel
-        for rel in LEGACY_ALLOWLIST
-        if rel not in known or not _offending_stubs(_REPO_ROOT / rel)
-    )
+    """Frozen counts that vanished or now exceed the real count must be lowered."""
+    offenders_by_file = {rel: _offending_stubs(path) for path, rel in _iter_test_files()}
+    stale: list[str] = []
+    for rel, frozen in sorted(LEGACY_ALLOWLIST.items()):
+        if rel not in offenders_by_file:
+            stale.append(f"{rel}: file no longer exists")
+        elif len(offenders_by_file[rel]) < frozen:
+            stale.append(
+                f"{rel}: frozen {frozen} but only {len(offenders_by_file[rel])} remain; "
+                "lower the count (drop the entry once it reaches zero)"
+            )
     assert not stale, (
-        "Stale LEGACY_ALLOWLIST entries (file migrated to make_config_entry or no "
-        f"longer exists); remove them to keep the backlog honest: {stale}"
+        "Stale LEGACY_ALLOWLIST entries (files migrated toward make_config_entry "
+        f"or removed); update the frozen counts to keep the backlog honest: {stale}"
     )
