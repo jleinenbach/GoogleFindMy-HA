@@ -22,6 +22,12 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 )
 
 
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C)."""
+
+    return func(*args)
+
+
 @pytest.mark.asyncio
 async def test_known_time_basis_skips_alternate_strategies(
     monkeypatch: pytest.MonkeyPatch,
@@ -31,6 +37,7 @@ async def test_known_time_basis_skips_alternate_strategies(
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
         async_create_task=asyncio.create_task,
+        async_add_executor_job=_run_in_executor,
         data={},
     )
     resolver._store = SimpleNamespace(
@@ -127,5 +134,12 @@ async def test_known_time_basis_skips_alternate_strategies(
     await resolver._refresh_cache()
 
     assert resolver._known_timebases["tracker-1"] == "pair_date"
-    assert seen_windows == [pair_target]
-    assert seen_counters == [pair_target + 1]
+    # The known basis hint narrows the relative-window scan to the single
+    # ``pair_date`` basis: every window/counter explored equals the pair target,
+    # and no secrets/unix basis is tried. Under the AP-B1 skip guard (Variant B)
+    # the pure window math runs once for the build signature and once for the
+    # build itself, so each list repeats the single value rather than appearing
+    # once; the expensive crypto stays single-pass via the AP-A memo. What this
+    # test pins is the *basis narrowing*, i.e. uniqueness, not the call count.
+    assert set(seen_windows) == {pair_target}
+    assert set(seen_counters) == {pair_target + 1}

@@ -10,13 +10,16 @@ outside the hot path; ``resolve_eid`` only performs lookups.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Coroutine, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, cast, runtime_checkable
 
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
@@ -37,6 +40,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD_3600,
     EidVariant,
     HeuristicBasis,
+    HeuristicEidResult,
     compute_flags_xor_mask,
     generate_eid_variant,
     generate_heuristic_eid,
@@ -92,6 +96,91 @@ _VARIANT_CURVE_PARAMS: dict[EidVariant, tuple[int, int | None]] = {
     EidVariant.MODERN_P256_X20_TRUNC_LE: (MODERN_EID_LENGTH, P256_ORDER),
 }
 
+# Per-variant crypto memoization (AP-A).
+# Both EID derivation (generate_eid_variant) and the flags XOR mask
+# (compute_flags_xor_mask) are pure functions of their inputs and run once per
+# (key, time_counter, variant/curve) tuple on every rotation refresh. A bounded
+# LRU per resolver instance turns the repeated within-rotation and
+# back-to-back-refresh recomputation into a dict lookup while staying byte-exact.
+#
+# functools.lru_cache is deliberately NOT used: as a method decorator it keys on
+# ``self`` (and pins it), leaking the resolver and preventing per-instance caches.
+# The minimal OrderedDict+Lock helper below keys only on the crypto inputs.
+#
+# _EID_MEMO_MAXSIZE = 512: 13 devices x 5 variants x 4 concurrently live
+# time_counter windows ~= 260, x ~2 headroom -> 512 (next power of two).
+_EID_MEMO_MAXSIZE = 512
+# _EID_MASK_MEMO_MAXSIZE = 512: same dimensioning; mask key cardinality is
+# <= devices x windows x 2 curves < 512 (no per-variant fan-out for the mask).
+_EID_MASK_MEMO_MAXSIZE = 512
+
+# Heuristic phone-discovery memoization (AP-SWEEP).
+# ``generate_heuristic_eid`` is the on-loop sibling of the build-side crypto: it
+# runs inside ``_resolve_eid_internal`` -> ``_heuristic_resolve`` on every
+# cache-miss FMDN advertisement (an HA-Bluetooth callback that fires on the
+# event loop for EVERY advertisement). The slow path fans out over
+# HEURISTIC_HYPOTHESES x HEURISTIC_VARIANTS_TO_TEST (4 x 4) and each call derives
+# several EC points, yet its result list is a pure function of the rotation-
+# aligned time window plus the hypothesis parameters. Consecutive advertisements
+# from the same nearby phone fall in the same window and recompute identical
+# lists; a bounded LRU per resolver instance collapses that into a dict lookup
+# while staying byte-exact (the key carries every output-determining parameter,
+# so a window-boundary mismatch can only cause a benign miss, never a stale hit).
+#
+# _HEURISTIC_MEMO_MAXSIZE = 256: <= identities (~13) x hypotheses (4) x variants
+# (4) x ~2 concurrently live windows ~= 416 worst case for the learned + slow
+# paths combined, but in practice only a handful of phones reach the slow path;
+# 256 covers the realistic working set with LRU headroom and bounds memory.
+_HEURISTIC_MEMO_MAXSIZE = 256
+
+
+class _BoundedLRUCache:
+    """Thread-safe bounded LRU keyed on hashable crypto inputs.
+
+    A tiny instance-bound replacement for ``functools.lru_cache`` that keys on
+    explicit input tuples rather than ``self``. The lock guards only the
+    OrderedDict lookup/store, never the wrapped crypto call, so concurrent
+    worker threads (AP-C) can run the actual derivation in parallel and only
+    serialize on the cheap dict access.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        """Initialize an empty cache bounded to ``maxsize`` entries."""
+
+        self._maxsize = maxsize
+        self._store: OrderedDict[Any, Any] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key: Any) -> Any:
+        """Return the cached value for ``key`` or ``None`` on a miss.
+
+        ``None`` is never stored as a value, so a ``None`` return is an
+        unambiguous miss signal for the callers in this module.
+        """
+
+        with self._lock:
+            if key not in self._store:
+                return None
+            # Mark as most-recently-used.
+            self._store.move_to_end(key)
+            return self._store[key]
+
+    def put(self, key: Any, value: Any) -> None:
+        """Store ``value`` under ``key``, evicting the LRU entry past maxsize."""
+
+        with self._lock:
+            self._store[key] = value
+            self._store.move_to_end(key)
+            while len(self._store) > self._maxsize:
+                self._store.popitem(last=False)
+
+    def __len__(self) -> int:
+        """Return the current number of cached entries."""
+
+        with self._lock:
+            return len(self._store)
+
+
 # Strategy Configuration
 # ENABLE_ABSOLUTE_UNIX_BASIS: If True, scans for EIDs based on absolute Unix time (Deep Scan).
 # Proven unreliable for standard trackers (Motorola/Pebblebee), so disabled by default.
@@ -119,11 +208,6 @@ KNOWN_OFFSET_KEY_LENGTH = 2
 # expected counter when tracking a locked device. ±2 periods covers ~34 minutes
 # of clock drift at 1024s rotation.
 LOCK_TRACKING_WINDOW_STEPS = 2
-
-# Maximum wall-clock time (seconds) the EID refresh loop may run before
-# yielding control back to the event loop via ``await asyncio.sleep(0)``.
-# Keeps the main thread responsive under HA's 10 ms watchdog budget.
-_YIELD_BUDGET_SECONDS: float = 0.008
 
 # =============================================================================
 # Heuristic Phone Discovery Configuration
@@ -752,6 +836,28 @@ class GoogleFindMyEIDResolver:
     )
     _ble_scan_info: dict[str, BLEScanInfo] = field(init=False, default_factory=dict)
     _cached_identities: list[DeviceIdentity] = field(init=False, default_factory=list)
+    # Per-variant crypto memoization caches (AP-A). Declared as slots-backed
+    # dataclass fields; stubs that bypass __init__ get them seeded by
+    # _ensure_cache_defaults under its hasattr guard.
+    _eid_memo: _BoundedLRUCache = field(
+        init=False, default_factory=lambda: _BoundedLRUCache(_EID_MEMO_MAXSIZE)
+    )
+    _flags_mask_memo: _BoundedLRUCache = field(
+        init=False,
+        default_factory=lambda: _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE),
+    )
+    # On-loop heuristic phone-discovery memoization (AP-SWEEP). Same shape as the
+    # two AP-A caches; absorbs the per-advertisement ``generate_heuristic_eid``
+    # fan-out on the resolve hot path.
+    _heuristic_memo: _BoundedLRUCache = field(
+        init=False,
+        default_factory=lambda: _BoundedLRUCache(_HEURISTIC_MEMO_MAXSIZE),
+    )
+    # Deterministic signature of the last successful build phase (AP-B1).
+    # ``None`` means "no successful build yet", so the first refresh never
+    # skips. Declared as a slots-backed dataclass field; stubs that bypass
+    # __init__ get it seeded by _ensure_cache_defaults under its hasattr guard.
+    _last_build_signature: str | None = field(init=False, default=None)
 
     def __post_init__(self) -> None:
         """Set up caches and schedule the first rotation-aligned refresh."""
@@ -804,6 +910,20 @@ class GoogleFindMyEIDResolver:
             self._ble_scan_info = {}
         if not hasattr(self, "_cached_identities"):
             self._cached_identities = []
+        # Per-variant crypto memoization caches (AP-A). Initialized here under
+        # the same hasattr guard as the _known_* defaults so stubs that bypass
+        # __init__ (and call _ensure_cache_defaults directly) get them too.
+        if not hasattr(self, "_eid_memo"):
+            self._eid_memo = _BoundedLRUCache(_EID_MEMO_MAXSIZE)
+        if not hasattr(self, "_flags_mask_memo"):
+            self._flags_mask_memo = _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE)
+        # On-loop heuristic discovery memoization (AP-SWEEP), same guard.
+        if not hasattr(self, "_heuristic_memo"):
+            self._heuristic_memo = _BoundedLRUCache(_HEURISTIC_MEMO_MAXSIZE)
+        # Build-phase skip-guard signature (AP-B1). Same hasattr guard as the
+        # AP-A memo caches so stubs that bypass __init__ get the default too.
+        if not hasattr(self, "_last_build_signature"):
+            self._last_build_signature = None
 
     def _clear_lock_state(self, device_id: str) -> bool:
         """Remove all cached state associated with a device lock."""
@@ -1523,6 +1643,91 @@ class GoogleFindMyEIDResolver:
             )
         return generated
 
+    def _build_signature(
+        self,
+        work_items: list[WorkItem],
+        *,
+        now_unix: int,
+        params: RotationParams,
+    ) -> str:
+        """Return a deterministic signature of the active-device build inputs.
+
+        The signature is the skip-guard key for the expensive build phase: if it
+        is unchanged, re-running the build would reproduce a byte-identical
+        lookup table, so it can be safely skipped.
+
+        Correctness model (Variant B -- fold the computed specs, not a time
+        formula). The expensive, skipped part of the build is the per-variant
+        crypto in ``_generate_eids_from_spec`` / ``_compute_flags_xor_mask``. Its
+        only inputs are the ``VariantSpec`` items the build loop fans out, which
+        are a deterministic, *pure* function of each work item and ``now_unix``:
+        ``_compute_time_windows`` (-> ``_compute_lock_windows`` /
+        ``_compute_relative_windows`` / ``_dedupe_windows``) reads the learned
+        ``_known_offsets`` snapshot but mutates no resolver state, and
+        ``_compute_variants`` is pure. The signature therefore replays exactly
+        that window/variant derivation and folds its *content* in: if the spec
+        set is identical the crypto output is byte-identical, so the skip is
+        correct by construction.
+
+        Folding the realized window timestamps (rather than a ``now_unix //
+        period`` term) closes the phase-relative drift gap: the lock-tracking
+        index is ``(now_unix - created_at) // period`` and the relative index is
+        ``(now_unix - anchor) // period``, so a non-period-aligned anchor rolls
+        a drift window at a different ``now_unix`` than the absolute rollover --
+        two clocks could share the old absolute-counter signature yet need
+        different window sets. By hashing the windows the build actually
+        produces, a missing or added drift window always changes the digest.
+
+        Per work item the digest additionally folds the identity fields that
+        reach the build output but never the window math -- ``registry_id`` /
+        ``canonical_id`` / ``config_entry_id`` are emitted verbatim into every
+        ``EIDMatch``. Sorting makes the digest independent of iteration order.
+        """
+
+        hasher = hashlib.blake2b(digest_size=32)
+
+        def _item_key(item: WorkItem) -> tuple[str, ...]:
+            # Identity fields that flow straight into ``EIDMatch`` output but are
+            # invisible to the window/variant derivation below.
+            fields: list[str] = [
+                item.registry_id,
+                item.canonical_id,
+                item.config_entry_id,
+                item.key_bytes.hex(),
+                "" if item.locked_variant is None else item.locked_variant.value,
+            ]
+            # Replay the pure window/variant derivation and fold the realized
+            # specs. ``_compute_time_windows`` is read-only with respect to
+            # ``self`` (it only reads the ``_known_offsets`` snapshot); see the
+            # AP-C offload contract. The realized spec set fully determines the
+            # skipped crypto output, so identical specs => identical lookup.
+            windows, invalid_hint = self._compute_time_windows(
+                item, now_unix=now_unix, params=params
+            )
+            fields.append("1" if invalid_hint else "0")
+            for window in windows:
+                for variant_spec in self._compute_variants(item, window):
+                    fields.append(
+                        "|".join(
+                            (
+                                variant_spec.variant.value,
+                                str(int(variant_spec.include_reverse)),
+                                window.time_basis,
+                                str(variant_spec.window.timestamp),
+                                str(variant_spec.window.semantic_offset),
+                            )
+                        )
+                    )
+            return tuple(fields)
+
+        for key in sorted(_item_key(item) for item in work_items):
+            hasher.update(b"W")
+            for field_value in key:
+                hasher.update(field_value.encode())
+                hasher.update(b"\x00")
+
+        return hasher.hexdigest()
+
     async def _refresh_cache(self) -> None:
         """Rebuild the EID lookup table for all active devices."""
 
@@ -1540,15 +1745,105 @@ class GoogleFindMyEIDResolver:
         _LOGGER.debug("Refresh start: %d identities discovered", len(identities))
         work_items = self._collect_work_items(identities, now_unix=now_unix)
         _LOGGER.debug("Refresh stage: collected %d work items", len(work_items))
+
+        # Skip-guard (AP-B1): the build phase below is a pure function of the
+        # work items and the per-period rotation counters. When the signature is
+        # unchanged, rebuilding would reproduce a byte-identical lookup table, so
+        # we keep the existing one and skip the expensive CacheBuilder fan-out.
+        # The cheap mandatory side effects above (_purge_stale_locks,
+        # _cached_identities, _collect_device_secrets) and the invalid-hint
+        # bookkeeping in _collect_work_items still run on every trigger. The
+        # build-loop's own ``_known_timebases.pop`` (invalid-hint) is safe to
+        # skip: ``invalid_hint`` is a pure function of the work item's
+        # ``basis_hint`` (plus its lock-derived window basis), so an unchanged
+        # signature means the hint state is unchanged; any newly invalid hint
+        # changes ``basis_hint`` (read back from _known_timebases), which changes
+        # the signature and forces a rebuild that runs the pop.
+        build_signature = self._build_signature(
+            work_items, now_unix=now_unix, params=rotation_params
+        )
+        if self._last_build_signature == build_signature:
+            _LOGGER.debug(
+                "Refresh stage: build signature unchanged, skipping rebuild "
+                "(%d work items, %d cached EIDs)",
+                len(work_items),
+                len(self._lookup),
+            )
+            return
+
+        # Offload the pure synchronous build to a worker thread (AP-C). The
+        # build block touches ``self`` only through the two thread-safe AP-A
+        # memo caches (``_eid_memo``/``_flags_mask_memo``), whose locks guard
+        # the dict access only, and reads the immutable learned ``_known_offsets``
+        # snapshot via ``_compute_time_windows``. Every genuine ``self.*``
+        # mutation stays on the loop: the invalid-hint ``_known_timebases.pop``
+        # below (driven by the registry ids returned from the build) and the
+        # ``_lookup``/``_lookup_metadata`` assignment after the executor returns.
+        # The cooperative ``asyncio.sleep(0)`` yield is gone because no event
+        # loop exists inside the worker thread; running the whole build off-loop
+        # keeps the loop reactive without per-item yields.
+        lookup, lookup_metadata, invalid_hint_ids = (
+            await self.hass.async_add_executor_job(
+                self._build_lookup_sync,
+                work_items,
+                now_unix,
+                rotation_params,
+            )
+        )
+
+        # Loop-side ``self.*`` mutations (single-threaded, no executor in flight).
+        for registry_id in invalid_hint_ids:
+            self._known_timebases.pop(registry_id, None)
+        self._lookup, self._lookup_metadata = lookup, lookup_metadata
+        # Record the signature only after a successful build so a failure leaves
+        # the guard cleared and the next trigger rebuilds (AP-B1).
+        self._last_build_signature = build_signature
+        _LOGGER.debug(
+            "Refresh stage: finalize complete (lookup=%d, metadata=%d)",
+            len(self._lookup),
+            len(self._lookup_metadata),
+        )
+        _LOGGER.debug(
+            "Refreshed EID cache for %d devices (%d cached EIDs)",
+            len(work_items),
+            len(self._lookup),
+        )
+
+    def _build_lookup_sync(
+        self,
+        work_items: list[WorkItem],
+        now_unix: int,
+        rotation_params: RotationParams,
+    ) -> tuple[
+        dict[bytes, list[EIDMatch]],
+        dict[bytes, dict[str, Any]],
+        list[str],
+    ]:
+        """Build the EID lookup table off the event loop (AP-C).
+
+        Pure synchronous build over the loop-side inputs ``work_items`` /
+        ``now_unix`` / ``rotation_params``. Designed to run inside a worker
+        thread via ``hass.async_add_executor_job``: it performs no ``await``,
+        touches no event loop, and mutates no resolver state except the two
+        thread-safe AP-A memo caches (``_eid_memo`` / ``_flags_mask_memo``),
+        which serialize only on the bounded dict access. ``_compute_time_windows``
+        and its callees read the learned ``_known_offsets`` snapshot but never
+        write it, and the ``CacheBuilder`` is thread-local to this call.
+
+        Returns the finalized ``(lookup, metadata)`` tables plus the list of
+        registry ids whose basis hint was invalid; the caller pops their
+        ``_known_timebases`` entries on the loop, where it is safe to mutate.
+        """
+
         builder = CacheBuilder()
-        _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
+        invalid_hint_ids: list[str] = []
 
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
                 work_item, now_unix=now_unix, params=rotation_params
             )
             if invalid_hint:
-                self._known_timebases.pop(work_item.registry_id, None)
+                invalid_hint_ids.append(work_item.registry_id)
             _LOGGER.debug(
                 "Refresh stage: %s produced %d window groups",
                 work_item.registry_id,
@@ -1562,7 +1857,7 @@ class GoogleFindMyEIDResolver:
                         variant_spec.variant, (LEGACY_EID_LENGTH, None)
                     )
                     try:
-                        xor_mask = compute_flags_xor_mask(
+                        xor_mask = self._compute_flags_xor_mask(
                             variant_spec.key_bytes,
                             variant_spec.window.timestamp,
                             curve_byte_len=curve_len,
@@ -1587,23 +1882,8 @@ class GoogleFindMyEIDResolver:
                             flags_xor_mask=xor_mask,
                         )
 
-            # Cooperative yield: give the event loop a chance to process
-            # pending callbacks when the CPU budget for this tick is spent.
-            if time.monotonic() >= _yield_deadline:
-                await asyncio.sleep(0)
-                _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
-
-        self._lookup, self._lookup_metadata = builder.finalize()
-        _LOGGER.debug(
-            "Refresh stage: finalize complete (lookup=%d, metadata=%d)",
-            len(self._lookup),
-            len(self._lookup_metadata),
-        )
-        _LOGGER.debug(
-            "Refreshed EID cache for %d devices (%d cached EIDs)",
-            len(work_items),
-            len(self._lookup),
-        )
+        lookup, lookup_metadata = builder.finalize()
+        return lookup, lookup_metadata, invalid_hint_ids
 
     def _normalize_variant_value(self, raw: object, *, eid_len: int) -> str:
         """Return a valid `EidVariant` value string for persistence."""
@@ -1653,14 +1933,134 @@ class GoogleFindMyEIDResolver:
         time_counter: int,
         variant: EidVariant,
     ) -> bytes:
-        """Generate an EID for a specific profile."""
+        """Generate an EID for a specific profile.
 
-        return generate_eid_variant(
+        Memoized per resolver instance on ``(key_bytes, time_counter,
+        variant)``. The derivation is pure, so a hit returns the byte-identical
+        EID without recomputation. Cache invalidation is implicit: key rotation
+        changes ``time_counter`` and re-keying changes ``key_bytes``, both of
+        which produce a fresh key and let stale entries age out via the LRU.
+        """
+
+        cache_key = (key_bytes, time_counter, variant)
+        cached = self._eid_memo.get(cache_key)
+        if cached is not None:
+            return cast(bytes, cached)
+
+        # Compute outside the cache lock so parallel workers (AP-C) are not
+        # serialized on the crypto call.
+        eid_bytes = generate_eid_variant(
             key_bytes,
             time_counter,
             variant,
             strict=False,
         )
+        self._eid_memo.put(cache_key, eid_bytes)
+        return eid_bytes
+
+    def _compute_flags_xor_mask(
+        self,
+        key_bytes: bytes,
+        time_counter: int,
+        *,
+        curve_byte_len: int,
+        curve_order: int | None,
+    ) -> int:
+        """Memoized wrapper around ``compute_flags_xor_mask``.
+
+        Keyed per resolver instance on ``(key_bytes, time_counter,
+        curve_byte_len, curve_order)``. The mask is a pure function of these
+        inputs, so a hit returns the identical integer without recomputation.
+        Invalidation is implicit via key rotation, identical to
+        ``_generate_variant``.
+        """
+
+        cache_key = (key_bytes, time_counter, curve_byte_len, curve_order)
+        cached = self._flags_mask_memo.get(cache_key)
+        if cached is not None:
+            return cast(int, cached)
+
+        # Compute outside the cache lock so parallel workers (AP-C) are not
+        # serialized on the crypto call.
+        mask = compute_flags_xor_mask(
+            key_bytes,
+            time_counter,
+            curve_byte_len=curve_byte_len,
+            curve_order=curve_order,
+        )
+        self._flags_mask_memo.put(cache_key, mask)
+        return mask
+
+    def _generate_heuristic_eid(  # noqa: PLR0913
+        self,
+        key_bytes: bytes,
+        now_unix: int,
+        *,
+        rotation_period: int,
+        basis: HeuristicBasis,
+        variant: EidVariant,
+        anchor: int | None,
+        drift_offsets: tuple[int, ...] = (-1, 0, 1),
+    ) -> list[HeuristicEidResult]:
+        """Memoized wrapper around ``generate_heuristic_eid`` (AP-SWEEP).
+
+        ``generate_heuristic_eid`` runs on the event loop for every cache-miss
+        FMDN advertisement (``_resolve_eid_internal`` -> ``_heuristic_resolve``).
+        Its output list is a pure function of the rotation-aligned time window
+        and the hypothesis parameters, so consecutive advertisements from the
+        same nearby phone within one window recompute identical lists. This
+        wrapper turns that repeat into a dict lookup.
+
+        The cache key carries every parameter that influences the output --
+        ``key_bytes``, the rotation-aligned window start, ``rotation_period``,
+        ``basis``, ``variant`` and ``anchor`` -- so a stale value can never be
+        served: a window-boundary rounding difference can at worst miss the
+        cache and recompute (still byte-exact), never collide across distinct
+        inputs. The window start mirrors ``_align_to_rotation_flexible``'s
+        ``(t // period) * period`` over the same time value the crypto aligns
+        (``now_unix`` for ABSOLUTE, ``now_unix - anchor`` for RELATIVE).
+        Invalidation is implicit: a new window or re-keying yields a fresh key
+        and stale entries age out via the LRU. ``drift_offsets`` defaults to the
+        same value the underlying generator uses; it is folded into the key (and
+        forwarded explicitly rather than relying on the callee default) so a
+        future caller that varies it can never be served a stale entry. The
+        added key cardinality is negligible (one constant tuple in practice).
+        """
+
+        if basis == HeuristicBasis.RELATIVE and anchor is not None and anchor > 0:
+            aligned_source = max(now_unix - anchor, 0)
+        else:
+            aligned_source = now_unix
+        window_start = (
+            (aligned_source // rotation_period) * rotation_period
+            if rotation_period > 0
+            else aligned_source
+        )
+
+        cache_key = (
+            key_bytes,
+            window_start,
+            rotation_period,
+            basis,
+            variant,
+            anchor,
+            drift_offsets,
+        )
+        cached = self._heuristic_memo.get(cache_key)
+        if cached is not None:
+            return cast(list[HeuristicEidResult], cached)
+
+        results = generate_heuristic_eid(
+            key_bytes,
+            now_unix,
+            rotation_period=rotation_period,
+            basis=basis,
+            variant=variant,
+            anchor=anchor,
+            drift_offsets=drift_offsets,
+        )
+        self._heuristic_memo.put(cache_key, results)
+        return results
 
     async def _collect_device_secrets(self) -> list[DeviceIdentity]:
         """Retrieve active tracker identities from all loaded coordinators."""
@@ -2027,7 +2427,7 @@ class GoogleFindMyEIDResolver:
         anchor = self._get_best_anchor(identity)
 
         try:
-            results = generate_heuristic_eid(
+            results = self._generate_heuristic_eid(
                 key_bytes,
                 now_unix,
                 rotation_period=learned.rotation_period,
@@ -2096,7 +2496,7 @@ class GoogleFindMyEIDResolver:
 
             for variant in HEURISTIC_VARIANTS_TO_TEST:
                 try:
-                    results = generate_heuristic_eid(
+                    results = self._generate_heuristic_eid(
                         key_bytes,
                         now_unix,
                         rotation_period=rotation_period,

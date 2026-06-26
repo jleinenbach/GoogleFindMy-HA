@@ -23,7 +23,7 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
-from ..const import DATA_EID_RESOLVER, DOMAIN
+from ..const import _EID_REFRESH_DEBOUNCE_S, DATA_EID_RESOLVER, DOMAIN
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
@@ -239,25 +239,72 @@ class CacheOperations(_MixinBase):
         if has_metadata or updated != existing:
             self._device_location_data[device_id] = updated
 
-        # Trigger EID resolver refresh when identity_key is present
+        # Trigger EID resolver refresh when identity_key is present.
         if "identity_key" in payload or "identityKey" in payload:
-            hass_obj = getattr(self, "hass", None)
-            if hass_obj is None:
-                return
-            domain_bucket = (
-                hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
+            self._schedule_inline_eid_resolver_refresh(device_id)
+
+    def _schedule_inline_eid_resolver_refresh(self, device_id: str) -> None:
+        """Debounced inline EID-resolver refresh trigger (AP-B2).
+
+        This is the separate inline trigger site (distinct from the central
+        ``_schedule_eid_resolver_refresh`` helper in identity.py). During an FCM
+        burst, ``_persist_anchor_metadata`` runs once per anchored payload, so
+        without coalescing each identity-bearing payload would spawn its own
+        ``async_create_task(resolver.async_refresh())``. We hold one pending
+        timer handle for this site: the first trigger arms a ``loop.call_later``
+        timer, further triggers within ``_EID_REFRESH_DEBOUNCE_S`` are dropped,
+        and the handle is cleared *before* the task is created so a trigger after
+        the window still produces a fresh task (no swallowed window-change). The
+        rebuild-vs-skip decision remains with the AP-B1 skip guard.
+        """
+        hass_obj = getattr(self, "hass", None)
+        if hass_obj is None:
+            return
+        domain_bucket = (
+            hass_obj.data.get(DOMAIN) if hasattr(hass_obj, "data") else None
+        )
+        if not isinstance(domain_bucket, dict):
+            return
+        eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
+        if eid_resolver is None:
+            return
+        refresh_coro = getattr(eid_resolver, "async_refresh", None)
+        if not callable(refresh_coro):
+            return
+
+        create_task = getattr(hass_obj, "async_create_task", None)
+        if not callable(create_task):
+            return
+
+        def _spawn_refresh_task() -> None:
+            """Clear the debounce handle, then create the single refresh task."""
+            # Clear first so a trigger after the window arms a fresh timer.
+            self._eid_inline_refresh_debounce_handle = None
+            _LOGGER.debug(
+                "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
+                device_id,
             )
-            if not isinstance(domain_bucket, dict):
-                return
-            eid_resolver = domain_bucket.get(DATA_EID_RESOLVER)
-            if eid_resolver is not None:
-                _LOGGER.debug(
-                    "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
-                    device_id,
-                )
-                refresh_coro = getattr(eid_resolver, "async_refresh", None)
-                if callable(refresh_coro):
-                    hass_obj.async_create_task(refresh_coro())
+            create_task(refresh_coro())
+
+        loop = getattr(hass_obj, "loop", None)
+        call_later = getattr(loop, "call_later", None)
+        if not callable(call_later):
+            # No event loop available (e.g. minimal stubs): fall back to the
+            # legacy immediate behaviour so a refresh is never lost.
+            _LOGGER.debug(
+                "Triggering EID Resolver refresh for %s (identity_key in anchor_payload)",
+                device_id,
+            )
+            create_task(refresh_coro())
+            return
+
+        # A timer is already pending for this window: coalesce this trigger.
+        if getattr(self, "_eid_inline_refresh_debounce_handle", None) is not None:
+            return
+
+        self._eid_inline_refresh_debounce_handle = call_later(
+            _EID_REFRESH_DEBOUNCE_S, _spawn_refresh_task
+        )
 
     def update_device_cache(
         self,

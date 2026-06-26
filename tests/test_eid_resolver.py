@@ -26,12 +26,19 @@ def _close_coro(coro: object, name: object = None) -> None:
         coro.close()
 
 
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C)."""
+
+    return func(*args)
+
+
 def _fake_hass() -> SimpleNamespace:
     """Return a lightweight hass stand-in with coroutine-closing helpers."""
 
     return SimpleNamespace(
         async_create_task=_close_coro,
         async_create_background_task=_close_coro,
+        async_add_executor_job=_run_in_executor,
         data={},
     )
 
@@ -114,6 +121,7 @@ async def test_resolver_saves_locks_via_store(monkeypatch: pytest.MonkeyPatch) -
     hass_with_real_tasks = SimpleNamespace(
         async_create_task=lambda coro, name=None: asyncio.create_task(coro),
         async_create_background_task=lambda coro, name=None: asyncio.create_task(coro),
+        async_add_executor_job=_run_in_executor,
         data={},
     )
 

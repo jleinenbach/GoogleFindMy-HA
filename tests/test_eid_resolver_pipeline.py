@@ -26,6 +26,12 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 )
 
 
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C)."""
+
+    return func(*args)
+
+
 def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
     """Return a resolver with lightweight Home Assistant stand-ins."""
 
@@ -33,6 +39,7 @@ def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
     resolver.hass = SimpleNamespace(
         async_create_task=lambda coro,
         name=None: asyncio.get_running_loop().create_task(coro),
+        async_add_executor_job=_run_in_executor,
         data={},
     )
     resolver._store = SimpleNamespace(async_load=lambda: None, async_save=AsyncMock())
