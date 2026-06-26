@@ -301,6 +301,39 @@ The integration provides a couple of Home Assistant Actions for use with automat
 - **Manual refresh:** Call the `googlefindmy.locate_device` action to request fresh data outside the scheduled polling cycle.  The integration debounces requests to avoid repeated queries that would exceed the appropriate polling guidance.
 - **Repair flows:** When authentication expires or Google invalidates API tokens, the integration raises a [Home Assistant repair issue](https://developers.home-assistant.io/docs/core/platform/repairs/) that guides you through reauthentication without removing the config entry.
 
+### Optional: faster legacy-tracker EID computation (advanced)
+
+Only **older** FMDN trackers exercise a pure-Python elliptic-curve path
+(SECP160r1) when computing rotating EIDs. Modern trackers use P-256, which is
+already C-backed (`cryptography`), so they are unaffected. For the legacy path,
+`python-ecdsa` automatically uses `gmpy2` (preferred) or `gmpy` for its modular
+arithmetic **if either is importable**, with no configuration. If neither is
+present, it falls back to pure Python.
+
+This is purely optional and the effect is small. After the polling/refresh
+optimizations in #1140 the legacy path runs rarely, and the measured speedup is
+modest: roughly **~1.15x on x86_64** for this small curve (not the "~3x" the
+library advertises for large operands). On weaker ARM CPUs it may be somewhat
+higher, but this is not quantified.
+
+You can verify which backend would be used (and which accelerator versions are
+installed) from the integration's diagnostics download (`crypto.ecdsa_acceleration`
+and `crypto.gmpy2_version`) or from a one-time DEBUG log line at startup. Note
+that this reports *import availability and installed version*, not guaranteed
+runtime acceleration: a broken `gmpy2` install would still appear installed
+while `python-ecdsa` silently falls back to pure Python.
+
+| Platform | gmpy2 wheel? | Effect on legacy path |
+|---|---|---|
+| x86_64 / aarch64 (glibc) | yes | small speedup (~1.15x x86_64), used automatically |
+| aarch64 (musl) | yes (>= 2.3.1) | small speedup, used automatically |
+| armv6 / armv7 (32-bit) | no | not installable, no effect |
+
+On **32-bit ARM (armv6/armv7)** there is no `gmpy2` wheel and a source build
+fails, so it cannot be used there. Because the effect is already small after the
+#1140 optimizations and only touches legacy trackers, installing `gmpy2` is a
+minor, optional tweak rather than a recommended step.
+
 ## Known limitations
 
 - **Historical data availability:** Map View history is generated locally and depends on the Recorder integration retaining statistics; pruning recorder data will remove historical traces.
