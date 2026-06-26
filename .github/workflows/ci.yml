@@ -254,7 +254,10 @@ jobs:
         run: |
           set +e
           poetry run ruff check . 2>&1 | tee ruff_output.txt
-          EXIT_CODE=${PIPESTATUS[0]}
+          CHECK_EXIT=${PIPESTATUS[0]}
+          poetry run ruff format --check . 2>&1 | tee -a ruff_output.txt
+          FORMAT_EXIT=${PIPESTATUS[0]}
+          EXIT_CODE=$(( CHECK_EXIT > FORMAT_EXIT ? CHECK_EXIT : FORMAT_EXIT ))
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
           exit $EXIT_CODE
 
