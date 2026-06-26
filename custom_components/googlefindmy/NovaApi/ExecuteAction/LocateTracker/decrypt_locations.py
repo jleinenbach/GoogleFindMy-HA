@@ -154,8 +154,12 @@ def invalidate_eik_cache_for_key(
 ) -> int:
     """Invalidate all cached EIK entries for a specific encrypted identity key.
 
-    Called when persistent MAC/InvalidTag failures indicate the cached decrypted
-    EIK is stale (e.g., after key rotation, re-pairing, or E2EE reset).
+    Called when every encrypted report in a poll cycle fails MAC/InvalidTag
+    authentication, which suggests the cached decrypted EIK is stale (e.g., after
+    key rotation, re-pairing, or E2EE reset). Whether the failure is actually
+    persistent is decided by the stateful callers (coordinator poll verdict / FCM
+    callback), not here: this helper only drops the cache so the next poll
+    re-derives the key.
 
     Returns:
         The number of entries removed.
@@ -169,7 +173,8 @@ def invalidate_eik_cache_for_key(
             removed += 1
     if removed:
         _LOGGER.info(
-            "Invalidated %d EIK cache entries (version=%s) due to persistent auth failures",
+            "Invalidated %d EIK cache entries (version=%s) after authentication "
+            "failures this cycle; the next poll re-derives the key",
             removed,
             owner_key_version,
         )
@@ -1708,11 +1713,17 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             _auth_failures += 1
             if public_key_random == b"":  # Own-report auth failure
                 _own_auth_failures += 1
-            _LOGGER.warning(
+            # Per-report detail diagnostics only: a single report failing to
+            # authenticate is not actionable on its own (a stale own report,
+            # an offline device, or a foreign/crowdsourced report keyed to
+            # another account all land here). The user-facing verdict and any
+            # reauth decision belong to the stateful, sibling-aware callers
+            # (coordinator poll verdict / FCM callback), so this stays DEBUG and
+            # carries no reauth advice.
+            _LOGGER.debug(
                 "Decryption auth failed (InvalidTag) for %s report "
                 "(time_offset=%s, key_len=%s, candidates=%d): "
-                "report could not be authenticated. "
-                "Try re-authenticating the account in the Google app.",
+                "report could not be authenticated.",
                 "own" if public_key_random == b"" else "foreign",
                 time_offset if public_key_random != b"" else "N/A",
                 len(active_identity_key) if active_identity_key else 0,
@@ -1727,7 +1738,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 _auth_failures += 1
                 if public_key_random == b"":  # Own-report auth failure
                     _own_auth_failures += 1
-                _LOGGER.warning(
+                # Same class as InvalidTag above (PyCryptodome AES-EAX raises
+                # ValueError("MAC check failed") on the same tag mismatch);
+                # per-report detail diagnostics, DEBUG, no reauth advice.
+                _LOGGER.debug(
                     "Decryption auth failed (MAC check) for %s report "
                     "(time_offset=%s, key_len=%s, candidates=%d): %s",
                     "own" if public_key_random == b"" else "foreign",
@@ -1766,20 +1780,27 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     ):
         owner_ver = getattr(encrypted_user_secrets, "ownerKeyVersion", 0)
         removed = invalidate_eik_cache_for_key(raw_encrypted_identity_key, owner_ver)
+        # This aggregate notice stays DEBUG and carries no reauth advice: this
+        # function is stateless per call (it sees a single poll cycle, often with
+        # just one report) and cannot judge whether the failure is persistent. The
+        # cache invalidation above is logged once at INFO; the sibling-aware,
+        # cross-cycle reauth verdict belongs to the coordinator
+        # (PollingOperations) and the FCM callback, which remain the user-facing
+        # owners of any WARNING/ERROR. The own-report mismatch is still surfaced
+        # via OwnReportIdentityMismatchError below, so the escalation machinery is
+        # untouched.
         if removed:
-            _LOGGER.warning(
-                "All %d encrypted location reports failed authentication. "
-                "Invalidated %d cached identity key(s) to force re-derivation "
-                "on next poll. If this persists, re-authenticate the account "
-                "or check if E2EE keys have been reset.",
+            _LOGGER.debug(
+                "All %d encrypted location reports failed authentication; "
+                "invalidated %d cached identity key(s) to force re-derivation "
+                "on the next poll.",
                 _auth_failures,
                 removed,
             )
         else:
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "All %d encrypted location reports failed authentication "
-                "but no cached keys found to invalidate. The identity key "
-                "derivation may be failing. Re-authenticate the account.",
+                "but no cached keys were found to invalidate.",
                 _auth_failures,
             )
 
