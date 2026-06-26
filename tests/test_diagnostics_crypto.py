@@ -20,8 +20,9 @@ from custom_components.googlefindmy import diagnostics
 from custom_components.googlefindmy.const import DOMAIN
 from custom_components.googlefindmy.diagnostics import _crypto_block
 
-# asyncio_mode = "auto" (pyproject.toml) runs the `async def` tests below without
-# an explicit marker; the one sync test stays sync (no module-level mark).
+# Each async test below carries an explicit ``@pytest.mark.asyncio`` marker
+# (required by tests/test_guard_async_test_marker.py); the one sync test stays
+# unmarked, so no module-level ``pytestmark`` is used.
 
 _SENTINEL_INFO: dict[str, str | None] = {
     "ecdsa_acceleration": "gmpy2",
@@ -61,6 +62,7 @@ def _make_entry_and_hass(
     return entry, hass
 
 
+@pytest.mark.asyncio
 async def test_crypto_block_present_when_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -82,6 +84,7 @@ async def test_crypto_block_present_when_cached(
     # set-equality assertion red.
 
 
+@pytest.mark.asyncio
 async def test_crypto_block_absent_without_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
