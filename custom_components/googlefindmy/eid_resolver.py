@@ -40,6 +40,7 @@ from .FMDNCrypto.eid_generator import (
     ROTATION_PERIOD_3600,
     EidVariant,
     HeuristicBasis,
+    HeuristicEidResult,
     compute_flags_xor_mask,
     generate_eid_variant,
     generate_heuristic_eid,
@@ -112,6 +113,25 @@ _EID_MEMO_MAXSIZE = 512
 # _EID_MASK_MEMO_MAXSIZE = 512: same dimensioning; mask key cardinality is
 # <= devices x windows x 2 curves < 512 (no per-variant fan-out for the mask).
 _EID_MASK_MEMO_MAXSIZE = 512
+
+# Heuristic phone-discovery memoization (AP-SWEEP).
+# ``generate_heuristic_eid`` is the on-loop sibling of the build-side crypto: it
+# runs inside ``_resolve_eid_internal`` -> ``_heuristic_resolve`` on every
+# cache-miss FMDN advertisement (an HA-Bluetooth callback that fires on the
+# event loop for EVERY advertisement). The slow path fans out over
+# HEURISTIC_HYPOTHESES x HEURISTIC_VARIANTS_TO_TEST (4 x 4) and each call derives
+# several EC points, yet its result list is a pure function of the rotation-
+# aligned time window plus the hypothesis parameters. Consecutive advertisements
+# from the same nearby phone fall in the same window and recompute identical
+# lists; a bounded LRU per resolver instance collapses that into a dict lookup
+# while staying byte-exact (the key carries every output-determining parameter,
+# so a window-boundary mismatch can only cause a benign miss, never a stale hit).
+#
+# _HEURISTIC_MEMO_MAXSIZE = 256: <= identities (~13) x hypotheses (4) x variants
+# (4) x ~2 concurrently live windows ~= 416 worst case for the learned + slow
+# paths combined, but in practice only a handful of phones reach the slow path;
+# 256 covers the realistic working set with LRU headroom and bounds memory.
+_HEURISTIC_MEMO_MAXSIZE = 256
 
 
 class _BoundedLRUCache:
@@ -826,6 +846,13 @@ class GoogleFindMyEIDResolver:
         init=False,
         default_factory=lambda: _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE),
     )
+    # On-loop heuristic phone-discovery memoization (AP-SWEEP). Same shape as the
+    # two AP-A caches; absorbs the per-advertisement ``generate_heuristic_eid``
+    # fan-out on the resolve hot path.
+    _heuristic_memo: _BoundedLRUCache = field(
+        init=False,
+        default_factory=lambda: _BoundedLRUCache(_HEURISTIC_MEMO_MAXSIZE),
+    )
     # Deterministic signature of the last successful build phase (AP-B1).
     # ``None`` means "no successful build yet", so the first refresh never
     # skips. Declared as a slots-backed dataclass field; stubs that bypass
@@ -890,6 +917,9 @@ class GoogleFindMyEIDResolver:
             self._eid_memo = _BoundedLRUCache(_EID_MEMO_MAXSIZE)
         if not hasattr(self, "_flags_mask_memo"):
             self._flags_mask_memo = _BoundedLRUCache(_EID_MASK_MEMO_MAXSIZE)
+        # On-loop heuristic discovery memoization (AP-SWEEP), same guard.
+        if not hasattr(self, "_heuristic_memo"):
+            self._heuristic_memo = _BoundedLRUCache(_HEURISTIC_MEMO_MAXSIZE)
         # Build-phase skip-guard signature (AP-B1). Same hasattr guard as the
         # AP-A memo caches so stubs that bypass __init__ get the default too.
         if not hasattr(self, "_last_build_signature"):
@@ -1968,6 +1998,71 @@ class GoogleFindMyEIDResolver:
         self._flags_mask_memo.put(cache_key, mask)
         return mask
 
+    def _generate_heuristic_eid(  # noqa: PLR0913
+        self,
+        key_bytes: bytes,
+        now_unix: int,
+        *,
+        rotation_period: int,
+        basis: HeuristicBasis,
+        variant: EidVariant,
+        anchor: int | None,
+    ) -> list[HeuristicEidResult]:
+        """Memoized wrapper around ``generate_heuristic_eid`` (AP-SWEEP).
+
+        ``generate_heuristic_eid`` runs on the event loop for every cache-miss
+        FMDN advertisement (``_resolve_eid_internal`` -> ``_heuristic_resolve``).
+        Its output list is a pure function of the rotation-aligned time window
+        and the hypothesis parameters, so consecutive advertisements from the
+        same nearby phone within one window recompute identical lists. This
+        wrapper turns that repeat into a dict lookup.
+
+        The cache key carries every parameter that influences the output --
+        ``key_bytes``, the rotation-aligned window start, ``rotation_period``,
+        ``basis``, ``variant`` and ``anchor`` -- so a stale value can never be
+        served: a window-boundary rounding difference can at worst miss the
+        cache and recompute (still byte-exact), never collide across distinct
+        inputs. The window start mirrors ``_align_to_rotation_flexible``'s
+        ``(t // period) * period`` over the same time value the crypto aligns
+        (``now_unix`` for ABSOLUTE, ``now_unix - anchor`` for RELATIVE).
+        Invalidation is implicit: a new window or re-keying yields a fresh key
+        and stale entries age out via the LRU. ``drift_offsets`` is the
+        constant default at both call sites, so it is not part of the key.
+        """
+
+        if basis == HeuristicBasis.RELATIVE and anchor is not None and anchor > 0:
+            aligned_source = max(now_unix - anchor, 0)
+        else:
+            aligned_source = now_unix
+        window_start = (
+            (aligned_source // rotation_period) * rotation_period
+            if rotation_period > 0
+            else aligned_source
+        )
+
+        cache_key = (
+            key_bytes,
+            window_start,
+            rotation_period,
+            basis,
+            variant,
+            anchor,
+        )
+        cached = self._heuristic_memo.get(cache_key)
+        if cached is not None:
+            return cast(list[HeuristicEidResult], cached)
+
+        results = generate_heuristic_eid(
+            key_bytes,
+            now_unix,
+            rotation_period=rotation_period,
+            basis=basis,
+            variant=variant,
+            anchor=anchor,
+        )
+        self._heuristic_memo.put(cache_key, results)
+        return results
+
     async def _collect_device_secrets(self) -> list[DeviceIdentity]:
         """Retrieve active tracker identities from all loaded coordinators."""
         bucket = self.hass.data.get(DOMAIN)
@@ -2333,7 +2428,7 @@ class GoogleFindMyEIDResolver:
         anchor = self._get_best_anchor(identity)
 
         try:
-            results = generate_heuristic_eid(
+            results = self._generate_heuristic_eid(
                 key_bytes,
                 now_unix,
                 rotation_period=learned.rotation_period,
@@ -2402,7 +2497,7 @@ class GoogleFindMyEIDResolver:
 
             for variant in HEURISTIC_VARIANTS_TO_TEST:
                 try:
-                    results = generate_heuristic_eid(
+                    results = self._generate_heuristic_eid(
                         key_bytes,
                         now_unix,
                         rotation_period=rotation_period,
