@@ -17,6 +17,12 @@ from custom_components.googlefindmy.eid_resolver import (
 )
 
 
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C)."""
+
+    return func(*args)
+
+
 @pytest.mark.asyncio
 async def test_tracking_mode_predicts_next_rotation(
     monkeypatch: pytest.MonkeyPatch,
@@ -27,6 +33,7 @@ async def test_tracking_mode_predicts_next_rotation(
     resolver.hass = SimpleNamespace(
         async_create_task=lambda coro, name=None: asyncio.create_task(coro),
         async_create_background_task=lambda coro, name=None: asyncio.create_task(coro),
+        async_add_executor_job=_run_in_executor,
     )
     resolver._locks = {}
     resolver._ensure_cache_defaults()

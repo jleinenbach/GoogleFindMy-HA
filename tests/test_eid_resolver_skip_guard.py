@@ -104,12 +104,24 @@ def _close_coro(coro: object, name: object = None) -> None:
         coro.close()
 
 
+async def _run_in_executor(func: object, *args: object) -> object:
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C).
+
+    Runs the offloaded build inline so the skip/rebuild assertions keep
+    exercising the same build surface; the dedicated executor-offload suite
+    pins the genuine worker-thread behavior.
+    """
+
+    return func(*args)  # type: ignore[operator]
+
+
 def _fake_hass() -> SimpleNamespace:
     """Return a lightweight hass stand-in that closes scheduled coroutines."""
 
     return SimpleNamespace(
         async_create_task=_close_coro,
         async_create_background_task=_close_coro,
+        async_add_executor_job=_run_in_executor,
         data={},
     )
 

@@ -19,6 +19,12 @@ from custom_components.googlefindmy.FMDNCrypto.eid_generator import (
 )
 
 
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C)."""
+
+    return func(*args)
+
+
 @pytest.mark.asyncio
 async def test_pair_date_offset_beats_drifted_unix(
     monkeypatch: pytest.MonkeyPatch,
@@ -28,6 +34,7 @@ async def test_pair_date_offset_beats_drifted_unix(
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
         async_create_task=asyncio.create_task,
+        async_add_executor_job=_run_in_executor,
         data={},
     )
 

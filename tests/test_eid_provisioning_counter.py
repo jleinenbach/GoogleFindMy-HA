@@ -7,6 +7,17 @@ from types import SimpleNamespace
 
 import pytest
 
+
+async def _run_in_executor(func, *args):
+    """Synchronous stand-in for ``hass.async_add_executor_job`` (AP-C).
+
+    Runs the offloaded EID build inline so these correctness assertions keep
+    exercising the build surface; the executor-offload suite pins the genuine
+    worker-thread behavior.
+    """
+
+    return func(*args)
+
 from custom_components.googlefindmy.coordinator import DeviceIdentity
 from custom_components.googlefindmy.eid_resolver import (
     FMDN_FRAME_TYPE,
@@ -25,7 +36,9 @@ async def test_resolver_matches_unix_timebase(monkeypatch: pytest.MonkeyPatch) -
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        data={}, async_create_task=asyncio.create_task
+        data={},
+        async_create_task=asyncio.create_task,
+        async_add_executor_job=_run_in_executor,
     )
     resolver._lookup = {}
     resolver._lookup_metadata = {}

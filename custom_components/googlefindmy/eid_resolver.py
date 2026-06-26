@@ -189,11 +189,6 @@ KNOWN_OFFSET_KEY_LENGTH = 2
 # of clock drift at 1024s rotation.
 LOCK_TRACKING_WINDOW_STEPS = 2
 
-# Maximum wall-clock time (seconds) the EID refresh loop may run before
-# yielding control back to the event loop via ``await asyncio.sleep(0)``.
-# Keeps the main thread responsive under HA's 10 ms watchdog budget.
-_YIELD_BUDGET_SECONDS: float = 0.008
-
 # =============================================================================
 # Heuristic Phone Discovery Configuration
 # =============================================================================
@@ -1753,15 +1748,79 @@ class GoogleFindMyEIDResolver:
             )
             return
 
+        # Offload the pure synchronous build to a worker thread (AP-C). The
+        # build block touches ``self`` only through the two thread-safe AP-A
+        # memo caches (``_eid_memo``/``_flags_mask_memo``), whose locks guard
+        # the dict access only, and reads the immutable learned ``_known_offsets``
+        # snapshot via ``_compute_time_windows``. Every genuine ``self.*``
+        # mutation stays on the loop: the invalid-hint ``_known_timebases.pop``
+        # below (driven by the registry ids returned from the build) and the
+        # ``_lookup``/``_lookup_metadata`` assignment after the executor returns.
+        # The cooperative ``asyncio.sleep(0)`` yield is gone because no event
+        # loop exists inside the worker thread; running the whole build off-loop
+        # keeps the loop reactive without per-item yields.
+        lookup, lookup_metadata, invalid_hint_ids = (
+            await self.hass.async_add_executor_job(
+                self._build_lookup_sync,
+                work_items,
+                now_unix,
+                rotation_params,
+            )
+        )
+
+        # Loop-side ``self.*`` mutations (single-threaded, no executor in flight).
+        for registry_id in invalid_hint_ids:
+            self._known_timebases.pop(registry_id, None)
+        self._lookup, self._lookup_metadata = lookup, lookup_metadata
+        # Record the signature only after a successful build so a failure leaves
+        # the guard cleared and the next trigger rebuilds (AP-B1).
+        self._last_build_signature = build_signature
+        _LOGGER.debug(
+            "Refresh stage: finalize complete (lookup=%d, metadata=%d)",
+            len(self._lookup),
+            len(self._lookup_metadata),
+        )
+        _LOGGER.debug(
+            "Refreshed EID cache for %d devices (%d cached EIDs)",
+            len(work_items),
+            len(self._lookup),
+        )
+
+    def _build_lookup_sync(
+        self,
+        work_items: list[WorkItem],
+        now_unix: int,
+        rotation_params: RotationParams,
+    ) -> tuple[
+        dict[bytes, list[EIDMatch]],
+        dict[bytes, dict[str, Any]],
+        list[str],
+    ]:
+        """Build the EID lookup table off the event loop (AP-C).
+
+        Pure synchronous build over the loop-side inputs ``work_items`` /
+        ``now_unix`` / ``rotation_params``. Designed to run inside a worker
+        thread via ``hass.async_add_executor_job``: it performs no ``await``,
+        touches no event loop, and mutates no resolver state except the two
+        thread-safe AP-A memo caches (``_eid_memo`` / ``_flags_mask_memo``),
+        which serialize only on the bounded dict access. ``_compute_time_windows``
+        and its callees read the learned ``_known_offsets`` snapshot but never
+        write it, and the ``CacheBuilder`` is thread-local to this call.
+
+        Returns the finalized ``(lookup, metadata)`` tables plus the list of
+        registry ids whose basis hint was invalid; the caller pops their
+        ``_known_timebases`` entries on the loop, where it is safe to mutate.
+        """
+
         builder = CacheBuilder()
-        _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
+        invalid_hint_ids: list[str] = []
 
         for work_item in work_items:
             windows, invalid_hint = self._compute_time_windows(
                 work_item, now_unix=now_unix, params=rotation_params
             )
             if invalid_hint:
-                self._known_timebases.pop(work_item.registry_id, None)
+                invalid_hint_ids.append(work_item.registry_id)
             _LOGGER.debug(
                 "Refresh stage: %s produced %d window groups",
                 work_item.registry_id,
@@ -1800,26 +1859,8 @@ class GoogleFindMyEIDResolver:
                             flags_xor_mask=xor_mask,
                         )
 
-            # Cooperative yield: give the event loop a chance to process
-            # pending callbacks when the CPU budget for this tick is spent.
-            if time.monotonic() >= _yield_deadline:
-                await asyncio.sleep(0)
-                _yield_deadline = time.monotonic() + _YIELD_BUDGET_SECONDS
-
-        self._lookup, self._lookup_metadata = builder.finalize()
-        # Record the signature only after a successful build so a failure leaves
-        # the guard cleared and the next trigger rebuilds (AP-B1).
-        self._last_build_signature = build_signature
-        _LOGGER.debug(
-            "Refresh stage: finalize complete (lookup=%d, metadata=%d)",
-            len(self._lookup),
-            len(self._lookup_metadata),
-        )
-        _LOGGER.debug(
-            "Refreshed EID cache for %d devices (%d cached EIDs)",
-            len(work_items),
-            len(self._lookup),
-        )
+        lookup, lookup_metadata = builder.finalize()
+        return lookup, lookup_metadata, invalid_hint_ids
 
     def _normalize_variant_value(self, raw: object, *, eid_len: int) -> str:
         """Return a valid `EidVariant` value string for persistence."""
