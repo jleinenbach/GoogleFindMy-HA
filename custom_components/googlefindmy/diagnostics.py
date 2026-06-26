@@ -692,15 +692,10 @@ async def async_get_config_entry_diagnostics(
     concurrency = _concurrency_block(hass)
     fcm_state = _fcm_receiver_state(hass)
 
-    # ECDSA big-int backend + installed accelerator versions (global).
-    # Materialize in an executor: the SSOT performs filesystem I/O on first call
-    # (find_spec + dist-info read). After async_setup's warmup this is a cache
-    # hit without real I/O, but the executor hop stays correct and negligible.
-    from .FMDNCrypto._lazy_crypto import (  # noqa: PLC0415
-        get_ecdsa_acceleration_info,
-    )
-
-    crypto_info = await hass.async_add_executor_job(get_ecdsa_acceleration_info)
+    # ECDSA big-int backend + installed accelerator versions (global), cached by
+    # async_setup in hass.data. Read synchronously here (no I/O), consistent with
+    # every other diagnostics block; present once async_setup has materialized it.
+    crypto_info = (hass.data.get(DOMAIN, {}) or {}).get("ecdsa_acceleration_info")
 
     # EIK cache statistics (performance optimization metrics)
     # Import lazily to avoid circular import (diagnostics <- decrypt_locations <- __init__ <- diagnostics)
@@ -726,9 +721,10 @@ async def async_get_config_entry_diagnostics(
             "entity": entity_registry_counts,
         },
         "concurrency": concurrency,
-        "crypto": _crypto_block(crypto_info),
         "eik_cache": eik_cache_stats,
     }
+    if crypto_info:
+        payload["crypto"] = _crypto_block(crypto_info)
     if coordinator_block:
         payload["coordinator"] = coordinator_block
     if fcm_state:

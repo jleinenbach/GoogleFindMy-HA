@@ -2372,6 +2372,7 @@ class GoogleFindMyDomainData(TypedDict, total=False):
     """Typed container describing objects stored under ``hass.data[DOMAIN]``."""
 
     device_owner_index: dict[str, str]
+    ecdsa_acceleration_info: dict[str, str | None]
     entries: dict[str, RuntimeData]
     eid_resolver: GoogleFindMyEIDResolver
     fcm_lock: asyncio.Lock
@@ -6302,15 +6303,19 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     # re-arms it after a last-entry reload tears it down (see helper docstring).
     await _async_ensure_restart_required_check(hass, bucket)
 
-    # Make the ECDSA big-int backend (and installed accelerator versions)
-    # visible once per process. The first materialization performs filesystem
-    # I/O (find_spec + dist-info read), so it runs in an executor; the pure
-    # logger then formats the result without blocking the event loop.
+    # Determine the ECDSA big-int backend (and installed accelerator versions)
+    # once per process, then cache it in hass.data so the diagnostics dump can
+    # read it synchronously, exactly like every other diagnostics block (none of
+    # them performs its own I/O). The first materialization performs filesystem
+    # I/O (find_spec + dist-info read), so it runs in an executor here, in setup,
+    # never in the event-loop-bound diagnostics path. The pure logger then
+    # formats the result without blocking the event loop.
     from .FMDNCrypto._lazy_crypto import (  # noqa: PLC0415
         get_ecdsa_acceleration_info,
     )
 
     ecdsa_info = await hass.async_add_executor_job(get_ecdsa_acceleration_info)
+    bucket["ecdsa_acceleration_info"] = ecdsa_info
     _log_ecdsa_acceleration(ecdsa_info)
 
     return True
