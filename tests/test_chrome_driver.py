@@ -376,21 +376,36 @@ def test_get_uc_module_caches_loaded_module(
 # ---------------------------------------------------------------------------
 
 
-def test_neutralize_replaces_own_del_with_noop() -> None:
-    """A real Chrome class with its own ``__del__`` gets a no-op finalizer."""
-    quit_calls: list[str] = []
+def test_neutralize_preserves_original_cleanup() -> None:
+    """The wrapped __del__ still runs uc's cleanup (no leak on failed builds)."""
+    cleanup_calls: list[str] = []
 
     class _FakeChrome:
         def __del__(self) -> None:
-            quit_calls.append("re-quit")
+            cleanup_calls.append("cleanup")
 
     chrome_driver._neutralize_uc_finalizer(SimpleNamespace(Chrome=_FakeChrome))
 
     assert _FakeChrome._gfmy_del_neutralized is True
-    # The replaced __del__ is a no-op: invoking it explicitly does nothing.
+    # The wrapper delegates to the original __del__ instead of dropping it:
+    # this preserves browser/temp-profile cleanup for a partially built driver.
     inst = _FakeChrome.__new__(_FakeChrome)
     assert _FakeChrome.__del__(inst) is None
-    assert quit_calls == []
+    assert cleanup_calls == ["cleanup"]
+
+
+def test_neutralize_suppresses_del_errors() -> None:
+    """A WinError-6-style raise from uc's __del__ is swallowed, not propagated."""
+
+    class _FakeChrome:
+        def __del__(self) -> None:
+            raise OSError(6, "The handle is invalid")
+
+    chrome_driver._neutralize_uc_finalizer(SimpleNamespace(Chrome=_FakeChrome))
+
+    # Invoking the wrapped __del__ must not raise despite the original raising.
+    inst = _FakeChrome.__new__(_FakeChrome)
+    assert _FakeChrome.__del__(inst) is None
 
 
 def test_neutralize_skips_import_stub() -> None:
@@ -436,7 +451,7 @@ def test_get_uc_module_neutralizes_finalizer(monkeypatch: pytest.MonkeyPatch) ->
     """``_get_uc_module`` neutralizes the finalizer on the freshly loaded module."""
 
     class _FakeChrome:
-        def __del__(self) -> None:  # pragma: no cover - replaced by the no-op
+        def __del__(self) -> None:  # pragma: no cover - not invoked in this test
             return None
 
     fake_module = SimpleNamespace(Chrome=_FakeChrome, ChromeOptions=FakeChromeOptions)

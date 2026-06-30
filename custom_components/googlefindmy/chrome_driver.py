@@ -88,43 +88,55 @@ _UC_CACHE = SimpleNamespace(module=None)
 
 
 def _neutralize_uc_finalizer(module: Any) -> None:
-    """Silence undetected_chromedriver's ``Chrome.__del__`` re-quit.
+    """Silence undetected_chromedriver's ``Chrome.__del__`` re-quit noise.
 
-    uc's ``Chrome.__del__`` calls ``self.quit()`` during garbage collection,
-    which raises ``OSError [WinError 6] (The handle is invalid)`` on Windows
-    after our own ``safe_quit_driver`` has already torn the driver down — pure
-    teardown noise that alarms users reading the log.  Replacing ``__del__``
-    with a no-op removes that redundant re-quit.
+    uc's ``Chrome.__del__`` calls ``self.quit()`` during garbage collection.
+    After our own ``safe_quit_driver`` has already torn the driver down, that GC
+    re-quit raises ``OSError [WinError 6] (The handle is invalid)`` on Windows —
+    pure teardown noise that alarms users reading the log.
 
-    This does NOT leak the chromedriver process: uc also registers
-    ``weakref.finalize(self, self._ensure_close, self)`` in ``__init__``, and
-    ``_ensure_close`` kills the service process independently of ``__del__``.
-    This integration owns the driver lifecycle exclusively via
-    ``create_driver``/``safe_quit_driver``, so suppressing the automatic
-    finalizer is safe and intentional.
+    We do NOT replace ``__del__`` with a no-op: that would also disable uc's
+    cleanup of a *partially constructed* driver.  When ``uc.Chrome(...)`` raises
+    after the browser already launched (e.g. a Chrome/driver version mismatch),
+    the strategy helpers in this module never receive a ``driver`` object, so
+    their ``_quit_driver(driver)`` is a no-op and uc's own ``__del__`` is the
+    only thing that would kill the orphaned browser process and remove its temp
+    profile.  uc's ``weakref.finalize(self._ensure_close)`` reaper only kills the
+    chromedriver *service* process, not the browser or the temp dir, so a no-op
+    would leak both until interpreter exit.
+
+    Instead we wrap the original ``__del__`` so its cleanup still runs but any
+    exception it raises is swallowed.  This kills the redundant-quit noise
+    without weakening cleanup on failed constructions.
 
     Idempotent and guarded: only a real ``Chrome`` class that still defines its
-    own ``__del__`` is patched (the import-failure stub and an already-patched
+    own ``__del__`` is wrapped (the import-failure stub and an already-wrapped
     module are skipped; a uc release without its own ``__del__`` is left
     untouched rather than having one fabricated).
     """
     chrome = getattr(module, "Chrome", None)
     if not isinstance(chrome, type):
-        return  # import stub (SimpleNamespace with a function), nothing to patch
+        return  # import stub (SimpleNamespace with a function), nothing to wrap
     if getattr(chrome, "_gfmy_del_neutralized", False):
-        return  # already patched in this process
+        return  # already wrapped in this process
     if "__del__" not in chrome.__dict__:
-        return  # no own __del__ to suppress; do not fabricate one
+        return  # no own __del__ to wrap; do not fabricate one
 
-    def _no_op_del(self: Any) -> None:
-        return None
+    original_del = chrome.__dict__["__del__"]
+
+    def _quiet_del(self: Any) -> None:
+        # Preserve uc's cleanup (service + browser process + temp profile) for
+        # failed constructions; only swallow the redundant-quit error it raises
+        # after our safe_quit_driver has already torn the driver down.
+        with contextlib.suppress(Exception):
+            original_del(self)
 
     # ``chrome`` is narrowed to ``type`` by the isinstance guard above, which
     # mypy treats as having no assignable ``__del__``/marker attributes. Assign
     # through an ``Any`` alias so the dynamic class patch stays type-clean
     # without resorting to ``setattr`` (which ruff B010 would flag).
     chrome_cls: Any = chrome
-    chrome_cls.__del__ = _no_op_del
+    chrome_cls.__del__ = _quiet_del
     chrome_cls._gfmy_del_neutralized = True
 
 
