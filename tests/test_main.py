@@ -688,10 +688,13 @@ class TestVaultKeysCompleteness:
         assert cache.data["owner_key"] == "owner-hex"
 
     @pytest.mark.asyncio
-    async def test_owner_key_failure_keeps_tokens(
+    async def test_owner_key_failure_is_non_fatal(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An owner-key fetch failure exits cleanly and deletes no tokens."""
+        """An owner-key fetch failure is non-fatal: the run continues without a
+        ``SystemExit``, the shared key obtained beforehand survives, and the
+        durable tokens are left untouched (the owner key is re-derived lazily
+        at runtime, so secrets.json stays usable)."""
         from custom_components.googlefindmy import main as cli_main
 
         cache = _AsyncDictCache(
@@ -707,14 +710,42 @@ class TestVaultKeysCompleteness:
         monkeypatch.setattr(cli_main, "_ensure_shared_key", _set_shared)
         monkeypatch.setattr(cli_main, "_ensure_owner_key", _owner_boom)
 
-        with pytest.raises(SystemExit) as excinfo:
-            await cli_main._ensure_vault_keys(cache)
+        # No SystemExit: the owner-key boundary warns and continues.
+        await cli_main._ensure_vault_keys(cache)
 
-        assert excinfo.value.code == 1
         assert cache.data["oauth_token"] == "oauth"
         assert cache.data["aas_token"] == "aas"
-        # The shared key obtained before the failure also survives.
+        # The shared key obtained before the owner-key failure survives.
         assert cache.data["shared_key"] == "shared-hex"
+
+    @pytest.mark.asyncio
+    async def test_owner_key_failure_warns_with_exception_type(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The non-fatal owner-key note names the concrete exception type and
+        states that secrets.json is still usable (so the user is not misled into
+        a pointless re-login)."""
+        from custom_components.googlefindmy import main as cli_main
+
+        cache = _AsyncDictCache({"username": "u@example.com"})
+
+        async def _set_shared(_cache):  # type: ignore[no-untyped-def]
+            await _cache.set("shared_key", "shared-hex")
+
+        async def _owner_boom(_cache):  # type: ignore[no-untyped-def]
+            raise RuntimeError("SPOT failure")
+
+        monkeypatch.setattr(cli_main, "_ensure_shared_key", _set_shared)
+        monkeypatch.setattr(cli_main, "_ensure_owner_key", _owner_boom)
+
+        await cli_main._ensure_vault_keys(cache)
+
+        err = capsys.readouterr().err
+        assert "RuntimeError" in err
+        assert "non-fatal" in err
+        assert "secrets.json" in err
+        # The fatal shared-key wording must NOT appear on the owner-key path.
+        assert "vault key retrieval failed" not in err
 
 
 class TestPasteRoundTrip:

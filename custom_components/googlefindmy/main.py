@@ -588,33 +588,56 @@ async def _ensure_owner_key(cache: object) -> None:
 
 
 async def _ensure_vault_keys(cache: object) -> None:
-    """Eagerly obtain both vault keys, exiting cleanly on any vault failure.
+    """Eagerly obtain the vault keys with a per-key criticality boundary.
 
-    Wraps the eager shared-key and owner-key retrieval at the CLI terminal
-    point. The vault/login step can fail in several ways (``RuntimeError`` from
-    ``shared_key_retrieval``, ``ValueError`` from hex/base64 decoding, or
-    ``ConfigEntryAuthFailed`` from the SPOT auth path); rather than surfacing a
-    raw traceback, this prints an actionable message and exits with status 1.
-    ``except Exception`` deliberately does *not* catch ``KeyboardInterrupt``
-    (a ``BaseException``), so a user-initiated abort still propagates.
+    The two eager retrievals have opposite criticality contracts, so each gets
+    its own error boundary instead of a single shared ``try`` that flattens both
+    to "all or nothing":
+
+    * **Shared key** (``_ensure_shared_key``) is *essential* and browser/login
+      bound. Failure here is fatal: there is no usable bundle without it, so we
+      print an actionable sign-in hint and exit with status 1.
+    * **Owner key** (``_ensure_owner_key``) is *optional* and non-interactive (a
+      SPOT API call plus a decrypt, no browser). The runtime re-derives it
+      lazily on first use (``decrypt_locations``/``eid_resolver`` call
+      ``async_get_owner_key`` with a ``force_refresh`` fallback), so a failure
+      here still leaves a usable ``secrets.json``. We warn and continue rather
+      than aborting the whole run.
+
+    Both blocks catch only ``Exception``; ``KeyboardInterrupt`` (a
+    ``BaseException``) still propagates so a user-initiated abort is honoured.
 
     No tokens are deleted on failure: the AAS/oauth tokens are durable by design
     (``_FileCache._SOFT_INVALIDATE_KEYS``); removing them would force an
     expensive full OAuth login on the next run.
     """
+    # Shared key: essential and browser-bound. Failure is fatal.
     try:
         await _ensure_shared_key(cache)
-        await _ensure_owner_key(cache)
     except Exception:  # noqa: BLE001
         print(
             "\nError: vault key retrieval failed.\n"
-            "Could not obtain the encryption keys from Google's vault.\n"
+            "Could not obtain the encryption key from Google's vault.\n"
             "\n"
             "Please re-run the tool and complete the Google sign-in when the "
             "browser opens.\n",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Owner key: optional and non-interactive. The runtime re-derives it lazily,
+    # so a failure here is non-fatal -- warn and keep the usable secrets.json.
+    try:
+        await _ensure_owner_key(cache)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"\nNote: the owner key could not be pre-fetched "
+            f"({type(exc).__name__}).\n"
+            "This is non-fatal: the shared key alone is sufficient for the Home "
+            "Assistant integration, and the owner key is fetched automatically "
+            "on first use. The generated secrets.json is ready to use.\n",
+            file=sys.stderr,
+        )
 
 
 async def _clear_stale_adm_token(cache: object) -> None:

@@ -7,7 +7,7 @@ name = "googlefindmy-ha"
 # [tool.semantic_release] version_toml below); on release branches it MUST be
 # bumped by hand alongside the other two. Canonical anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
-version = "1.7.7"
+version = "1.7.8"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
