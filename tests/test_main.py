@@ -328,6 +328,117 @@ class TestShouldServeOnly:
         assert _should_serve_only([], reauth=True) is False
 
 
+class _TrackingSession:
+    """Fake ``aiohttp.ClientSession`` context manager that records closure.
+
+    ``__aexit__`` runs for ``BaseException`` (``SystemExit``) too, so a ``closed``
+    flag set to ``True`` after a vault ``sys.exit`` proves the session was not
+    leaked.  A list passed at construction time collects every instance so the
+    test can inspect the one the function created.
+    """
+
+    def __init__(
+        self, sink: list[_TrackingSession], *args: object, **kwargs: object
+    ) -> None:
+        self.closed = False
+        sink.append(self)
+
+    async def __aenter__(self) -> _TrackingSession:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        self.closed = True
+        return False  # do not suppress the propagating exception
+
+
+class TestRunCliBootstrapSessionLifecycle:
+    """`_run_cli_bootstrap` closes its aiohttp session on every exit path.
+
+    The session is opened with ``async with`` so ``__aexit__`` reaps it even when
+    ``_ensure_vault_keys`` raises ``SystemExit`` on a fatal shared-key failure.
+    A leaked session was the source of the 'Unclosed client session' / WinError-6
+    teardown noise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_session_closed_on_vault_sys_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``sys.exit`` from the eager vault step still closes the session."""
+        import aiohttp
+
+        from custom_components.googlefindmy import main as cli_main
+
+        created: list[_TrackingSession] = []
+        monkeypatch.setattr(
+            aiohttp,
+            "ClientSession",
+            lambda *a, **k: _TrackingSession(created, *a, **k),
+        )
+        monkeypatch.setattr(aiohttp, "TCPConnector", lambda **k: object())
+
+        async def _ok(_cache: object) -> None:
+            return None
+
+        async def _vault_exit(_cache: object) -> None:
+            raise SystemExit(1)
+
+        monkeypatch.setattr(cli_main, "_ensure_aas_token", _ok)
+        monkeypatch.setattr(cli_main, "_ensure_vault_keys", _vault_exit)
+
+        with pytest.raises(SystemExit):
+            await cli_main._run_cli_bootstrap(object(), None)
+
+        assert created, "the function should have opened exactly one session"
+        assert created[0].closed is True
+
+    @pytest.mark.asyncio
+    async def test_session_and_fcm_closed_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On the happy path the session closes and the FCM receiver is stopped."""
+        import aiohttp
+
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.NovaApi.ListDevices import (
+            nbe_list_devices as nbe,
+        )
+
+        created: list[_TrackingSession] = []
+        monkeypatch.setattr(
+            aiohttp,
+            "ClientSession",
+            lambda *a, **k: _TrackingSession(created, *a, **k),
+        )
+        monkeypatch.setattr(aiohttp, "TCPConnector", lambda **k: object())
+
+        stopped: list[bool] = []
+
+        class _Fcm:
+            async def async_stop(self) -> None:
+                stopped.append(True)
+
+        async def _ok(_cache: object) -> None:
+            return None
+
+        async def _fcm(_cache: object) -> _Fcm:
+            return _Fcm()
+
+        async def _cli(*, entry_id: str | None, session: object) -> None:
+            return None
+
+        monkeypatch.setattr(cli_main, "_ensure_aas_token", _ok)
+        monkeypatch.setattr(cli_main, "_ensure_vault_keys", _ok)
+        monkeypatch.setattr(cli_main, "_clear_stale_adm_token", _ok)
+        monkeypatch.setattr(cli_main, "_setup_fcm_receiver", _fcm)
+        monkeypatch.setattr(nbe, "_async_cli_main", _cli)
+
+        await cli_main._run_cli_bootstrap(object(), "entry_x")
+
+        assert created and created[0].closed is True
+        assert stopped == [True]
+
+
 # ---------------------------------------------------------------------------
 # AP-B1: atomic JSON write + clean vault-failure exit
 # ---------------------------------------------------------------------------

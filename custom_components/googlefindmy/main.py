@@ -817,6 +817,50 @@ def _should_serve_only(registered_entry_ids: list[str], reauth: bool) -> bool:
     return bool(registered_entry_ids) and not reauth
 
 
+async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
+    """Run the standalone token bootstrap, then hand off to the interactive CLI.
+
+    A single aiohttp session is shared across the whole flow and managed by
+    ``async with`` so it is closed deterministically on *every* exit path,
+    including the ``sys.exit(1)`` that ``_ensure_vault_keys`` raises on a fatal
+    shared-key failure: ``__aexit__`` runs for ``BaseException`` (``SystemExit``,
+    ``KeyboardInterrupt``) too.  Previously the session was created before the
+    ``try`` and closed only in a ``finally``, so any ``sys.exit`` from the eager
+    key-retrieval steps leaked it, producing 'Unclosed client session' warnings
+    and the WinError-6 teardown noise on Windows.
+
+    Extracted from the ``__main__`` block so the session lifecycle is testable
+    without spawning a subprocess (mirrors ``_resolve_effective_entry_id`` /
+    ``_should_serve_only``).
+    """
+    import contextlib  # noqa: PLC0415
+
+    import aiohttp  # noqa: PLC0415
+
+    from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: PLC0415
+        _async_cli_main,
+    )
+
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
+    ) as session:
+        # Exchange the single-use OAuth cookie for an AAS master token BEFORE
+        # opening Chrome again for the shared key flow.  The OAuth cookie has a
+        # very short TTL and is invalidated once a new Chrome session is opened,
+        # so the exchange must happen immediately.
+        await _ensure_aas_token(file_cache)
+        # Eagerly obtain both vault keys (shared + owner); a vault failure exits
+        # cleanly without deleting the durable AAS/oauth tokens.
+        await _ensure_vault_keys(file_cache)
+        await _clear_stale_adm_token(file_cache)
+        fcm = await _setup_fcm_receiver(file_cache)
+        try:
+            await _async_cli_main(entry_id=entry_id, session=session)
+        finally:
+            with contextlib.suppress(Exception):
+                await fcm.async_stop()
+
+
 if __name__ == "__main__":
     import argparse  # noqa: PLC0415
     import asyncio  # noqa: PLC0415
@@ -877,30 +921,7 @@ if __name__ == "__main__":
         )
         _file_cache = _register_file_cache(_effective_entry_id)
 
-        async def _cli_main() -> None:
-            import aiohttp  # noqa: PLC0415
-
-            session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
-            )
-            # Exchange the single-use OAuth cookie for an AAS master token
-            # BEFORE opening Chrome again for the shared key flow.  The OAuth
-            # cookie has a very short TTL and is invalidated once a new Chrome
-            # session is opened, so the exchange must happen immediately.
-            await _ensure_aas_token(_file_cache)
-            # Eagerly obtain both vault keys (shared + owner); a vault failure
-            # exits cleanly without deleting the durable AAS/oauth tokens.
-            await _ensure_vault_keys(_file_cache)
-            await _clear_stale_adm_token(_file_cache)
-            fcm = await _setup_fcm_receiver(_file_cache)
-            try:
-                await _async_cli_main(entry_id=_cli_args.entry, session=session)
-            finally:
-                with __import__("contextlib").suppress(Exception):
-                    await fcm.async_stop()
-                await session.close()
-
         try:
-            asyncio.run(_cli_main())
+            asyncio.run(_run_cli_bootstrap(_file_cache, _cli_args.entry))
         except KeyboardInterrupt:
             print("\nExiting.")
