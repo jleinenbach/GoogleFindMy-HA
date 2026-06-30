@@ -10,16 +10,18 @@ Usage:
 
 Flags:
     --reauth   Force re-authentication by clearing cached tokens and running the
-               Chrome login flow.  Only active in standalone mode (flat directory
-               layout); in repo/HA layout the flag is currently a no-op and emits
-               a stderr warning.
+               Chrome login flow.  Honored in any directory layout; it always
+               forces a fresh token bootstrap.
     --entry    Target config entry ID.  Required when secrets.json contains caches
                for multiple HA config entries.  May also be set via the
                ``GOOGLEFINDMY_ENTRY_ID`` environment variable.
 
-The module selects between two code paths via ``_standalone``:
-    * standalone (flat directory):  runs the full token-bootstrap pipeline.
-    * non-standalone (HA repo layout): delegates to ``nbe_list_devices._async_cli_main``.
+Run as a script, the module always runs the full token-bootstrap pipeline and
+writes ``secrets.json``, regardless of flat vs. repo directory layout.  When a
+usable cache already exists, ``_ensure_authenticated`` returns early so no Chrome
+login is launched; ``--reauth`` forces a fresh login.  ``_standalone`` only
+governs packaging (virtual package vs. real package), which is the one thing the
+directory name legitimately determines.
 """
 
 import os
@@ -794,13 +796,52 @@ def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) ->
     return ""
 
 
+async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
+    """Run the standalone token bootstrap, then hand off to the interactive CLI.
+
+    A single aiohttp session is shared across the whole flow and managed by
+    ``async with`` so it is closed deterministically on *every* exit path,
+    including the ``sys.exit(1)`` that ``_ensure_vault_keys`` raises on a fatal
+    shared-key failure: ``__aexit__`` runs for ``BaseException`` (``SystemExit``,
+    ``KeyboardInterrupt``) too.  Previously the session was created before the
+    ``try`` and closed only in a ``finally``, so any ``sys.exit`` from the eager
+    key-retrieval steps leaked it, producing 'Unclosed client session' warnings
+    and the WinError-6 teardown noise on Windows.
+
+    Extracted from the ``__main__`` block so the session lifecycle is testable
+    without spawning a subprocess (mirrors ``_resolve_effective_entry_id``).
+    """
+    import contextlib  # noqa: PLC0415
+
+    import aiohttp  # noqa: PLC0415
+
+    from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: PLC0415
+        _async_cli_main,
+    )
+
+    async with aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
+    ) as session:
+        # Exchange the single-use OAuth cookie for an AAS master token BEFORE
+        # opening Chrome again for the shared key flow.  The OAuth cookie has a
+        # very short TTL and is invalidated once a new Chrome session is opened,
+        # so the exchange must happen immediately.
+        await _ensure_aas_token(file_cache)
+        # Eagerly obtain both vault keys (shared + owner); a vault failure exits
+        # cleanly without deleting the durable AAS/oauth tokens.
+        await _ensure_vault_keys(file_cache)
+        await _clear_stale_adm_token(file_cache)
+        fcm = await _setup_fcm_receiver(file_cache)
+        try:
+            await _async_cli_main(entry_id=entry_id, session=session)
+        finally:
+            with contextlib.suppress(Exception):
+                await fcm.async_stop()
+
+
 if __name__ == "__main__":
     import argparse  # noqa: PLC0415
     import asyncio  # noqa: PLC0415
-
-    from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: E402, PLC0415
-        _async_cli_main,
-    )
 
     _cli_parser = argparse.ArgumentParser(description="Google Find My Device CLI")
     _cli_parser.add_argument(
@@ -818,59 +859,29 @@ if __name__ == "__main__":
     )
     _cli_args = _cli_parser.parse_args()
 
-    if _standalone:
-        if _cli_args.reauth:
-            _clear_stale_tokens_for_reauth()
-        _ensure_authenticated()
-        # Resolve the effective entry id (CLI > env > ""). Without this,
-        # _async_cli_main forwards a non-empty hint that _resolve_cli_cache
-        # would reject as "Unknown entry_id" because the cache was only
-        # registered under "".  Codex review on 694f6883aa.
-        _effective_entry_id = _resolve_effective_entry_id(
-            _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
-        )
-        _file_cache = _register_file_cache(_effective_entry_id)
+    # Always run the token-bootstrap pipeline, regardless of flat vs. repo
+    # directory layout.  When a usable cache already exists, _ensure_authenticated
+    # returns early so no Chrome login is launched; --reauth forces a fresh login.
+    # This replaces the earlier branch gates (first the _standalone directory name,
+    # then a cache-signal check that was always empty for a fresh shell start),
+    # both of which could dead-end a repo-layout start in an opaque
+    # MissingTokenCacheError instead of bootstrapping.
+    if _cli_args.reauth:
+        _clear_stale_tokens_for_reauth()
+    _ensure_authenticated()
+    # Resolve the effective entry id once (CLI > env > "") and use the SAME
+    # value for both registration and hand-off, so the registry key and the
+    # lookup hint can never diverge.  Forwarding the raw _cli_args.entry instead
+    # would re-trigger _async_cli_main's env fallback for an explicit
+    # --entry "" (empty string is falsy), making _resolve_cli_cache reject the
+    # env value as "Unknown entry_id" although the cache was registered under
+    # "".  Codex reviews on 694f6883aa and 17669c7ff2.
+    _effective_entry_id = _resolve_effective_entry_id(
+        _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+    )
+    _file_cache = _register_file_cache(_effective_entry_id)
 
-        async def _cli_main() -> None:
-            import aiohttp  # noqa: PLC0415
-
-            session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(limit=16, enable_cleanup_closed=True)
-            )
-            # Exchange the single-use OAuth cookie for an AAS master token
-            # BEFORE opening Chrome again for the shared key flow.  The OAuth
-            # cookie has a very short TTL and is invalidated once a new Chrome
-            # session is opened, so the exchange must happen immediately.
-            await _ensure_aas_token(_file_cache)
-            # Eagerly obtain both vault keys (shared + owner); a vault failure
-            # exits cleanly without deleting the durable AAS/oauth tokens.
-            await _ensure_vault_keys(_file_cache)
-            await _clear_stale_adm_token(_file_cache)
-            fcm = await _setup_fcm_receiver(_file_cache)
-            try:
-                await _async_cli_main(entry_id=_cli_args.entry, session=session)
-            finally:
-                with __import__("contextlib").suppress(Exception):
-                    await fcm.async_stop()
-                await session.close()
-
-        try:
-            asyncio.run(_cli_main())
-        except KeyboardInterrupt:
-            print("\nExiting.")
-    else:
-        # Repo/HA layout: --reauth is a standalone-only feature (see module
-        # docstring).  Warn explicitly instead of silently ignoring the flag.
-        if _cli_args.reauth:
-            print(
-                "warning: --reauth is only honored in standalone mode; ignoring.",
-                file=sys.stderr,
-            )
-        # Bypass list_devices() so we can forward --entry into _async_cli_main.
-        # list_devices() is a deliberately minimal upstream-API wrapper that
-        # takes no entry_id argument; extending its signature would change a
-        # public helper for a CLI-local concern.
-        try:
-            asyncio.run(_async_cli_main(_cli_args.entry))
-        except KeyboardInterrupt:
-            print("\nExiting.")
+    try:
+        asyncio.run(_run_cli_bootstrap(_file_cache, _effective_entry_id))
+    except KeyboardInterrupt:
+        print("\nExiting.")

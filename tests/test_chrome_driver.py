@@ -372,6 +372,98 @@ def test_get_uc_module_caches_loaded_module(
 
 
 # ---------------------------------------------------------------------------
+# _neutralize_uc_finalizer (WinError 6 teardown noise)
+# ---------------------------------------------------------------------------
+
+
+def test_neutralize_preserves_original_cleanup() -> None:
+    """The wrapped __del__ still runs uc's cleanup (no leak on failed builds)."""
+    cleanup_calls: list[str] = []
+
+    class _FakeChrome:
+        def __del__(self) -> None:
+            cleanup_calls.append("cleanup")
+
+    chrome_driver._neutralize_uc_finalizer(SimpleNamespace(Chrome=_FakeChrome))
+
+    assert _FakeChrome._gfmy_del_neutralized is True
+    # The wrapper delegates to the original __del__ instead of dropping it:
+    # this preserves browser/temp-profile cleanup for a partially built driver.
+    inst = _FakeChrome.__new__(_FakeChrome)
+    assert _FakeChrome.__del__(inst) is None
+    assert cleanup_calls == ["cleanup"]
+
+
+def test_neutralize_suppresses_del_errors() -> None:
+    """A WinError-6-style raise from uc's __del__ is swallowed, not propagated."""
+
+    class _FakeChrome:
+        def __del__(self) -> None:
+            raise OSError(6, "The handle is invalid")
+
+    chrome_driver._neutralize_uc_finalizer(SimpleNamespace(Chrome=_FakeChrome))
+
+    # Invoking the wrapped __del__ must not raise despite the original raising.
+    inst = _FakeChrome.__new__(_FakeChrome)
+    assert _FakeChrome.__del__(inst) is None
+
+
+def test_neutralize_skips_import_stub() -> None:
+    """The import-failure stub exposes ``Chrome`` as a function, not a class."""
+
+    def _stub_chrome(*, options: object) -> object:  # pragma: no cover - shape only
+        return object()
+
+    # Must not raise and must not mark a plain function.
+    chrome_driver._neutralize_uc_finalizer(SimpleNamespace(Chrome=_stub_chrome))
+
+    assert not hasattr(_stub_chrome, "_gfmy_del_neutralized")
+
+
+def test_neutralize_is_idempotent() -> None:
+    """A second call does not re-wrap an already-neutralized class."""
+
+    class _FakeChrome:
+        def __del__(self) -> None:
+            return None
+
+    module = SimpleNamespace(Chrome=_FakeChrome)
+    chrome_driver._neutralize_uc_finalizer(module)
+    patched = _FakeChrome.__del__
+    chrome_driver._neutralize_uc_finalizer(module)
+
+    assert _FakeChrome.__del__ is patched
+
+
+def test_neutralize_leaves_class_without_own_del() -> None:
+    """A uc release without its own ``__del__`` is left untouched (none fabricated)."""
+
+    class _NoDel:
+        pass
+
+    chrome_driver._neutralize_uc_finalizer(SimpleNamespace(Chrome=_NoDel))
+
+    assert "__del__" not in _NoDel.__dict__
+    assert not hasattr(_NoDel, "_gfmy_del_neutralized")
+
+
+def test_get_uc_module_neutralizes_finalizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_get_uc_module`` neutralizes the finalizer on the freshly loaded module."""
+
+    class _FakeChrome:
+        def __del__(self) -> None:  # pragma: no cover - not invoked in this test
+            return None
+
+    fake_module = SimpleNamespace(Chrome=_FakeChrome, ChromeOptions=FakeChromeOptions)
+    chrome_driver._reset_uc_cache(None)
+    monkeypatch.setattr(chrome_driver, "_load_uc", lambda: fake_module)
+
+    chrome_driver._get_uc_module()
+
+    assert _FakeChrome._gfmy_del_neutralized is True
+
+
+# ---------------------------------------------------------------------------
 # get_chrome_version
 # ---------------------------------------------------------------------------
 
