@@ -87,11 +87,54 @@ def _load_uc() -> Any:
 _UC_CACHE = SimpleNamespace(module=None)
 
 
+def _neutralize_uc_finalizer(module: Any) -> None:
+    """Silence undetected_chromedriver's ``Chrome.__del__`` re-quit.
+
+    uc's ``Chrome.__del__`` calls ``self.quit()`` during garbage collection,
+    which raises ``OSError [WinError 6] (The handle is invalid)`` on Windows
+    after our own ``safe_quit_driver`` has already torn the driver down — pure
+    teardown noise that alarms users reading the log.  Replacing ``__del__``
+    with a no-op removes that redundant re-quit.
+
+    This does NOT leak the chromedriver process: uc also registers
+    ``weakref.finalize(self, self._ensure_close, self)`` in ``__init__``, and
+    ``_ensure_close`` kills the service process independently of ``__del__``.
+    This integration owns the driver lifecycle exclusively via
+    ``create_driver``/``safe_quit_driver``, so suppressing the automatic
+    finalizer is safe and intentional.
+
+    Idempotent and guarded: only a real ``Chrome`` class that still defines its
+    own ``__del__`` is patched (the import-failure stub and an already-patched
+    module are skipped; a uc release without its own ``__del__`` is left
+    untouched rather than having one fabricated).
+    """
+    chrome = getattr(module, "Chrome", None)
+    if not isinstance(chrome, type):
+        return  # import stub (SimpleNamespace with a function), nothing to patch
+    if getattr(chrome, "_gfmy_del_neutralized", False):
+        return  # already patched in this process
+    if "__del__" not in chrome.__dict__:
+        return  # no own __del__ to suppress; do not fabricate one
+
+    def _no_op_del(self: Any) -> None:
+        return None
+
+    # ``chrome`` is narrowed to ``type`` by the isinstance guard above, which
+    # mypy treats as having no assignable ``__del__``/marker attributes. Assign
+    # through an ``Any`` alias so the dynamic class patch stays type-clean
+    # without resorting to ``setattr`` (which ruff B010 would flag).
+    chrome_cls: Any = chrome
+    chrome_cls.__del__ = _no_op_del
+    chrome_cls._gfmy_del_neutralized = True
+
+
 def _get_uc_module() -> Any:
     """Lazily import and cache ``undetected_chromedriver``."""
 
     if _UC_CACHE.module is None:
-        _UC_CACHE.module = cast(Any, _load_uc())
+        module = cast(Any, _load_uc())
+        _neutralize_uc_finalizer(module)
+        _UC_CACHE.module = module
 
     return _UC_CACHE.module
 
