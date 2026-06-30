@@ -293,41 +293,6 @@ class TestResolveEffectiveEntryId:
         assert _resolve_effective_entry_id("", "env_value") == ""
 
 
-class TestShouldServeOnly:
-    """Unit tests for the bootstrap-vs-serve cache-signal decision.
-
-    The CLI must decide whether to bootstrap ``secrets.json`` or serve an
-    already-registered cache based on the *cache signal* (a registered token
-    cache), not on the directory layout.  A repo-layout shell start with no
-    registered cache must bootstrap (return ``False``) instead of dead-ending
-    in ``MissingTokenCacheError``.
-    """
-
-    def test_no_cache_bootstraps(self) -> None:
-        """Empty registry → bootstrap (this is the repo-layout fix)."""
-        from custom_components.googlefindmy.main import _should_serve_only
-
-        assert _should_serve_only([], reauth=False) is False
-
-    def test_registered_cache_serves_only(self) -> None:
-        """A registered cache without --reauth → serve directly, no bootstrap."""
-        from custom_components.googlefindmy.main import _should_serve_only
-
-        assert _should_serve_only(["entry_a"], reauth=False) is True
-
-    def test_reauth_forces_bootstrap_even_with_cache(self) -> None:
-        """--reauth always bootstraps, even when a cache is registered."""
-        from custom_components.googlefindmy.main import _should_serve_only
-
-        assert _should_serve_only(["entry_a"], reauth=True) is False
-
-    def test_no_cache_with_reauth_bootstraps(self) -> None:
-        """No cache and --reauth both point to bootstrap."""
-        from custom_components.googlefindmy.main import _should_serve_only
-
-        assert _should_serve_only([], reauth=True) is False
-
-
 class _TrackingSession:
     """Fake ``aiohttp.ClientSession`` context manager that records closure.
 

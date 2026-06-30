@@ -16,14 +16,12 @@ Flags:
                for multiple HA config entries.  May also be set via the
                ``GOOGLEFINDMY_ENTRY_ID`` environment variable.
 
-The module decides between two code paths by the *cache signal* (whether a token
-cache is registered in this process), not by the directory layout:
-    * no registered cache (or ``--reauth``): runs the full token-bootstrap
-      pipeline and writes ``secrets.json``, regardless of flat vs. repo layout.
-    * a cache is already registered: delegates to
-      ``nbe_list_devices._async_cli_main`` (serve-only, no Chrome).
-``_standalone`` now only governs packaging (virtual package vs. real package),
-which is the one thing the directory name legitimately determines.
+Run as a script, the module always runs the full token-bootstrap pipeline and
+writes ``secrets.json``, regardless of flat vs. repo directory layout.  When a
+usable cache already exists, ``_ensure_authenticated`` returns early so no Chrome
+login is launched; ``--reauth`` forces a fresh login.  ``_standalone`` only
+governs packaging (virtual package vs. real package), which is the one thing the
+directory name legitimately determines.
 """
 
 import os
@@ -798,25 +796,6 @@ def _resolve_effective_entry_id(cli_entry: str | None, env_entry: str | None) ->
     return ""
 
 
-def _should_serve_only(registered_entry_ids: list[str], reauth: bool) -> bool:
-    """Decide bootstrap vs. serve-only from the cache signal, not the layout.
-
-    Returns ``True`` when the CLI should serve an already-registered token cache
-    directly (no bootstrap, no Chrome).  Returns ``False`` when this invocation
-    must bootstrap ``secrets.json``.
-
-    The decision keys off the *cache signal* (whether a token cache is registered
-    in this process), not the directory layout: a registered cache means a usable
-    cache already exists, while an empty registry means the caller must bootstrap.
-    ``--reauth`` always forces a bootstrap (returns ``False``) so a fresh Chrome
-    login runs even if a cache happens to be present.
-
-    Extracted from the ``__main__`` block so the rule is unit-testable without
-    spawning a subprocess (mirrors ``_resolve_effective_entry_id``).
-    """
-    return bool(registered_entry_ids) and not reauth
-
-
 async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     """Run the standalone token bootstrap, then hand off to the interactive CLI.
 
@@ -830,8 +809,7 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
     and the WinError-6 teardown noise on Windows.
 
     Extracted from the ``__main__`` block so the session lifecycle is testable
-    without spawning a subprocess (mirrors ``_resolve_effective_entry_id`` /
-    ``_should_serve_only``).
+    without spawning a subprocess (mirrors ``_resolve_effective_entry_id``).
     """
     import contextlib  # noqa: PLC0415
 
@@ -865,10 +843,6 @@ if __name__ == "__main__":
     import argparse  # noqa: PLC0415
     import asyncio  # noqa: PLC0415
 
-    from custom_components.googlefindmy.NovaApi.ListDevices.nbe_list_devices import (  # noqa: E402, PLC0415
-        _async_cli_main,
-    )
-
     _cli_parser = argparse.ArgumentParser(description="Google Find My Device CLI")
     _cli_parser.add_argument(
         "--reauth",
@@ -885,43 +859,26 @@ if __name__ == "__main__":
     )
     _cli_args = _cli_parser.parse_args()
 
-    # Decide bootstrap vs. serve-only by the *cache signal*, not by the directory
-    # layout.  A registered token cache means this process already holds a usable
-    # cache (embedded/advanced use): serve it directly.  No registered cache means
-    # this invocation must bootstrap secrets.json (open Chrome, exchange tokens),
-    # regardless of whether main.py sits in a flat or a repo directory.  --reauth
-    # always forces a bootstrap.  This decision previously keyed off _standalone
-    # (the directory name), which dead-ended a repo-layout shell start with no
-    # cache in an opaque MissingTokenCacheError instead of bootstrapping.
-    from custom_components.googlefindmy.Auth.token_cache import (  # noqa: E402, PLC0415
-        get_registered_entry_ids,
+    # Always run the token-bootstrap pipeline, regardless of flat vs. repo
+    # directory layout.  When a usable cache already exists, _ensure_authenticated
+    # returns early so no Chrome login is launched; --reauth forces a fresh login.
+    # This replaces the earlier branch gates (first the _standalone directory name,
+    # then a cache-signal check that was always empty for a fresh shell start),
+    # both of which could dead-end a repo-layout start in an opaque
+    # MissingTokenCacheError instead of bootstrapping.
+    if _cli_args.reauth:
+        _clear_stale_tokens_for_reauth()
+    _ensure_authenticated()
+    # Resolve the effective entry id (CLI > env > ""). Without this,
+    # _async_cli_main forwards a non-empty hint that _resolve_cli_cache
+    # would reject as "Unknown entry_id" because the cache was only
+    # registered under "".  Codex review on 694f6883aa.
+    _effective_entry_id = _resolve_effective_entry_id(
+        _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
     )
+    _file_cache = _register_file_cache(_effective_entry_id)
 
-    _serve_only = _should_serve_only(get_registered_entry_ids(), _cli_args.reauth)
-
-    if _serve_only:
-        # A token cache is already registered in this process: serve it without
-        # re-running the bootstrap or opening Chrome.  HA never executes main.py
-        # as __main__, so this path is for embedded/advanced callers only.
-        try:
-            asyncio.run(_async_cli_main(_cli_args.entry))
-        except KeyboardInterrupt:
-            print("\nExiting.")
-    else:
-        # Bootstrap path: provision secrets.json (token exchange + vault keys).
-        if _cli_args.reauth:
-            _clear_stale_tokens_for_reauth()
-        _ensure_authenticated()
-        # Resolve the effective entry id (CLI > env > ""). Without this,
-        # _async_cli_main forwards a non-empty hint that _resolve_cli_cache
-        # would reject as "Unknown entry_id" because the cache was only
-        # registered under "".  Codex review on 694f6883aa.
-        _effective_entry_id = _resolve_effective_entry_id(
-            _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
-        )
-        _file_cache = _register_file_cache(_effective_entry_id)
-
-        try:
-            asyncio.run(_run_cli_bootstrap(_file_cache, _cli_args.entry))
-        except KeyboardInterrupt:
-            print("\nExiting.")
+    try:
+        asyncio.run(_run_cli_bootstrap(_file_cache, _cli_args.entry))
+    except KeyboardInterrupt:
+        print("\nExiting.")
