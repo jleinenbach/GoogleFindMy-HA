@@ -869,16 +869,19 @@ if __name__ == "__main__":
     if _cli_args.reauth:
         _clear_stale_tokens_for_reauth()
     _ensure_authenticated()
-    # Resolve the effective entry id (CLI > env > ""). Without this,
-    # _async_cli_main forwards a non-empty hint that _resolve_cli_cache
-    # would reject as "Unknown entry_id" because the cache was only
-    # registered under "".  Codex review on 694f6883aa.
+    # Resolve the effective entry id once (CLI > env > "") and use the SAME
+    # value for both registration and hand-off, so the registry key and the
+    # lookup hint can never diverge.  Forwarding the raw _cli_args.entry instead
+    # would re-trigger _async_cli_main's env fallback for an explicit
+    # --entry "" (empty string is falsy), making _resolve_cli_cache reject the
+    # env value as "Unknown entry_id" although the cache was registered under
+    # "".  Codex reviews on 694f6883aa and 17669c7ff2.
     _effective_entry_id = _resolve_effective_entry_id(
         _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
     )
     _file_cache = _register_file_cache(_effective_entry_id)
 
     try:
-        asyncio.run(_run_cli_bootstrap(_file_cache, _cli_args.entry))
+        asyncio.run(_run_cli_bootstrap(_file_cache, _effective_entry_id))
     except KeyboardInterrupt:
         print("\nExiting.")

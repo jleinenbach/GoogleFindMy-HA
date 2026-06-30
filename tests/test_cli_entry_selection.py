@@ -139,3 +139,67 @@ async def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -
     assert called["list_namespace"] == "entry-one"
     assert called["loc_cache"] is cache
     assert called["loc_namespace"] == "entry-one"
+
+
+class _StopAfterResolve(Exception):
+    """Sentinel raised from a stubbed _resolve_cli_cache to stop _async_cli_main."""
+
+
+class TestAsyncCliMainEntryResolution:
+    """The env fallback must apply only for an unspecified (None) entry id.
+
+    Regression for Codex review on 17669c7ff2: ``entry_id or env`` conflated an
+    explicit empty string (the documented "use the sole default cache" selector
+    that ``--entry ""`` sets to defeat ``GOOGLEFINDMY_ENTRY_ID``) with "not
+    supplied", so the env value overrode it and ``_resolve_cli_cache`` raised
+    ``Unknown entry_id``.  ``_async_cli_main`` now resolves with ``is not None``,
+    making it the single source of the env fallback.
+    """
+
+    @staticmethod
+    def _capture_hint(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        """Stub _resolve_cli_cache to record its hint and short-circuit."""
+        seen: dict[str, Any] = {}
+
+        def _stub(hint: Any) -> tuple[Any, str]:
+            seen["hint"] = hint
+            raise _StopAfterResolve
+
+        monkeypatch.setattr(nbe_list_devices, "_resolve_cli_cache", _stub)
+        return seen
+
+    async def test_explicit_empty_entry_id_is_not_overridden_by_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``--entry ""`` must win over GOOGLEFINDMY_ENTRY_ID (CLI > env)."""
+        monkeypatch.setenv("GOOGLEFINDMY_ENTRY_ID", "from-env")
+        seen = self._capture_hint(monkeypatch)
+
+        with pytest.raises(_StopAfterResolve):
+            await nbe_list_devices._async_cli_main("")
+
+        assert seen["hint"] == ""
+
+    async def test_none_entry_id_falls_back_to_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unspecified (None) entry id still uses the env var."""
+        monkeypatch.setenv("GOOGLEFINDMY_ENTRY_ID", "from-env")
+        seen = self._capture_hint(monkeypatch)
+
+        with pytest.raises(_StopAfterResolve):
+            await nbe_list_devices._async_cli_main(None)
+
+        assert seen["hint"] == "from-env"
+
+    async def test_explicit_entry_id_wins_over_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-empty explicit entry id is used verbatim, ignoring env."""
+        monkeypatch.setenv("GOOGLEFINDMY_ENTRY_ID", "from-env")
+        seen = self._capture_hint(monkeypatch)
+
+        with pytest.raises(_StopAfterResolve):
+            await nbe_list_devices._async_cli_main("explicit")
+
+        assert seen["hint"] == "explicit"
