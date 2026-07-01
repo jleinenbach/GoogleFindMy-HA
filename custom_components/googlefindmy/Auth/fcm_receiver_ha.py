@@ -3634,11 +3634,34 @@ class FcmReceiverHA:
             # Google may arrive before the MCS connection is established.
             pc = self.pcs.get(entry_id)
             if pc is not None:
-                _MAX_READY_WAIT_S = 15.0
+                # Derive the readiness budget from the library's connection-retry
+                # count instead of a fixed 15.0s.  A brand-new FCM identity's
+                # first MCS connect can take the full retry budget
+                # (FCM_CONNECTION_RETRY_COUNT attempts, ~15-20s per the note near
+                # _listen()); a hard-coded 15.0s under-covered that window and let
+                # the gate expire before STARTED on the very first run.  Adding a
+                # small margin keeps a fresh registration from being abandoned
+                # prematurely, which is the root of the deterministic first-run
+                # locate timeout.
+                _PER_ATTEMPT_WAIT_S = 4.0
+                _READY_WAIT_MARGIN_S = 2.0
+                _MAX_READY_WAIT_S = (
+                    int(FCM_CONNECTION_RETRY_COUNT) * _PER_ATTEMPT_WAIT_S
+                    + _READY_WAIT_MARGIN_S
+                )
                 _POLL_INTERVAL_S = 0.3
                 waited = 0.0
                 while waited < _MAX_READY_WAIT_S:
-                    run_state = getattr(pc, "run_state", None)
+                    # Re-read the live entry client each iteration.  A concurrent
+                    # supervisor restart can stop the captured ``pc`` and swap a
+                    # replacement into ``self.pcs[entry_id]`` on a transient
+                    # pre-start connection/login failure; that replacement may
+                    # reach STARTED while the stale object never does.  Polling
+                    # the current client (falling back to ``pc`` only while the
+                    # slot is momentarily empty) avoids a false fail-closed that
+                    # would abort a locate the replacement client could serve.
+                    current_pc = self.pcs.get(entry_id, pc)
+                    run_state = getattr(current_pc, "run_state", None)
                     if (
                         FcmPushClientRunState is not None
                         and run_state == FcmPushClientRunState.STARTED
@@ -3647,18 +3670,27 @@ class FcmReceiverHA:
                     await asyncio.sleep(_POLL_INTERVAL_S)
                     waited += _POLL_INTERVAL_S
                 else:
+                    # Fail closed: the client never started listening, so sending
+                    # the location request would hand the token to a dead listener
+                    # and the caller would block until an opaque 30s timeout.
+                    # Clearing the local token means the function returns None (the
+                    # sole caller, location_request.py, then reports a clear error
+                    # and returns early) and the finally block pops the manual-
+                    # locate callback so no stale registration leaks.
                     _LOGGER.warning(
                         "[entry=%s] FCM client not in STARTED state after %.1fs; "
-                        "location request may time out",
+                        "aborting manual locate registration (fail-closed)",
                         entry_id,
                         _MAX_READY_WAIT_S,
                     )
+                    token = None
 
-            _LOGGER.info(
-                "[entry=%s] Manual locate registration ready for %s",
-                entry_id,
-                canonic_id[:8],
-            )
+            if token is not None:
+                _LOGGER.info(
+                    "[entry=%s] Manual locate registration ready for %s",
+                    entry_id,
+                    canonic_id[:8],
+                )
             return token
         finally:
             if not token:

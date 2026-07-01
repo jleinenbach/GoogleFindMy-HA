@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from custom_components.googlefindmy.Auth import fcm_receiver_ha as fcm_mod
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 
 
@@ -157,3 +158,156 @@ def test_process_background_update_uses_thread(
     assert receiver._pending_targets[key] == {"entry-1", "entry-2"}
     assert schedule_calls == [key]
     assert decode_calls == [("entry-1", "c0ffee")]
+
+
+# ---------------------------------------------------------------------------
+# Readiness gate: fail-closed when the FCM client never reaches STARTED
+# ---------------------------------------------------------------------------
+
+
+class _RunState:
+    """Minimal stand-in for FcmPushClientRunState (only STARTED is compared)."""
+
+    STARTED = "STARTED"
+
+
+class _DummyPc:
+    """Push client double exposing only the polled ``run_state`` attribute."""
+
+    def __init__(self, run_state: object) -> None:
+        self.run_state = run_state
+
+
+def _wire_manual_locate(
+    monkeypatch: pytest.MonkeyPatch,
+    receiver: FcmReceiverHA,
+    entry_id: str,
+    cache: DummyCache,
+) -> None:
+    """Stub every collaborator the readiness gate calls before the poll loop."""
+
+    async def _ensure_client(eid: str, c: Any, generation: int | None = None) -> object:
+        return object()
+
+    async def _start(eid: str, c: Any) -> None:
+        return None
+
+    async def _ensure_token(eid: str) -> str:
+        return "token-123"
+
+    async def _persist(eid: str, tok: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        receiver, "_select_manual_locate_entry", lambda cid: (entry_id, cache)
+    )
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure_client)
+    monkeypatch.setattr(receiver, "_start_supervisor_for_entry", _start)
+    monkeypatch.setattr(receiver, "_ensure_token_for_entry", _ensure_token)
+    monkeypatch.setattr(receiver, "_update_token_routing", lambda tok, ids: None)
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_fails_closed_when_never_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that never reaches STARTED yields None and leaves no callback.
+
+    Regression for the deterministic first-run locate timeout: the gate used to
+    fall through to ``return token`` (fail-open), handing a token to a listener
+    that was not yet connected so the caller blocked until an opaque 30s timeout.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    receiver.pcs[entry_id] = _DummyPc(run_state="CONNECTING")  # type: ignore[assignment]
+
+    # Do not actually sleep through the readiness budget.
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token is None
+    assert device_id not in receiver.location_update_callbacks
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_returns_token_when_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HA happy path: STARTED within budget returns the token, keeps the callback."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    receiver.pcs[entry_id] = _DummyPc(run_state=_RunState.STARTED)  # type: ignore[assignment]
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert receiver.location_update_callbacks[device_id] is manual_callback
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_reads_replacement_client_during_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor restart that swaps in a STARTED client mid-poll is honored.
+
+    Regression (Codex): the gate captured ``pc`` once before waiting.  When a
+    concurrent ``_start_supervisor_for_entry`` restart discards that client and
+    replaces ``self.pcs[entry_id]`` with a fresh one that reaches STARTED, the
+    stale object never transitions, so fail-closed used to abort a request the
+    replacement client could actually serve.  The loop must re-read the live
+    entry client during the poll.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    stale = _DummyPc(run_state="CONNECTING")
+    started = _DummyPc(run_state=_RunState.STARTED)
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    # Simulate a concurrent supervisor restart swapping the entry client in
+    # while the readiness gate is between polls (on the first ``await sleep``).
+    swapped = {"done": False}
+
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if not swapped["done"]:
+            receiver.pcs[entry_id] = started  # type: ignore[assignment]
+            swapped["done"] = True
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert receiver.location_update_callbacks[device_id] is manual_callback

@@ -7,6 +7,8 @@ it simply imports ``list_devices`` from ``nbe_list_devices`` and calls it.
 
 from __future__ import annotations
 
+import argparse
+import logging
 import subprocess
 import sys
 from unittest import mock
@@ -106,6 +108,9 @@ class TestDunderMain:
         )
         assert "--reauth" in result.stdout, (
             f"--reauth missing from --help output:\n{result.stdout}"
+        )
+        assert "--debug" in result.stdout, (
+            f"--debug missing from --help output:\n{result.stdout}"
         )
 
     def test_dunder_main_accepts_entry_flag(self) -> None:
@@ -899,3 +904,161 @@ class TestPasteRoundTrip:
         assert cache.saved[f"shared_key_{username}"] == "ddeeff"
         # The top-level field itself is preserved verbatim.
         assert cache.saved["owner_key"] == owner_hex
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point: parser surface, logging configuration, and call order
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCliParser:
+    """_build_cli_parser() exposes every documented flag."""
+
+    def test_help_lists_all_flags(self) -> None:
+        from custom_components.googlefindmy import main as cli_main
+
+        help_text = cli_main._build_cli_parser().format_help()
+        assert "--reauth" in help_text
+        assert "--entry" in help_text
+        assert "--debug" in help_text
+
+    def test_debug_defaults_to_false(self) -> None:
+        from custom_components.googlefindmy import main as cli_main
+
+        args = cli_main._build_cli_parser().parse_args([])
+        assert args.debug is False
+
+    def test_debug_flag_parses_true(self) -> None:
+        from custom_components.googlefindmy import main as cli_main
+
+        args = cli_main._build_cli_parser().parse_args(["--debug"])
+        assert args.debug is True
+
+
+class TestConfigureCliLogging:
+    """_configure_cli_logging() maps flag/env onto the basicConfig level."""
+
+    @staticmethod
+    def _captured_level(
+        monkeypatch: pytest.MonkeyPatch, *, debug_flag: bool, env: dict[str, str]
+    ) -> int:
+        from custom_components.googlefindmy import main as cli_main
+
+        captured: dict[str, object] = {}
+
+        def fake_basic_config(**kwargs: object) -> None:
+            # basicConfig is a no-op once pytest installed root handlers, so we
+            # assert on the requested level instead of the effective root level.
+            captured.update(kwargs)
+
+        monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
+        cli_main._configure_cli_logging(debug_flag=debug_flag, env=env)
+        level = captured["level"]
+        assert isinstance(level, int)
+        return level
+
+    def test_flag_enables_debug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            self._captured_level(monkeypatch, debug_flag=True, env={}) == logging.DEBUG
+        )
+
+    def test_env_truthy_enables_debug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            self._captured_level(
+                monkeypatch, debug_flag=False, env={"GOOGLEFINDMY_DEBUG": "1"}
+            )
+            == logging.DEBUG
+        )
+
+    def test_env_falsy_stays_at_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # "0" must be treated as disabled, not merely "present" (mutation guard).
+        assert (
+            self._captured_level(
+                monkeypatch, debug_flag=False, env={"GOOGLEFINDMY_DEBUG": "0"}
+            )
+            == logging.WARNING
+        )
+
+    def test_default_is_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            self._captured_level(monkeypatch, debug_flag=False, env={})
+            == logging.WARNING
+        )
+
+
+class TestCliMainCallOrder:
+    """_main() configures logging before authentication and bootstrap."""
+
+    def _run_main(self, monkeypatch: pytest.MonkeyPatch, *, reauth: bool) -> mock.Mock:
+        import asyncio
+
+        from custom_components.googlefindmy import main as cli_main
+
+        manager = mock.Mock()
+        namespace = argparse.Namespace(debug=True, reauth=reauth, entry=None)
+        fake_parser = mock.Mock()
+        fake_parser.parse_args.return_value = namespace
+
+        monkeypatch.setattr(cli_main, "_build_cli_parser", lambda: fake_parser)
+        monkeypatch.setattr(cli_main, "_configure_cli_logging", manager.configure)
+        monkeypatch.setattr(cli_main, "_clear_stale_tokens_for_reauth", manager.clear)
+        monkeypatch.setattr(cli_main, "_ensure_authenticated", manager.auth)
+        monkeypatch.setattr(
+            cli_main, "_resolve_effective_entry_id", lambda *a: "entry-x"
+        )
+        monkeypatch.setattr(cli_main, "_register_file_cache", lambda entry: object())
+        # Mock the coroutine factory too so no un-awaited coroutine is created
+        # (asyncio.run is mocked, so a real coroutine would leak a warning).
+        monkeypatch.setattr(cli_main, "_run_cli_bootstrap", manager.bootstrap)
+        monkeypatch.setattr(asyncio, "run", manager.run)
+
+        cli_main._main([])
+        return manager
+
+    def test_logging_configured_before_auth_and_bootstrap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = self._run_main(monkeypatch, reauth=False)
+        call_names = [call[0] for call in manager.mock_calls]
+
+        assert "configure" in call_names, call_names
+        assert call_names.index("configure") < call_names.index("auth")
+        assert call_names.index("auth") < call_names.index("run")
+        # reauth was False, so the stale-token clear must NOT run.
+        assert "clear" not in call_names
+
+    def test_logging_receives_debug_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._run_main(monkeypatch, reauth=False)
+        manager.configure.assert_called_once_with(debug_flag=True, env=mock.ANY)
+
+    def test_reauth_clears_before_auth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._run_main(monkeypatch, reauth=True)
+        call_names = [call[0] for call in manager.mock_calls]
+        assert call_names.index("clear") < call_names.index("auth")
+
+    def test_keyboard_interrupt_prints_exiting(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A Ctrl-C during the bootstrap is caught and reported, not propagated."""
+        import asyncio
+
+        from custom_components.googlefindmy import main as cli_main
+
+        namespace = argparse.Namespace(debug=False, reauth=False, entry=None)
+        fake_parser = mock.Mock()
+        fake_parser.parse_args.return_value = namespace
+
+        monkeypatch.setattr(cli_main, "_build_cli_parser", lambda: fake_parser)
+        monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **kwargs: None)
+        monkeypatch.setattr(cli_main, "_ensure_authenticated", lambda: None)
+        monkeypatch.setattr(cli_main, "_resolve_effective_entry_id", lambda *a: "")
+        monkeypatch.setattr(cli_main, "_register_file_cache", lambda entry: object())
+        monkeypatch.setattr(cli_main, "_run_cli_bootstrap", lambda *a: None)
+
+        def _raise(_coro: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(asyncio, "run", _raise)
+
+        cli_main._main([])
+        assert "Exiting." in capsys.readouterr().out
