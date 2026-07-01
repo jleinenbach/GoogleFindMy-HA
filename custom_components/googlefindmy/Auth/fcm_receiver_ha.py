@@ -3652,7 +3652,16 @@ class FcmReceiverHA:
                 _POLL_INTERVAL_S = 0.3
                 waited = 0.0
                 while waited < _MAX_READY_WAIT_S:
-                    run_state = getattr(pc, "run_state", None)
+                    # Re-read the live entry client each iteration.  A concurrent
+                    # supervisor restart can stop the captured ``pc`` and swap a
+                    # replacement into ``self.pcs[entry_id]`` on a transient
+                    # pre-start connection/login failure; that replacement may
+                    # reach STARTED while the stale object never does.  Polling
+                    # the current client (falling back to ``pc`` only while the
+                    # slot is momentarily empty) avoids a false fail-closed that
+                    # would abort a locate the replacement client could serve.
+                    current_pc = self.pcs.get(entry_id, pc)
+                    run_state = getattr(current_pc, "run_state", None)
                     if (
                         FcmPushClientRunState is not None
                         and run_state == FcmPushClientRunState.STARTED

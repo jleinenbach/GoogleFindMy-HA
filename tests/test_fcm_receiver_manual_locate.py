@@ -266,3 +266,48 @@ async def test_manual_locate_returns_token_when_started(
 
     assert token == "token-123"
     assert receiver.location_update_callbacks[device_id] is manual_callback
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_reads_replacement_client_during_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supervisor restart that swaps in a STARTED client mid-poll is honored.
+
+    Regression (Codex): the gate captured ``pc`` once before waiting.  When a
+    concurrent ``_start_supervisor_for_entry`` restart discards that client and
+    replaces ``self.pcs[entry_id]`` with a fresh one that reaches STARTED, the
+    stale object never transitions, so fail-closed used to abort a request the
+    replacement client could actually serve.  The loop must re-read the live
+    entry client during the poll.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    stale = _DummyPc(run_state="CONNECTING")
+    started = _DummyPc(run_state=_RunState.STARTED)
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    # Simulate a concurrent supervisor restart swapping the entry client in
+    # while the readiness gate is between polls (on the first ``await sleep``).
+    swapped = {"done": False}
+
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if not swapped["done"]:
+            receiver.pcs[entry_id] = started  # type: ignore[assignment]
+            swapped["done"] = True
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert receiver.location_update_callbacks[device_id] is manual_callback
