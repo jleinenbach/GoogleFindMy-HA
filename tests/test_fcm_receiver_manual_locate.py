@@ -624,3 +624,256 @@ async def test_manual_locate_reconnect_for_slow_startup_fresh_session(
     assert stale.stopped is True  # reconnect fired despite the stale supervisor stamp
     assert nudged == [entry_id]
     assert receiver.pcs[entry_id] is fresh
+
+
+# ---------------------------------------------------------------------------
+# First-locate reconnect serialization (Codex #1150 follow-up): concurrent or
+# sequential manual locates for different trackers on the SAME entry must share
+# a single reconnect instead of each tearing down the fresh session.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_first_locate_reconnect_reuses_replacement_on_sequential_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sequential second caller reuses the replacement instead of re-tearing.
+
+    After the first caller reconnects to ``fresh``, ``fresh`` is itself young
+    and has not delivered yet, so the naive age/no-delivery gate would fire
+    again and tear down the very replacement the first caller just built.  The
+    per-entry consumed-latch must make the second caller REUSE ``fresh``.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if receiver.pcs[entry_id] is stale:
+            receiver.pcs[entry_id] = fresh  # type: ignore[assignment]
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+
+    first = await receiver._reconnect_for_first_locate(entry_id, 5.0)
+    assert first is fresh
+    assert stale.stopped is True
+    assert nudged == [entry_id]
+
+    second = await receiver._reconnect_for_first_locate(entry_id, 5.0)
+    assert second is fresh  # reused, not reconnected again
+    assert fresh.stopped is False  # replacement was NOT torn down
+    assert nudged == [entry_id]  # still exactly one reconnect
+
+
+@pytest.mark.asyncio
+async def test_first_locate_reconnect_serialized_across_concurrent_callers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent callers on the same entry share one reconnect.
+
+    Regression (Codex #1150): without per-entry serialization the second caller
+    entered the reconnect branch independently and stopped the replacement the
+    first caller had just waited for, so the first request timed out.  The
+    per-entry lock must block the second caller until the first completes, after
+    which the consumed-latch makes it reuse the replacement.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    in_crit = asyncio.Event()
+    release = asyncio.Event()
+    fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+
+    class _BarrierPc:
+        """Stale client whose stop() parks inside the critical section."""
+
+        def __init__(self) -> None:
+            self.run_state: object = _RunState.STARTED
+            self.persistent_ids: list[str] = []
+            self._started_monotonic = time.monotonic()
+            self.stopped = False
+
+        async def stop(self) -> None:
+            self.stopped = True
+            in_crit.set()  # first caller holds the per-entry lock now
+            await release.wait()  # park so the second caller can try to enter
+            receiver.pcs[entry_id] = fresh  # type: ignore[assignment]
+
+    stale = _BarrierPc()
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    task_a = asyncio.create_task(receiver._reconnect_for_first_locate(entry_id, 5.0))
+    await in_crit.wait()  # first caller is mid-reconnect, holding the lock
+    task_b = asyncio.create_task(receiver._reconnect_for_first_locate(entry_id, 5.0))
+    await asyncio.sleep(0)  # let the second caller run; it must block on the lock
+    # B has not completed: it is parked on the per-entry lock the first caller
+    # holds. (This alone is necessary, not sufficient -- the decisive proof of
+    # serialization is the single reconnect asserted via ``nudged`` below.)
+    assert not task_b.done()
+
+    release.set()  # let the first caller finish the single reconnect
+    result_a = await task_a
+    result_b = await task_b
+
+    assert result_a is fresh
+    assert result_b is fresh  # second caller reused the same replacement
+    assert fresh.stopped is False  # replacement never torn down
+    assert nudged == [entry_id]  # exactly one reconnect happened
+
+
+@pytest.mark.asyncio
+async def test_first_locate_reconnect_relatches_for_new_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely new session generation is allowed its own single reconnect.
+
+    The consumed-latch is keyed by client identity, not by ``entry_id``: once
+    the supervisor rebuilds a brand-new young client (a different object), the
+    stored replacement no longer matches, so the next caller may reconnect once
+    more.  A key-based latch would wrongly suppress this.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    # State left by a prior reconnect: latch points at a now-superseded client,
+    # while the supervisor has installed a brand-new young session (new_pc).
+    old_fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver._first_locate_reconnect_done[entry_id] = old_fresh  # type: ignore[assignment]
+    new_pc = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    newest = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = new_pc  # type: ignore[assignment]
+
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if receiver.pcs[entry_id] is new_pc:
+            receiver.pcs[entry_id] = newest  # type: ignore[assignment]
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+
+    result = await receiver._reconnect_for_first_locate(entry_id, 5.0)
+
+    assert result is newest  # new generation got its own reconnect
+    assert new_pc.stopped is True
+    assert nudged == [entry_id]
+    assert receiver._first_locate_reconnect_done[entry_id] is newest
+
+
+@pytest.mark.asyncio
+async def test_first_locate_reconnect_fails_closed_when_client_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No live client under the lock yields None (fail closed).
+
+    A concurrent supervisor teardown can pop the entry client between the
+    branch pre-check and the lock acquisition; the serialized decision must then
+    return None so the caller fails closed instead of dereferencing nothing.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    # self.pcs has no entry for entry_id -> current is None.
+    result = await receiver._reconnect_for_first_locate(entry_id, 5.0)
+
+    assert result is None
+    assert nudged == []  # no reconnect attempted
+
+
+@pytest.mark.asyncio
+async def test_first_locate_reconnect_uses_current_when_no_longer_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client that has since delivered is used as-is, without a reconnect.
+
+    Between the cheap branch pre-check and acquiring the per-entry lock the
+    session may have delivered its first push (``persistent_ids`` filled).  The
+    authoritative re-check under the lock must then reuse it, never tear it down.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    delivered = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=["pid-1"])
+    receiver.pcs[entry_id] = delivered  # type: ignore[assignment]
+
+    result = await receiver._reconnect_for_first_locate(entry_id, 5.0)
+
+    assert result is delivered  # reused as-is
+    assert delivered.stopped is False  # no reconnect
+    assert nudged == []
+
+
+@pytest.mark.asyncio
+async def test_first_locate_reconnect_fails_closed_on_unstarted_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-STARTED client reached via the reuse short-circuit fails closed.
+
+    Regression (Codex #1150 follow-up review): a concurrent supervisor swap can
+    install a fresh, not-yet-started client between the branch pre-check and the
+    per-entry lock. ``_needs_first_locate_reconnect`` is False for a never-
+    STARTED client (``_session_age_s`` is None), so the reuse path must NOT hand
+    this non-listening client back -- doing so reproduces the very locate
+    timeout the fix heals. It must fail closed instead, like the readiness gate.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    # Fresh, not-yet-started client swapped in under the lock: run_state is not
+    # STARTED and it never reached STARTED, so the reuse path selects it.
+    unstarted = _ReconnectPc(run_state="CONNECTING", persistent_ids=[])
+    unstarted._started_monotonic = None  # type: ignore[assignment]  # never STARTED
+    receiver.pcs[entry_id] = unstarted  # type: ignore[assignment]
+
+    result = await receiver._reconnect_for_first_locate(entry_id, 5.0)
+
+    assert result is None  # fail closed, not a non-listening client
+    assert unstarted.stopped is False  # untouched
+    assert nudged == []
+
+
+@pytest.mark.asyncio
+async def test_is_started_false_when_runstate_enum_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_is_started`` fails safe when the library run-state enum is unavailable."""
+    receiver = FcmReceiverHA()
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", None)
+
+    pc = _ReconnectPc(run_state="STARTED", persistent_ids=[])
+
+    assert receiver._is_started(pc) is False  # type: ignore[arg-type]

@@ -426,6 +426,22 @@ class FcmReceiverHA:
         self._entry_health: dict[str, bool] = {}
         self._entry_last_connected_wall: dict[str, float] = {}
 
+        # One-shot first-locate reconnect (#1150) serialization. Concurrent
+        # manual locates for different trackers on the *same* entry both enter
+        # the fresh/no-delivery reconnect branch; without coordination the
+        # second caller tears down the replacement client the first caller just
+        # waited for, so the first request hands its token to a listener that is
+        # already gone and times out (Codex #1150 follow-up). A per-entry lock
+        # serialises the decision and ``_first_locate_reconnect_done`` records
+        # the replacement we already reconnected to (by identity), so a
+        # concurrent or sequential second caller reuses it instead of forcing
+        # another reconnect. A genuinely new session generation (a different
+        # client object) is still allowed exactly one fresh reconnect. Not the
+        # global ``self._lock``: the reconnect awaits the supervisor rebuild,
+        # which itself takes ``self._lock``, so reusing it would deadlock.
+        self._first_locate_locks: dict[str, asyncio.Lock] = {}
+        self._first_locate_reconnect_done: dict[str, FcmPushClient[Any]] = {}
+
         # Active background tasks for exception tracking (P0 fix)
         self._active_tasks: set[asyncio.Task[Any]] = set()
 
@@ -3435,6 +3451,11 @@ class FcmReceiverHA:
     def _purge_entry_tokens(self, entry_id: str) -> None:
         """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
+        # First-locate reconnect serialization state (#1150 follow-up): drop the
+        # per-entry lock and the consumed-replacement record so a later reload
+        # under the same entry_id starts from a clean slate.
+        self._first_locate_locks.pop(entry_id, None)
+        self._first_locate_reconnect_done.pop(entry_id, None)
         # AP1 (finding 2a): fatal retry counters are only cleared on the success
         # path (registration ok), so they leak per teardown without this.
         self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
@@ -3616,16 +3637,25 @@ class FcmReceiverHA:
         waited = 0.0
         while waited < max_wait_s:
             current_pc = self.pcs.get(entry_id, fallback_pc)
-            run_state = getattr(current_pc, "run_state", None)
-            if (
-                FcmPushClientRunState is not None
-                and run_state == FcmPushClientRunState.STARTED
-                and (exclude_pc is None or current_pc is not exclude_pc)
+            if self._is_started(current_pc) and (
+                exclude_pc is None or current_pc is not exclude_pc
             ):
                 return current_pc
             await asyncio.sleep(_POLL_INTERVAL_S)
             waited += _POLL_INTERVAL_S
         return None
+
+    def _is_started(self, pc: FcmPushClient[Any]) -> bool:
+        """True if *pc* is currently in the ``STARTED`` run state.
+
+        Single definition of "listening" shared by the readiness poll and the
+        first-locate reconnect short-circuits, so both fail closed on a client
+        that is not actually STARTED (e.g. a fresh, not-yet-started replacement
+        a concurrent supervisor swapped in).
+        """
+        if FcmPushClientRunState is None:
+            return False
+        return bool(getattr(pc, "run_state", None) == FcmPushClientRunState.STARTED)
 
     def _session_age_s(self, pc: FcmPushClient[Any]) -> float | None:
         """Age (seconds) since this client's STARTED transition, or ``None``.
@@ -3708,6 +3738,60 @@ class FcmReceiverHA:
         return await self._await_entry_started(
             entry_id, stale_pc, max_wait_s, exclude_pc=stale_pc
         )
+
+    def _get_first_locate_lock(self, entry_id: str) -> asyncio.Lock:
+        """Return the per-entry first-locate reconnect lock, creating it lazily.
+
+        Runs in the event loop with no ``await`` between the read and the
+        store, so the lazy creation is atomic against other callers.
+        """
+        lock = self._first_locate_locks.get(entry_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._first_locate_locks[entry_id] = lock
+        return lock
+
+    async def _reconnect_for_first_locate(
+        self, entry_id: str, max_wait_s: float
+    ) -> FcmPushClient[Any] | None:
+        """Serialise the one-shot first-locate reconnect for *entry_id*.
+
+        Concurrent manual locates for different trackers on the same entry must
+        not each tear down the fresh session (Codex #1150 follow-up): only the
+        first caller forces the single cooperative reconnect, and concurrent or
+        sequential callers await it and reuse the same replacement. The live
+        client is re-read under the per-entry lock because a concurrent caller
+        may already have replaced it. Returns the client to hand the locate to,
+        or ``None`` when no started client is available (the caller then fails
+        closed exactly like the readiness gate).
+        """
+        async with self._get_first_locate_lock(entry_id):
+            current = self.pcs.get(entry_id)
+            if current is None:
+                # The supervisor tore the client down; fail closed.
+                return None
+            reuse_current = (
+                # This exact replacement already had its one forced reconnect
+                # (a concurrent caller won the race), ...
+                self._first_locate_reconnect_done.get(entry_id) is current
+                # ... or another caller's reconnect already delivered / the
+                # session is no longer a fresh, undelivered one.
+                or not self._needs_first_locate_reconnect(current)
+            )
+            if reuse_current:
+                # Reuse the live client instead of forcing another reconnect,
+                # but only if it is actually STARTED. A concurrent supervisor
+                # swap may have installed a fresh, not-yet-started client here
+                # between the branch pre-check and this lock; handing the locate
+                # token to a non-listening client would reproduce the very
+                # timeout this heals, so fail closed like the readiness gate.
+                return current if self._is_started(current) else None
+            fresh_pc = await self._force_first_locate_reconnect(
+                entry_id, current, max_wait_s
+            )
+            if fresh_pc is not None:
+                self._first_locate_reconnect_done[entry_id] = fresh_pc
+            return fresh_pc
 
     async def async_register_for_location_updates(
         self, canonic_id: str, callback: Callable[[str, str], None]
@@ -3801,9 +3885,12 @@ class FcmReceiverHA:
                     # session reached STARTED but empirically will not receive the
                     # very first locate push until it reconnects.  Force exactly
                     # one cooperative reconnect, then fail closed if the
-                    # replacement never starts, like the gate above.
-                    fresh_pc = await self._force_first_locate_reconnect(
-                        entry_id, started_pc, _MAX_READY_WAIT_S
+                    # replacement never starts, like the gate above.  The
+                    # reconnect is serialised per entry so concurrent locates on
+                    # the same entry share one replacement instead of tearing
+                    # down each other's fresh session (Codex #1150 follow-up).
+                    fresh_pc = await self._reconnect_for_first_locate(
+                        entry_id, _MAX_READY_WAIT_S
                     )
                     if fresh_pc is None:
                         _LOGGER.warning(
