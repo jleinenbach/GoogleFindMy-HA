@@ -396,7 +396,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
     # protobuf varint32 helpers
     async def _read_varint32(self) -> int:
         reader = self.reader
-        assert reader is not None, "StreamReader is not initialized"
+        if reader is None:
+            # Same class as the ``_send_msg`` writer guard: a read on a
+            # torn-down stream is a normal connection life-cycle event, not an
+            # invariant violation. Surface it as a ConnectionError the listener
+            # already handles gracefully rather than an "Unknown error" trace.
+            raise ConnectionError("StreamReader is not initialized")
         res = 0
         shift = 0
         while True:
@@ -434,13 +439,26 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         self._log_verbose("Sending packet to server: %s", self._msg_str(msg))
         buf = FcmPushClient._make_packet(msg, self.first_message)
         writer = self.writer
-        assert writer is not None, "StreamWriter is not initialized"
+        if writer is None:
+            # A send on a torn-down stream is a normal connection life-cycle
+            # event, not a programming-invariant violation: e.g. an in-flight
+            # heartbeat ack racing a concurrent stop()/teardown that already
+            # nulled ``self.writer`` in ``_do_writer_close``. Raise a
+            # ConnectionError so the listener's connection-error handling stops
+            # the worker cleanly, instead of an ``assert`` whose AssertionError
+            # falls through to the generic arm and surfaces as an alarming
+            # "Unknown error in listener" traceback for a benign shutdown.
+            raise ConnectionError("StreamWriter is not initialized")
         writer.write(buf)
         await writer.drain()
 
     async def _receive_msg(self) -> MessageProto | None:
         reader = self.reader
-        assert reader is not None, "StreamReader is not initialized"
+        if reader is None:
+            # Same class as the ``_send_msg`` writer guard (see there): a torn-
+            # down stream is a normal life-cycle event; raise ConnectionError so
+            # the listener stops cleanly instead of logging an "Unknown error".
+            raise ConnectionError("StreamReader is not initialized")
 
         if self.first_message:
             r = await reader.readexactly(2)
