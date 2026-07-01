@@ -73,6 +73,7 @@ def test_resolve_cli_cache_multiple_entries_require_hint(
     assert "GOOGLEFINDMY_ENTRY_ID" in message
 
 
+@pytest.mark.asyncio
 async def test_cli_main_passes_selected_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI helper should forward the selected cache/namespace to API calls."""
 
@@ -168,6 +169,7 @@ class TestAsyncCliMainEntryResolution:
         monkeypatch.setattr(nbe_list_devices, "_resolve_cli_cache", _stub)
         return seen
 
+    @pytest.mark.asyncio
     async def test_explicit_empty_entry_id_is_not_overridden_by_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -180,6 +182,7 @@ class TestAsyncCliMainEntryResolution:
 
         assert seen["hint"] == ""
 
+    @pytest.mark.asyncio
     async def test_none_entry_id_falls_back_to_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -192,6 +195,7 @@ class TestAsyncCliMainEntryResolution:
 
         assert seen["hint"] == "from-env"
 
+    @pytest.mark.asyncio
     async def test_explicit_entry_id_wins_over_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
