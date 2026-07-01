@@ -205,11 +205,13 @@ def _wire_manual_locate(
     monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure_client)
     monkeypatch.setattr(receiver, "_start_supervisor_for_entry", _start)
     monkeypatch.setattr(receiver, "_ensure_token_for_entry", _ensure_token)
-    # ``get_fcm_token`` reads live creds in production and, via
-    # ``_ensure_token_for_entry``, agrees with the token above.  Stub it to the
-    # same value so the post-reconnect token refresh sees an unchanged token by
-    # default; rotation tests override it explicitly.
-    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: "token-123")
+    # The post-reconnect refresh reads the token strictly entry-scoped via
+    # ``_entry_scoped_fcm_token`` (production seam), which via
+    # ``_ensure_token_for_entry`` agrees with the token above.  Stub it to the
+    # same value so the refresh sees an unchanged token by default; rotation and
+    # fail-closed tests override this seam explicitly.  The cross-entry scoping
+    # test deliberately leaves it unstubbed to exercise the real strict read.
+    monkeypatch.setattr(receiver, "_entry_scoped_fcm_token", lambda eid: "token-123")
     monkeypatch.setattr(receiver, "_update_token_routing", lambda tok, ids: None)
     monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
     monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
@@ -936,8 +938,8 @@ async def test_manual_locate_refreshes_rotated_token_after_reconnect(
     nudged = _wire_forced_reconnect(monkeypatch, receiver, entry_id)
 
     # The supervisor rebuild rotated the token: _ensure_token_for_entry captured
-    # "token-123", but get_fcm_token now reports the post-reconnect token.
-    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: "token-999")
+    # "token-123", but the entry-scoped read now reports the post-reconnect token.
+    monkeypatch.setattr(receiver, "_entry_scoped_fcm_token", lambda eid: "token-999")
     routed: list[tuple[str, set[str]]] = []
     monkeypatch.setattr(
         receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
@@ -978,7 +980,7 @@ async def test_manual_locate_fails_closed_when_token_missing_after_reconnect(
     _wire_forced_reconnect(monkeypatch, receiver, entry_id)
 
     # The re-registration during the rebuild left the entry without a token.
-    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: None)
+    monkeypatch.setattr(receiver, "_entry_scoped_fcm_token", lambda eid: None)
     routed: list[tuple[str, set[str]]] = []
     monkeypatch.setattr(
         receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
@@ -1014,8 +1016,8 @@ async def test_manual_locate_unchanged_token_skips_routing_churn(
     _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
     _wire_forced_reconnect(monkeypatch, receiver, entry_id)
 
-    # get_fcm_token still reports the captured token (no rotation).
-    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: "token-123")
+    # The entry-scoped read still reports the captured token (no rotation).
+    monkeypatch.setattr(receiver, "_entry_scoped_fcm_token", lambda eid: "token-123")
     routed: list[tuple[str, set[str]]] = []
     monkeypatch.setattr(
         receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
@@ -1032,3 +1034,135 @@ async def test_manual_locate_unchanged_token_skips_routing_churn(
     # Only the pre-reconnect path routed the captured token once; the refresh
     # added nothing because the token did not rotate (no churn).
     assert routed == [("token-123", {entry_id})]
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_refresh_stays_entry_scoped_across_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Multi-account: the post-reconnect refresh stays strictly entry-scoped.
+
+    Regression (Codex #1150 follow-up): ``get_fcm_token``'s cross-entry fallback
+    returns the first token across all accounts.  If the forced reconnect leaves
+    *this* entry momentarily tokenless while a *different* entry still holds a
+    token, reading via ``get_fcm_token`` would hand the foreign account's token to
+    this entry (routed and returned).  The refresh must read strictly entry-scoped
+    and fail closed instead.
+
+    Uses real creds and the real ``_entry_scoped_fcm_token`` (unstubbed), so a
+    revert to ``get_fcm_token`` turns this test red.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+
+    async def _ensure_client(eid: str, c: Any, generation: int | None = None) -> object:
+        return object()
+
+    async def _start(eid: str, c: Any) -> None:
+        return None
+
+    async def _ensure_token(eid: str) -> str:
+        return "token-123"
+
+    async def _persist(eid: str, tok: str) -> None:
+        return None
+
+    monkeypatch.setattr(
+        receiver, "_select_manual_locate_entry", lambda cid: (entry_id, cache)
+    )
+    monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure_client)
+    monkeypatch.setattr(receiver, "_start_supervisor_for_entry", _start)
+    monkeypatch.setattr(receiver, "_ensure_token_for_entry", _ensure_token)
+    routed: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
+    )
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    # Real creds: this entry is tokenless after the rebuild, a *different* account
+    # still holds a token.  The strict entry-scoped read must not leak it.  The
+    # ``_entry_scoped_fcm_token`` seam is left unstubbed on purpose.
+    receiver.creds = {  # type: ignore[assignment]
+        entry_id: {},
+        "entry-2": {"fcm": {"registration": {"token": "other-account-token"}}},
+    }
+
+    # Force exactly one reconnect; the fresh replacement double carries no
+    # per-client credentials, so the strict read falls through to creds only.
+    _wire_forced_reconnect(monkeypatch, receiver, entry_id)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    # Fail closed: the foreign token is never returned to the caller ...
+    assert token is None
+    assert device_id not in receiver.location_update_callbacks
+    # ... and never routed for this entry (only the pre-reconnect path routed the
+    # captured token once; the foreign account's token must not appear at all).
+    assert ("other-account-token", {entry_id}) not in routed
+    assert routed == [("token-123", {entry_id})]
+
+
+def test_entry_scoped_fcm_token_never_leaks_across_entries() -> None:
+    """The strict entry-scoped read stays within its entry (no cross-entry fallback).
+
+    Directly pins the invariant that ``get_fcm_token`` and the post-reconnect token
+    refresh both rely on: read persisted creds, then the live client's credentials,
+    and fail closed with ``None`` when only *another* entry holds a token.
+    """
+    receiver = FcmReceiverHA()
+    receiver.creds = {  # type: ignore[assignment]
+        "entry-1": {"fcm": {"registration": {"token": "tok-1"}}},
+        "entry-2": {"fcm": {"registration": {"token": "tok-2"}}},
+    }
+    # Persisted-creds layer, strictly scoped (never entry-2's token for entry-1).
+    assert receiver._entry_scoped_fcm_token("entry-1") == "tok-1"
+    assert receiver._entry_scoped_fcm_token("entry-2") == "tok-2"
+
+    # No persisted creds for the entry, but a live client exposes credentials.
+    class _CredPc:
+        credentials = {"fcm": {"registration": {"token": "live-tok"}}}
+
+    receiver.creds = {  # type: ignore[assignment]
+        "entry-3": {},
+        "entry-2": {"fcm": {"registration": {"token": "tok-2"}}},
+    }
+    receiver.pcs["entry-3"] = _CredPc()  # type: ignore[assignment]
+    assert receiver._entry_scoped_fcm_token("entry-3") == "live-tok"
+
+    # A live client whose credentials access raises is swallowed (defensive path).
+    class _RaisingPc:
+        @property
+        def credentials(self) -> dict[str, Any]:
+            raise RuntimeError("creds unavailable")
+
+    receiver.creds = {  # type: ignore[assignment]
+        "entry-4": {},
+        "entry-2": {"fcm": {"registration": {"token": "tok-2"}}},
+    }
+    receiver.pcs["entry-4"] = _RaisingPc()  # type: ignore[assignment]
+    assert receiver._entry_scoped_fcm_token("entry-4") is None
+
+    # Live client exposes a credentials dict but with an empty token: fall through
+    # to None rather than leak another entry's token.
+    class _CredPcEmpty:
+        credentials = {"fcm": {"registration": {"token": ""}}}
+
+    receiver.creds = {  # type: ignore[assignment]
+        "entry-5": {},
+        "entry-2": {"fcm": {"registration": {"token": "tok-2"}}},
+    }
+    receiver.pcs["entry-5"] = _CredPcEmpty()  # type: ignore[assignment]
+    assert receiver._entry_scoped_fcm_token("entry-5") is None
+
+    # Entry is tokenless (no creds, no live client) while another entry has a
+    # token: must return None, never the foreign token.
+    receiver.pcs.pop("entry-4", None)
+    assert receiver._entry_scoped_fcm_token("entry-4") is None

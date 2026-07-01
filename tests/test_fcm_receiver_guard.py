@@ -212,6 +212,51 @@ def test_multi_entry_buffers_prevent_global_cache_access(
     assert start_calls.count("entry-2") == 1
 
 
+def test_credentials_update_routes_only_own_entry_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tokenless creds update never routes another entry's token.
+
+    Regression (Codex #1150 follow-up, same leak class as the forced-reconnect
+    refresh): ``_on_credentials_updated_for_entry`` writes ``self.creds[entry_id]``
+    and then routes that entry's token.  Reading via ``get_fcm_token`` would fall
+    back to the first token across *all* entries, so a tokenless update for one
+    account while another account holds a token would route the foreign token
+    under the wrong entry.  The strict entry-scoped read must route nothing.
+    """
+    receiver = FcmReceiverHA()
+
+    # Another account already holds a token.
+    receiver.creds["entry-2"] = {"fcm": {"registration": {"token": "token-entry-2"}}}
+
+    routed: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
+    )
+    # Isolate the routing decision: swallow (and close) the dispatched coroutines
+    # and neutralise the fatal-error clear so no event loop is required.
+    monkeypatch.setattr(
+        receiver, "_dispatch_to_hass_loop", lambda coro, label=None: coro.close()
+    )
+    monkeypatch.setattr(
+        receiver, "_clear_fatal_error_for_entry", lambda eid, reason=None: None
+    )
+
+    # entry-1 receives a tokenless credentials update while entry-2 has a token.
+    receiver._on_credentials_updated_for_entry("entry-1", {"fcm": {}})
+
+    # The foreign account's token is never routed under entry-1; in fact nothing
+    # is routed, because entry-1 has no token of its own.
+    assert ("token-entry-2", {"entry-1"}) not in routed
+    assert routed == []
+
+    # A subsequent update *with* an own token routes exactly that token.
+    receiver._on_credentials_updated_for_entry(
+        "entry-1", {"fcm": {"registration": {"token": "token-entry-1"}}}
+    )
+    assert routed == [("token-entry-1", {"entry-1"})]
+
+
 def test_unregister_prunes_token_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Removing a coordinator clears its tokens and blocks future fan-out."""
 

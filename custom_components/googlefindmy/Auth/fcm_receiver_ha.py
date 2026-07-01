@@ -3208,8 +3208,13 @@ class FcmReceiverHA:
                 )
         self.creds[entry_id] = normalized if isinstance(normalized, dict) else None
 
-        # Update token routing from fresh creds if possible
-        token = self.get_fcm_token(entry_id)
+        # Update token routing from fresh creds if possible.  Read strictly
+        # entry-scoped: the creds for this entry were just written above, so
+        # ``get_fcm_token``'s cross-entry fallback could only route a *foreign*
+        # account's token under this entry when the update is tokenless -- the
+        # same leak class as the forced first-locate reconnect refresh (Codex
+        # #1150 follow-ups).  A tokenless update must route nothing here.
+        token = self._entry_scoped_fcm_token(entry_id)
         if token:
             self._update_token_routing(token, {entry_id})
             self._dispatch_to_hass_loop(
@@ -3492,6 +3497,33 @@ class FcmReceiverHA:
 
     # -------------------- Public token accessor --------------------
 
+    def _entry_scoped_fcm_token(self, entry_id: str) -> str | None:
+        """Return the FCM token that belongs strictly to ``entry_id``.
+
+        Reads the entry's persisted creds first, then the live client's
+        credentials.  Unlike :meth:`get_fcm_token`, this never falls back to
+        another entry's token, so a caller that requires per-entry correctness
+        (the forced first-locate reconnect in a multi-account setup) can fail
+        closed instead of routing a foreign account's token to the wrong entry.
+        """
+        creds = self.creds.get(entry_id)
+        if isinstance(creds, dict):
+            tok = (creds.get("fcm") or {}).get("registration", {}).get("token")
+            if isinstance(tok, str) and tok:
+                return tok
+        # Also try the current client's live creds if present
+        pc = self.pcs.get(entry_id)
+        if pc:
+            try:
+                c = getattr(pc, "credentials", None)
+                if isinstance(c, dict):
+                    tok = (c.get("fcm") or {}).get("registration", {}).get("token")
+                    if isinstance(tok, str) and tok:
+                        return tok
+            except Exception:
+                pass
+        return None
+
     def get_fcm_token(self, entry_id: str | None = None) -> str | None:
         """Return current FCM token (best-effort).
 
@@ -3502,22 +3534,9 @@ class FcmReceiverHA:
         target_entry = entry_id if entry_id is not None else self._default_entry_id
 
         if target_entry:
-            creds = self.creds.get(target_entry)
-            if isinstance(creds, dict):
-                tok = (creds.get("fcm") or {}).get("registration", {}).get("token")
-                if isinstance(tok, str) and tok:
-                    return tok
-            # Also try the current client's live creds if present
-            pc = self.pcs.get(target_entry)
-            if pc:
-                try:
-                    c = getattr(pc, "credentials", None)
-                    if isinstance(c, dict):
-                        tok = (c.get("fcm") or {}).get("registration", {}).get("token")
-                        if isinstance(tok, str) and tok:
-                            return tok
-                except Exception:
-                    pass
+            scoped = self._entry_scoped_fcm_token(target_entry)
+            if scoped:
+                return scoped
         # Fallback: first available token across entries
         for c in self.creds.values():
             if isinstance(c, dict):
@@ -3810,6 +3829,13 @@ class FcmReceiverHA:
         Routing is re-pointed at the refreshed token only when it actually
         rotated; the stale mapping for a dead registration is benign (it receives
         no pushes) and is not eagerly purged here.
+
+        The refreshed token is read strictly entry-scoped
+        (:meth:`_entry_scoped_fcm_token`, not :meth:`get_fcm_token`): in a
+        multi-account setup ``get_fcm_token``'s cross-entry fallback could return
+        another account's token when this entry is momentarily tokenless after the
+        rebuild, which would route a foreign token for this entry.  Failing closed
+        is correct there (Codex #1150 follow-up).
         """
         fresh_pc = await self._reconnect_for_first_locate(entry_id, max_wait_s)
         if fresh_pc is None:
@@ -3821,7 +3847,7 @@ class FcmReceiverHA:
             )
             return None
 
-        refreshed = self.get_fcm_token(entry_id)
+        refreshed = self._entry_scoped_fcm_token(entry_id)
         if not refreshed:
             _LOGGER.warning(
                 "[entry=%s] FCM token unavailable after forced reconnect; "
