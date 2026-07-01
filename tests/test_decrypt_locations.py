@@ -482,6 +482,68 @@ async def test_all_own_reports_failing_auth_raises_decryption_error(
         )
 
 
+async def test_stale_own_reports_with_foreign_success_preserve_network_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1b: stale own reports + a successful foreign report → keep the network fix.
+
+    Counterpoint to T-D1: an offline phone still seen by the FMDN network (a Google
+    Home / Nest anchor) yields stale own reports (all fail authentication) alongside
+    one foreign/crowdsourced report that decrypts. The own-report mismatch raise must
+    be SUPPRESSED so the good network coordinate is returned instead of being
+    discarded by the exception before the ``wrapped`` list is ever converted. A
+    reauth cannot fix stale own reports of an offline device anyway, and the device
+    is demonstrably locatable this cycle. Reverting the ``not _foreign_report_success``
+    guard makes this test raise ``OwnReportIdentityMismatchError`` (mutation proof).
+    """
+
+    base_now = 1_700_000_750.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        return _valid_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-stale",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    _add_report(
+        update,
+        public_key_random=b"\x20\x21\x22\x23",
+        encrypted_location=b"foreign-ok",
+        is_own_report=False,
+        base_now=base_now,
+    )
+
+    # Must NOT raise: the successful network report is a valid fix to preserve.
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    # The good crowdsourced position survived instead of being discarded by the raise.
+    assert decrypt_locations.any_real_location_record(result)
+
+
 async def test_foreign_failures_with_own_success_do_not_escalate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

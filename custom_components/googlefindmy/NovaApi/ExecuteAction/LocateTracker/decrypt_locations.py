@@ -1559,6 +1559,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     _own_encrypted_report_count = 0  # Own (Owner-key) reports attempted
     _own_auth_failures = 0  # Own-report MAC / InvalidTag failures
     _own_report_success = False  # At least one own report authenticated OK
+    # A foreign/crowdsourced (network) report that decrypts is positive proof that
+    # THIS device produced a usable coordinate this cycle. It must suppress the
+    # own-report mismatch raise below so the good network position is not discarded
+    # (an offline phone located via the FMDN network still yields foreign reports).
+    _foreign_report_success = False  # At least one foreign/network report decrypted OK
 
     # FIX #155: Prepare all identity key candidates for multi-candidate retry.
     # async_retrieve_identity_key can return multiple candidates (MCU bit-flip
@@ -1696,6 +1701,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 )
                 continue
 
+            if public_key_random != b"":
+                # A foreign/crowdsourced report authenticated and produced a real
+                # coordinate: the device is locatable this cycle via the FMDN
+                # network even if its own reports are stale.
+                _foreign_report_success = True
             wrapped.append(
                 WrappedLocation(
                     decrypted_location=decrypted_location,
@@ -1810,14 +1820,20 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
     # escalate). Raise the dedicated OwnReportIdentityMismatchError so the existing
     # escalation machinery (coordinator poll/locate handlers and the FCM push
     # handler, all gated by per-cycle counting + cooldown) surfaces a reauth repair
-    # instead of silently returning empty every cycle -- UNLESS a sibling device
-    # decrypts in the same poll cycle, which proves the account keys are healthy
-    # and lets the coordinator downgrade this device-local staleness to a warning
-    # (a fresh secrets.json cannot fix an offline/re-paired device anyway).
+    # instead of silently returning empty every cycle -- UNLESS either (a) a sibling
+    # device decrypts in the same poll cycle, which proves the account keys are
+    # healthy, or (b) THIS device already produced a usable foreign/crowdsourced
+    # (network) coordinate in this very call. In case (b) the device is locatable
+    # via the FMDN network right now, so raising would discard that good position
+    # for no benefit -- a fresh secrets.json cannot fix stale own reports of an
+    # offline/re-paired device anyway, and the cache invalidation above still forces
+    # own-key re-derivation on the next poll. Suppressing the raise lets the good
+    # `wrapped` network position flow through the normal return path below.
     if (
         _own_encrypted_report_count > 0
         and _own_auth_failures >= _own_encrypted_report_count
         and not _own_report_success
+        and not _foreign_report_success
     ):
         raise OwnReportIdentityMismatchError(
             "All own-report decryptions failed; the cached identity key no "
