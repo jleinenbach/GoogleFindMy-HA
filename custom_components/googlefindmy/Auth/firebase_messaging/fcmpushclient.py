@@ -306,6 +306,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         self.last_message_time: float = 0.0
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
+        # Monotonic timestamp of this client's STARTED transition (set in
+        # ``_handle_message`` on a successful login, alongside ``persistent_ids``).
+        # Consumers measure "session age since STARTED" from this instead of the
+        # supervisor's pre-start timestamp, which is recorded before ``start()``
+        # and can trail the actual STARTED transition by the connection budget
+        # (~15-20s). ``None`` until the client first reaches STARTED.
+        self._started_monotonic: float | None = None
         self.tasks: list[asyncio.Task[None]] = []
         # Set by ``_listen`` when stored FCM key material is found to be
         # corrupt/undecodable. The supervisor reads this after the listener
@@ -396,7 +403,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
     # protobuf varint32 helpers
     async def _read_varint32(self) -> int:
         reader = self.reader
-        assert reader is not None, "StreamReader is not initialized"
+        if reader is None:
+            # Same class as the ``_send_msg`` writer guard: a read on a
+            # torn-down stream is a normal connection life-cycle event, not an
+            # invariant violation. Surface it as a ConnectionError the listener
+            # already handles gracefully rather than an "Unknown error" trace.
+            raise ConnectionError("StreamReader is not initialized")
         res = 0
         shift = 0
         while True:
@@ -434,13 +446,26 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         self._log_verbose("Sending packet to server: %s", self._msg_str(msg))
         buf = FcmPushClient._make_packet(msg, self.first_message)
         writer = self.writer
-        assert writer is not None, "StreamWriter is not initialized"
+        if writer is None:
+            # A send on a torn-down stream is a normal connection life-cycle
+            # event, not a programming-invariant violation: e.g. an in-flight
+            # heartbeat ack racing a concurrent stop()/teardown that already
+            # nulled ``self.writer`` in ``_do_writer_close``. Raise a
+            # ConnectionError so the listener's connection-error handling stops
+            # the worker cleanly, instead of an ``assert`` whose AssertionError
+            # falls through to the generic arm and surfaces as an alarming
+            # "Unknown error in listener" traceback for a benign shutdown.
+            raise ConnectionError("StreamWriter is not initialized")
         writer.write(buf)
         await writer.drain()
 
     async def _receive_msg(self) -> MessageProto | None:
         reader = self.reader
-        assert reader is not None, "StreamReader is not initialized"
+        if reader is None:
+            # Same class as the ``_send_msg`` writer guard (see there): a torn-
+            # down stream is a normal life-cycle event; raise ConnectionError so
+            # the listener stops cleanly instead of logging an "Unknown error".
+            raise ConnectionError("StreamReader is not initialized")
 
         if self.first_message:
             r = await reader.readexactly(2)
@@ -811,6 +836,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             else:
                 self.logger.info("Successfully logged in to MCS endpoint")
                 self._reset_error_count(ErrorType.LOGIN)
+                # Stamp the STARTED-transition time *before* publishing the
+                # STARTED state so any observer that sees STARTED also sees the
+                # timestamp (single authoritative transition point, race-free).
+                self._started_monotonic = time.monotonic()
                 self.run_state = FcmPushClientRunState.STARTED
                 self.persistent_ids = []
                 # Refresh activity timestamp

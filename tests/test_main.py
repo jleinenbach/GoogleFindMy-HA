@@ -7,6 +7,8 @@ it simply imports ``list_devices`` from ``nbe_list_devices`` and calls it.
 
 from __future__ import annotations
 
+import argparse
+import logging
 import subprocess
 import sys
 from unittest import mock
@@ -106,6 +108,9 @@ class TestDunderMain:
         )
         assert "--reauth" in result.stdout, (
             f"--reauth missing from --help output:\n{result.stdout}"
+        )
+        assert "--debug" in result.stdout, (
+            f"--debug missing from --help output:\n{result.stdout}"
         )
 
     def test_dunder_main_accepts_entry_flag(self) -> None:
@@ -291,6 +296,117 @@ class TestResolveEffectiveEntryId:
         from custom_components.googlefindmy.main import _resolve_effective_entry_id
 
         assert _resolve_effective_entry_id("", "env_value") == ""
+
+
+class _TrackingSession:
+    """Fake ``aiohttp.ClientSession`` context manager that records closure.
+
+    ``__aexit__`` runs for ``BaseException`` (``SystemExit``) too, so a ``closed``
+    flag set to ``True`` after a vault ``sys.exit`` proves the session was not
+    leaked.  A list passed at construction time collects every instance so the
+    test can inspect the one the function created.
+    """
+
+    def __init__(
+        self, sink: list[_TrackingSession], *args: object, **kwargs: object
+    ) -> None:
+        self.closed = False
+        sink.append(self)
+
+    async def __aenter__(self) -> _TrackingSession:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        self.closed = True
+        return False  # do not suppress the propagating exception
+
+
+class TestRunCliBootstrapSessionLifecycle:
+    """`_run_cli_bootstrap` closes its aiohttp session on every exit path.
+
+    The session is opened with ``async with`` so ``__aexit__`` reaps it even when
+    ``_ensure_vault_keys`` raises ``SystemExit`` on a fatal shared-key failure.
+    A leaked session was the source of the 'Unclosed client session' / WinError-6
+    teardown noise.
+    """
+
+    @pytest.mark.asyncio
+    async def test_session_closed_on_vault_sys_exit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A ``sys.exit`` from the eager vault step still closes the session."""
+        import aiohttp
+
+        from custom_components.googlefindmy import main as cli_main
+
+        created: list[_TrackingSession] = []
+        monkeypatch.setattr(
+            aiohttp,
+            "ClientSession",
+            lambda *a, **k: _TrackingSession(created, *a, **k),
+        )
+        monkeypatch.setattr(aiohttp, "TCPConnector", lambda **k: object())
+
+        async def _ok(_cache: object) -> None:
+            return None
+
+        async def _vault_exit(_cache: object) -> None:
+            raise SystemExit(1)
+
+        monkeypatch.setattr(cli_main, "_ensure_aas_token", _ok)
+        monkeypatch.setattr(cli_main, "_ensure_vault_keys", _vault_exit)
+
+        with pytest.raises(SystemExit):
+            await cli_main._run_cli_bootstrap(object(), None)
+
+        assert created, "the function should have opened exactly one session"
+        assert created[0].closed is True
+
+    @pytest.mark.asyncio
+    async def test_session_and_fcm_closed_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """On the happy path the session closes and the FCM receiver is stopped."""
+        import aiohttp
+
+        from custom_components.googlefindmy import main as cli_main
+        from custom_components.googlefindmy.NovaApi.ListDevices import (
+            nbe_list_devices as nbe,
+        )
+
+        created: list[_TrackingSession] = []
+        monkeypatch.setattr(
+            aiohttp,
+            "ClientSession",
+            lambda *a, **k: _TrackingSession(created, *a, **k),
+        )
+        monkeypatch.setattr(aiohttp, "TCPConnector", lambda **k: object())
+
+        stopped: list[bool] = []
+
+        class _Fcm:
+            async def async_stop(self) -> None:
+                stopped.append(True)
+
+        async def _ok(_cache: object) -> None:
+            return None
+
+        async def _fcm(_cache: object) -> _Fcm:
+            return _Fcm()
+
+        async def _cli(*, entry_id: str | None, session: object) -> None:
+            return None
+
+        monkeypatch.setattr(cli_main, "_ensure_aas_token", _ok)
+        monkeypatch.setattr(cli_main, "_ensure_vault_keys", _ok)
+        monkeypatch.setattr(cli_main, "_clear_stale_adm_token", _ok)
+        monkeypatch.setattr(cli_main, "_setup_fcm_receiver", _fcm)
+        monkeypatch.setattr(nbe, "_async_cli_main", _cli)
+
+        await cli_main._run_cli_bootstrap(object(), "entry_x")
+
+        assert created and created[0].closed is True
+        assert stopped == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -688,10 +804,13 @@ class TestVaultKeysCompleteness:
         assert cache.data["owner_key"] == "owner-hex"
 
     @pytest.mark.asyncio
-    async def test_owner_key_failure_keeps_tokens(
+    async def test_owner_key_failure_is_non_fatal(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """An owner-key fetch failure exits cleanly and deletes no tokens."""
+        """An owner-key fetch failure is non-fatal: the run continues without a
+        ``SystemExit``, the shared key obtained beforehand survives, and the
+        durable tokens are left untouched (the owner key is re-derived lazily
+        at runtime, so secrets.json stays usable)."""
         from custom_components.googlefindmy import main as cli_main
 
         cache = _AsyncDictCache(
@@ -707,14 +826,42 @@ class TestVaultKeysCompleteness:
         monkeypatch.setattr(cli_main, "_ensure_shared_key", _set_shared)
         monkeypatch.setattr(cli_main, "_ensure_owner_key", _owner_boom)
 
-        with pytest.raises(SystemExit) as excinfo:
-            await cli_main._ensure_vault_keys(cache)
+        # No SystemExit: the owner-key boundary warns and continues.
+        await cli_main._ensure_vault_keys(cache)
 
-        assert excinfo.value.code == 1
         assert cache.data["oauth_token"] == "oauth"
         assert cache.data["aas_token"] == "aas"
-        # The shared key obtained before the failure also survives.
+        # The shared key obtained before the owner-key failure survives.
         assert cache.data["shared_key"] == "shared-hex"
+
+    @pytest.mark.asyncio
+    async def test_owner_key_failure_warns_with_exception_type(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The non-fatal owner-key note names the concrete exception type and
+        states that secrets.json is still usable (so the user is not misled into
+        a pointless re-login)."""
+        from custom_components.googlefindmy import main as cli_main
+
+        cache = _AsyncDictCache({"username": "u@example.com"})
+
+        async def _set_shared(_cache):  # type: ignore[no-untyped-def]
+            await _cache.set("shared_key", "shared-hex")
+
+        async def _owner_boom(_cache):  # type: ignore[no-untyped-def]
+            raise RuntimeError("SPOT failure")
+
+        monkeypatch.setattr(cli_main, "_ensure_shared_key", _set_shared)
+        monkeypatch.setattr(cli_main, "_ensure_owner_key", _owner_boom)
+
+        await cli_main._ensure_vault_keys(cache)
+
+        err = capsys.readouterr().err
+        assert "RuntimeError" in err
+        assert "non-fatal" in err
+        assert "secrets.json" in err
+        # The fatal shared-key wording must NOT appear on the owner-key path.
+        assert "vault key retrieval failed" not in err
 
 
 class TestPasteRoundTrip:
@@ -757,3 +904,161 @@ class TestPasteRoundTrip:
         assert cache.saved[f"shared_key_{username}"] == "ddeeff"
         # The top-level field itself is preserved verbatim.
         assert cache.saved["owner_key"] == owner_hex
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point: parser surface, logging configuration, and call order
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCliParser:
+    """_build_cli_parser() exposes every documented flag."""
+
+    def test_help_lists_all_flags(self) -> None:
+        from custom_components.googlefindmy import main as cli_main
+
+        help_text = cli_main._build_cli_parser().format_help()
+        assert "--reauth" in help_text
+        assert "--entry" in help_text
+        assert "--debug" in help_text
+
+    def test_debug_defaults_to_false(self) -> None:
+        from custom_components.googlefindmy import main as cli_main
+
+        args = cli_main._build_cli_parser().parse_args([])
+        assert args.debug is False
+
+    def test_debug_flag_parses_true(self) -> None:
+        from custom_components.googlefindmy import main as cli_main
+
+        args = cli_main._build_cli_parser().parse_args(["--debug"])
+        assert args.debug is True
+
+
+class TestConfigureCliLogging:
+    """_configure_cli_logging() maps flag/env onto the basicConfig level."""
+
+    @staticmethod
+    def _captured_level(
+        monkeypatch: pytest.MonkeyPatch, *, debug_flag: bool, env: dict[str, str]
+    ) -> int:
+        from custom_components.googlefindmy import main as cli_main
+
+        captured: dict[str, object] = {}
+
+        def fake_basic_config(**kwargs: object) -> None:
+            # basicConfig is a no-op once pytest installed root handlers, so we
+            # assert on the requested level instead of the effective root level.
+            captured.update(kwargs)
+
+        monkeypatch.setattr(logging, "basicConfig", fake_basic_config)
+        cli_main._configure_cli_logging(debug_flag=debug_flag, env=env)
+        level = captured["level"]
+        assert isinstance(level, int)
+        return level
+
+    def test_flag_enables_debug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            self._captured_level(monkeypatch, debug_flag=True, env={}) == logging.DEBUG
+        )
+
+    def test_env_truthy_enables_debug(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            self._captured_level(
+                monkeypatch, debug_flag=False, env={"GOOGLEFINDMY_DEBUG": "1"}
+            )
+            == logging.DEBUG
+        )
+
+    def test_env_falsy_stays_at_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # "0" must be treated as disabled, not merely "present" (mutation guard).
+        assert (
+            self._captured_level(
+                monkeypatch, debug_flag=False, env={"GOOGLEFINDMY_DEBUG": "0"}
+            )
+            == logging.WARNING
+        )
+
+    def test_default_is_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert (
+            self._captured_level(monkeypatch, debug_flag=False, env={})
+            == logging.WARNING
+        )
+
+
+class TestCliMainCallOrder:
+    """_main() configures logging before authentication and bootstrap."""
+
+    def _run_main(self, monkeypatch: pytest.MonkeyPatch, *, reauth: bool) -> mock.Mock:
+        import asyncio
+
+        from custom_components.googlefindmy import main as cli_main
+
+        manager = mock.Mock()
+        namespace = argparse.Namespace(debug=True, reauth=reauth, entry=None)
+        fake_parser = mock.Mock()
+        fake_parser.parse_args.return_value = namespace
+
+        monkeypatch.setattr(cli_main, "_build_cli_parser", lambda: fake_parser)
+        monkeypatch.setattr(cli_main, "_configure_cli_logging", manager.configure)
+        monkeypatch.setattr(cli_main, "_clear_stale_tokens_for_reauth", manager.clear)
+        monkeypatch.setattr(cli_main, "_ensure_authenticated", manager.auth)
+        monkeypatch.setattr(
+            cli_main, "_resolve_effective_entry_id", lambda *a: "entry-x"
+        )
+        monkeypatch.setattr(cli_main, "_register_file_cache", lambda entry: object())
+        # Mock the coroutine factory too so no un-awaited coroutine is created
+        # (asyncio.run is mocked, so a real coroutine would leak a warning).
+        monkeypatch.setattr(cli_main, "_run_cli_bootstrap", manager.bootstrap)
+        monkeypatch.setattr(asyncio, "run", manager.run)
+
+        cli_main._main([])
+        return manager
+
+    def test_logging_configured_before_auth_and_bootstrap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = self._run_main(monkeypatch, reauth=False)
+        call_names = [call[0] for call in manager.mock_calls]
+
+        assert "configure" in call_names, call_names
+        assert call_names.index("configure") < call_names.index("auth")
+        assert call_names.index("auth") < call_names.index("run")
+        # reauth was False, so the stale-token clear must NOT run.
+        assert "clear" not in call_names
+
+    def test_logging_receives_debug_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._run_main(monkeypatch, reauth=False)
+        manager.configure.assert_called_once_with(debug_flag=True, env=mock.ANY)
+
+    def test_reauth_clears_before_auth(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._run_main(monkeypatch, reauth=True)
+        call_names = [call[0] for call in manager.mock_calls]
+        assert call_names.index("clear") < call_names.index("auth")
+
+    def test_keyboard_interrupt_prints_exiting(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A Ctrl-C during the bootstrap is caught and reported, not propagated."""
+        import asyncio
+
+        from custom_components.googlefindmy import main as cli_main
+
+        namespace = argparse.Namespace(debug=False, reauth=False, entry=None)
+        fake_parser = mock.Mock()
+        fake_parser.parse_args.return_value = namespace
+
+        monkeypatch.setattr(cli_main, "_build_cli_parser", lambda: fake_parser)
+        monkeypatch.setattr(cli_main, "_configure_cli_logging", lambda **kwargs: None)
+        monkeypatch.setattr(cli_main, "_ensure_authenticated", lambda: None)
+        monkeypatch.setattr(cli_main, "_resolve_effective_entry_id", lambda *a: "")
+        monkeypatch.setattr(cli_main, "_register_file_cache", lambda entry: object())
+        monkeypatch.setattr(cli_main, "_run_cli_bootstrap", lambda *a: None)
+
+        def _raise(_coro: object) -> None:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(asyncio, "run", _raise)
+
+        cli_main._main([])
+        assert "Exiting." in capsys.readouterr().out

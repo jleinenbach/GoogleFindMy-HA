@@ -279,9 +279,15 @@ async def _async_cli_main(
         entry_id: Optional config entry ID to scope the CLI session.
         session: Optional shared aiohttp session to avoid ephemeral per-request sessions.
     """
-    cache, namespace = _resolve_cli_cache(
-        entry_id or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
-    )
+    # ``entry_id`` is the single source of truth when the caller supplied one.
+    # Use ``is not None`` (not ``or``) so an explicit empty string -- the
+    # documented "use the sole default cache" selector that ``--entry ""`` sets
+    # to defeat ``GOOGLEFINDMY_ENTRY_ID`` -- is honoured verbatim instead of
+    # silently falling through to the env var (which would then look up an
+    # unregistered id and raise "Unknown entry_id"). The env fallback only
+    # applies when the caller passed nothing at all (``None``).
+    hint = entry_id if entry_id is not None else os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+    cache, namespace = _resolve_cli_cache(hint)
 
     print("Loading...")
     result_hex = await async_request_device_list(
@@ -401,7 +407,9 @@ if __name__ == "__main__":
     # for testing or manual device registration.
     try:
         args = _parse_cli_args()
-        entry_hint = args.entry or os.environ.get("GOOGLEFINDMY_ENTRY_ID")
-        asyncio.run(_async_cli_main(entry_hint))
+        # Forward the raw --entry value (None when unset). _async_cli_main is
+        # the single resolver: it applies the GOOGLEFINDMY_ENTRY_ID fallback
+        # only for None, so an explicit --entry "" is honoured here too.
+        asyncio.run(_async_cli_main(args.entry))
     except KeyboardInterrupt:
         print("\nExiting.")
