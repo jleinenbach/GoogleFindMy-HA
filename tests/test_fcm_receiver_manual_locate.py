@@ -325,10 +325,19 @@ class _ReconnectPc:
     """Push client double exposing run_state, persistent_ids and async stop()."""
 
     def __init__(
-        self, run_state: object, persistent_ids: list[str] | None = None
+        self,
+        run_state: object,
+        persistent_ids: list[str] | None = None,
+        started_monotonic: float | None = None,
     ) -> None:
         self.run_state = run_state
         self.persistent_ids = list(persistent_ids or [])
+        # STARTED-transition anchor consumed by ``_session_age_s``. Defaults to
+        # "just reached STARTED" (young session) so the common case is terse;
+        # the established-session test passes an old timestamp explicitly.
+        self._started_monotonic = (
+            time.monotonic() if started_monotonic is None else started_monotonic
+        )
         self.stopped = False
 
     async def stop(self) -> None:
@@ -356,11 +365,11 @@ async def test_manual_locate_forces_reconnect_for_fresh_nondelivering_session(
     cache = DummyCache()
     _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
 
+    # Young session: the double defaults to a just-now STARTED stamp, so the
+    # per-client age gate (``_session_age_s``) is open (age ~0 < _CHURN_WINDOW_S).
     stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
     fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
     receiver.pcs[entry_id] = stale  # type: ignore[assignment]
-    # Young session (age ~0 < _CHURN_WINDOW_S) → age gate open.
-    receiver.last_start_monotonic = time.monotonic()
 
     nudged: list[str | None] = []
     monkeypatch.setattr(
@@ -400,10 +409,13 @@ async def test_manual_locate_no_reconnect_for_established_session(
     cache = DummyCache()
     _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
 
-    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    # Established session: STARTED well beyond _CHURN_WINDOW_S (per-client age).
+    stale = _ReconnectPc(
+        run_state=_RunState.STARTED,
+        persistent_ids=[],
+        started_monotonic=time.monotonic() - 100.0,
+    )
     receiver.pcs[entry_id] = stale  # type: ignore[assignment]
-    # Established session: age well beyond _CHURN_WINDOW_S.
-    receiver.last_start_monotonic = time.monotonic() - 100.0
 
     nudged: list[str | None] = []
     monkeypatch.setattr(
@@ -440,9 +452,9 @@ async def test_manual_locate_no_reconnect_when_already_delivered(
     cache = DummyCache()
     _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
 
+    # Young (default STARTED stamp) but already delivered (persistent_ids set).
     stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=["pid-1"])
     receiver.pcs[entry_id] = stale  # type: ignore[assignment]
-    receiver.last_start_monotonic = time.monotonic()  # young
 
     nudged: list[str | None] = []
     monkeypatch.setattr(
@@ -473,9 +485,9 @@ async def test_manual_locate_reconnect_fails_closed_when_replacement_never_start
     cache = DummyCache()
     _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
 
+    # Young (default STARTED stamp) and not delivered -> the trigger fires.
     stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
     receiver.pcs[entry_id] = stale  # type: ignore[assignment]
-    receiver.last_start_monotonic = time.monotonic()  # young → trigger fires
 
     monkeypatch.setattr(receiver, "nudge_retry", lambda eid=None: True)
     # No replacement ever appears; the post-reconnect wait exhausts its budget.
@@ -560,3 +572,55 @@ async def test_force_reconnect_excludes_lingering_started_stale(
 
     assert result is None  # stale-but-STARTED must not be taken as the replacement
     assert stale.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_reconnect_for_slow_startup_fresh_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow-startup fresh session: churn age is measured from STARTED, not supervisor start.
+
+    Codex #1150 follow-up: the supervisor records ``last_start_monotonic`` before
+    ``pc.start()``, and the readiness gate allows a fresh MCS connection ~15-20s
+    to reach STARTED.  A session that starts slowly (supervisor start long ago)
+    but has only *just* reached STARTED and delivered nothing is exactly the case
+    the reconnect must heal.  Anchoring the age on the client's own STARTED stamp
+    fires the reconnect here; the old anchor (``last_start_monotonic``, set far in
+    the past) would compute age >= _CHURN_WINDOW_S and wrongly skip it.  Setting a
+    stale ``last_start_monotonic`` proves the decision no longer depends on it.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    # Client only just reached STARTED (young), though the supervisor began the
+    # start long ago (slow connection budget consumed before STARTED).
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+    receiver.last_start_monotonic = time.monotonic() - 100.0  # stale supervisor stamp
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if receiver.pcs[entry_id] is stale:
+            receiver.pcs[entry_id] = fresh  # type: ignore[assignment]
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert stale.stopped is True  # reconnect fired despite the stale supervisor stamp
+    assert nudged == [entry_id]
+    assert receiver.pcs[entry_id] is fresh

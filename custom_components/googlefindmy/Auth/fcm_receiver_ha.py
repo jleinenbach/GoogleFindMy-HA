@@ -3627,27 +3627,36 @@ class FcmReceiverHA:
             waited += _POLL_INTERVAL_S
         return None
 
-    def _session_age_s(self) -> float | None:
-        """Age (seconds) of the most recent FCM session start, or ``None``.
+    def _session_age_s(self, pc: FcmPushClient[Any]) -> float | None:
+        """Age (seconds) since this client's STARTED transition, or ``None``.
 
-        ``last_start_monotonic`` is aggregate across entries (see its definition
-        near the top of this class).  For the single-entry CLI — the target of
-        the first-locate-delivery fix — it is exactly the one entry's session
-        age; under Home Assistant multi-entry it is approximate, which is why the
-        reconnect trigger is additionally gated on per-entry non-delivery (see
-        ``_needs_first_locate_reconnect``).
+        Anchored on the client's own ``_started_monotonic`` — stamped where the
+        library assigns ``run_state = STARTED`` — not the supervisor's
+        ``last_start_monotonic``, which is recorded *before* ``pc.start()`` and
+        before the listener reaches STARTED.  The readiness gate deliberately
+        allows a fresh MCS connection ~15-20s to reach STARTED; measuring the
+        churn window from the supervisor start would let a slow-but-fresh session
+        age past ``_CHURN_WINDOW_S`` before its first STARTED observation and skip
+        the very reconnect this heals (Codex #1150 follow-up).  Being per-client,
+        it is also exact under Home Assistant multi-entry — no aggregate blur.
+
+        Returns ``None`` until the client has reached STARTED at least once; the
+        manual-locate caller only consults this for an already-STARTED client, so
+        ``None`` there means "library without a STARTED stamp" and fails safe (no
+        reconnect).
         """
-        start = self.last_start_monotonic
-        if start <= 0:
+        started: float | None = getattr(pc, "_started_monotonic", None)
+        if started is None:
             return None
-        return max(time.monotonic() - start, 0.0)
+        return max(time.monotonic() - started, 0.0)
 
     def _needs_first_locate_reconnect(self, pc: FcmPushClient[Any]) -> bool:
         """True if a fresh, not-yet-delivering session should reconnect once.
 
         Trigger (T-A + per-entry sharpening): the session is *young*
-        (age < ``_CHURN_WINDOW_S``) **and** this client has not delivered any
-        data message since login.  Delivery is read from the library's
+        (STARTED age < ``_CHURN_WINDOW_S``, measured from this client's own
+        STARTED transition) **and** this client has not delivered any data
+        message since login.  Delivery is read from the library's
         ``persistent_ids`` list, which is reset to ``[]`` on each successful
         login and appended to only for a ``DataMessageStanza`` — so a non-empty
         list is a clean "has delivered" proof.  It deliberately does *not* use
@@ -3656,9 +3665,9 @@ class FcmReceiverHA:
         therefore never separate a broken fresh session (heartbeats, zero data)
         from a healthy one.  A healthy, already-delivering session (e.g. a
         long-running HA entry) is thus never torn down, independent of the
-        aggregate session age.
+        session age.
         """
-        age = self._session_age_s()
+        age = self._session_age_s(pc)
         if age is None or age >= _CHURN_WINDOW_S:
             return False
         delivered = bool(getattr(pc, "persistent_ids", None))
@@ -3677,7 +3686,7 @@ class FcmReceiverHA:
         it.  Part of the first-locate-delivery fix (#1148/#1149 family): STARTED
         is necessary but not sufficient for the first push to arrive.
         """
-        session_age = self._session_age_s()
+        session_age = self._session_age_s(stale_pc)
         _LOGGER.debug(
             "[entry=%s] Fresh FCM session (age=%.1fs) reached STARTED but has not "
             "delivered a data message yet; forcing one reconnect before the first "
