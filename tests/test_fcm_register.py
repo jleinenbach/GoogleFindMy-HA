@@ -16,6 +16,7 @@ from custom_components.googlefindmy.Auth.firebase_messaging.const import (
     GCM_SERVER_KEY_B64,
 )
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
+    FcmCheckinTransientError,
     FcmRegister,
     FcmRegisterConfig,
     FcmRegisterHTTPError,
@@ -819,3 +820,156 @@ async def test_gcm_register_classifier_independent_of_logger_output(
     # Defense is independent of logger output: the silenced logger
     # captured nothing, yet the classifier still surfaced the fatal.
     assert "status=404" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# gcm_check_in transient-vs-permanent taxonomy (FcmCheckinTransientError)
+# --------------------------------------------------------------------------
+
+
+class _RaisingCheckinResponse:
+    """Async CM whose ``__aenter__`` raises a transport error (HTTP never reached)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def __aenter__(self) -> _RaisingCheckinResponse:
+        raise self._exc
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _SequencedCheckinSession:
+    """Session stub yielding transport failures and/or HTTP responses in order.
+
+    Each configured item is either an ``Exception`` (simulating a transport-layer
+    failure such as a DNS timeout, so the endpoint is never reached) or a
+    ``_FakeResponse`` (the server answered at the HTTP layer).
+    """
+
+    def __init__(self, items: list[Exception | _FakeResponse]) -> None:
+        self._items = items
+        self.calls = 0
+
+    def post(self, **_kwargs: Any) -> _RaisingCheckinResponse | _FakeResponse:
+        self.calls += 1
+        if not self._items:
+            raise AssertionError("No more check-in items configured")
+        item = self._items.pop(0)
+        if isinstance(item, Exception):
+            return _RaisingCheckinResponse(item)
+        return item
+
+
+def _checkin_config() -> FcmRegisterConfig:
+    return FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+
+
+async def _fast_sleep(_: float) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_transient_exhaustion_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pure transport exhaustion (endpoint never reached) raises transient, not None."""
+    session = _SequencedCheckinSession([TimeoutError("DNS timeout")] * 8)
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    with pytest.raises(FcmCheckinTransientError):
+        await register.gcm_check_in(1, 2)
+    assert session.calls == 8  # full retry budget consumed
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_authoritative_non_ok_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeated non-OK HTTP responses (server reachable) still return None."""
+    session = _SequencedCheckinSession(
+        [_FakeResponse(500, "err", {"Content-Type": "text/plain"}) for _ in range(8)]
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    result = await register.gcm_check_in(1, 2)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_gcm_check_in_mixed_reached_server_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transport blip followed by non-OK HTTP is authoritative, not transient.
+
+    Guards the ``saw_http_response`` discriminator: once the endpoint answered at
+    the HTTP layer, exhaustion must return ``None`` (defer to the register
+    fallback), even though a transport exception was seen earlier.
+    """
+    session = _SequencedCheckinSession(
+        [TimeoutError("DNS blip"), TimeoutError("DNS blip")]
+        + [_FakeResponse(500, "err", {"Content-Type": "text/plain"}) for _ in range(6)]
+    )
+    register = FcmRegister(_checkin_config(), http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    result = await register.gcm_check_in(1, 2)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_reregister_keeping_identity_preserves_on_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient check-in outage propagates without rotating the device identity."""
+    session = _SequencedCheckinSession([TimeoutError("DNS timeout")] * 8)
+    creds = {"gcm": {"android_id": 1, "security_token": 2}}
+    register = FcmRegister(_checkin_config(), creds, http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    register_called = False
+
+    async def _spy_register() -> Any:
+        nonlocal register_called
+        register_called = True
+        return None
+
+    monkeypatch.setattr(register, "register", _spy_register)
+
+    with pytest.raises(FcmCheckinTransientError):
+        await register.reregister_keeping_identity()
+    assert register_called is False  # no full register() -> identity kept
+    assert register.credentials == creds
+
+
+@pytest.mark.asyncio
+async def test_checkin_or_register_preserves_on_transient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient check-in outage propagates instead of falling through to register()."""
+    session = _SequencedCheckinSession([TimeoutError("DNS timeout")] * 8)
+    creds = {"gcm": {"android_id": 1, "security_token": 2}}
+    register = FcmRegister(_checkin_config(), creds, http_client_session=session)
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    register_called = False
+
+    async def _spy_register() -> Any:
+        nonlocal register_called
+        register_called = True
+        return None
+
+    monkeypatch.setattr(register, "register", _spy_register)
+
+    with pytest.raises(FcmCheckinTransientError):
+        await register.checkin_or_register()
+    assert register_called is False
