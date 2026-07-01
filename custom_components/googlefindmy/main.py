@@ -5,8 +5,8 @@
 """Standalone CLI entry point for GoogleFindMy functionality.
 
 Usage:
-    python -m custom_components.googlefindmy.main [--reauth] [--entry ENTRY_ID]
-    python custom_components/googlefindmy/main.py [--reauth] [--entry ENTRY_ID]
+    python -m custom_components.googlefindmy.main [--reauth] [--entry ENTRY_ID] [--debug]
+    python custom_components/googlefindmy/main.py [--reauth] [--entry ENTRY_ID] [--debug]
 
 Flags:
     --reauth   Force re-authentication by clearing cached tokens and running the
@@ -15,6 +15,10 @@ Flags:
     --entry    Target config entry ID.  Required when secrets.json contains caches
                for multiple HA config entries.  May also be set via the
                ``GOOGLEFINDMY_ENTRY_ID`` environment variable.
+    --debug    Enable verbose DEBUG logging for the bootstrap and FCM flow.  The
+               package configures no logging otherwise, so bootstrap/FCM diagnostics
+               are invisible without this flag.  May also be enabled via the
+               ``GOOGLEFINDMY_DEBUG`` environment variable.
 
 Run as a script, the module always runs the full token-bootstrap pipeline and
 writes ``secrets.json``, regardless of flat vs. repo directory layout.  When a
@@ -24,11 +28,17 @@ governs packaging (virtual package vs. real package), which is the one thing the
 directory name legitimately determines.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import types
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - import-time typing block
+    import argparse
+    from collections.abc import Mapping, Sequence
 
 _this_dir = Path(__file__).resolve().parent
 _standalone = not (
@@ -168,7 +178,7 @@ else:
                 fullname: str,
                 path: object,
                 target: object = None,
-            ) -> "importlib.machinery.ModuleSpec | None":
+            ) -> importlib.machinery.ModuleSpec | None:
                 if (
                     fullname == "homeassistant" or fullname.startswith("homeassistant.")
                 ) and fullname not in sys.modules:
@@ -839,17 +849,21 @@ async def _run_cli_bootstrap(file_cache: object, entry_id: str | None) -> None:
                 await fcm.async_stop()
 
 
-if __name__ == "__main__":
-    import argparse  # noqa: PLC0415
-    import asyncio  # noqa: PLC0415
+def _build_cli_parser() -> argparse.ArgumentParser:
+    """Build the standalone CLI argument parser.
 
-    _cli_parser = argparse.ArgumentParser(description="Google Find My Device CLI")
-    _cli_parser.add_argument(
+    Extracted from the ``__main__`` block so the flag surface (and therefore the
+    ``--help`` output) is unit-testable without spawning a subprocess.
+    """
+    import argparse  # noqa: PLC0415
+
+    parser = argparse.ArgumentParser(description="Google Find My Device CLI")
+    parser.add_argument(
         "--reauth",
         action="store_true",
         help="Force re-authentication by clearing cached tokens and running Chrome login",
     )
-    _cli_parser.add_argument(
+    parser.add_argument(
         "--entry",
         default=None,
         help=(
@@ -857,7 +871,53 @@ if __name__ == "__main__":
             "Required when secrets.json contains caches for multiple HA config entries."
         ),
     )
-    _cli_args = _cli_parser.parse_args()
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Enable verbose DEBUG logging for the bootstrap and FCM flow. "
+            "Also enabled via the GOOGLEFINDMY_DEBUG environment variable."
+        ),
+    )
+    return parser
+
+
+def _configure_cli_logging(*, debug_flag: bool, env: Mapping[str, str]) -> None:
+    """Configure root logging for the standalone CLI.
+
+    The package never calls ``logging.basicConfig``; without it the root logger's
+    last-resort handler discards everything below WARNING, so every
+    ``_LOGGER.debug``/``info`` in the bootstrap and FCM path is invisible and the
+    first-run locate timeout cannot be diagnosed from a log.  DEBUG is enabled
+    when ``--debug`` is passed or ``GOOGLEFINDMY_DEBUG`` is truthy; otherwise the
+    default keeps normal runs at WARNING so the critical readiness warning still
+    surfaces without extra noise.
+
+    Must be called before the bootstrap so the auth and FCM steps emit under the
+    configured level.
+    """
+    import logging  # noqa: PLC0415
+
+    env_value = env.get("GOOGLEFINDMY_DEBUG", "").strip().lower()
+    debug_enabled = debug_flag or env_value not in ("", "0", "false", "no", "off")
+    logging.basicConfig(
+        level=logging.DEBUG if debug_enabled else logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def _main(argv: Sequence[str] | None = None) -> None:
+    """Standalone CLI entry point.
+
+    Extracted from the ``__main__`` guard so flag parsing, logging setup, and the
+    bootstrap call order are unit-testable (the guard itself cannot be imported).
+    Logging is configured *before* ``_ensure_authenticated`` so the Chrome/FCM
+    diagnostics are captured from the very first step.
+    """
+    import asyncio  # noqa: PLC0415
+
+    args = _build_cli_parser().parse_args(argv)
+    _configure_cli_logging(debug_flag=args.debug, env=os.environ)
 
     # Always run the token-bootstrap pipeline, regardless of flat vs. repo
     # directory layout.  When a usable cache already exists, _ensure_authenticated
@@ -866,22 +926,26 @@ if __name__ == "__main__":
     # then a cache-signal check that was always empty for a fresh shell start),
     # both of which could dead-end a repo-layout start in an opaque
     # MissingTokenCacheError instead of bootstrapping.
-    if _cli_args.reauth:
+    if args.reauth:
         _clear_stale_tokens_for_reauth()
     _ensure_authenticated()
     # Resolve the effective entry id once (CLI > env > "") and use the SAME
     # value for both registration and hand-off, so the registry key and the
-    # lookup hint can never diverge.  Forwarding the raw _cli_args.entry instead
+    # lookup hint can never diverge.  Forwarding the raw args.entry instead
     # would re-trigger _async_cli_main's env fallback for an explicit
     # --entry "" (empty string is falsy), making _resolve_cli_cache reject the
     # env value as "Unknown entry_id" although the cache was registered under
     # "".  Codex reviews on 694f6883aa and 17669c7ff2.
-    _effective_entry_id = _resolve_effective_entry_id(
-        _cli_args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
+    effective_entry_id = _resolve_effective_entry_id(
+        args.entry, os.environ.get("GOOGLEFINDMY_ENTRY_ID")
     )
-    _file_cache = _register_file_cache(_effective_entry_id)
+    file_cache = _register_file_cache(effective_entry_id)
 
     try:
-        asyncio.run(_run_cli_bootstrap(_file_cache, _effective_entry_id))
+        asyncio.run(_run_cli_bootstrap(file_cache, effective_entry_id))
     except KeyboardInterrupt:
         print("\nExiting.")
+
+
+if __name__ == "__main__":
+    _main()
