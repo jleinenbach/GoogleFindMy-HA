@@ -94,6 +94,23 @@ class FcmRegisterHTTPError(RuntimeError):
 _FATAL_HTTP_STATUSES = (HTTPStatus.UNAUTHORIZED, HTTPStatus.NOT_FOUND)
 
 
+class FcmCheckinTransientError(RuntimeError):
+    """Raised when GCM check-in exhausts its retry budget on pure network errors.
+
+    Distinguishes a *transient* transport failure (DNS timeout, connection
+    reset — the endpoint was never reached at the HTTP layer) from an
+    authoritative empty/non-OK response. Returning ``None`` for both cases made
+    callers treat a temporary network outage as an invalid identity and rotate a
+    working android_id/key material via a full ``register()``. By raising a
+    distinct ``RuntimeError`` subclass instead, callers preserve the device
+    identity and let the supervisor retry later, mirroring the
+    ``FcmRegisterHTTPError`` split for fatal HTTP statuses. Inherits from
+    ``RuntimeError`` so the supervisor's existing transient/retry classification
+    (``isinstance(err, (TimeoutError, RuntimeError))``) applies without a
+    dedicated branch.
+    """
+
+
 _SHA1_HEX_LENGTH = 40
 
 
@@ -298,6 +315,11 @@ class FcmRegister:
 
         max_attempts = 8
         content: bytes | None = None
+        # Distinguish a pure transport-layer exhaustion (the endpoint was never
+        # reached at the HTTP layer) from an authoritative empty/non-OK
+        # response, so callers can preserve identity on transient outages.
+        saw_http_response = False
+        last_transient_exc: Exception | None = None
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -308,6 +330,14 @@ class FcmRegister:
                     timeout=self.CLIENT_TIMEOUT,
                 ) as resp:
                     status = resp.status
+                    # Reached the endpoint at the HTTP layer: any later
+                    # exhaustion is authoritative, not a transport outage, so we
+                    # defer to the register() fallback rather than raising a
+                    # transient. Deliberately conservative: a mid-body read
+                    # failure after a 200 status line is also treated as
+                    # authoritative (errs toward re-register, never toward
+                    # blocking a genuinely revoked identity).
+                    saw_http_response = True
                     if status == HTTPStatus.OK:
                         content = await resp.read()
                         break
@@ -337,6 +367,7 @@ class FcmRegister:
                 # into the generic transient-retry loop below.
                 raise
             except Exception as e:
+                last_transient_exc = e
                 _logger.warning(
                     "GCM check-in error (attempt %d/%d) at url=%s: %s",
                     attempt,
@@ -352,6 +383,21 @@ class FcmRegister:
                 await asyncio.sleep(delay)
 
         if not content:
+            if not saw_http_response and last_transient_exc is not None:
+                # Pure transport failure (e.g. DNS timeout): the endpoint was
+                # never reached, so the existing identity is almost certainly
+                # still valid. Surface as transient so callers keep it instead
+                # of rotating android_id/keys via a full register().
+                _logger.error(
+                    "Unable to check-in to GCM after %d attempts (url=%s): "
+                    "transient network failure, preserving identity",
+                    max_attempts,
+                    GCM_CHECKIN_URL,
+                )
+                raise FcmCheckinTransientError(
+                    "GCM check-in exhausted after "
+                    f"{max_attempts} transient network failures"
+                ) from last_transient_exc
             _logger.error(
                 "Unable to check-in to GCM after %d attempts (url=%s)",
                 max_attempts,
@@ -888,6 +934,12 @@ class FcmRegister:
                 )
                 if gcm_response:
                     return self.credentials
+            except FcmCheckinTransientError:
+                # Transport-level check-in outage (e.g. DNS timeout): the
+                # existing identity is almost certainly still valid. Propagate
+                # so the supervisor retries later instead of discarding a
+                # working android_id/keys via a full register().
+                raise
             except Exception as e:
                 _logger.warning(
                     "Existing credentials check-in failed; re-registering",
@@ -937,6 +989,11 @@ class FcmRegister:
         # Step 1: Check-in with existing device identity
         try:
             gcm_response = await self.gcm_check_in(android_id, security_token)
+        except FcmCheckinTransientError:
+            # Transport-level check-in outage (e.g. DNS timeout): keep the
+            # existing GCM identity and let the supervisor retry later, rather
+            # than rotating a working android_id/keys via a full register().
+            raise
         except Exception as e:
             _logger.debug("Check-in exception detail", exc_info=e)
             return await self._fallback_full_register(
