@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -311,3 +312,251 @@ async def test_manual_locate_reads_replacement_client_during_poll(
 
     assert token == "token-123"
     assert receiver.location_update_callbacks[device_id] is manual_callback
+
+
+# ---------------------------------------------------------------------------
+# First-locate delivery reconnect (AP1, T-A): a fresh session can reach STARTED
+# yet not deliver the first push until it reconnects.  The trigger fires only
+# for a *young* session that has *not yet delivered* a data message.
+# ---------------------------------------------------------------------------
+
+
+class _ReconnectPc:
+    """Push client double exposing run_state, persistent_ids and async stop()."""
+
+    def __init__(
+        self, run_state: object, persistent_ids: list[str] | None = None
+    ) -> None:
+        self.run_state = run_state
+        self.persistent_ids = list(persistent_ids or [])
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stopped = True
+        self.run_state = "STOPPED"
+
+
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_forces_reconnect_for_fresh_nondelivering_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Young + no delivery: force one reconnect and serve from the replacement.
+
+    Regression for the deterministic first-locate timeout after a fresh FCM
+    registration: the first client reaches STARTED but never receives the push,
+    and only a reconnect (a session that subscribes after registration) heals it.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+    # Young session (age ~0 < _CHURN_WINDOW_S) → age gate open.
+    receiver.last_start_monotonic = time.monotonic()
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    # The forced-reconnect wait swaps in the replacement on its first sleep,
+    # mirroring the supervisor rebuild.  The first readiness wait does not sleep
+    # (stale is already STARTED).
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if receiver.pcs[entry_id] is stale:
+            receiver.pcs[entry_id] = fresh  # type: ignore[assignment]
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert stale.stopped is True  # the reconnect actually happened
+    assert nudged == [entry_id]  # supervisor nudged to rebuild
+    assert receiver.pcs[entry_id] is fresh  # replacement client is live
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_no_reconnect_for_established_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old session (age >= window): no reconnect, token returned unchanged."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+    # Established session: age well beyond _CHURN_WINDOW_S.
+    receiver.last_start_monotonic = time.monotonic() - 100.0
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert stale.stopped is False
+    assert nudged == []
+    assert receiver.pcs[entry_id] is stale
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_no_reconnect_when_already_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Young but already-delivering session: the sharpening suppresses reconnect.
+
+    Protects a healthy HA multi-entry session that the aggregate age anchor might
+    otherwise mis-classify as young: a non-empty ``persistent_ids`` proves the
+    session already delivered a data message, so no needless reconnect fires.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=["pid-1"])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+    receiver.last_start_monotonic = time.monotonic()  # young
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    assert stale.stopped is False
+    assert nudged == []
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_reconnect_fails_closed_when_replacement_never_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forced reconnect whose replacement never reaches STARTED fails closed."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+    receiver.last_start_monotonic = time.monotonic()  # young → trigger fires
+
+    monkeypatch.setattr(receiver, "nudge_retry", lambda eid=None: True)
+    # No replacement ever appears; the post-reconnect wait exhausts its budget.
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token is None
+    assert device_id not in receiver.location_update_callbacks
+    assert stale.stopped is True  # reconnect was attempted before failing closed
+
+
+@pytest.mark.asyncio
+async def test_force_first_locate_reconnect_swallows_stop_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop() error on the dying client is swallowed; the rebuild still runs."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    class _BoomPc(_ReconnectPc):
+        async def stop(self) -> None:
+            self.stopped = True
+            raise RuntimeError("boom")
+
+    stale = _BoomPc(run_state="STOPPED", persistent_ids=[])
+    fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    async def _swap(_seconds: float) -> None:
+        receiver.pcs[entry_id] = fresh  # type: ignore[assignment]
+
+    monkeypatch.setattr(asyncio, "sleep", _swap)
+
+    result = await receiver._force_first_locate_reconnect(entry_id, stale, 5.0)  # type: ignore[arg-type]
+
+    assert result is fresh
+    assert stale.stopped is True
+    assert nudged == [entry_id]
+
+
+@pytest.mark.asyncio
+async def test_force_reconnect_excludes_lingering_started_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale client still STARTED after a failed stop() is not the replacement.
+
+    Hardens the ``exclude_pc`` guard: if ``stop()`` raised and the stale client
+    lingers in STARTED with no replacement swapped in, the post-reconnect wait
+    must reject the stale instance and let the budget expire (return ``None`` =
+    fail closed), rather than mistake the stale for the fresh client.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
+
+    class _LingeringPc(_ReconnectPc):
+        async def stop(self) -> None:
+            # stop() fails and does NOT transition run_state: it lingers STARTED.
+            self.stopped = True
+            raise RuntimeError("stop failed; client lingers STARTED")
+
+    stale = _LingeringPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    monkeypatch.setattr(receiver, "nudge_retry", lambda eid=None: True)
+    # No replacement is ever swapped in; the stale lingers in STARTED.
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+
+    result = await receiver._force_first_locate_reconnect(entry_id, stale, 1.0)  # type: ignore[arg-type]
+
+    assert result is None  # stale-but-STARTED must not be taken as the replacement
+    assert stale.stopped is True
