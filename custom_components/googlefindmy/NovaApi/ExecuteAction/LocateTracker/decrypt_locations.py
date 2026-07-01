@@ -1802,45 +1802,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 _auth_failures,
             )
 
-    # Diff-Review #1: When the device HAS its own encrypted reports and EVERY
-    # one of them failed authentication (with not a single own-report success),
-    # the cached identity key no longer matches THIS device's server reports --
-    # distinct from the masked retrieve path above and from foreign/crowdsourced
-    # failures (which legitimately fail with other accounts' keys and must NOT
-    # escalate). Raise the dedicated OwnReportIdentityMismatchError so the existing
-    # escalation machinery (coordinator poll/locate handlers and the FCM push
-    # handler, all gated by per-cycle counting + cooldown) surfaces a reauth repair
-    # instead of silently returning empty every cycle -- UNLESS a sibling device
-    # decrypts in the same poll cycle, which proves the account keys are healthy
-    # and lets the coordinator downgrade this device-local staleness to a warning
-    # (a fresh secrets.json cannot fix an offline/re-paired device anyway).
-    if (
-        _own_encrypted_report_count > 0
-        and _own_auth_failures >= _own_encrypted_report_count
-        and not _own_report_success
-    ):
-        raise OwnReportIdentityMismatchError(
-            "All own-report decryptions failed; the cached identity key no "
-            "longer matches the server reports."
-        )
-
-    if not wrapped:
-        _LOGGER.info("[DecryptLocations] No locations found.")
-        # FIX: Merge metadata_update into the returned payload even when no locations.
-        # This ensures encrypted_identity_key, secrets_creation_date, owner_key_version,
-        # identity_key, etc. are returned for devices (like phones) that have these
-        # fields but no location reports yet.
-        if metadata or metadata_update:
-            metadata_only: dict[str, Any] = {}
-            if metadata:
-                metadata_only.update(metadata)
-            if metadata_update:
-                metadata_only.update(metadata_update)
-            metadata_only["metadata_only"] = True
-            return [metadata_only]
-        return []
-
-    # Convert to structured payloads for HA entities (with fail-fast validation)
+    # Convert to structured payloads for HA entities (with fail-fast validation).
+    # Built BEFORE the own-report-mismatch escalation decision below so that
+    # decision can use the SAME validated real-coordinate predicate the callers use
+    # (`is_real_location_record`), instead of a premature "decrypted to bytes" flag.
     structured: list[dict[str, Any]] = []
     for loc in wrapped:
         try:
@@ -1980,6 +1945,57 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                 "Failed to convert one WrappedLocation to structured payload: %s",
                 one_exc,
             )
+
+    # Diff-Review #1 / Codex (PR #1153): the device HAS its own encrypted reports
+    # and EVERY one failed authentication (no own-report success), so the cached
+    # identity key no longer matches THIS device's server reports -- distinct from
+    # foreign/crowdsourced failures (which legitimately fail with other accounts'
+    # keys and must NOT escalate). Raise the dedicated OwnReportIdentityMismatchError
+    # so the escalation machinery (coordinator poll/locate handlers and the FCM push
+    # handler, all gated by per-cycle counting + cooldown) surfaces a reauth repair
+    # instead of silently returning empty every cycle -- UNLESS this device already
+    # produced a usable foreign/crowdsourced (network) coordinate in this very call.
+    # That judgement is made HERE, on the VALIDATED `structured` output, using the
+    # exact `is_real_location_record` predicate the callers use to clear the reauth
+    # budget: a foreign report that merely decrypted to bytes but then failed
+    # protobuf parsing / lat-lon validation (or a SEMANTIC network hit with no
+    # coordinate) is NOT a usable fix and must not suppress the escalation. A fresh
+    # secrets.json cannot fix stale own reports of an offline/re-paired device
+    # anyway, and the cache invalidation above still forces own-key re-derivation on
+    # the next poll; when a real network fix exists, suppressing the raise lets that
+    # good position flow through the normal return path below. (A sibling device
+    # decrypting in the same cycle is handled one layer up, in the sibling-gated
+    # coordinator/FCM callers.)
+    if (
+        _own_encrypted_report_count > 0
+        and _own_auth_failures >= _own_encrypted_report_count
+        and not _own_report_success
+    ):
+        has_network_fix = any(
+            not record.get("is_own_report") and is_real_location_record(record)
+            for record in structured
+        )
+        if not has_network_fix:
+            raise OwnReportIdentityMismatchError(
+                "All own-report decryptions failed; the cached identity key no "
+                "longer matches the server reports."
+            )
+
+    if not wrapped:
+        _LOGGER.info("[DecryptLocations] No locations found.")
+        # FIX: Merge metadata_update into the returned payload even when no locations.
+        # This ensures encrypted_identity_key, secrets_creation_date, owner_key_version,
+        # identity_key, etc. are returned for devices (like phones) that have these
+        # fields but no location reports yet.
+        if metadata or metadata_update:
+            metadata_only: dict[str, Any] = {}
+            if metadata:
+                metadata_only.update(metadata)
+            if metadata_update:
+                metadata_only.update(metadata_update)
+            metadata_only["metadata_only"] = True
+            return [metadata_only]
+        return []
 
     return structured
 
