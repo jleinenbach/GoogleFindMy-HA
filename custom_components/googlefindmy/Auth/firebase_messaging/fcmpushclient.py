@@ -306,6 +306,13 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         self.last_message_time: float = 0.0
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
+        # Monotonic timestamp of this client's STARTED transition (set in
+        # ``_handle_message`` on a successful login, alongside ``persistent_ids``).
+        # Consumers measure "session age since STARTED" from this instead of the
+        # supervisor's pre-start timestamp, which is recorded before ``start()``
+        # and can trail the actual STARTED transition by the connection budget
+        # (~15-20s). ``None`` until the client first reaches STARTED.
+        self._started_monotonic: float | None = None
         self.tasks: list[asyncio.Task[None]] = []
         # Set by ``_listen`` when stored FCM key material is found to be
         # corrupt/undecodable. The supervisor reads this after the listener
@@ -829,6 +836,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             else:
                 self.logger.info("Successfully logged in to MCS endpoint")
                 self._reset_error_count(ErrorType.LOGIN)
+                # Stamp the STARTED-transition time *before* publishing the
+                # STARTED state so any observer that sees STARTED also sees the
+                # timestamp (single authoritative transition point, race-free).
+                self._started_monotonic = time.monotonic()
                 self.run_state = FcmPushClientRunState.STARTED
                 self.persistent_ids = []
                 # Refresh activity timestamp

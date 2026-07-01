@@ -276,6 +276,19 @@ _MAX_CONSECUTIVE_SHORT_RUNS = 10
 _SHORT_RUN_THRESHOLD_S = (
     30.0  # strictly < 30s between pc.start() and STOPPED = short run
 )
+# First-locate delivery reconnect (AP1): a brand-new MCS session can reach
+# ``STARTED`` yet never receive the very first locate push (``STARTED`` is
+# necessary but not sufficient for delivery; third of the #1148/#1149 family).
+# Only a full reconnect — a fresh session that subscribes *after* registration
+# completes — heals it.  This window bounds "how young a session still counts as
+# freshly registered / churning" for that one-shot decision.  It is deliberately
+# NOT the activity-health freshness window (``_activity_stale_after_s`` /
+# ``FCM_IDLE_RESET_AFTER_S`` = 90s, idle-reset semantics): it feeds no health
+# snapshot and no coordinator state, so it does not violate the Auth/AGENTS.md
+# "reuse the health helper, do not add parallel health windows" rule (whose
+# rationale is diagnostics/coordinator-state consistency, untouched here).
+_CHURN_WINDOW_S = 15.0
+
 _HTTP_UNAUTHORIZED = 401
 _HTTP_NOT_FOUND = 404
 
@@ -412,6 +425,22 @@ class FcmReceiverHA:
         self._activity_stale_after_s: float = float(FCM_IDLE_RESET_AFTER_S)
         self._entry_health: dict[str, bool] = {}
         self._entry_last_connected_wall: dict[str, float] = {}
+
+        # One-shot first-locate reconnect (#1150) serialization. Concurrent
+        # manual locates for different trackers on the *same* entry both enter
+        # the fresh/no-delivery reconnect branch; without coordination the
+        # second caller tears down the replacement client the first caller just
+        # waited for, so the first request hands its token to a listener that is
+        # already gone and times out (Codex #1150 follow-up). A per-entry lock
+        # serialises the decision and ``_first_locate_reconnect_done`` records
+        # the replacement we already reconnected to (by identity), so a
+        # concurrent or sequential second caller reuses it instead of forcing
+        # another reconnect. A genuinely new session generation (a different
+        # client object) is still allowed exactly one fresh reconnect. Not the
+        # global ``self._lock``: the reconnect awaits the supervisor rebuild,
+        # which itself takes ``self._lock``, so reusing it would deadlock.
+        self._first_locate_locks: dict[str, asyncio.Lock] = {}
+        self._first_locate_reconnect_done: dict[str, FcmPushClient[Any]] = {}
 
         # Active background tasks for exception tracking (P0 fix)
         self._active_tasks: set[asyncio.Task[Any]] = set()
@@ -1218,11 +1247,8 @@ class FcmReceiverHA:
                     _on_creds_updated_entry,
                 )
                 pc = _FcmPushClientFactory(
-                    lambda payload,
-                    persistent_id,
-                    context,
-                    eid=entry_id: self._on_notification(
-                        eid, payload, persistent_id, context
+                    lambda payload, persistent_id, context, eid=entry_id: (
+                        self._on_notification(eid, payload, persistent_id, context)
                     ),
                     fcm_config,
                     creds,
@@ -3182,8 +3208,13 @@ class FcmReceiverHA:
                 )
         self.creds[entry_id] = normalized if isinstance(normalized, dict) else None
 
-        # Update token routing from fresh creds if possible
-        token = self.get_fcm_token(entry_id)
+        # Update token routing from fresh creds if possible.  Read strictly
+        # entry-scoped: the creds for this entry were just written above, so
+        # ``get_fcm_token``'s cross-entry fallback could only route a *foreign*
+        # account's token under this entry when the update is tokenless -- the
+        # same leak class as the forced first-locate reconnect refresh (Codex
+        # #1150 follow-ups).  A tokenless update must route nothing here.
+        token = self._entry_scoped_fcm_token(entry_id)
         if token:
             self._update_token_routing(token, {entry_id})
             self._dispatch_to_hass_loop(
@@ -3425,6 +3456,11 @@ class FcmReceiverHA:
     def _purge_entry_tokens(self, entry_id: str) -> None:
         """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
+        # First-locate reconnect serialization state (#1150 follow-up): drop the
+        # per-entry lock and the consumed-replacement record so a later reload
+        # under the same entry_id starts from a clean slate.
+        self._first_locate_locks.pop(entry_id, None)
+        self._first_locate_reconnect_done.pop(entry_id, None)
         # AP1 (finding 2a): fatal retry counters are only cleared on the success
         # path (registration ok), so they leak per teardown without this.
         self._fatal_retry_counts.pop(f"{entry_id}:auth", None)
@@ -3461,6 +3497,33 @@ class FcmReceiverHA:
 
     # -------------------- Public token accessor --------------------
 
+    def _entry_scoped_fcm_token(self, entry_id: str) -> str | None:
+        """Return the FCM token that belongs strictly to ``entry_id``.
+
+        Reads the entry's persisted creds first, then the live client's
+        credentials.  Unlike :meth:`get_fcm_token`, this never falls back to
+        another entry's token, so a caller that requires per-entry correctness
+        (the forced first-locate reconnect in a multi-account setup) can fail
+        closed instead of routing a foreign account's token to the wrong entry.
+        """
+        creds = self.creds.get(entry_id)
+        if isinstance(creds, dict):
+            tok = (creds.get("fcm") or {}).get("registration", {}).get("token")
+            if isinstance(tok, str) and tok:
+                return tok
+        # Also try the current client's live creds if present
+        pc = self.pcs.get(entry_id)
+        if pc:
+            try:
+                c = getattr(pc, "credentials", None)
+                if isinstance(c, dict):
+                    tok = (c.get("fcm") or {}).get("registration", {}).get("token")
+                    if isinstance(tok, str) and tok:
+                        return tok
+            except Exception:
+                pass
+        return None
+
     def get_fcm_token(self, entry_id: str | None = None) -> str | None:
         """Return current FCM token (best-effort).
 
@@ -3471,22 +3534,9 @@ class FcmReceiverHA:
         target_entry = entry_id if entry_id is not None else self._default_entry_id
 
         if target_entry:
-            creds = self.creds.get(target_entry)
-            if isinstance(creds, dict):
-                tok = (creds.get("fcm") or {}).get("registration", {}).get("token")
-                if isinstance(tok, str) and tok:
-                    return tok
-            # Also try the current client's live creds if present
-            pc = self.pcs.get(target_entry)
-            if pc:
-                try:
-                    c = getattr(pc, "credentials", None)
-                    if isinstance(c, dict):
-                        tok = (c.get("fcm") or {}).get("registration", {}).get("token")
-                        if isinstance(tok, str) and tok:
-                            return tok
-                except Exception:
-                    pass
+            scoped = self._entry_scoped_fcm_token(target_entry)
+            if scoped:
+                return scoped
         # Fallback: first available token across entries
         for c in self.creds.values():
             if isinstance(c, dict):
@@ -3580,6 +3630,242 @@ class FcmReceiverHA:
 
         return self.get_fcm_token(entry_id)
 
+    async def _await_entry_started(
+        self,
+        entry_id: str,
+        fallback_pc: FcmPushClient[Any],
+        max_wait_s: float,
+        *,
+        exclude_pc: FcmPushClient[Any] | None = None,
+    ) -> FcmPushClient[Any] | None:
+        """Poll the live entry client until it reaches ``STARTED``.
+
+        Returns the ``STARTED`` client, or ``None`` if the budget expires.
+
+        Re-reads ``self.pcs[entry_id]`` on every poll (falling back to
+        ``fallback_pc`` only while the slot is momentarily empty) so a concurrent
+        supervisor restart that stops the captured client and swaps a replacement
+        into the slot is honored — the stale object may never transition while
+        the replacement reaches ``STARTED``.
+
+        ``exclude_pc`` (used after a forced reconnect) requires a *different*
+        instance to count, so a stale client that still lingers in ``STARTED`` is
+        not mistaken for the fresh replacement.
+        """
+        _POLL_INTERVAL_S = 0.3
+        waited = 0.0
+        while waited < max_wait_s:
+            current_pc = self.pcs.get(entry_id, fallback_pc)
+            if self._is_started(current_pc) and (
+                exclude_pc is None or current_pc is not exclude_pc
+            ):
+                return current_pc
+            await asyncio.sleep(_POLL_INTERVAL_S)
+            waited += _POLL_INTERVAL_S
+        return None
+
+    def _is_started(self, pc: FcmPushClient[Any]) -> bool:
+        """True if *pc* is currently in the ``STARTED`` run state.
+
+        Single definition of "listening" shared by the readiness poll and the
+        first-locate reconnect short-circuits, so both fail closed on a client
+        that is not actually STARTED (e.g. a fresh, not-yet-started replacement
+        a concurrent supervisor swapped in).
+        """
+        if FcmPushClientRunState is None:
+            return False
+        return bool(getattr(pc, "run_state", None) == FcmPushClientRunState.STARTED)
+
+    def _session_age_s(self, pc: FcmPushClient[Any]) -> float | None:
+        """Age (seconds) since this client's STARTED transition, or ``None``.
+
+        Anchored on the client's own ``_started_monotonic`` — stamped where the
+        library assigns ``run_state = STARTED`` — not the supervisor's
+        ``last_start_monotonic``, which is recorded *before* ``pc.start()`` and
+        before the listener reaches STARTED.  The readiness gate deliberately
+        allows a fresh MCS connection ~15-20s to reach STARTED; measuring the
+        churn window from the supervisor start would let a slow-but-fresh session
+        age past ``_CHURN_WINDOW_S`` before its first STARTED observation and skip
+        the very reconnect this heals (Codex #1150 follow-up).  Being per-client,
+        it is also exact under Home Assistant multi-entry — no aggregate blur.
+
+        Returns ``None`` until the client has reached STARTED at least once; the
+        manual-locate caller only consults this for an already-STARTED client, so
+        ``None`` there means "library without a STARTED stamp" and fails safe (no
+        reconnect).
+        """
+        started: float | None = getattr(pc, "_started_monotonic", None)
+        if started is None:
+            return None
+        return max(time.monotonic() - started, 0.0)
+
+    def _needs_first_locate_reconnect(self, pc: FcmPushClient[Any]) -> bool:
+        """True if a fresh, not-yet-delivering session should reconnect once.
+
+        Trigger (T-A + per-entry sharpening): the session is *young*
+        (STARTED age < ``_CHURN_WINDOW_S``, measured from this client's own
+        STARTED transition) **and** this client has not delivered any data
+        message since login.  Delivery is read from the library's
+        ``persistent_ids`` list, which is reset to ``[]`` on each successful
+        login and appended to only for a ``DataMessageStanza`` — so a non-empty
+        list is a clean "has delivered" proof.  It deliberately does *not* use
+        the activity clock (``last_message_time`` / ``_entry_last_activity_
+        monotonic``), which a bare heartbeat ack also advances and which would
+        therefore never separate a broken fresh session (heartbeats, zero data)
+        from a healthy one.  A healthy, already-delivering session (e.g. a
+        long-running HA entry) is thus never torn down, independent of the
+        session age.
+        """
+        age = self._session_age_s(pc)
+        if age is None or age >= _CHURN_WINDOW_S:
+            return False
+        delivered = bool(getattr(pc, "persistent_ids", None))
+        return not delivered
+
+    async def _force_first_locate_reconnect(
+        self, entry_id: str, stale_pc: FcmPushClient[Any], max_wait_s: float
+    ) -> FcmPushClient[Any] | None:
+        """Force one cooperative reconnect for a fresh, not-yet-delivering session.
+
+        Stops ``stale_pc``, nudges the supervisor to rebuild immediately, and
+        waits (``max_wait_s`` budget) for the *replacement* instance to reach
+        STARTED.  Returns the fresh client, or ``None`` if it never starts (the
+        caller then fails closed, exactly like the readiness gate).  The
+        supervisor owns the rebuild, so no new race surface is introduced against
+        it.  Part of the first-locate-delivery fix (#1148/#1149 family): STARTED
+        is necessary but not sufficient for the first push to arrive.
+        """
+        session_age = self._session_age_s(stale_pc)
+        _LOGGER.debug(
+            "[entry=%s] Fresh FCM session (age=%.1fs) reached STARTED but has not "
+            "delivered a data message yet; forcing one reconnect before the first "
+            "locate",
+            entry_id,
+            session_age if session_age is not None else -1.0,
+        )
+        try:
+            await stale_pc.stop()
+        except Exception as err:  # noqa: BLE001
+            # A stop() failure on an already-dying client is benign; the
+            # supervisor rebuild is driven by the nudge below.
+            _LOGGER.debug(
+                "[entry=%s] Forced-reconnect stop() raised (ignored): %s",
+                entry_id,
+                err,
+            )
+        self.nudge_retry(entry_id)
+        return await self._await_entry_started(
+            entry_id, stale_pc, max_wait_s, exclude_pc=stale_pc
+        )
+
+    def _get_first_locate_lock(self, entry_id: str) -> asyncio.Lock:
+        """Return the per-entry first-locate reconnect lock, creating it lazily.
+
+        Runs in the event loop with no ``await`` between the read and the
+        store, so the lazy creation is atomic against other callers.
+        """
+        lock = self._first_locate_locks.get(entry_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._first_locate_locks[entry_id] = lock
+        return lock
+
+    async def _reconnect_for_first_locate(
+        self, entry_id: str, max_wait_s: float
+    ) -> FcmPushClient[Any] | None:
+        """Serialise the one-shot first-locate reconnect for *entry_id*.
+
+        Concurrent manual locates for different trackers on the same entry must
+        not each tear down the fresh session (Codex #1150 follow-up): only the
+        first caller forces the single cooperative reconnect, and concurrent or
+        sequential callers await it and reuse the same replacement. The live
+        client is re-read under the per-entry lock because a concurrent caller
+        may already have replaced it. Returns the client to hand the locate to,
+        or ``None`` when no started client is available (the caller then fails
+        closed exactly like the readiness gate).
+        """
+        async with self._get_first_locate_lock(entry_id):
+            current = self.pcs.get(entry_id)
+            if current is None:
+                # The supervisor tore the client down; fail closed.
+                return None
+            reuse_current = (
+                # This exact replacement already had its one forced reconnect
+                # (a concurrent caller won the race), ...
+                self._first_locate_reconnect_done.get(entry_id) is current
+                # ... or another caller's reconnect already delivered / the
+                # session is no longer a fresh, undelivered one.
+                or not self._needs_first_locate_reconnect(current)
+            )
+            if reuse_current:
+                # Reuse the live client instead of forcing another reconnect,
+                # but only if it is actually STARTED. A concurrent supervisor
+                # swap may have installed a fresh, not-yet-started client here
+                # between the branch pre-check and this lock; handing the locate
+                # token to a non-listening client would reproduce the very
+                # timeout this heals, so fail closed like the readiness gate.
+                return current if self._is_started(current) else None
+            fresh_pc = await self._force_first_locate_reconnect(
+                entry_id, current, max_wait_s
+            )
+            if fresh_pc is not None:
+                self._first_locate_reconnect_done[entry_id] = fresh_pc
+            return fresh_pc
+
+    async def _reconnect_and_refresh_token(
+        self, entry_id: str, previous_token: str, max_wait_s: float
+    ) -> str | None:
+        """Force the first-locate reconnect, then return the *live* entry token.
+
+        Fails closed (returns ``None``) when the replacement never reaches
+        STARTED, or when the entry has no FCM token after the reconnect.
+
+        The reconnect nudges a supervisor rebuild that may run a full
+        re-registration (``checkin_or_register`` / ``reregister_keeping_identity``)
+        and rotate the entry's FCM token after the caller captured
+        ``previous_token``.  Returning the stale token would send the locate to
+        the old registration while the live listener is subscribed with the new
+        one, reproducing the very timeout this fix heals (Codex #1150 follow-up).
+        Routing is re-pointed at the refreshed token only when it actually
+        rotated; the stale mapping for a dead registration is benign (it receives
+        no pushes) and is not eagerly purged here.
+
+        The refreshed token is read strictly entry-scoped
+        (:meth:`_entry_scoped_fcm_token`, not :meth:`get_fcm_token`): in a
+        multi-account setup ``get_fcm_token``'s cross-entry fallback could return
+        another account's token when this entry is momentarily tokenless after the
+        rebuild, which would route a foreign token for this entry.  Failing closed
+        is correct there (Codex #1150 follow-up).
+        """
+        fresh_pc = await self._reconnect_for_first_locate(entry_id, max_wait_s)
+        if fresh_pc is None:
+            _LOGGER.warning(
+                "[entry=%s] Forced reconnect did not reach STARTED after %.1fs; "
+                "aborting manual locate registration (fail-closed)",
+                entry_id,
+                max_wait_s,
+            )
+            return None
+
+        refreshed = self._entry_scoped_fcm_token(entry_id)
+        if not refreshed:
+            _LOGGER.warning(
+                "[entry=%s] FCM token unavailable after forced reconnect; "
+                "aborting manual locate registration (fail-closed)",
+                entry_id,
+            )
+            return None
+
+        if refreshed != previous_token:
+            _LOGGER.debug(
+                "[entry=%s] FCM token rotated during forced first-locate "
+                "reconnect; using the refreshed token for the locate",
+                entry_id,
+            )
+            self._update_token_routing(refreshed, {entry_id})
+            await self._persist_routing_token(entry_id, refreshed)
+        return refreshed
+
     async def async_register_for_location_updates(
         self, canonic_id: str, callback: Callable[[str, str], None]
     ) -> str | None:
@@ -3649,27 +3935,10 @@ class FcmReceiverHA:
                     int(FCM_CONNECTION_RETRY_COUNT) * _PER_ATTEMPT_WAIT_S
                     + _READY_WAIT_MARGIN_S
                 )
-                _POLL_INTERVAL_S = 0.3
-                waited = 0.0
-                while waited < _MAX_READY_WAIT_S:
-                    # Re-read the live entry client each iteration.  A concurrent
-                    # supervisor restart can stop the captured ``pc`` and swap a
-                    # replacement into ``self.pcs[entry_id]`` on a transient
-                    # pre-start connection/login failure; that replacement may
-                    # reach STARTED while the stale object never does.  Polling
-                    # the current client (falling back to ``pc`` only while the
-                    # slot is momentarily empty) avoids a false fail-closed that
-                    # would abort a locate the replacement client could serve.
-                    current_pc = self.pcs.get(entry_id, pc)
-                    run_state = getattr(current_pc, "run_state", None)
-                    if (
-                        FcmPushClientRunState is not None
-                        and run_state == FcmPushClientRunState.STARTED
-                    ):
-                        break
-                    await asyncio.sleep(_POLL_INTERVAL_S)
-                    waited += _POLL_INTERVAL_S
-                else:
+                started_pc = await self._await_entry_started(
+                    entry_id, pc, _MAX_READY_WAIT_S
+                )
+                if started_pc is None:
                     # Fail closed: the client never started listening, so sending
                     # the location request would hand the token to a dead listener
                     # and the caller would block until an opaque 30s timeout.
@@ -3684,6 +3953,20 @@ class FcmReceiverHA:
                         _MAX_READY_WAIT_S,
                     )
                     token = None
+                elif self._needs_first_locate_reconnect(started_pc):
+                    # AP1 (first-locate-delivery fix): a fresh, not-yet-delivering
+                    # session reached STARTED but empirically will not receive the
+                    # very first locate push until it reconnects.  Force exactly
+                    # one cooperative reconnect (serialised per entry so concurrent
+                    # locates on the same entry share one replacement instead of
+                    # tearing down each other's fresh session), then re-read the
+                    # token: the reconnect's supervisor rebuild may re-register and
+                    # rotate the entry's FCM token after it was captured above.
+                    # Fail closed if the replacement never starts or the token
+                    # vanished (Codex #1150 follow-ups).
+                    token = await self._reconnect_and_refresh_token(
+                        entry_id, token, _MAX_READY_WAIT_S
+                    )
 
             if token is not None:
                 _LOGGER.info(
