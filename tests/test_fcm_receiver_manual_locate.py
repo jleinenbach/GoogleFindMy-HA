@@ -205,6 +205,11 @@ def _wire_manual_locate(
     monkeypatch.setattr(receiver, "_ensure_client_for_entry", _ensure_client)
     monkeypatch.setattr(receiver, "_start_supervisor_for_entry", _start)
     monkeypatch.setattr(receiver, "_ensure_token_for_entry", _ensure_token)
+    # ``get_fcm_token`` reads live creds in production and, via
+    # ``_ensure_token_for_entry``, agrees with the token above.  Stub it to the
+    # same value so the post-reconnect token refresh sees an unchanged token by
+    # default; rotation tests override it explicitly.
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: "token-123")
     monkeypatch.setattr(receiver, "_update_token_routing", lambda tok, ids: None)
     monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
     monkeypatch.setattr(fcm_mod, "FcmPushClientRunState", _RunState)
@@ -877,3 +882,153 @@ async def test_is_started_false_when_runstate_enum_unavailable(
     pc = _ReconnectPc(run_state="STARTED", persistent_ids=[])
 
     assert receiver._is_started(pc) is False  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# First-locate reconnect: refresh the FCM token after the forced reconnect.
+# The reconnect drives a supervisor rebuild that may re-register and rotate the
+# entry token; returning the stale token would send the locate to the old
+# registration while the live listener is subscribed with the new one (Codex
+# #1150 follow-up).
+# ---------------------------------------------------------------------------
+
+
+def _wire_forced_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    receiver: FcmReceiverHA,
+    entry_id: str,
+) -> list[str | None]:
+    """Set up a young, non-delivering session that forces exactly one reconnect."""
+
+    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    fresh = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=[])
+    receiver.pcs[entry_id] = stale  # type: ignore[assignment]
+
+    nudged: list[str | None] = []
+    monkeypatch.setattr(
+        receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
+    )
+
+    async def _swap_then_no_sleep(_seconds: float) -> None:
+        if receiver.pcs[entry_id] is stale:
+            receiver.pcs[entry_id] = fresh  # type: ignore[assignment]
+
+    monkeypatch.setattr(asyncio, "sleep", _swap_then_no_sleep)
+    return nudged
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_refreshes_rotated_token_after_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rotated token: the refreshed token is returned and routing re-pointed.
+
+    Regression (Codex): the forced reconnect nudges a supervisor rebuild that can
+    re-register and rotate the entry FCM token after it was captured.  Returning
+    the stale token would hand the locate to the dead registration while the live
+    listener subscribes with the new one, reproducing the timeout.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+    nudged = _wire_forced_reconnect(monkeypatch, receiver, entry_id)
+
+    # The supervisor rebuild rotated the token: _ensure_token_for_entry captured
+    # "token-123", but get_fcm_token now reports the post-reconnect token.
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: "token-999")
+    routed: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
+    )
+    persisted: list[tuple[str, str]] = []
+
+    async def _persist(eid: str, tok: str) -> None:
+        persisted.append((eid, tok))
+
+    monkeypatch.setattr(receiver, "_persist_routing_token", _persist)
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-999"  # the fresh token, not the stale "token-123"
+    assert nudged == [entry_id]  # the reconnect actually happened
+    # Routing/persist re-pointed at the rotated token (the pre-reconnect path
+    # also routes the captured token once; the refresh adds the new one).
+    assert ("token-999", {entry_id}) in routed
+    assert (entry_id, "token-999") in persisted
+    assert receiver.location_update_callbacks[device_id] is manual_callback
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_fails_closed_when_token_missing_after_reconnect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Token gone after reconnect: fail closed (None) and leave no callback."""
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+    _wire_forced_reconnect(monkeypatch, receiver, entry_id)
+
+    # The re-registration during the rebuild left the entry without a token.
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: None)
+    routed: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
+    )
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token is None
+    assert device_id not in receiver.location_update_callbacks
+    # Fails closed before the rotation block: only the pre-reconnect path routed
+    # (the captured token once); a missing token is never routed.
+    assert routed == [("token-123", {entry_id})]
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_unchanged_token_skips_routing_churn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unrotated token: return it unchanged and do not re-point routing.
+
+    Pins the rotation guard: routing is touched only when the token actually
+    changed, so a no-op reconnect does not churn the token map.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-1"
+    device_id = "device-canonic"
+    cache = DummyCache()
+    _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
+    _wire_forced_reconnect(monkeypatch, receiver, entry_id)
+
+    # get_fcm_token still reports the captured token (no rotation).
+    monkeypatch.setattr(receiver, "get_fcm_token", lambda eid=None: "token-123")
+    routed: list[tuple[str, set[str]]] = []
+    monkeypatch.setattr(
+        receiver, "_update_token_routing", lambda tok, ids: routed.append((tok, ids))
+    )
+
+    def manual_callback(canonic: str, payload_hex: str) -> None:
+        return None
+
+    token = await receiver.async_register_for_location_updates(
+        device_id, manual_callback
+    )
+
+    assert token == "token-123"
+    # Only the pre-reconnect path routed the captured token once; the refresh
+    # added nothing because the token did not rotate (no churn).
+    assert routed == [("token-123", {entry_id})]

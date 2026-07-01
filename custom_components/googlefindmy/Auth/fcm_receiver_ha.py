@@ -3793,6 +3793,53 @@ class FcmReceiverHA:
                 self._first_locate_reconnect_done[entry_id] = fresh_pc
             return fresh_pc
 
+    async def _reconnect_and_refresh_token(
+        self, entry_id: str, previous_token: str, max_wait_s: float
+    ) -> str | None:
+        """Force the first-locate reconnect, then return the *live* entry token.
+
+        Fails closed (returns ``None``) when the replacement never reaches
+        STARTED, or when the entry has no FCM token after the reconnect.
+
+        The reconnect nudges a supervisor rebuild that may run a full
+        re-registration (``checkin_or_register`` / ``reregister_keeping_identity``)
+        and rotate the entry's FCM token after the caller captured
+        ``previous_token``.  Returning the stale token would send the locate to
+        the old registration while the live listener is subscribed with the new
+        one, reproducing the very timeout this fix heals (Codex #1150 follow-up).
+        Routing is re-pointed at the refreshed token only when it actually
+        rotated; the stale mapping for a dead registration is benign (it receives
+        no pushes) and is not eagerly purged here.
+        """
+        fresh_pc = await self._reconnect_for_first_locate(entry_id, max_wait_s)
+        if fresh_pc is None:
+            _LOGGER.warning(
+                "[entry=%s] Forced reconnect did not reach STARTED after %.1fs; "
+                "aborting manual locate registration (fail-closed)",
+                entry_id,
+                max_wait_s,
+            )
+            return None
+
+        refreshed = self.get_fcm_token(entry_id)
+        if not refreshed:
+            _LOGGER.warning(
+                "[entry=%s] FCM token unavailable after forced reconnect; "
+                "aborting manual locate registration (fail-closed)",
+                entry_id,
+            )
+            return None
+
+        if refreshed != previous_token:
+            _LOGGER.debug(
+                "[entry=%s] FCM token rotated during forced first-locate "
+                "reconnect; using the refreshed token for the locate",
+                entry_id,
+            )
+            self._update_token_routing(refreshed, {entry_id})
+            await self._persist_routing_token(entry_id, refreshed)
+        return refreshed
+
     async def async_register_for_location_updates(
         self, canonic_id: str, callback: Callable[[str, str], None]
     ) -> str | None:
@@ -3884,23 +3931,16 @@ class FcmReceiverHA:
                     # AP1 (first-locate-delivery fix): a fresh, not-yet-delivering
                     # session reached STARTED but empirically will not receive the
                     # very first locate push until it reconnects.  Force exactly
-                    # one cooperative reconnect, then fail closed if the
-                    # replacement never starts, like the gate above.  The
-                    # reconnect is serialised per entry so concurrent locates on
-                    # the same entry share one replacement instead of tearing
-                    # down each other's fresh session (Codex #1150 follow-up).
-                    fresh_pc = await self._reconnect_for_first_locate(
-                        entry_id, _MAX_READY_WAIT_S
+                    # one cooperative reconnect (serialised per entry so concurrent
+                    # locates on the same entry share one replacement instead of
+                    # tearing down each other's fresh session), then re-read the
+                    # token: the reconnect's supervisor rebuild may re-register and
+                    # rotate the entry's FCM token after it was captured above.
+                    # Fail closed if the replacement never starts or the token
+                    # vanished (Codex #1150 follow-ups).
+                    token = await self._reconnect_and_refresh_token(
+                        entry_id, token, _MAX_READY_WAIT_S
                     )
-                    if fresh_pc is None:
-                        _LOGGER.warning(
-                            "[entry=%s] Forced reconnect did not reach STARTED "
-                            "after %.1fs; aborting manual locate registration "
-                            "(fail-closed)",
-                            entry_id,
-                            _MAX_READY_WAIT_S,
-                        )
-                        token = None
 
             if token is not None:
                 _LOGGER.info(
