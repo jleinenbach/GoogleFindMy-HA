@@ -23,7 +23,6 @@ import pytest
 LEGACY_ALLOWLIST: set[str] = {
     "tests/test_aas_token_retrieval.py",
     "tests/test_api_location_selection.py",
-    "tests/test_cli_entry_selection.py",
     "tests/test_coordinator_locate_basics.py",
     "tests/test_coordinator_polling_basics.py",
     "tests/test_coordinator_polling_branches.py",
