@@ -493,8 +493,9 @@ async def test_stale_own_reports_with_foreign_success_preserve_network_location(
     be SUPPRESSED so the good network coordinate is returned instead of being
     discarded by the exception before the ``wrapped`` list is ever converted. A
     reauth cannot fix stale own reports of an offline device anyway, and the device
-    is demonstrably locatable this cycle. Reverting the ``not _foreign_report_success``
-    guard makes this test raise ``OwnReportIdentityMismatchError`` (mutation proof).
+    is demonstrably locatable this cycle. Dropping the ``is_real_location_record``
+    network-fix suppression makes this test raise ``OwnReportIdentityMismatchError``
+    (mutation proof).
     """
 
     base_now = 1_700_000_750.0
@@ -542,6 +543,78 @@ async def test_stale_own_reports_with_foreign_success_preserve_network_location(
 
     # The good crowdsourced position survived instead of being discarded by the raise.
     assert decrypt_locations.any_real_location_record(result)
+
+
+async def test_stale_own_reports_with_undecodable_foreign_still_escalate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1c: stale own reports + a foreign report that decrypts to bytes but yields
+    NO usable coordinate → escalation must STILL fire.
+
+    Codex (PR #1153) counterpoint to T-D1b: a foreign/crowdsourced report can
+    authenticate to raw bytes yet fail protobuf parsing or lat/lon bounds
+    validation, so it never becomes a real coordinate. Suppressing the own-report
+    mismatch on "decrypted to bytes" alone would hand the caller an empty result
+    AND skip the stale-own-report handling even though no network fix was preserved.
+    The suppression is therefore judged on the validated ``is_real_location_record``
+    output; with the only foreign report out of bounds, the raise must fire. Basing
+    suppression back on mere decrypt success makes this test stop raising (mutation
+    proof).
+    """
+
+    base_now = 1_700_000_800.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    def _out_of_bounds_location_bytes() -> bytes:
+        # Parses cleanly, but latitude 200° is rejected by _is_valid_latlon, so the
+        # report is dropped by the fail-fast validation and never enters `structured`.
+        loc = DeviceUpdate_pb2.Location()
+        loc.latitude = int(200.0 * 1e7)
+        loc.longitude = int(11.0 * 1e7)
+        loc.altitude = ALTITUDE_METERS
+        return loc.SerializeToString()
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        return _out_of_bounds_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-stale",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    _add_report(
+        update,
+        public_key_random=b"\x30\x31\x32\x33",
+        encrypted_location=b"foreign-unusable",
+        is_own_report=False,
+        base_now=base_now,
+    )
+
+    # The foreign report decrypted but produced no valid coordinate, so the stale
+    # own-report signal must still escalate (there is no network fix to preserve).
+    with pytest.raises(decrypt_locations.OwnReportIdentityMismatchError):
+        await decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
 
 
 async def test_foreign_failures_with_own_success_do_not_escalate(
