@@ -217,7 +217,10 @@ def is_poll_cycle_due(
     Poll is due when:
     1. Cold start (first poll with no location data) - always due
     2. Elapsed time >= effective_interval AND not predictively blocked
-    3. Predictive due AND hard limit passed
+    3. Predictive due AND hard limit passed AND elapsed >= effective_interval
+       (min_poll_interval alone no longer triggers a poll below the chosen
+       cadence; effective_interval governs the cadence, min_poll_interval
+       stays a pure API safety floor)
 
     Args:
         elapsed: Time since last poll in seconds.
@@ -238,8 +241,13 @@ def is_poll_cycle_due(
     if elapsed >= effective_interval and not predictive_block:
         return True
 
-    # Predictive due with hard limit passed
-    if predictive_due and hard_limit_passed:
+    # Predictive due, but never below the chosen cadence. min_poll_interval
+    # stays a pure API safety floor; effective_interval governs the cadence,
+    # so predictive pre-fetch no longer pulls polling below effective_interval.
+    # hard_limit_passed is redundant while callers keep the invariant
+    # effective_interval >= min_poll_interval, but is retained so this pure
+    # function stays correct for any caller (do not "simplify" it away).
+    if predictive_due and hard_limit_passed and elapsed >= effective_interval:
         return True
 
     return False
