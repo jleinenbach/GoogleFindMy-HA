@@ -7,6 +7,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from homeassistant.config_entries import ConfigSubentry
 
 from custom_components.googlefindmy import (
@@ -20,6 +21,7 @@ from custom_components.googlefindmy.const import (
     OPT_OPTIONS_SCHEMA_VERSION,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
+    coerce_ignored_mapping,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
@@ -198,3 +200,36 @@ def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
     managed = manager.get(TRACKER_SUBENTRY_KEY)
     assert managed is not None
     assert tuple(managed.data.get("visible_device_ids", ())) == ("device-1",)
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        float("nan"),  # int(nan) -> ValueError
+        float("inf"),  # int(inf) -> OverflowError
+        float("-inf"),  # int(-inf) -> OverflowError
+        True,  # bool is an int subclass; a truthy epoch of 1 is garbage
+    ],
+    ids=["nan", "inf", "-inf", "bool"],
+)
+def test_coerce_ignored_mapping_survives_invalid_ignored_at(bad_value: object) -> None:
+    """An invalid ``ignored_at`` is dropped to the default, never raised.
+
+    ``int()`` on a non-finite float raises (``ValueError``/``OverflowError``),
+    which would break the ignored-devices coercion on a corrupt ``.storage``
+    value; a ``bool`` would silently become the absurd epoch ``1``. Every one of
+    these must instead fall back to the finite default without raising.
+    """
+    result, _changed = coerce_ignored_mapping(
+        {"device-1": {"name": "Dev", "ignored_at": bad_value}}
+    )
+
+    assert "device-1" in result
+    metadata = result["device-1"]
+    assert metadata["name"] == "Dev"
+    # ignored_at fell back to the finite _now_epoch() default: a positive epoch,
+    # never NaN, never 0/None, and never the bool-derived 1 (a "return 0 instead
+    # of None" or dropped-guard helper mutation would leave a wrong value here).
+    ignored_at = metadata["ignored_at"]
+    assert isinstance(ignored_at, int)
+    assert ignored_at > 1
