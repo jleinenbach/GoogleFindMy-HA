@@ -12,6 +12,9 @@ from cryptography.exceptions import InvalidTag
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypted_location import (
+    WrappedLocation,
+)
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
@@ -681,6 +684,62 @@ async def test_stale_own_reports_with_crowdsourced_own_flag_preserve_network_loc
     )
 
     assert decrypt_locations.any_real_location_record(result)
+
+    # Downstream contract (Codex BSkando PR #197, follow-up): the admitted network
+    # fix must be normalized to ``is_own_report=False`` so consumers that read that
+    # flag as authoritative owner provenance (row_source_label,
+    # FCM crowd-source stats, map view, ranking) classify it as crowdsourced, not
+    # owner. Cryptographic provenance stays visible via ``is_network_report=True``.
+    # Dropping the ``and not is_network_report`` invariant in WrappedLocation makes
+    # ``is_own_report`` stay True here (mutation proof).
+    network_fixes = [
+        record
+        for record in result
+        if record.get("is_network_report")
+        and decrypt_locations.is_real_location_record(record)
+    ]
+    assert network_fixes, "expected the crowdsourced fix to survive as a record"
+    for record in network_fixes:
+        assert record["is_own_report"] is False
+        assert record["is_network_report"] is True
+
+
+async def test_wrapped_location_network_report_is_never_own_report() -> None:
+    """T-WL1: WrappedLocation enforces the network/own mutual-exclusion invariant.
+
+    A network/foreign report is never an owner report. The server-supplied
+    ``is_own_report`` flag is unreliable (this integration's own crowdsourced
+    uploader stamps ``isOwnReport=True`` on network reports), so the object keys
+    ownership off cryptographic provenance: whenever ``is_network_report`` is True,
+    ``is_own_report`` must be coerced to False. Genuine own reports
+    (``is_network_report`` False) keep their flag. Dropping the
+    ``and not is_network_report`` coercion makes the network case return True
+    (mutation proof).
+    """
+
+    network = WrappedLocation(
+        decrypted_location=b"",
+        time=0.0,
+        accuracy=5.0,
+        status=int(Common_pb2.Status.LAST_KNOWN),
+        is_own_report=True,
+        is_network_report=True,
+        name="",
+    )
+    assert network.is_own_report is False
+    assert network.is_network_report is True
+
+    own = WrappedLocation(
+        decrypted_location=b"",
+        time=0.0,
+        accuracy=5.0,
+        status=int(Common_pb2.Status.LAST_KNOWN),
+        is_own_report=True,
+        is_network_report=False,
+        name="",
+    )
+    assert own.is_own_report is True
+    assert own.is_network_report is False
 
 
 async def test_foreign_failures_with_own_success_do_not_escalate(
