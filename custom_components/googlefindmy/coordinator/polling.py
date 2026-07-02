@@ -73,6 +73,9 @@ from .helpers.update import (
     calculate_presence_ttl as _calculate_presence_ttl_impl,
 )
 from .helpers.update import (
+    device_due_by_interval as _device_due_by_interval_impl,
+)
+from .helpers.update import (
     filter_and_dedupe_devices as _filter_and_dedupe_impl,
 )
 from .helpers.update import (
@@ -1429,6 +1432,25 @@ class PollingOperations(_MixinBase):
                     if now_mono >= self._device_poll_cooldown_until.get(d["id"], 0.0)
                 ]
 
+            # Apply per-device poll intervals (Direction A: a device may poll
+            # less often than the cadence, never more). Additive filter: a
+            # device is dropped from this cycle while its own interval (floored
+            # at effective_interval) has not elapsed since its last real poll.
+            # Reads _device_last_poll_mono only; the stamp is written at the
+            # real poll end so a globally-gated-out device keeps its floor.
+            per_device_interval = self._get_device_poll_interval_map()
+            if per_device_interval and devices_to_poll:
+                devices_to_poll = [
+                    d
+                    for d in devices_to_poll
+                    if _device_due_by_interval_impl(
+                        now_mono,
+                        self._device_last_poll_mono.get(d["id"], 0.0),
+                        float(per_device_interval.get(d["id"], 0)),
+                        effective_interval,
+                    )
+                ]
+
             # Cold start detection: force immediate poll on first install when devices have no location data
             is_cold_start = bool(
                 self._last_poll_mono == 0.0
@@ -2191,7 +2213,17 @@ class PollingOperations(_MixinBase):
                         self.min_poll_interval,
                     )
                     self._schedule_short_retry(self.min_poll_interval)
-                self._last_poll_mono = time.monotonic()
+                cycle_end_mono = time.monotonic()
+                self._last_poll_mono = cycle_end_mono
+                # Stamp the per-device interval floor at the same instant as the
+                # global baseline, for exactly the devices this cycle ran. The
+                # per-device filter reads (never writes) this map, so a device
+                # the global gate never started keeps its earlier stamp and
+                # stays due; only really-polled devices advance their floor.
+                for _polled in devices:
+                    _polled_id = _polled.get("id")
+                    if isinstance(_polled_id, str) and _polled_id:
+                        self._device_last_poll_mono[_polled_id] = cycle_end_mono
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 if cycle_failed:

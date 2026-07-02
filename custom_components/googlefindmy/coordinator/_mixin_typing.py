@@ -79,6 +79,7 @@ class _MixinBase:
     _device_action_locks: dict[str, asyncio.Lock]
     _sound_request_uuids: dict[str, str]
     _device_poll_cooldown_until: dict[str, float]
+    _device_last_poll_mono: dict[str, float]
     _enabled_poll_device_ids: set[str]
     _devices_with_entry: set[str]
     _identity_key_to_devices: dict[bytes, set[str]]
@@ -170,6 +171,9 @@ class _MixinBase:
 
     def _get_ignored_set(self) -> set[str]:
         raise NotImplementedError
+
+    def _get_device_poll_interval_map(self) -> dict[str, int]:
+        raise NotImplementedError  # pragma: no cover - abstract mixin stub
 
     def _get_google_home_filter(self) -> Any:
         raise NotImplementedError

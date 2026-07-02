@@ -462,6 +462,7 @@ async def test_manual_locate_starts_reauth(monkeypatch: pytest.MonkeyPatch) -> N
     coordinator._locate_inflight = set()
     coordinator._locate_cooldown_until = {}
     coordinator._device_poll_cooldown_until = {}
+    coordinator._device_last_poll_mono = {}
     coordinator._device_location_data = {}
     coordinator.data = []
     coordinator.push_updated = lambda *_args, **_kwargs: None

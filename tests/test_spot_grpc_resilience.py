@@ -370,6 +370,7 @@ async def test_manual_locate_reports_reauth_status() -> None:
     coordinator._locate_inflight = set()
     coordinator._locate_cooldown_until = {}
     coordinator._device_poll_cooldown_until = {}
+    coordinator._device_last_poll_mono = {}
     coordinator._device_location_data = {}
     coordinator.data = []
     coordinator.async_set_updated_data = Mock()

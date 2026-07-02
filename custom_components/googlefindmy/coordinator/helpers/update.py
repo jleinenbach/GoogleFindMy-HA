@@ -19,6 +19,7 @@ from typing import Any
 
 __all__ = [
     "calculate_presence_ttl",
+    "device_due_by_interval",
     "filter_and_dedupe_devices",
     "is_fatal_fcm_auth_error",
     "is_poll_cycle_due",
@@ -251,3 +252,45 @@ def is_poll_cycle_due(
         return True
 
     return False
+
+
+def device_due_by_interval(
+    now_mono: float,
+    last_poll_mono: float,
+    per_device_interval: float,
+    effective_interval: float,
+) -> bool:
+    """Decide whether a single device is due under its per-device interval.
+
+    Direction A only: a device may be polled *less* often than the
+    coordinator-wide cadence, never more. The effective floor is therefore
+    ``max(per_device_interval, effective_interval)`` so a configured value
+    below the cadence is clamped, not honored. A device with no override
+    (``per_device_interval <= 0``) reduces to the cadence floor and thus always
+    passes once the global gate has admitted the cycle.
+
+    This predicate is a pure function of monotonic timestamps and never
+    mutates the stamp; the caller stamps ``last_poll_mono`` only at the real
+    poll end for devices that actually ran (so a device the global gate never
+    started does not have its floor advanced).
+
+    Args:
+        now_mono: Current monotonic clock reading in seconds.
+        last_poll_mono: Monotonic timestamp of this device's last real poll
+            (``0.0`` when never polled, which makes the device due).
+        per_device_interval: Configured per-device interval in seconds
+            (``0.0`` or negative means "no override").
+        effective_interval: Coordinator-wide cadence floor in seconds.
+
+    Returns:
+        True if the device's own interval has elapsed and it should stay in the
+        poll set; False if it should be skipped this cycle.
+    """
+    # Never polled (absent stamp passed as 0.0, or any non-positive sentinel):
+    # always due. Comparing (now_mono - 0.0) >= floor would otherwise wrongly
+    # skip a never-polled device shortly after boot, when monotonic uptime is
+    # still below the interval (anti-starvation).
+    if last_poll_mono <= 0.0:
+        return True
+    floor = max(per_device_interval, effective_interval)
+    return (now_mono - last_poll_mono) >= floor

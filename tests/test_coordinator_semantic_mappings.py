@@ -83,6 +83,7 @@ def _base_coordinator(
     coordinator._set_auth_state = lambda **_kwargs: None
     coordinator._device_location_data = {}
     coordinator._device_poll_cooldown_until = {}
+    coordinator._device_last_poll_mono = {}
     coordinator._present_last_seen = {}
     coordinator._locate_inflight = set()
     coordinator._locate_cooldown_until = {}
@@ -217,6 +218,7 @@ def _push_coordinator(options: dict[str, Any]) -> GoogleFindMyCoordinator:
     coordinator._device_name_cache = {}
     coordinator._device_update_history = {}
     coordinator._device_poll_cooldown_until = {}
+    coordinator._device_last_poll_mono = {}
     coordinator._present_last_seen = {}
     coordinator._semantic_label_cache = {}
     return coordinator

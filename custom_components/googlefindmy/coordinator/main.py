@@ -151,9 +151,11 @@ from ..const import (
     # Required symbols provided by const.py (5.1-A)
     EVENT_AUTH_ERROR,
     EVENT_AUTH_OK,
+    OPT_DEVICE_POLL_INTERVAL,
     OPT_IGNORED_DEVICES,
     OPT_SEMANTIC_LOCATIONS,
     UPDATE_INTERVAL,
+    coerce_device_poll_interval_mapping,
     coerce_ignored_mapping,
 )
 from ..ha_typing import DataUpdateCoordinator
@@ -786,6 +788,11 @@ class GoogleFindMyCoordinator(
 
         # Per-device poll cooldowns after owner/crowdsourced reports.
         self._device_poll_cooldown_until: dict[str, float] = {}
+        # Per-device last real-poll monotonic stamp, keyed by device id. Written
+        # only at the real poll end (mirrors _last_poll_mono) for devices that
+        # actually ran a cycle; read by the per-device interval filter. Absent
+        # key => never polled => device is due.
+        self._device_last_poll_mono: dict[str, float] = {}
         # Per-device interval history for predictive polling
         self._device_interval_history: dict[str, list[float]] = {}
 
@@ -1440,6 +1447,30 @@ class GoogleFindMyCoordinator(
     def is_ignored(self, device_id: str) -> bool:
         """Return True if the device is currently ignored by user choice."""
         return device_id in self._get_ignored_set()
+
+    def _get_device_poll_interval_map(self) -> dict[str, int]:
+        """Return the per-device poll interval overrides (options-first).
+
+        Resolved live from ``config_entry.options`` on each read (like
+        ``_get_ignored_set``) so an options reload propagates without a
+        coordinator restart. Values are coerced and clamped to
+        ``DEVICE_POLL_INTERVAL_MIN_S..MAX_S``; an empty or missing mapping means
+        every device follows the coordinator-wide cadence.
+
+        Returns:
+            Mapping of device id to a bounded per-device interval in seconds.
+        """
+        try:
+            entry = self.config_entry
+            if entry is not None:
+                raw = entry.options.get(
+                    OPT_DEVICE_POLL_INTERVAL,
+                    DEFAULT_OPTIONS.get(OPT_DEVICE_POLL_INTERVAL, {}),
+                )
+                return coerce_device_poll_interval_mapping(raw)
+        except Exception:  # defensive: never break polling on a bad option
+            pass
+        return {}
 
     # ---------------------------- Metrics & errors helpers ------------------
     def safe_update_metric(self, key: str, value: float) -> None:
