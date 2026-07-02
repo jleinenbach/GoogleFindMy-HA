@@ -14,6 +14,7 @@ class WrappedLocation:
         accuracy: float,
         status: int,
         is_own_report: bool,
+        is_network_report: bool,
         name: str,
     ) -> None:
         if isinstance(decrypted_location, bytearray):
@@ -28,5 +29,12 @@ class WrappedLocation:
         self.status: int = status
         self.decrypted_location: bytes = decrypted_payload
         self.is_own_report: bool = is_own_report
+        # Cryptographic provenance: True when this report came from the FMDN
+        # network side (a foreign/crowdsourced ECDH report, or a SEMANTIC network
+        # hit) rather than one of THIS device's own AES-GCM server reports. This is
+        # the authoritative decrypt-path signal and, unlike the server-supplied
+        # ``is_own_report`` flag, is not spoofed to True by this integration's own
+        # crowdsourced uploader (fmdn_finder/location_uploader.py).
+        self.is_network_report: bool = is_network_report
         self.accuracy: float = accuracy
         self.name: str = name

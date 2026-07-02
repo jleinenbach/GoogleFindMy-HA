@@ -617,6 +617,72 @@ async def test_stale_own_reports_with_undecodable_foreign_still_escalate(
         )
 
 
+async def test_stale_own_reports_with_crowdsourced_own_flag_preserve_network_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1d: stale own reports + a valid network report carrying isOwnReport=True.
+
+    Codex (BSkando PR #197) counterpoint to T-D1b: this integration's own
+    crowdsourced uploader (``fmdn_finder/location_uploader.py``) stamps network
+    reports with ``isOwnReport=True`` while still carrying a non-empty
+    ``publicKeyRandom`` (the foreign/ECDH crypto path). Keying the network-fix
+    suppression off the server-supplied ``is_own_report`` flag would misclassify
+    such a valid crowdsourced fix as an own report, let the raise fire, and discard
+    the good coordinate. The suppression is therefore keyed off cryptographic
+    provenance (``is_network_report`` = decrypted via the foreign ECDH path), which
+    is immune to that flag. Reverting the predicate to ``not is_own_report`` makes
+    this test raise ``OwnReportIdentityMismatchError`` (mutation proof).
+    """
+
+    base_now = 1_700_000_850.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        return _valid_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-stale",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    # A valid crowdsourced network fix that (like this repo's uploader) carries the
+    # server flag isOwnReport=True together with a non-empty publicKeyRandom.
+    _add_report(
+        update,
+        public_key_random=b"\x40\x41\x42\x43",
+        encrypted_location=b"crowdsourced-ok",
+        is_own_report=True,
+        base_now=base_now,
+    )
+
+    # Must NOT raise: the foreign-decrypted coordinate is a real network fix despite
+    # the isOwnReport=True flag, so it is preserved instead of being discarded.
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert decrypt_locations.any_real_location_record(result)
+
+
 async def test_foreign_failures_with_own_success_do_not_escalate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

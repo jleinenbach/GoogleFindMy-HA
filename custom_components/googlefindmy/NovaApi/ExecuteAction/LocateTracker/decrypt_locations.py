@@ -1607,6 +1607,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                         accuracy=0,  # Internal placeholder, not for display
                         status=loc.status,
                         is_own_report=False,  # SEMANTIC is not an Owner-Report
+                        is_network_report=True,  # SEMANTIC hits are network-side, never own AES-GCM
                         name=loc.semanticLocation.locationName,
                     )
                 )
@@ -1703,6 +1704,11 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     accuracy=loc.geoLocation.accuracy,
                     status=loc.status,
                     is_own_report=enc.isOwnReport,
+                    # Cryptographic provenance from the decrypt path: an empty
+                    # publicKeyRandom is an own AES-GCM report; a non-empty one is a
+                    # foreign/crowdsourced ECDH report. This is authoritative even
+                    # when the server flags a crowdsourced report as isOwnReport=True.
+                    is_network_report=public_key_random != b"",
                     name="",
                 )
             )
@@ -1833,6 +1839,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "status": _status_name_safe(loc.status),
                     "status_code": int(loc.status),
                     "is_own_report": False,
+                    "is_network_report": loc.is_network_report,
                     "semantic_name": loc.name,
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
@@ -1888,6 +1895,7 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
                     "status": status_name,
                     "status_code": int(loc.status),
                     "is_own_report": loc.is_own_report,
+                    "is_network_report": loc.is_network_report,
                     "semantic_name": None,
                     "encrypted_identity_key": raw_encrypted_identity_key,
                     "owner_key_version": raw_owner_key_version,
@@ -1972,8 +1980,16 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         and _own_auth_failures >= _own_encrypted_report_count
         and not _own_report_success
     ):
+        # Detect the network fix by CRYPTOGRAPHIC PROVENANCE (decrypted via the
+        # foreign/ECDH path), NOT by the server-supplied ``is_own_report`` flag. This
+        # integration's own crowdsourced uploader stamps valid network reports with
+        # ``isOwnReport=True`` while carrying a non-empty publicKeyRandom
+        # (fmdn_finder/location_uploader.py), so keying off ``not is_own_report``
+        # would misclassify such a real fix as an own report, fire the raise, and
+        # discard the good coordinate. ``is_network_report`` is set from the actual
+        # decrypt branch and is immune to that flag.
         has_network_fix = any(
-            not record.get("is_own_report") and is_real_location_record(record)
+            record.get("is_network_report") and is_real_location_record(record)
             for record in structured
         )
         if not has_network_fix:
