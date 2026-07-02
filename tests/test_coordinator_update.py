@@ -497,3 +497,52 @@ class TestIsPollCycleDue:
             is_cold_start=False,
         )
         assert result is False
+
+    def test_predictive_due_below_real_cadence_not_due(self) -> None:
+        """Cadence fix: predictive due below effective_interval must not poll.
+
+        Discriminating case for the Stage-1 fix using the reported real-world
+        cadence (effective_interval=241s). elapsed=100 is past the raw
+        min_poll_interval floor (hard_limit_passed=True) but below the chosen
+        cadence, so the poll must NOT fire. Reverting the fix
+        (dropping ``and elapsed >= effective_interval``) flips this to True,
+        which keeps the mutation gegenprobe sharp.
+        """
+        result = is_poll_cycle_due(
+            elapsed=100.0,
+            effective_interval=241.0,
+            predictive_block=False,
+            predictive_due=True,
+            hard_limit_passed=True,
+            is_cold_start=False,
+        )
+        assert result is False
+
+    def test_predictive_due_at_cadence_due_via_interval(self) -> None:
+        """At/above the cadence, the normal interval branch fires (branch 2)."""
+        result = is_poll_cycle_due(
+            elapsed=245.0,
+            effective_interval=241.0,
+            predictive_block=False,
+            predictive_due=True,
+            hard_limit_passed=True,
+            is_cold_start=False,
+        )
+        assert result is True
+
+    def test_predictive_due_past_cadence_due_when_blocked(self) -> None:
+        """Predictive branch 3 fires past cadence even when interval branch is blocked.
+
+        With predictive_block=True the normal interval branch (2) is skipped,
+        so this exercises the TRUE path of the new ``elapsed >= effective_interval``
+        term inside branch 3 (predictive due, past cadence -> poll).
+        """
+        result = is_poll_cycle_due(
+            elapsed=245.0,
+            effective_interval=241.0,
+            predictive_block=True,
+            predictive_due=True,
+            hard_limit_passed=True,
+            is_cold_start=False,
+        )
+        assert result is True
