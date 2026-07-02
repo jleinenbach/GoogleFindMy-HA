@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "Inloggegevens bijwerken",
           "settings": "Instellingen wijzigen",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "Apparaatzichtbaarheid",
           "semantic_locations": "Semantische locaties",
           "repairs": "Subentry-reparaties"
@@ -277,6 +278,20 @@
           "subentry": "Herstelde apparaten worden toegevoegd aan de functiegroep die je kiest. Zie [Subentries en functiegroepen]({subentries_docs_url}) voor toewijzingsadvies."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "Subentry-reparaties",
         "description": "Kies een reparatieactie voor je functiegroepen.",
@@ -315,10 +330,12 @@
       "duplicate_name": "Semantische naam bestaat al. Kies een andere naam.",
       "duplicate_semantic_location": "Semantische naam bestaat al. Kies een andere naam.",
       "unknown": "Er is een onverwachte fout opgetreden.",
-      "invalid_subentry": "Kies een geldige functiegroep."
+      "invalid_subentry": "Kies een geldige functiegroep.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "Herconfiguratie geslaagd.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "Er zijn geen genegeerde apparaten om te herstellen.",
       "no_semantic_locations": "Er zijn geen semantische locaties geconfigureerd.",
       "repairs_no_subentries": "Er zijn geen subentries om te repareren.",

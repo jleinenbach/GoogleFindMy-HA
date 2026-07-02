@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "Mettre à jour les identifiants",
           "settings": "Modifier les paramètres",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "Visibilité des appareils",
           "semantic_locations": "Emplacements sémantiques",
           "repairs": "Réparations des groupes de fonctionnalités"
@@ -277,6 +278,20 @@
           "subentry": "Les appareils restaurés sont associés au groupe de fonctionnalités choisi. Consultez [Sous-entrées et groupes de fonctionnalités]({subentries_docs_url}) pour obtenir des conseils."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "Réparations des groupes de fonctionnalités",
         "description": "Choisissez une action de réparation pour vos groupes de fonctionnalités.",
@@ -315,10 +330,12 @@
       "duplicate_name": "Le nom sémantique existe déjà. Choisissez un autre nom.",
       "duplicate_semantic_location": "Le nom sémantique existe déjà. Choisissez un autre nom.",
       "unknown": "Erreur inattendue.",
-      "invalid_subentry": "Choisissez un groupe de fonctionnalités valide."
+      "invalid_subentry": "Choisissez un groupe de fonctionnalités valide.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration réussie.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "Aucun appareil ignoré à restaurer.",
       "no_semantic_locations": "Aucun emplacement sémantique n’est configuré.",
       "repairs_no_subentries": "Aucun groupe de fonctionnalités à réparer.",

@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "Atualizar credenciais",
           "settings": "Modificar configurações",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "Visibilidade do dispositivo",
           "semantic_locations": "Localizações semânticas",
           "repairs": "Reparos de subentrada"
@@ -277,6 +278,20 @@
           "subentry": "Os dispositivos restaurados ingressam no grupo de recursos que você escolher. Consulte [Subentradas e grupos de recursos]({subentries_docs_url}) para orientações."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "Reparos de subentrada",
         "description": "Escolha uma ação de reparo para seus grupos de recursos.",
@@ -315,10 +330,12 @@
       "duplicate_name": "O nome semântico já existe. Escolha um nome diferente.",
       "duplicate_semantic_location": "O nome semântico já existe. Escolha um nome diferente.",
       "unknown": "Ocorreu um erro inesperado.",
-      "invalid_subentry": "Escolha um grupo de recursos válido."
+      "invalid_subentry": "Escolha um grupo de recursos válido.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguração bem-sucedida.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "Não há dispositivos ignorados para restaurar.",
       "no_semantic_locations": "Não estão configuradas localizações semânticas.",
       "repairs_no_subentries": "Não há subentradas para reparar.",

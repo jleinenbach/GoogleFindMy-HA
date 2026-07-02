@@ -97,11 +97,14 @@ from .const import (
     DEFAULT_SEMANTIC_DETECTION_RADIUS,
     DEFAULT_SHOW_LOCATION_AGE,
     DEFAULT_STALE_THRESHOLD,
+    DEVICE_POLL_INTERVAL_MAX_S,
+    DEVICE_POLL_INTERVAL_MIN_S,
     # Core domain & credential keys
     DOMAIN,
     OPT_CONTRIBUTOR_MODE,
     OPT_DELETE_CACHES_ON_REMOVE,
     OPT_DEVICE_POLL_DELAY,
+    OPT_DEVICE_POLL_INTERVAL,
     OPT_ENABLE_STATS_ENTITIES,
     OPT_IGNORED_DEVICES,
     # Options (non-secret runtime settings)
@@ -121,6 +124,7 @@ from .const import (
     TRACKER_FEATURE_PLATFORMS,
     TRACKER_SUBENTRY_KEY,
     TRACKER_SUBENTRY_TRANSLATION_KEY,
+    coerce_device_poll_interval_mapping,
     coerce_ignored_mapping,
     service_device_identifier,
 )
@@ -4743,6 +4747,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
 
         super().__init__(*args, **kwargs)
         self._semantic_location_editing: str | None = None
+        self._per_device_poll_editing: str | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -4752,6 +4757,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             step_id="init",
             menu_options=[
                 "settings",
+                "per_device_poll",
                 "credentials",
                 "visibility",
                 "semantic_locations",
@@ -5673,6 +5679,126 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             data_schema=schema,
             description_placeholders=_SUBENTRY_PLACEHOLDERS,
         )
+
+    # ---------- Per-device poll interval (Direction A: slower than cadence) ----
+    def _per_device_poll_intervals(self) -> dict[str, int]:
+        """Return the current, coerced per-device poll interval overrides."""
+        raw = self.config_entry.options.get(OPT_DEVICE_POLL_INTERVAL) or {}
+        return coerce_device_poll_interval_mapping(raw)
+
+    async def async_step_per_device_poll(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Pick a device whose per-device poll interval should be set or cleared.
+
+        Direction A only: a per-device value slows an individual device down
+        relative to the coordinator-wide cadence; a value below the cadence is
+        clamped by ``max(per_device_interval, effective_interval)`` at runtime.
+        """
+        device_choices = self._device_choice_map()
+        if not device_choices:
+            return self.async_abort(reason="no_devices")
+
+        current = self._per_device_poll_intervals()
+        if current:
+            display = "\n".join(
+                f"{device_choices.get(dev_id, dev_id)}: {seconds}s"
+                for dev_id, seconds in sorted(current.items())
+            )
+        else:
+            display = "None configured"
+
+        schema = vol.Schema(
+            {
+                vol.Required("device"): vol.In(
+                    {
+                        dev_id: f"{name} ({dev_id})"
+                        for dev_id, name in device_choices.items()
+                    }
+                )
+            }
+        )
+        placeholders = {"per_device_poll_intervals": display}
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="per_device_poll",
+                data_schema=schema,
+                description_placeholders=placeholders,
+            )
+
+        selected = str(user_input.get("device", ""))
+        if selected not in device_choices:
+            return self.async_show_form(
+                step_id="per_device_poll",
+                data_schema=schema,
+                errors={"device": "invalid_device"},
+                description_placeholders=placeholders,
+            )
+
+        self._per_device_poll_editing = selected
+        return await self.async_step_per_device_poll_set()
+
+    async def async_step_per_device_poll_set(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Set (or clear, by leaving it empty) the selected device's interval."""
+        device_id = self._per_device_poll_editing
+        device_choices = self._device_choice_map()
+        if not device_id or device_id not in device_choices:
+            # Selection was lost; return to the picker rather than guess.
+            return await self.async_step_per_device_poll()
+
+        current = self._per_device_poll_intervals()
+        placeholders = {
+            "device_name": f"{device_choices.get(device_id, device_id)} ({device_id})",
+            "min_seconds": str(DEVICE_POLL_INTERVAL_MIN_S),
+            "max_seconds": str(DEVICE_POLL_INTERVAL_MAX_S),
+        }
+        base_schema = vol.Schema(
+            {
+                vol.Optional("interval"): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(
+                        min=DEVICE_POLL_INTERVAL_MIN_S,
+                        max=DEVICE_POLL_INTERVAL_MAX_S,
+                    ),
+                )
+            }
+        )
+        suggested: dict[str, Any] = {}
+        if device_id in current:
+            suggested["interval"] = current[device_id]
+        schema = self.add_suggested_values_to_schema(base_schema, suggested)
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="per_device_poll_set",
+                data_schema=schema,
+                description_placeholders=placeholders,
+            )
+
+        new_map = dict(current)
+        interval_value = user_input.get("interval")
+        if interval_value is not None:
+            new_map[device_id] = int(interval_value)
+        else:
+            # Empty submission clears the override for this device.
+            new_map.pop(device_id, None)
+
+        new_options = dict(self.config_entry.options)
+        new_options[OPT_DEVICE_POLL_INTERVAL] = coerce_device_poll_interval_mapping(
+            new_map
+        )
+        self._per_device_poll_editing = None
+
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=new_options
+        )
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(self.config_entry.entry_id)
+        )
+        return await self.async_step_init()
 
     async def async_step_repairs(
         self, user_input: dict[str, Any] | None = None

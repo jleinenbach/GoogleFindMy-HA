@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "עדכון אישורים",
           "settings": "שינוי הגדרות",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "נראות התקנים",
           "semantic_locations": "מיקומים סמנטיים",
           "repairs": "תיקוני תת-רשומות"
@@ -277,6 +278,20 @@
           "subentry": "התקנים משוחזרים מצטרפים לקבוצת התכונות שתבחר. יש לעיין ב[תת-רשומות וקבוצות תכונות]({subentries_docs_url}) להנחיות שיוך."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "תיקוני תת-רשומות",
         "description": "יש לבחור פעולת תיקון עבור קבוצות התכונות שלך.",
@@ -315,10 +330,12 @@
       "duplicate_name": "השם הסמנטי כבר קיים. יש לבחור שם אחר.",
       "duplicate_semantic_location": "השם הסמנטי כבר קיים. יש לבחור שם אחר.",
       "unknown": "אירעה שגיאה בלתי צפויה.",
-      "invalid_subentry": "יש לבחור קבוצת תכונות תקינה."
+      "invalid_subentry": "יש לבחור קבוצת תכונות תקינה.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "הגדרה מחדש הצליחה.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "אין התקנים מוסתרים לשחזור.",
       "no_semantic_locations": "לא מוגדרים מיקומים סמנטיים.",
       "repairs_no_subentries": "אין תת-רשומות לתיקון.",

@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "Update credentials",
           "settings": "Modify settings",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "Device visibility",
           "semantic_locations": "Semantic locations",
           "repairs": "Subentry repairs"
@@ -277,6 +278,20 @@
           "subentry": "Restored devices join the feature group you choose. See [Subentries and feature groups]({subentries_docs_url}) for assignment guidance."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "Subentry Repairs",
         "description": "Choose a repair action for your feature groups.",
@@ -315,10 +330,12 @@
       "duplicate_name": "Semantic name already exists. Choose a different name.",
       "duplicate_semantic_location": "Semantic name already exists. Choose a different name.",
       "unknown": "Unexpected error occurred.",
-      "invalid_subentry": "Choose a valid feature group."
+      "invalid_subentry": "Choose a valid feature group.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "Reconfiguration successful.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "There are no ignored devices to restore.",
       "no_semantic_locations": "No semantic locations are configured.",
       "repairs_no_subentries": "There are no subentries to repair.",

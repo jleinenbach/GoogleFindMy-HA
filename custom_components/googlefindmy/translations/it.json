@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "Aggiorna credenziali",
           "settings": "Modifica impostazioni",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "Visibilità dei dispositivi",
           "semantic_locations": "Posizioni semantiche",
           "repairs": "Riparazioni dei gruppi di funzionalità"
@@ -277,6 +278,20 @@
           "subentry": "I dispositivi ripristinati vengono assegnati al gruppo di funzionalità scelto. Consulta [Sotto-voci e gruppi di funzionalità]({subentries_docs_url}) per ulteriori indicazioni."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "Riparazioni dei gruppi di funzionalità",
         "description": "Scegli un'azione di riparazione per i tuoi gruppi di funzionalità.",
@@ -315,10 +330,12 @@
       "duplicate_name": "Il nome semantico esiste già. Scegli un nome diverso.",
       "duplicate_semantic_location": "Il nome semantico esiste già. Scegli un nome diverso.",
       "unknown": "Errore imprevisto.",
-      "invalid_subentry": "Scegli un gruppo di funzionalità valido."
+      "invalid_subentry": "Scegli un gruppo di funzionalità valido.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "Riconfigurazione riuscita.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "Non ci sono dispositivi ignorati da ripristinare.",
       "no_semantic_locations": "Non sono configurate posizioni semantiche.",
       "repairs_no_subentries": "Non ci sono gruppi di funzionalità da riparare.",

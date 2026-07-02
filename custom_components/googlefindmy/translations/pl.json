@@ -154,6 +154,7 @@
         "menu_options": {
           "credentials": "Zaktualizuj poświadczenia",
           "settings": "Zmień ustawienia",
+          "per_device_poll": "Per-device poll intervals",
           "visibility": "Widoczność urządzeń",
           "semantic_locations": "Lokalizacje semantyczne",
           "repairs": "Naprawy grup funkcji"
@@ -277,6 +278,20 @@
           "subentry": "Przywrócone urządzenia zostaną przypisane do wybranej grupy funkcji. Wskazówki znajdziesz w sekcji [Podpozycje i grupy funkcji]({subentries_docs_url})."
         }
       },
+      "per_device_poll": {
+        "title": "Per-device poll intervals",
+        "description": "Poll an individual device less often than the global cadence (for example a rarely moving tracker). A per-device value below the global interval has no effect and is clamped. Pick a device to set or clear its interval.\n\nCurrent overrides:\n{per_device_poll_intervals}",
+        "data": {
+          "device": "Device"
+        }
+      },
+      "per_device_poll_set": {
+        "title": "Set poll interval",
+        "description": "Poll interval in seconds for {device_name}. Allowed range {min_seconds}-{max_seconds} seconds. Leave the field empty to remove the override and follow the global cadence.",
+        "data": {
+          "interval": "Poll interval (s)"
+        }
+      },
       "repairs": {
         "title": "Naprawy grup funkcji",
         "description": "Wybierz działanie naprawcze dla swoich grup funkcji.",
@@ -315,10 +330,12 @@
       "duplicate_name": "Nazwa semantyczna już istnieje. Wybierz inną nazwę.",
       "duplicate_semantic_location": "Nazwa semantyczna już istnieje. Wybierz inną nazwę.",
       "unknown": "Wystąpił nieoczekiwany błąd.",
-      "invalid_subentry": "Wybierz prawidłową grupę funkcji."
+      "invalid_subentry": "Wybierz prawidłową grupę funkcji.",
+      "invalid_device": "Selected device is not available."
     },
     "abort": {
       "reconfigure_successful": "Ponowna konfiguracja zakończona pomyślnie.",
+      "no_devices": "No devices are available to configure yet.",
       "no_ignored_devices": "Brak ignorowanych urządzeń do przywrócenia.",
       "no_semantic_locations": "Nie skonfigurowano lokalizacji semantycznych.",
       "repairs_no_subentries": "Brak grup funkcji do naprawy.",
