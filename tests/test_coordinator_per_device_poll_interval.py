@@ -33,6 +33,9 @@ from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.helpers.update import (
     device_due_by_interval,
 )
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
 from tests.helpers.config_entries_stub import make_config_entry
 
 
@@ -87,6 +90,25 @@ class _EmptyResultAPI:
     """API stub that returns an empty result so the real cycle reaches its end."""
 
     async def async_get_device_location(self, _dev_id: str, _dev_name: str):
+        return []
+
+
+class _RaiseOnDeviceAPI:
+    """API stub that raises on a target device to force an early loop exit.
+
+    ``SpotApiEmptyResponseError`` escalates to reauth inside the device loop and
+    returns immediately, so any device scheduled after the target is never
+    reached this cycle.
+    """
+
+    def __init__(self, raise_on: str) -> None:
+        self._raise_on = raise_on
+        self.calls: list[str] = []
+
+    async def async_get_device_location(self, dev_id: str, _dev_name: str):
+        self.calls.append(dev_id)
+        if dev_id == self._raise_on:
+            raise SpotApiEmptyResponseError("forced early exit")
         return []
 
 
@@ -364,6 +386,49 @@ async def test_stamp_not_written_when_global_gate_skips_cycle(
     coordinator._last_poll_mono = time.monotonic() - coordinator.min_poll_interval
     await _run_cycle_and_capture(coordinator)
     assert "dev-a" not in coordinator._device_last_poll_mono
+
+
+@pytest.mark.asyncio
+async def test_stamp_skips_devices_not_reached_on_early_exit(
+    coordinator: GoogleFindMyCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An early mid-loop exit must not stamp devices the loop never reached.
+
+    The cycle exits via reauth on ``dev-b``; ``dev-c`` is scheduled after it and
+    is never polled. Its per-device floor must stay unstamped so it remains due,
+    while the attempted devices (``dev-a``, ``dev-b``) advance their floor.
+    """
+
+    api = _RaiseOnDeviceAPI(raise_on="dev-b")
+    coordinator.api = api
+    coordinator.config_entry = make_config_entry(
+        entry_id="entry-id", options={}, data={}, title="Test Entry"
+    )
+    coordinator._get_google_home_filter = lambda: None
+    coordinator._is_fcm_ready_soft = lambda: True
+    coordinator._get_ignored_set = set
+    coordinator._last_device_list = [{"id": "dev-a"}, {"id": "dev-b"}, {"id": "dev-c"}]
+    coordinator.data = []
+    coordinator.last_update_success = True
+    coordinator.last_exception = None
+    coordinator.async_set_update_error = lambda _exc: None
+    coordinator.async_set_updated_data = lambda _data: None
+    monkeypatch.setattr(coordinator, "_request_poll_reauth", lambda *_a, **_k: None)
+    monkeypatch.setattr(coordinator, "_set_auth_state", lambda *_a, **_k: None)
+
+    devices = [
+        {"id": "dev-a", "name": "A"},
+        {"id": "dev-b", "name": "B"},
+        {"id": "dev-c", "name": "C"},
+    ]
+    await coordinator._async_start_poll_cycle(devices, force=True)
+
+    # dev-c was never reached (loop returned on dev-b): it must stay unstamped.
+    assert "dev-c" not in coordinator._device_last_poll_mono
+    assert api.calls == ["dev-a", "dev-b"]
+    # Devices that actually entered the request path advanced their floor.
+    assert "dev-a" in coordinator._device_last_poll_mono
+    assert "dev-b" in coordinator._device_last_poll_mono
 
 
 # --------------------------------------------------------------------------

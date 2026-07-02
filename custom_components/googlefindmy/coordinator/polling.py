@@ -1669,6 +1669,15 @@ class PollingOperations(_MixinBase):
 
             last_exception: Exception | None = None
             _any_device_got_data = False
+            # IDs of devices that actually entered the per-device request path
+            # this cycle. The finally-block per-device stamp must advance the
+            # poll floor only for these. The finally runs on every exit,
+            # including an early return/raise/cancel from mid-loop (reauth
+            # handlers, cancellation), so stamping the full scheduled batch
+            # would mark devices the loop never reached as freshly polled and
+            # suppress their next update for a full per-device interval without
+            # any real poll having happened.
+            attempted_ids: set[str] = set()
             try:
                 cycle_failed = False
                 # First account-wide decryption error seen this cycle (None == the
@@ -1694,6 +1703,11 @@ class PollingOperations(_MixinBase):
                 cycle_had_successful_decrypt = False
                 for idx, dev in enumerate(devices):
                     dev_id = dev["id"]
+                    # Mark attempted at iteration entry (before the request), so
+                    # a device whose poll raises is still stamped, but devices
+                    # after an early loop exit are not (see attempted_ids above).
+                    if isinstance(dev_id, str) and dev_id:
+                        attempted_ids.add(dev_id)
                     dev_name = dev.get("name", dev_id)
                     _LOGGER.debug(
                         "Sequential poll: requesting location for %s (%d/%d)",
@@ -2216,14 +2230,13 @@ class PollingOperations(_MixinBase):
                 cycle_end_mono = time.monotonic()
                 self._last_poll_mono = cycle_end_mono
                 # Stamp the per-device interval floor at the same instant as the
-                # global baseline, for exactly the devices this cycle ran. The
-                # per-device filter reads (never writes) this map, so a device
-                # the global gate never started keeps its earlier stamp and
-                # stays due; only really-polled devices advance their floor.
-                for _polled in devices:
-                    _polled_id = _polled.get("id")
-                    if isinstance(_polled_id, str) and _polled_id:
-                        self._device_last_poll_mono[_polled_id] = cycle_end_mono
+                # global baseline, for exactly the devices this cycle actually
+                # attempted. The per-device filter reads (never writes) this
+                # map, so a device the loop never reached (early return/raise/
+                # cancel) keeps its earlier stamp and stays due; only devices
+                # that entered the request path advance their floor.
+                for _polled_id in attempted_ids:
+                    self._device_last_poll_mono[_polled_id] = cycle_end_mono
                 self._is_polling = False
                 self.safe_update_metric("last_poll_end_mono", time.monotonic())
                 if cycle_failed:
