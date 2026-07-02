@@ -164,7 +164,9 @@ DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
 # cadence floor: a per-device value below it is clamped by
 # ``max(per_device_interval, effective_interval)`` and would be inert anyway.
 DEVICE_POLL_INTERVAL_MIN_S: int = DEFAULT_MIN_POLL_INTERVAL  # seconds
-DEVICE_POLL_INTERVAL_MAX_S: int = 3600  # seconds (1 hour), mirrors location_poll_interval
+DEVICE_POLL_INTERVAL_MAX_S: int = (
+    3600  # seconds (1 hour), mirrors location_poll_interval
+)
 
 # Manual locate policy (button/service)
 LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL

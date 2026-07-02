@@ -142,9 +142,7 @@ def _patch_side_effects(
     monkeypatch.setattr(
         coordinator, "_ensure_registry_for_devices", lambda *_a, **_k: 0
     )
-    monkeypatch.setattr(
-        coordinator, "_refresh_subentry_index", lambda *_a, **_k: None
-    )
+    monkeypatch.setattr(coordinator, "_refresh_subentry_index", lambda *_a, **_k: None)
     monkeypatch.setattr(
         coordinator,
         "_async_build_device_snapshot_with_fallbacks",
@@ -168,7 +166,9 @@ async def _run_cycle_and_capture(
 
     await coordinator._async_update_data()
     poll_tasks = [
-        task for task, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"
+        task
+        for task, name in coordinator.hass.created
+        if name == f"{DOMAIN}.poll_cycle"
     ]
     for task in poll_tasks:
         await asyncio.wait_for(task, timeout=1)
