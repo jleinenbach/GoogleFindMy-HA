@@ -8,6 +8,7 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from collections.abc import Mapping, Sequence
 from typing import Final, Literal
@@ -290,6 +291,27 @@ def _coerce_aliases(value: object) -> list[str]:
     return []
 
 
+def _finite_int_or_none(value: object) -> int | None:
+    """Convert a finite ``int``/``float`` to ``int``; return ``None`` otherwise.
+
+    ``bool``, non-numeric types, and non-finite floats (``NaN``/``±inf``) all
+    yield ``None``. This exists because ``int(float("nan"))`` raises
+    ``ValueError`` and ``int(float("inf"))`` raises ``OverflowError`` -- either
+    would defeat the drop-invalid, never-raise contract of the coercer below
+    when a corrupt ``.storage`` edit or a direct-options writer stores such a
+    value. Guarding on ``math.isfinite`` keeps that coercer total.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return int(value)
+    return None
+
+
 def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
     """Coerce various legacy shapes into v2 mapping.
     Accepted inputs:
@@ -346,8 +368,9 @@ def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
                         name = name_value
                     aliases = _coerce_aliases(str_meta.get(_IGN_KEY_ALIASES))
                     ignored_value = str_meta.get(_IGN_KEY_IGNORED_AT)
-                    if isinstance(ignored_value, (int, float)):
-                        ignored_at = int(ignored_value)
+                    coerced_at = _finite_int_or_none(ignored_value)
+                    if coerced_at is not None:
+                        ignored_at = coerced_at
                     source_value = str_meta.get(_IGN_KEY_SOURCE)
                     if isinstance(source_value, str) and source_value:
                         source = source_value
