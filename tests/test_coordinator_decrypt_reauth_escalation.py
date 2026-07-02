@@ -330,8 +330,10 @@ def test_resolve_mixed_cycle_sibling_success_blocks_spurious_reauth(
     # subclass here (NOT a plain DecryptionError), which is the only class the
     # sibling-success downgrade applies to.
     err = OwnReportIdentityMismatchError(
-        "All own-report decryptions failed; the cached identity key no longer "
-        "matches the server reports."
+        "All own-report decryptions failed: the server-side own reports predate "
+        "the current identity key (they were encrypted under a previous key, so "
+        "the current key cannot read them). This clears once the device uploads "
+        "a fresh report."
     )
 
     with caplog.at_level(logging.WARNING):

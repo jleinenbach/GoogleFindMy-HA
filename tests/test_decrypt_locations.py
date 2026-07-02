@@ -443,13 +443,13 @@ async def test_all_own_reports_failing_auth_raises_decryption_error(
 ) -> None:
     """T-D1: every own report fails authentication → OwnReportIdentityMismatchError.
 
-    Device-local signal: the cached identity key no longer matches THIS device's own
-    server reports (e.g. a phone powered off for days), so the function must raise
-    the dedicated subclass instead of silently returning empty (which the
-    coordinator would never surface). The coordinator downgrades it to a warning
-    only when a sibling proves the account keys healthy; on its own it still
-    escalates. Asserting the concrete subclass locks in the contract the
-    coordinator's sibling-success gate keys off.
+    Device-local signal: THIS device's own server reports predate the cached
+    identity key (e.g. a phone powered off for days, or freshly re-paired), so
+    the function must raise the dedicated subclass instead of silently returning
+    empty (which the coordinator would never surface). The coordinator downgrades
+    it to a warning only when a sibling proves the account keys healthy; on its
+    own it still escalates. Asserting the concrete subclass locks in the contract
+    the coordinator's sibling-success gate keys off.
     """
 
     base_now = 1_700_000_000.0

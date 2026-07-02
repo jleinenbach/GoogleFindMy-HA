@@ -1947,8 +1947,9 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
             )
 
     # Diff-Review #1 / Codex (PR #1153): the device HAS its own encrypted reports
-    # and EVERY one failed authentication (no own-report success), so the cached
-    # identity key no longer matches THIS device's server reports -- distinct from
+    # and EVERY one failed authentication (no own-report success), so THIS
+    # device's server-side own reports predate the cached identity key (they were
+    # encrypted under a previous key) -- distinct from
     # foreign/crowdsourced failures (which legitimately fail with other accounts'
     # keys and must NOT escalate). Raise the dedicated OwnReportIdentityMismatchError
     # so the escalation machinery (coordinator poll/locate handlers and the FCM push
@@ -1977,8 +1978,10 @@ async def async_decrypt_location_response_locations(  # noqa: PLR0912, PLR0915
         )
         if not has_network_fix:
             raise OwnReportIdentityMismatchError(
-                "All own-report decryptions failed; the cached identity key no "
-                "longer matches the server reports."
+                "All own-report decryptions failed: the server-side own reports "
+                "predate the current identity key (they were encrypted under a "
+                "previous key, so the current key cannot read them). This clears "
+                "once the device uploads a fresh report."
             )
 
     if not wrapped:
