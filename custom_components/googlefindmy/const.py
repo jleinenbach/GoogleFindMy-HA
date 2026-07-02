@@ -105,6 +105,12 @@ DATA_AUTH_METHOD: str = "auth_method"  # "secrets_json" | "individual_tokens"
 OPT_LOCATION_POLL_INTERVAL: str = "location_poll_interval"
 OPT_DEVICE_POLL_DELAY: str = "device_poll_delay"
 OPT_MIN_POLL_INTERVAL: str = "min_poll_interval"
+# Per-device poll interval override (Direction A only): mapping
+# {device_id: seconds}. A device polls no more often than
+# ``max(per_device_interval, effective_interval)``; values below the
+# coordinator-wide cadence are clamped, not silently honored. Managed by a
+# dedicated options flow (like OPT_IGNORED_DEVICES), not a raw scalar field.
+OPT_DEVICE_POLL_INTERVAL: str = "device_poll_interval"
 OPT_ALLOW_HISTORY_FALLBACK: str = "allow_history_fallback"
 OPT_ENABLE_STATS_ENTITIES: str = "enable_stats_entities"
 OPT_GOOGLE_HOME_FILTER_ENABLED: str = "google_home_filter_enabled"
@@ -123,6 +129,7 @@ OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 OPTION_KEYS: tuple[str, ...] = (
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
+    OPT_DEVICE_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL,
     OPT_ALLOW_HISTORY_FALLBACK,
@@ -152,6 +159,12 @@ DEVICE_LIST_POLL_INTERVAL: int = 300
 DEFAULT_LOCATION_POLL_INTERVAL: int = 300  # seconds; start a new polling cycle
 DEFAULT_DEVICE_POLL_DELAY: int = 5  # seconds; inter-device delay within one cycle
 DEFAULT_MIN_POLL_INTERVAL: int = 60  # seconds; hard lower bound between cycles
+
+# Per-device poll interval bounds (Direction A). The lower bound equals the
+# cadence floor: a per-device value below it is clamped by
+# ``max(per_device_interval, effective_interval)`` and would be inert anyway.
+DEVICE_POLL_INTERVAL_MIN_S: int = DEFAULT_MIN_POLL_INTERVAL  # seconds
+DEVICE_POLL_INTERVAL_MAX_S: int = 3600  # seconds (1 hour), mirrors location_poll_interval
 
 # Manual locate policy (button/service)
 LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
@@ -249,6 +262,8 @@ DEFAULT_OPTIONS: dict[str, object] = {
     # Store ignored devices as mapping {device_id: {"name": str, "aliases": [str], "ignored_at": int, "source": str}}
     # Backwards-compatible: old list[str] or dict[str,str] is auto-migrated on first write.
     OPT_IGNORED_DEVICES: {},
+    # Empty mapping = no per-device override; every device uses the cadence.
+    OPT_DEVICE_POLL_INTERVAL: {},
     OPT_LOCATION_POLL_INTERVAL: DEFAULT_LOCATION_POLL_INTERVAL,
     OPT_DEVICE_POLL_DELAY: DEFAULT_DEVICE_POLL_DELAY,
     OPT_MIN_POLL_INTERVAL: DEFAULT_MIN_POLL_INTERVAL,
@@ -374,6 +389,50 @@ def ignored_choices_for_ui(
     }
 
 
+DevicePollIntervalMapping = dict[str, int]
+
+
+def coerce_device_poll_interval_mapping(raw: object) -> DevicePollIntervalMapping:
+    """Coerce arbitrary stored input into a clean ``{device_id: seconds}`` map.
+
+    Defensive against hand-edited or legacy option values: only string keys
+    with integer-coercible values are kept, and each value is clamped to
+    ``DEVICE_POLL_INTERVAL_MIN_S..DEVICE_POLL_INTERVAL_MAX_S``. Invalid entries
+    are dropped rather than raising, so a corrupt option can never break the
+    poll loop. There is no legacy schema to migrate (new key), so no
+    ``changed`` flag is returned.
+
+    Args:
+        raw: The stored option value (expected mapping, but any type tolerated).
+
+    Returns:
+        A new mapping of device id to a bounded integer interval in seconds.
+    """
+    out: DevicePollIntervalMapping = {}
+    if not isinstance(raw, Mapping):
+        return out
+    for dev_id, value in raw.items():
+        if not isinstance(dev_id, str) or not dev_id:
+            continue
+        # Accept int/float/str-of-int; reject bool (bool is an int subclass).
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            seconds = int(value)
+        elif isinstance(value, str):
+            try:
+                seconds = int(value.strip())
+            except (TypeError, ValueError):
+                continue
+        else:
+            continue
+        seconds = max(
+            DEVICE_POLL_INTERVAL_MIN_S, min(DEVICE_POLL_INTERVAL_MAX_S, seconds)
+        )
+        out[dev_id] = seconds
+    return out
+
+
 # --------------------------------------------------------------------------------------
 # CONFIG_FIELDS — server-side validation contract for config/options flows
 # --------------------------------------------------------------------------------------
@@ -421,6 +480,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
     },
     # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
     # visibility flow and not edited as a raw field (list of ids).
+    # OPT_DEVICE_POLL_INTERVAL is likewise omitted: it is a mapping
+    # {device_id: seconds} managed by a dedicated per-device options flow, where
+    # each value is range-validated (DEVICE_POLL_INTERVAL_MIN_S..MAX_S).
 }
 
 # --------------------------------------------------------------------------------------
@@ -611,6 +673,7 @@ __all__ = [
     "DATA_AUTH_METHOD",
     "OPT_IGNORED_DEVICES",
     "OPT_LOCATION_POLL_INTERVAL",
+    "OPT_DEVICE_POLL_INTERVAL",
     "OPT_DEVICE_POLL_DELAY",
     "OPT_MIN_POLL_INTERVAL",
     "OPT_ALLOW_HISTORY_FALLBACK",
@@ -628,6 +691,8 @@ __all__ = [
     "DEFAULT_LOCATION_POLL_INTERVAL",
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",
+    "DEVICE_POLL_INTERVAL_MIN_S",
+    "DEVICE_POLL_INTERVAL_MAX_S",
     "LOCATE_COOLDOWN_S",
     "DEFAULT_ALLOW_HISTORY_FALLBACK",
     "DEFAULT_ENABLE_STATS_ENTITIES",
@@ -680,6 +745,7 @@ __all__ = [
     "STORAGE_VERSION",
     "coerce_ignored_mapping",
     "ignored_choices_for_ui",
+    "coerce_device_poll_interval_mapping",
     "WEEK_SECONDS",
     "map_token_secret_seed",
     "map_token_hex_digest",
