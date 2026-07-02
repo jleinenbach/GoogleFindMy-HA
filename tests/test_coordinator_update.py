@@ -420,8 +420,14 @@ class TestIsPollCycleDue:
         )
         assert result is False
 
-    def test_due_on_predictive_due_with_hard_limit(self) -> None:
-        """Should be due on predictive_due when hard limit passed."""
+    def test_not_due_on_predictive_due_below_cadence(self) -> None:
+        """Predictive due must not trigger below the chosen cadence.
+
+        Stage-1 cadence fix: min_poll_interval (reflected here by
+        hard_limit_passed=True) alone no longer pulls a poll below
+        effective_interval. Predictive pre-fetch only fires once
+        elapsed >= effective_interval.
+        """
         result = is_poll_cycle_due(
             elapsed=30.0,
             effective_interval=60.0,
@@ -430,7 +436,7 @@ class TestIsPollCycleDue:
             hard_limit_passed=True,
             is_cold_start=False,
         )
-        assert result is True
+        assert result is False
 
     def test_not_due_on_predictive_due_without_hard_limit(self) -> None:
         """Should not be due on predictive_due without hard limit."""
