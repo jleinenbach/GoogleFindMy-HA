@@ -12,6 +12,9 @@ from cryptography.exceptions import InvalidTag
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker import (
     decrypt_locations,
 )
+from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypted_location import (
+    WrappedLocation,
+)
 from custom_components.googlefindmy.ProtoDecoders import Common_pb2, DeviceUpdate_pb2
 from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_owner_key import (
     OwnerKeyInfo,
@@ -443,13 +446,13 @@ async def test_all_own_reports_failing_auth_raises_decryption_error(
 ) -> None:
     """T-D1: every own report fails authentication → OwnReportIdentityMismatchError.
 
-    Device-local signal: the cached identity key no longer matches THIS device's own
-    server reports (e.g. a phone powered off for days), so the function must raise
-    the dedicated subclass instead of silently returning empty (which the
-    coordinator would never surface). The coordinator downgrades it to a warning
-    only when a sibling proves the account keys healthy; on its own it still
-    escalates. Asserting the concrete subclass locks in the contract the
-    coordinator's sibling-success gate keys off.
+    Device-local signal: THIS device's own server reports predate the cached
+    identity key (e.g. a phone powered off for days, or freshly re-paired), so
+    the function must raise the dedicated subclass instead of silently returning
+    empty (which the coordinator would never surface). The coordinator downgrades
+    it to a warning only when a sibling proves the account keys healthy; on its
+    own it still escalates. Asserting the concrete subclass locks in the contract
+    the coordinator's sibling-success gate keys off.
     """
 
     base_now = 1_700_000_000.0
@@ -480,6 +483,263 @@ async def test_all_own_reports_failing_auth_raises_decryption_error(
         await decrypt_locations.async_decrypt_location_response_locations(
             update, cache=object()
         )
+
+
+async def test_stale_own_reports_with_foreign_success_preserve_network_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1b: stale own reports + a successful foreign report → keep the network fix.
+
+    Counterpoint to T-D1: an offline phone still seen by the FMDN network (a Google
+    Home / Nest anchor) yields stale own reports (all fail authentication) alongside
+    one foreign/crowdsourced report that decrypts. The own-report mismatch raise must
+    be SUPPRESSED so the good network coordinate is returned instead of being
+    discarded by the exception before the ``wrapped`` list is ever converted. A
+    reauth cannot fix stale own reports of an offline device anyway, and the device
+    is demonstrably locatable this cycle. Dropping the ``is_real_location_record``
+    network-fix suppression makes this test raise ``OwnReportIdentityMismatchError``
+    (mutation proof).
+    """
+
+    base_now = 1_700_000_750.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        return _valid_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-stale",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    _add_report(
+        update,
+        public_key_random=b"\x20\x21\x22\x23",
+        encrypted_location=b"foreign-ok",
+        is_own_report=False,
+        base_now=base_now,
+    )
+
+    # Must NOT raise: the successful network report is a valid fix to preserve.
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    # The good crowdsourced position survived instead of being discarded by the raise.
+    assert decrypt_locations.any_real_location_record(result)
+
+
+async def test_stale_own_reports_with_undecodable_foreign_still_escalate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1c: stale own reports + a foreign report that decrypts to bytes but yields
+    NO usable coordinate → escalation must STILL fire.
+
+    Codex (PR #1153) counterpoint to T-D1b: a foreign/crowdsourced report can
+    authenticate to raw bytes yet fail protobuf parsing or lat/lon bounds
+    validation, so it never becomes a real coordinate. Suppressing the own-report
+    mismatch on "decrypted to bytes" alone would hand the caller an empty result
+    AND skip the stale-own-report handling even though no network fix was preserved.
+    The suppression is therefore judged on the validated ``is_real_location_record``
+    output; with the only foreign report out of bounds, the raise must fire. Basing
+    suppression back on mere decrypt success makes this test stop raising (mutation
+    proof).
+    """
+
+    base_now = 1_700_000_800.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    def _out_of_bounds_location_bytes() -> bytes:
+        # Parses cleanly, but latitude 200° is rejected by _is_valid_latlon, so the
+        # report is dropped by the fail-fast validation and never enters `structured`.
+        loc = DeviceUpdate_pb2.Location()
+        loc.latitude = int(200.0 * 1e7)
+        loc.longitude = int(11.0 * 1e7)
+        loc.altitude = ALTITUDE_METERS
+        return loc.SerializeToString()
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        return _out_of_bounds_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-stale",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    _add_report(
+        update,
+        public_key_random=b"\x30\x31\x32\x33",
+        encrypted_location=b"foreign-unusable",
+        is_own_report=False,
+        base_now=base_now,
+    )
+
+    # The foreign report decrypted but produced no valid coordinate, so the stale
+    # own-report signal must still escalate (there is no network fix to preserve).
+    with pytest.raises(decrypt_locations.OwnReportIdentityMismatchError):
+        await decrypt_locations.async_decrypt_location_response_locations(
+            update, cache=object()
+        )
+
+
+async def test_stale_own_reports_with_crowdsourced_own_flag_preserve_network_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-D1d: stale own reports + a valid network report carrying isOwnReport=True.
+
+    Codex (BSkando PR #197) counterpoint to T-D1b: this integration's own
+    crowdsourced uploader (``fmdn_finder/location_uploader.py``) stamps network
+    reports with ``isOwnReport=True`` while still carrying a non-empty
+    ``publicKeyRandom`` (the foreign/ECDH crypto path). Keying the network-fix
+    suppression off the server-supplied ``is_own_report`` flag would misclassify
+    such a valid crowdsourced fix as an own report, let the raise fire, and discard
+    the good coordinate. The suppression is therefore keyed off cryptographic
+    provenance (``is_network_report`` = decrypted via the foreign ECDH path), which
+    is immune to that flag. Reverting the predicate to ``not is_own_report`` makes
+    this test raise ``OwnReportIdentityMismatchError`` (mutation proof).
+    """
+
+    base_now = 1_700_000_850.0
+    monkeypatch.setattr(decrypt_locations.time, "time", lambda: base_now)
+    monkeypatch.setattr(decrypt_locations, "is_mcu_tracker", lambda *_a: False)
+
+    async def fake_identity_key(*_args: object, **_kwargs: object) -> list[bytes]:
+        return [b"\x42" * 32]
+
+    async def fake_offload_aes(*_args: object, **_kwargs: object) -> bytes:
+        raise InvalidTag
+
+    async def fake_offload_foreign(*_args: object, **_kwargs: object) -> bytes:
+        return _valid_location_bytes()
+
+    monkeypatch.setattr(
+        decrypt_locations, "async_retrieve_identity_key", fake_identity_key
+    )
+    monkeypatch.setattr(decrypt_locations, "_offload_decrypt_aes", fake_offload_aes)
+    monkeypatch.setattr(
+        decrypt_locations, "_offload_decrypt_foreign", fake_offload_foreign
+    )
+
+    update = DeviceUpdate_pb2.DeviceUpdate()
+    update.deviceMetadata.information.deviceRegistration.SetInParent()
+    _add_report(
+        update,
+        public_key_random=b"",
+        encrypted_location=b"own-stale",
+        is_own_report=True,
+        base_now=base_now,
+    )
+    # A valid crowdsourced network fix that (like this repo's uploader) carries the
+    # server flag isOwnReport=True together with a non-empty publicKeyRandom.
+    _add_report(
+        update,
+        public_key_random=b"\x40\x41\x42\x43",
+        encrypted_location=b"crowdsourced-ok",
+        is_own_report=True,
+        base_now=base_now,
+    )
+
+    # Must NOT raise: the foreign-decrypted coordinate is a real network fix despite
+    # the isOwnReport=True flag, so it is preserved instead of being discarded.
+    result = await decrypt_locations.async_decrypt_location_response_locations(
+        update, cache=object()
+    )
+
+    assert decrypt_locations.any_real_location_record(result)
+
+    # Downstream contract (Codex BSkando PR #197, follow-up): the admitted network
+    # fix must be normalized to ``is_own_report=False`` so consumers that read that
+    # flag as authoritative owner provenance (row_source_label,
+    # FCM crowd-source stats, map view, ranking) classify it as crowdsourced, not
+    # owner. Cryptographic provenance stays visible via ``is_network_report=True``.
+    # Dropping the ``and not is_network_report`` invariant in WrappedLocation makes
+    # ``is_own_report`` stay True here (mutation proof).
+    network_fixes = [
+        record
+        for record in result
+        if record.get("is_network_report")
+        and decrypt_locations.is_real_location_record(record)
+    ]
+    assert network_fixes, "expected the crowdsourced fix to survive as a record"
+    for record in network_fixes:
+        assert record["is_own_report"] is False
+        assert record["is_network_report"] is True
+
+
+async def test_wrapped_location_network_report_is_never_own_report() -> None:
+    """T-WL1: WrappedLocation enforces the network/own mutual-exclusion invariant.
+
+    A network/foreign report is never an owner report. The server-supplied
+    ``is_own_report`` flag is unreliable (this integration's own crowdsourced
+    uploader stamps ``isOwnReport=True`` on network reports), so the object keys
+    ownership off cryptographic provenance: whenever ``is_network_report`` is True,
+    ``is_own_report`` must be coerced to False. Genuine own reports
+    (``is_network_report`` False) keep their flag. Dropping the
+    ``and not is_network_report`` coercion makes the network case return True
+    (mutation proof).
+    """
+
+    network = WrappedLocation(
+        decrypted_location=b"",
+        time=0.0,
+        accuracy=5.0,
+        status=int(Common_pb2.Status.LAST_KNOWN),
+        is_own_report=True,
+        is_network_report=True,
+        name="",
+    )
+    assert network.is_own_report is False
+    assert network.is_network_report is True
+
+    own = WrappedLocation(
+        decrypted_location=b"",
+        time=0.0,
+        accuracy=5.0,
+        status=int(Common_pb2.Status.LAST_KNOWN),
+        is_own_report=True,
+        is_network_report=False,
+        name="",
+    )
+    assert own.is_own_report is True
+    assert own.is_network_report is False
 
 
 async def test_foreign_failures_with_own_success_do_not_escalate(
