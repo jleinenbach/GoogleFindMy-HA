@@ -398,6 +398,24 @@ def test_coerce_non_mapping_returns_empty() -> None:
     assert coerce_device_poll_interval_mapping(None) == {}
 
 
+def test_coerce_drops_non_finite_floats() -> None:
+    """NaN and +/-inf are dropped, never raised (Codex #1157 hardening).
+
+    ``int(float("nan"))`` raises ValueError and ``int(float("inf"))`` raises
+    OverflowError. A corrupt ``.storage`` edit or a direct-options writer could
+    store such a value; the coercer must honour its drop-invalid contract so one
+    bad entry cannot disable every valid override or break the options screen.
+    """
+    raw = {
+        "dev-ok": 300,
+        "dev-nan": float("nan"),
+        "dev-inf": float("inf"),
+        "dev-ninf": float("-inf"),
+    }
+    result = coerce_device_poll_interval_mapping(raw)
+    assert result == {"dev-ok": 300}
+
+
 # --------------------------------------------------------------------------
 # Coordinator live options resolution (_get_device_poll_interval_map)
 # --------------------------------------------------------------------------

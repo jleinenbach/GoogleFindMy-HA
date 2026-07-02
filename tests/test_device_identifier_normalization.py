@@ -20,6 +20,7 @@ from custom_components.googlefindmy.const import (
     OPT_OPTIONS_SCHEMA_VERSION,
     SUBENTRY_TYPE_TRACKER,
     TRACKER_SUBENTRY_KEY,
+    coerce_ignored_mapping,
 )
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from tests.helpers.config_flow import ConfigEntriesDomainUniqueIdLookupMixin
@@ -198,3 +199,25 @@ def test_migrate_entry_identifier_namespaces_updates_subentries() -> None:
     managed = manager.get(TRACKER_SUBENTRY_KEY)
     assert managed is not None
     assert tuple(managed.data.get("visible_device_ids", ())) == ("device-1",)
+
+
+def test_coerce_ignored_mapping_survives_non_finite_ignored_at() -> None:
+    """A NaN/inf ``ignored_at`` is dropped to the default, never raised.
+
+    Same class as the per-device coercer hardening (Codex #1157): ``int()`` on a
+    non-finite float raises, which would break the ignored-devices coercion on a
+    corrupt ``.storage`` value. The entry must survive with a fallback timestamp.
+    """
+    result, _changed = coerce_ignored_mapping(
+        {"device-1": {"name": "Dev", "ignored_at": float("nan")}}
+    )
+
+    assert "device-1" in result
+    metadata = result["device-1"]
+    assert metadata["name"] == "Dev"
+    # ignored_at fell back to the finite _now_epoch() default: a positive epoch,
+    # never NaN and never 0/None (a "return 0 instead of None" helper mutation
+    # would leave ignored_at at the pre-set default, which is > 0).
+    ignored_at = metadata["ignored_at"]
+    assert isinstance(ignored_at, int)
+    assert ignored_at > 0
