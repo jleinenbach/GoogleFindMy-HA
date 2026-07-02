@@ -244,6 +244,9 @@ def is_poll_cycle_due(
     # Predictive due, but never below the chosen cadence. min_poll_interval
     # stays a pure API safety floor; effective_interval governs the cadence,
     # so predictive pre-fetch no longer pulls polling below effective_interval.
+    # hard_limit_passed is redundant while callers keep the invariant
+    # effective_interval >= min_poll_interval, but is retained so this pure
+    # function stays correct for any caller (do not "simplify" it away).
     if predictive_due and hard_limit_passed and elapsed >= effective_interval:
         return True
 

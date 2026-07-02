@@ -546,3 +546,21 @@ class TestIsPollCycleDue:
             is_cold_start=False,
         )
         assert result is True
+
+    def test_hard_limit_gate_still_blocks_branch_three(self) -> None:
+        """hard_limit_passed must still gate branch 3, even past cadence.
+
+        Pins the retained ``hard_limit_passed`` term: with it False, branch 3
+        must not fire even though elapsed >= effective_interval and the interval
+        branch is blocked. Dropping ``hard_limit_passed`` from branch 3 flips
+        this to True, so the contract stays locked (caller-independence).
+        """
+        result = is_poll_cycle_due(
+            elapsed=245.0,
+            effective_interval=241.0,
+            predictive_block=True,
+            predictive_due=True,
+            hard_limit_passed=False,
+            is_cold_start=False,
+        )
+        assert result is False
