@@ -27,7 +27,7 @@ CONFIG_ENTRY_VERSION: int = 2
 # cross-reference, so the manifest side is anchored in this directory's AGENTS.md
 # ("Version bump touches three files"). pyproject.toml carries the reverse reference
 # in a TOML comment.
-INTEGRATION_VERSION: str = "1.7.9"
+INTEGRATION_VERSION: str = "1.7.10"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
