@@ -37,14 +37,25 @@ class ReauthReasonCode(StrEnum):
     BADAUTH_GPSOAUTH = "badauth_gpsoauth"
     # Invalid AAS credential material.
     AAS_INVALID = "aas_invalid"
+    # Spot transport permanent auth failure (SpotAuthPermanentError from
+    # spot_request.py: AAS token invalid after refresh / gRPC UNAUTHENTICATED /
+    # PERMISSION_DENIED). General Spot-session-permanent, not owner-key specific.
+    SPOT_AUTH_PERMANENT = "spot_auth_permanent"
     # get_owner_key permanent Spot session failure.
     OWNER_KEY_PERMANENT = "owner_key_permanent"
     # get_owner_key empty/trailers-only SPOT response (transient/auth unproven).
     OWNER_KEY_EMPTY_RESPONSE = "owner_key_empty_response"
     # api.py "TokenCache is closed" invalid-state escalation.
     TOKENCACHE_CLOSED = "tokencache_closed"
-    # api.py transient/generic Nova auth failure.
+    # api.py transient/generic Nova auth failure (single, immediate escalation).
     NOVA_AUTH_FAILED = "nova_auth_failed"
+    # poll-cycle transient Nova auth failure that persisted across
+    # _MAX_TRANSIENT_AUTH_FAILURES consecutive cycles before escalating. Distinct
+    # from NOVA_AUTH_FAILED because "flaky auth that exhausted its retries" is the
+    # primary poll-reauth signal (the reported intermittent-network case) and must
+    # stay separable from a single hard failure. The counters snapshot carries the
+    # consecutive/threshold counts.
+    NOVA_AUTH_TRANSIENT_EXHAUSTED = "nova_auth_transient_exhausted"
     # api.py permanent Nova auth failure (NovaAuthPermanentError / is_permanent).
     NOVA_AUTH_PERMANENT = "nova_auth_permanent"
     # coordinator/polling FCM fatal auth error escalation.

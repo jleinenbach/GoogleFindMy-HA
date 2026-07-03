@@ -2013,6 +2013,7 @@ class PollingOperations(_MixinBase):
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google session invalid; re-authentication required"
                         )
+                        reauth_exc.reauth_code = ReauthReasonCode.SPOT_AUTH_PERMANENT
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
                         return
@@ -2030,6 +2031,9 @@ class PollingOperations(_MixinBase):
                         self._consecutive_timeouts = 0
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google session invalid; re-authentication required"
+                        )
+                        reauth_exc.reauth_code = (
+                            ReauthReasonCode.OWNER_KEY_EMPTY_RESPONSE
                         )
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
@@ -2052,6 +2056,7 @@ class PollingOperations(_MixinBase):
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google credentials invalid; re-authentication required"
                         )
+                        reauth_exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
                         return
@@ -2081,6 +2086,9 @@ class PollingOperations(_MixinBase):
                             self._consecutive_timeouts = 0
                             reauth_exc = ConfigEntryAuthFailed(
                                 f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
+                            )
+                            reauth_exc.reauth_code = (
+                                ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
                             )
                             last_exception = reauth_exc
                             self._request_poll_reauth(reauth_exc)

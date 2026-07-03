@@ -13,6 +13,7 @@ from custom_components.googlefindmy.coordinator import (
     CryptoStatus,
     GoogleFindMyCoordinator,
 )
+from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.coordinator.polling import (
     _MAX_DECRYPT_FAILURES,
     _MAX_TRANSIENT_AUTH_FAILURES,
@@ -24,6 +25,12 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
+)
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
+from custom_components.googlefindmy.SpotApi.spot_request import (
+    SpotAuthPermanentError,
 )
 from tests.helpers.homeassistant import GoogleFindMyConfigEntryStub
 
@@ -754,6 +761,48 @@ async def test_poll_cycle_nova_permanent_auth_starts_reauth() -> None:
         coordinator.hass
     )
     assert any(kw.get("failed") for kw in auth_calls)
+    # The poll site tags the exception so diagnostics record the specific cause.
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.NOVA_AUTH_PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_spot_auth_permanent_tags_reauth_code() -> None:
+    """A permanent Spot/AAS auth failure in the poll cycle records
+    SPOT_AUTH_PERMANENT (a general Spot-transport condition, not owner-key)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(
+        SpotAuthPermanentError("AAS token invalid after refresh.")
+    )
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.SPOT_AUTH_PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_spot_empty_response_tags_reauth_code() -> None:
+    """An empty SPOT GetEidInfo response in the poll cycle records
+    OWNER_KEY_EMPTY_RESPONSE (SpotApiEmptyResponseError is raised only from the
+    EID/owner-key retrieval layer, so the owner-key code names the same root)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(
+        SpotApiEmptyResponseError("SPOT returned an empty response")
+    )
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.OWNER_KEY_EMPTY_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -774,6 +823,17 @@ async def test_poll_cycle_transient_nova_auth_starts_reauth_after_threshold() ->
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
     coordinator.config_entry.async_start_reauth.assert_called_once_with(
         coordinator.hass
+    )
+    # Distinct code from the immediate NOVA_AUTH_FAILED: this is the
+    # retries-exhausted case, and the counter snapshot proves the escalation.
+    assert coordinator._reauth_reason is not None
+    assert (
+        coordinator._reauth_reason.code
+        is ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
+    )
+    assert (
+        coordinator._reauth_reason.counters["consecutive_transient_auth_failures"]
+        == _MAX_TRANSIENT_AUTH_FAILURES
     )
 
 
