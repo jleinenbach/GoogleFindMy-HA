@@ -60,6 +60,13 @@ class ReauthReasonCode(StrEnum):
     NOVA_AUTH_PERMANENT = "nova_auth_permanent"
     # coordinator/polling FCM fatal auth error escalation.
     FCM_AUTH_FATAL = "fcm_auth_fatal"
+    # poll-cycle account-wide location-decryption escalation: repeated decrypt
+    # failures across _MAX_DECRYPT_FAILURES consecutive cycles prove the shared
+    # key is stale and a fresh secrets.json is required. Distinct from the auth
+    # codes above because the trigger is a decryption verdict (not an auth-API
+    # error); it is the last poll-reauth cause that would otherwise record
+    # UNKNOWN in diagnostics.
+    DECRYPT_STALE_KEY = "decrypt_stale_key"
     # Default when a catch site finds no ``reauth_code`` attribute on the
     # exception, or a direct reauth site without a more specific classification.
     UNKNOWN = "unknown"

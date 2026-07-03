@@ -26,6 +26,7 @@ import pytest
 from homeassistant.config_entries import ConfigEntryAuthFailed
 
 from custom_components.googlefindmy.coordinator import polling as polling_mod
+from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.coordinator.helpers.stats import CryptoStatus
 from custom_components.googlefindmy.coordinator.polling import (
     _MAX_DECRYPT_FAILURES,
@@ -760,6 +761,35 @@ def test_finalize_escalates_at_threshold_with_reauth_exc() -> None:
     assert isinstance(reauth_exc, ConfigEntryAuthFailed)
     assert last_exception is reauth_exc
     stub._set_auth_state.assert_called_once()
+
+
+def test_finalize_escalation_reauth_exc_carries_decrypt_stale_key_code() -> None:
+    """The escalation ``reauth_exc`` is tagged ``DECRYPT_STALE_KEY`` so the poll
+    diagnostics classify the account-wide stale-shared-key escalation instead of
+    falling back to ``UNKNOWN``.
+
+    This is the last of the poll-cycle reauth sites to carry a structured code.
+    ``_request_poll_reauth`` records ``getattr(reauth_exc, "reauth_code",
+    UNKNOWN)`` at the fixed ``polling.py:1565`` origin, so an untagged escalation
+    would persist ``UNKNOWN`` for the most common stale-key reauth cause.
+
+    Mutation gate: dropping the tag (leaving the plain ``ConfigEntryAuthFailed``)
+    makes the ``getattr`` fall back to ``UNKNOWN`` and turns this assert red.
+    """
+    stub = _make_stub()
+    stub._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
+    err = SharedKeyMismatchError("stale shared key")
+
+    _cycle_failed, _last_exception, reauth_exc = stub._finalize_cycle_decrypt_state(
+        cycle_decrypt_error=err,
+        cycle_had_successful_decrypt=True,
+        cycle_had_stale_key=False,
+        cycle_failed=False,
+        last_exception=None,
+    )
+
+    assert isinstance(reauth_exc, ConfigEntryAuthFailed)
+    assert reauth_exc.reauth_code is ReauthReasonCode.DECRYPT_STALE_KEY
 
 
 def test_finalize_clean_cycle_stays_success() -> None:

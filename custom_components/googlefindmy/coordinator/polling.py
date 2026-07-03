@@ -616,6 +616,7 @@ class PollingOperations(_MixinBase):
                 "is stale; a fresh secrets.json (re-authentication) "
                 "is required"
             )
+            reauth_exc.reauth_code = ReauthReasonCode.DECRYPT_STALE_KEY
             return True, reauth_exc, reauth_exc
         if self._decrypt_failure_is_account_wide(
             cycle_decrypt_error, cycle_had_successful_decrypt
