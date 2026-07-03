@@ -77,6 +77,25 @@ class TestIsFatalFcmAuthError:
         assert is_fatal_fcm_auth_error("HTTP 500 Server Error") is False
         assert is_fatal_fcm_auth_error("Network unreachable") is False
 
+    def test_retry_after_4012_ms_not_fatal(self) -> None:
+        """FIX 5: a throttling message must not false-fire the 401 matcher.
+
+        "retry after 4012 ms" contains "401" as a raw substring. The
+        word-boundary matcher (\\b401\\b) must NOT treat it as an HTTP 401, so
+        transient throttling stays retryable instead of forcing re-auth.
+        """
+        assert is_fatal_fcm_auth_error("retry after 4012 ms") is False
+        # Analogous 404 substring guard: "retry after 40412 ms" contains "404".
+        assert (
+            is_fatal_fcm_auth_error("retry after 40412 ms; credential refresh") is False
+        )
+
+    def test_genuine_401_still_fatal_after_hardening(self) -> None:
+        """FIX 5: a genuine standalone 401 auth signal remains fatal."""
+        assert is_fatal_fcm_auth_error("401 unauthorized") is True
+        assert is_fatal_fcm_auth_error("HTTP 401 Unauthorized") is True
+        assert is_fatal_fcm_auth_error("Error code: 401") is True
+
     def test_empty_string_not_fatal(self) -> None:
         """Empty string should not be fatal."""
         assert is_fatal_fcm_auth_error("") is False

@@ -43,15 +43,27 @@ def _gpsoauth() -> GpsoauthModule:
 gpsoauth = _gpsoauth_proxy
 
 
-def _is_invalid_aas_error_text(text: str) -> bool:
-    """Return True when the error string indicates an invalid AAS token."""
+def _is_invalid_aas_error_text(text: str, *, allow_http_generic: bool = False) -> bool:
+    """Return True when the error string indicates an invalid AAS token.
+
+    The gpsoauth-specific tokens (``badauthentication``, ``needsbrowser``, and
+    the ``invalid`` + credential vocabulary) are unique to the gpsoauth
+    ``Error`` field and stay active on every call. The HTTP-generic tokens
+    (``unauthorized`` / ``forbidden``) are only honoured when
+    ``allow_http_generic`` is set, because an arbitrary transport/network
+    exception string must not be able to masquerade as an invalid AAS token
+    and discard otherwise-valid credential material. Callers that pass the
+    structured gpsoauth ``Error`` field opt in via ``allow_http_generic=True``;
+    callers that pass a generic ``str(err)`` from an ``except Exception`` block
+    keep the safe default (``False``).
+    """
 
     lowered = text.lower()
     if "badauthentication" in lowered:
         return True
     if "needsbrowser" in lowered:
         return True
-    if "unauthorized" in lowered or "forbidden" in lowered:
+    if allow_http_generic and ("unauthorized" in lowered or "forbidden" in lowered):
         return True
     if "invalid" in lowered:
         if "token" in lowered or "auth" in lowered or "credential" in lowered:
@@ -210,7 +222,9 @@ def _perform_oauth_sync(
             return token_value
 
         error_detail = str(auth_response.get("Error", "")).strip()
-        if error_detail and _is_invalid_aas_error_text(error_detail):
+        if error_detail and _is_invalid_aas_error_text(
+            error_detail, allow_http_generic=True
+        ):
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {error_detail}"
             )
@@ -219,6 +233,10 @@ def _perform_oauth_sync(
         raise
     except Exception as err:  # noqa: BLE001
         message: str = str(err)
+        # Generic exception string: keep ``allow_http_generic=False`` so a
+        # transport/network error whose text merely contains "unauthorized" or
+        # "forbidden" cannot masquerade as an invalid AAS token. Only the
+        # gpsoauth-specific vocabulary may promote this to InvalidAasTokenError.
         if message and _is_invalid_aas_error_text(message):
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"

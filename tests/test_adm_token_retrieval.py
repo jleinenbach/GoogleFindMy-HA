@@ -216,12 +216,20 @@ def test_is_non_retryable_auth_via_error_kind_badauthentication() -> None:
     assert adm_token_retrieval._is_non_retryable_auth(err) is True
 
 
-def test_is_non_retryable_auth_string_fallback_still_works() -> None:
-    """RuntimeError without error_kind attribute still matches via substring."""
+def test_is_non_retryable_auth_string_fallback_gpsoauth_vocabulary() -> None:
+    """RuntimeError without error_kind still matches gpsoauth-specific vocabulary.
 
-    err = RuntimeError("server returned 401 unauthorized")
+    FIX 5: the substring fallback now only recognizes gpsoauth-specific tokens.
+    A generic HTTP surface such as "server returned 401 unauthorized" is
+    retryable (no ``error_kind``, no gpsoauth token), while a genuine
+    ``badauthentication`` surface stays non-retryable.
+    """
 
-    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+    http_surface = RuntimeError("server returned 401 unauthorized")
+    assert adm_token_retrieval._is_non_retryable_auth(http_surface) is False
+
+    gpsoauth_surface = RuntimeError("gpsoauth rejected: BadAuthentication")
+    assert adm_token_retrieval._is_non_retryable_auth(gpsoauth_surface) is True
 
 
 def test_is_non_retryable_auth_falsy_error_kind_falls_back_to_string() -> None:
@@ -1074,10 +1082,23 @@ def test_normalize_service_whitespace() -> None:
     )
 
 
-def test_is_non_retryable_auth_http_signals() -> None:
-    """HTTP-style auth denials should not be retryable."""
-    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("401")) is True
-    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("403")) is True
+def test_is_non_retryable_auth_http_status_substrings_are_retryable() -> None:
+    """FIX 5: bare HTTP-status substrings are no longer non-retryable.
+
+    A message like "retry after 4012 ms" contains "401" as a substring; keying
+    non-retryable auth on that substring misclassified transient throttling as a
+    permanent auth failure. Genuine HTTP auth denials are carried structurally
+    (``error_kind`` / typed ``err.status``), not via free-text substrings, so a
+    plain ``RuntimeError("401")`` / ``("403")`` must now be treated as
+    retryable.
+    """
+    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("401")) is False
+    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("403")) is False
+    # The concrete false-fire the fix targets: a transient throttling message.
+    assert (
+        adm_token_retrieval._is_non_retryable_auth(RuntimeError("retry after 4012 ms"))
+        is False
+    )
 
 
 def test_is_non_retryable_auth_neither_marker() -> None:
