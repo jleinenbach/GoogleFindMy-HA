@@ -84,6 +84,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
+from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -3001,6 +3002,15 @@ class FcmReceiverHA:
             if escalate and hass is not None:
                 entry = getattr(coordinator, "config_entry", None)
                 if entry is not None:
+                    # FIX 3: direct reauth site (background decrypt escalation for
+                    # a stale shared key); record the classified reason on the
+                    # matching coordinator before starting the flow.
+                    recorder = getattr(coordinator, "record_reauth_reason", None)
+                    if callable(recorder):
+                        recorder(
+                            ReauthReasonCode.AAS_INVALID,
+                            origin="fcm_receiver_ha.py:3004",
+                        )
                     entry.async_start_reauth(hass)
 
     def _note_decrypt_success_for_entry(self, entry_id: str) -> None:

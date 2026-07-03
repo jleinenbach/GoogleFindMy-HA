@@ -92,6 +92,10 @@ def _base_coordinator(
     coordinator._consecutive_timeouts = 0
     coordinator._consecutive_transient_auth_failures = 0
     coordinator._last_transient_auth_error = None
+    # FIX 3: reauth-reason state normally seeded by ``__init__`` (bypassed via
+    # ``__new__`` here); the poll-reauth choke point records through these.
+    coordinator._reauth_reason = None
+    coordinator._reauth_reason_logged = set()
     coordinator._consecutive_decrypt_failures = 0
     coordinator._last_decrypt_reauth_monotonic = None
     coordinator._last_decrypt_error = None

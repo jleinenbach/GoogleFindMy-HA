@@ -19,6 +19,10 @@ from custom_components.googlefindmy.const import (
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
 )
+from custom_components.googlefindmy.coordinator._reauth_reason import (
+    ReauthReason,
+    ReauthReasonCode,
+)
 from tests.helpers import drain_loop
 
 
@@ -231,3 +235,39 @@ def test_diagnostics_merge_entry_data_and_options(
     assert config_summary["google_home_filter_keywords_count"] == 3
     assert config_summary["ignored_devices_count"] == 2
     assert "movement_threshold" not in config_summary
+
+
+def test_diagnostics_includes_reauth_reason_when_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX 3: a recorded reauth reason surfaces in the coordinator block."""
+
+    coordinator = _StubCoordinator()
+    coordinator._reauth_reason = ReauthReason(
+        code=ReauthReasonCode.HTTP_401_AFTER_REFRESH,
+        origin="polling.py:1541",
+        counters={"consecutive_transient_auth_failures": 3},
+        recorded_at=1_700_000_000.0,
+    )
+    entry = _StubEntry(coordinator)
+    hass = _StubHass(entry, coordinator)
+
+    async def _fake_get_integration(_hass, _domain):
+        return SimpleNamespace(name="Test Integration", version="1.2.3")
+
+    monkeypatch.setattr(diagnostics, "async_get_integration", _fake_get_integration)
+    monkeypatch.setattr(
+        diagnostics.dr, "async_get", lambda _hass: SimpleNamespace(devices={})
+    )
+    monkeypatch.setattr(
+        diagnostics.er, "async_get", lambda _hass: SimpleNamespace(entities={})
+    )
+    monkeypatch.setattr(diagnostics, "async_redact_data", _redact)
+
+    payload = _run(diagnostics.async_get_config_entry_diagnostics(hass, entry))
+
+    reauth = payload["coordinator"]["reauth_reason"]
+    assert reauth["code"] == "http_401_after_refresh"
+    assert reauth["origin"] == "polling.py:1541"
+    assert reauth["counters"] == {"consecutive_transient_auth_failures": 3}
+    # Mutation counter-check: skipping the wiring line drops this key entirely.

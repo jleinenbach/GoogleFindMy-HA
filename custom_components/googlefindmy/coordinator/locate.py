@@ -39,6 +39,7 @@ from ..NovaApi.nova_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
+from ._reauth_reason import ReauthReasonCode
 from .helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
     carry_reused_accuracy,
@@ -508,6 +509,12 @@ class LocateOperations(_MixinBase):
                     failed=True,
                     reason=f"Auth failed during manual locate: {auth_err}",
                 )
+                # FIX 3: direct reauth site (no exception bubbles to a coordinator
+                # catch), so record the classified reason directly.
+                self.record_reauth_reason(
+                    ReauthReasonCode.OWNER_KEY_PERMANENT,
+                    origin="locate.py:521",
+                )
                 entry = getattr(self, "config_entry", None)
                 reauth_started = False
                 if entry is not None:
@@ -644,6 +651,12 @@ class LocateOperations(_MixinBase):
                         "the shared key is stale and a fresh secrets.json "
                         "(re-authentication) is required"
                     ),
+                )
+                # FIX 3: direct reauth site (a stale shared key needs fresh
+                # credentials); record the classified reason directly.
+                self.record_reauth_reason(
+                    ReauthReasonCode.AAS_INVALID,
+                    origin="locate.py:656",
                 )
                 entry = getattr(self, "config_entry", None)
                 reauth_started = False

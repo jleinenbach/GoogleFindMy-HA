@@ -43,6 +43,7 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DEFAULT_CONTRIBUTOR_MODE,
 )
+from .coordinator._reauth_reason import ReauthReasonCode
 from .NovaApi import nova_request
 from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -1059,7 +1060,9 @@ class GoogleFindMyAPI:
                     err.status,
                     _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(_short_err(err)) from err
+                exc = ConfigEntryAuthFailed(_short_err(err))
+                exc.reauth_code = ReauthReasonCode.HTTP_401_AFTER_REFRESH
+                raise exc from err
             _LOGGER.warning(
                 "Device list temporarily unavailable (server error %s): %s",
                 err.status,
@@ -1071,7 +1074,9 @@ class GoogleFindMyAPI:
             _LOGGER.error(
                 "Authentication failed while listing devices: %s", _short_err(err)
             )
-            raise ConfigEntryAuthFailed(_short_err(err)) from err
+            exc = ConfigEntryAuthFailed(_short_err(err))
+            exc.reauth_code = ReauthReasonCode.NOVA_AUTH_FAILED
+            raise exc from err
 
         except NovaProtobufDecodeError as err:
             # Protobuf decode failures indicate corrupted response or protocol mismatch
@@ -1096,7 +1101,9 @@ class GoogleFindMyAPI:
                 or "Bad Authentication" in msg
             ):
                 _LOGGER.error("Authentication failed (gpsoauth): %s", _short_err(msg))
-                raise ConfigEntryAuthFailed(_short_err(msg)) from err
+                exc = ConfigEntryAuthFailed(_short_err(msg))
+                exc.reauth_code = ReauthReasonCode.BADAUTH_GPSOAUTH
+                raise exc from err
 
             # TokenCache closed indicates the integration is in an invalid state
             # (e.g., after a failed reload or during shutdown). Trigger re-auth
@@ -1106,9 +1113,11 @@ class GoogleFindMyAPI:
                     "TokenCache is closed; integration state is invalid. "
                     "Triggering re-authentication to reinitialize."
                 )
-                raise ConfigEntryAuthFailed(
+                exc = ConfigEntryAuthFailed(
                     "Integration state invalid (cache closed); please re-authenticate"
-                ) from err
+                )
+                exc.reauth_code = ReauthReasonCode.TOKENCACHE_CLOSED
+                raise exc from err
 
             # Detect and tame the multi-entry guard (INFO once, DEBUG thereafter)
             if _is_multi_entry_guard_message(msg):
@@ -1275,7 +1284,9 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            raise ConfigEntryAuthFailed(_short_err(err)) from err
+            exc = ConfigEntryAuthFailed(_short_err(err))
+            exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
+            raise exc from err
 
         except NovaAuthError as err:
             # Transient auth failure - may self-heal in subsequent poll cycles.
@@ -1287,7 +1298,9 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(_short_err(err)) from err
+                exc = ConfigEntryAuthFailed(_short_err(err))
+                exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
+                raise exc from err
 
             _LOGGER.warning(
                 "Transient authentication error for %s (%s): %s. May resolve in next poll cycle.",
@@ -1308,7 +1321,9 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(_short_err(err)) from err
+                exc = ConfigEntryAuthFailed(_short_err(err))
+                exc.reauth_code = ReauthReasonCode.HTTP_401_AFTER_REFRESH
+                raise exc from err
             _LOGGER.warning(
                 "Server error (%s) while getting location for %s (%s): %s",
                 err.status,

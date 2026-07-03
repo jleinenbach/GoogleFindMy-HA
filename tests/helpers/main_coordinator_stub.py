@@ -80,6 +80,12 @@ class MainCoordinatorStub(GoogleFindMyCoordinator):
         self._auth_error_active: bool = False
         self._auth_error_message: str | None = None
 
+        # Reauth-reason state (FIX 3), mirroring production ``__init__`` defaults
+        # so ``record_reauth_reason`` and the diagnostics mirror work here.
+        self._consecutive_transient_auth_failures: int = 0
+        self._reauth_reason: Any = None
+        self._reauth_reason_logged: set[tuple[str, str]] = set()
+
         # Force-refresh state
         self._force_device_list_refresh: bool = False
         self._force_device_list_reason: str | None = None

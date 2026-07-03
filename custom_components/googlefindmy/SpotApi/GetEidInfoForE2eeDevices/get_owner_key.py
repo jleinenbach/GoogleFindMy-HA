@@ -44,6 +44,7 @@ from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
     username_string,
 )
+from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     decrypt_owner_key,
 )
@@ -160,9 +161,11 @@ async def _retrieve_owner_key(
         try:
             eid_info = await async_get_eid_info(cache=cache)
         except SpotAuthPermanentError as exc:
-            raise ConfigEntryAuthFailed(
+            reauth_exc = ConfigEntryAuthFailed(
                 "Owner key retrieval failed: Google session invalid; re-authentication required."
-            ) from exc
+            )
+            reauth_exc.reauth_code = ReauthReasonCode.OWNER_KEY_PERMANENT
+            raise reauth_exc from exc
         except SpotApiEmptyResponseError:
             _LOGGER.error(
                 "Owner key retrieval failed: SPOT returned an empty/trailers-only "
@@ -396,10 +399,12 @@ async def async_get_owner_key(  # noqa: PLR0912,PLR0915
         # UNCHANGED deliberately, because whether an empty/trailers-only response
         # is transient or auth is not yet proven. The captured gRPC status (R9a)
         # makes the next real incident diagnosable before any reclassification.
-        raise ConfigEntryAuthFailed(
+        reauth_exc = ConfigEntryAuthFailed(
             "Owner key retrieval failed: SPOT returned an empty/trailers-only "
             "response; the exact gRPC status is logged for diagnosis."
-        ) from exc
+        )
+        reauth_exc.reauth_code = ReauthReasonCode.OWNER_KEY_EMPTY_RESPONSE
+        raise reauth_exc from exc
 
     cache_version: int | None = None
     cache_key_value: str | None = None

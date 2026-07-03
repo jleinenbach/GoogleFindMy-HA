@@ -65,6 +65,7 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
+from ._reauth_reason import ReauthReasonCode
 from .helpers.cache import carry_reused_accuracy
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot
@@ -1111,7 +1112,13 @@ class PollingOperations(_MixinBase):
                             fatal_error,
                         )
                         self._set_auth_state(failed=True, reason=fatal_error)
-                        raise ConfigEntryAuthFailed(fatal_error)
+                        # F-4: this raise is caught by the ConfigEntryAuthFailed
+                        # handler in _async_update_data (single recording choke
+                        # point), so only tag the exception here; do NOT record
+                        # directly to avoid a double record.
+                        fcm_exc = ConfigEntryAuthFailed(fatal_error)
+                        fcm_exc.reauth_code = ReauthReasonCode.FCM_AUTH_FATAL
+                        raise fcm_exc
 
                     # Track consecutive FCM errors for transient issues
                     if fatal_error != self._fcm_last_error:
@@ -1129,7 +1136,12 @@ class PollingOperations(_MixinBase):
                             fatal_error,
                         )
                         self._set_auth_state(failed=True, reason=fatal_error)
-                        raise ConfigEntryAuthFailed(fatal_error)
+                        # F-4: caught by the _async_update_data
+                        # ConfigEntryAuthFailed handler (single recording choke
+                        # point); tag only, do not record here.
+                        fcm_exc = ConfigEntryAuthFailed(fatal_error)
+                        fcm_exc.reauth_code = ReauthReasonCode.FCM_AUTH_FATAL
+                        raise fcm_exc
                     else:
                         _LOGGER.warning(
                             "FCM error detected (%d/%d): %s. Will retry before triggering re-auth.",
@@ -1546,6 +1558,14 @@ class PollingOperations(_MixinBase):
                 failed=True,
                 reason=f"Auth failed while fetching device list: {reason}",
             )
+            # FIX 3: single recording choke point for the awaited-refresh path.
+            # The reason code rides on the exception attribute (set at the raise
+            # site, e.g. api.py / polling FCM-fatal); default to UNKNOWN when the
+            # exception carries none.
+            self.record_reauth_reason(
+                getattr(auth_exc, "reauth_code", ReauthReasonCode.UNKNOWN),
+                origin="polling.py:1541",
+            )
             raise auth_exc
         except UpdateFailed as update_err:
             # Let pre-wrapped UpdateFailed bubble as-is after updating status
@@ -1574,6 +1594,14 @@ class PollingOperations(_MixinBase):
         records ``reauth_exc`` as ``last_exception`` so the ``finally`` block marks
         the update failed via ``async_set_update_error``.
         """
+        # FIX 3: single recording choke point for the fire-and-forget poll path.
+        # All six poll-cycle reauth sites (including the 2074 pre-converted
+        # ConfigEntryAuthFailed catch) funnel through here, so record exactly
+        # once. The reason code rides on the exception attribute when present.
+        self.record_reauth_reason(
+            getattr(reauth_exc, "reauth_code", ReauthReasonCode.UNKNOWN),
+            origin="polling.py:1565",
+        )
         entry = getattr(self, "config_entry", None)
         if entry is None:
             _LOGGER.debug("Cannot start reauth from poll cycle: no config entry bound.")
