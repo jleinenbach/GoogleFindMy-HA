@@ -23,6 +23,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from custom_components.googlefindmy import api as api_module
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.api import (
     GoogleFindMyAPI,
     _build_can_ring_index,
@@ -933,10 +934,37 @@ class TestAsyncBasicDeviceListErrorMapping:
     def test_nova_auth_error_maps_to_auth_failed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # Transient NovaAuthError (is_permanent=False) records the generic code.
         self._patch_request(monkeypatch, NovaAuthError(401, "auth"))
         api = _make_api_with_session()
-        with pytest.raises(ConfigEntryAuthFailed):
+        with pytest.raises(ConfigEntryAuthFailed) as excinfo:
             run_coro(api.async_get_basic_device_list())
+        assert (
+            getattr(excinfo.value, "reauth_code", None)
+            is ReauthReasonCode.NOVA_AUTH_FAILED
+        )
+
+    @pytest.mark.parametrize(
+        "err",
+        [
+            NovaAuthError(401, "perm-flag", is_permanent=True),
+            api_module.NovaAuthPermanentError(401, "perm-subclass"),
+        ],
+    )
+    def test_permanent_nova_auth_error_records_permanent_code(
+        self, monkeypatch: pytest.MonkeyPatch, err: NovaAuthError
+    ) -> None:
+        # Cross-site consistency (RV-G2e): the device-list path must record the
+        # same permanent code the location path uses for a permanent failure,
+        # not the generic NOVA_AUTH_FAILED. Mirrors api.py location handler.
+        self._patch_request(monkeypatch, err)
+        api = _make_api_with_session()
+        with pytest.raises(ConfigEntryAuthFailed) as excinfo:
+            run_coro(api.async_get_basic_device_list())
+        assert (
+            getattr(excinfo.value, "reauth_code", None)
+            is ReauthReasonCode.NOVA_AUTH_PERMANENT
+        )
 
     def test_protobuf_decode_maps_to_update_failed(
         self, monkeypatch: pytest.MonkeyPatch

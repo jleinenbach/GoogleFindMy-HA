@@ -1071,11 +1071,26 @@ class GoogleFindMyAPI:
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
-            _LOGGER.error(
-                "Authentication failed while listing devices: %s", _short_err(err)
-            )
+            # Mirror the location path's base handler: a permanent credential
+            # failure (NovaAuthPermanentError subclass, or a base NovaAuthError
+            # flagged is_permanent=True after token refresh) must record the
+            # permanent reason, not the generic/transient one, so diagnostics
+            # point triage at the right credential layer. Control flow is
+            # unchanged (both cases raise ConfigEntryAuthFailed); only the
+            # reason code and log wording differ by permanence.
             exc = ConfigEntryAuthFailed(_short_err(err))
-            exc.reauth_code = ReauthReasonCode.NOVA_AUTH_FAILED
+            if err.is_permanent:
+                _LOGGER.error(
+                    "Permanent authentication failure while listing devices: %s",
+                    _short_err(err),
+                )
+                exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
+            else:
+                _LOGGER.error(
+                    "Authentication failed while listing devices: %s",
+                    _short_err(err),
+                )
+                exc.reauth_code = ReauthReasonCode.NOVA_AUTH_FAILED
             raise exc from err
 
         except NovaProtobufDecodeError as err:
