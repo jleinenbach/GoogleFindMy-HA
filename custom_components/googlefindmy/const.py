@@ -514,6 +514,50 @@ FCM_MONITOR_INTERVAL_S: int = 1
 FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
 
 # --------------------------------------------------------------------------------------
+# FCM data-starvation liveness watchdog (re-arming zombie self-heal)
+# --------------------------------------------------------------------------------------
+# A "zombie" FCM session is STARTED and keeps acking heartbeats (so the activity
+# clock and readiness gate both look healthy), yet has stopped delivering
+# ``push_received`` data messages despite locates being sent. The one-shot
+# first-locate reconnect only covers a *young* session (age < _CHURN_WINDOW_S);
+# a long-running session that goes silent is only healed by a manual reload
+# today (empirically sometimes twice). The watchdog below detects this and
+# forces a cooperative, backoff-limited reconnect that re-arms after each cycle.
+#
+# FCM_DATA_STARVATION_S: minimum gap (seconds) since the last real data delivery
+# before a STARTED, heartbeating, locate-active session is treated as starved.
+# Calibration (live DEBUG capture 2026-07-04, 2h23m healthy window): normal gaps
+# between data messages reach ~349s (they grow with the observation window; only
+# ~305s over a 71-min window), so the threshold must be a *generous* multiple of
+# the poll cycle, well above 349s, never a value near it. 900s ≈ 3 default poll
+# cycles (300s) and ≈ 30× the 30s locate timeout — conservatively large so the
+# watchdog reacts later, never more aggressively (storm-safe by construction).
+# The MCS session lifetime is ~2h, so 15-minute detection is fast enough.
+FCM_DATA_STARVATION_S: int = 900
+
+# FCM_ZOMBIE_CHECK_INTERVAL_S: how often the watchdog *evaluates* starvation.
+# The supervisor monitor loop ticks every FCM_MONITOR_INTERVAL_S (1s); evaluating
+# the predicate every tick is wasteful, so the watchdog is throttled to run at
+# most once per this interval (30× rarer than the tick, far denser than the
+# starvation window, so detection latency stays well under a minute).
+FCM_ZOMBIE_CHECK_INTERVAL_S: int = 30
+
+# FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S: first backoff window after the first
+# watchdog reconnect. Subsequent windows double (60 → 120 → 240 → …) up to the
+# cap below, so a session that stays starved is retried with growing patience.
+FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S: int = 60
+
+# FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S: upper bound of the exponential backoff
+# (equals the starvation window: never retry faster than the detection cadence).
+FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S: int = 900
+
+# FCM_ZOMBIE_MAX_RECONNECTS: hard ceiling on watchdog reconnects per starvation
+# episode. The count (and backoff) reset on the first successful data delivery
+# after a reconnect. Together with the cap and the one-in-flight lock this bounds
+# the worst case to a slow, finite series — never a reconnect storm / self-DoS.
+FCM_ZOMBIE_MAX_RECONNECTS: int = 5
+
+# --------------------------------------------------------------------------------------
 # Feature Flags (compile-time toggles for optional functionality)
 # --------------------------------------------------------------------------------------
 # FMDN Finder: Upload location reports to Google for FMDN beacons detected by Bermuda.
@@ -687,6 +731,11 @@ __all__ = [
     "FCM_CONNECTION_RETRY_COUNT",
     "FCM_MONITOR_INTERVAL_S",
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
+    "FCM_DATA_STARVATION_S",
+    "FCM_ZOMBIE_CHECK_INTERVAL_S",
+    "FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S",
+    "FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S",
+    "FCM_ZOMBIE_MAX_RECONNECTS",
     "EVENT_AUTH_ERROR",
     "EVENT_AUTH_OK",
     "TRANSLATION_KEY_AUTH_STATUS",
