@@ -144,3 +144,68 @@ def test_generic_exception_with_gpsoauth_vocabulary_still_discards(
             False,
             android_id=0x1234,
         )
+
+
+# ---------------------------------------------------------------------------
+# _perform_oauth_sync: typed gpsoauth.AuthError structural channel
+# ---------------------------------------------------------------------------
+
+
+class _MockAuthError(Exception):
+    """Stand-in for ``gpsoauth.exceptions.AuthError`` (gpsoauth is absent in CI)."""
+
+
+def test_typed_gpsoauth_autherror_http_only_discards_aas_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed gpsoauth AuthError with HTTP-generic-only text must discard the
+    AAS token. gpsoauth may raise its typed AuthError instead of returning an
+    Error dict; classifying it by type (mirroring the AAS exchange path) must
+    promote it to InvalidAasTokenError even though the text matcher gates the
+    HTTP-generic tokens off (``allow_http_generic=False``)."""
+
+    monkeypatch.setattr(
+        token_retrieval,
+        "gpsoauth_exceptions",
+        SimpleNamespace(AuthError=_MockAuthError),
+    )
+
+    def _typed_auth_error(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise _MockAuthError("HTTP 403 Forbidden")
+
+    _install_fake_gpsoauth(monkeypatch, _typed_auth_error)
+
+    with pytest.raises(InvalidAasTokenError):
+        token_retrieval._perform_oauth_sync(
+            "user@example.com",
+            "aas_et/fake",
+            "android_device_manager",
+            False,
+            android_id=0x1234,
+        )
+
+
+def test_typed_channel_absent_http_only_stays_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the gpsoauth exceptions module is unavailable (dependency absent),
+    the typed channel is skipped and an HTTP-generic-only exception text keeps
+    the safe FIX-5 default: it stays a retryable RuntimeError and does not
+    masquerade as an invalid AAS token."""
+
+    monkeypatch.setattr(token_retrieval, "gpsoauth_exceptions", None)
+
+    def _http_only(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("HTTP 403 Forbidden")
+
+    _install_fake_gpsoauth(monkeypatch, _http_only)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        token_retrieval._perform_oauth_sync(
+            "user@example.com",
+            "aas_et/fake",
+            "android_device_manager",
+            False,
+            android_id=0x1234,
+        )
+    assert not isinstance(excinfo.value, InvalidAasTokenError)
