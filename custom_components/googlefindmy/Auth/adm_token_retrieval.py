@@ -49,6 +49,7 @@ import logging
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from types import ModuleType
 from typing import Any, cast
 
 # Prefer relative imports inside the package for robustness
@@ -56,6 +57,7 @@ from ..const import CONF_OAUTH_TOKEN, DATA_AAS_TOKEN, DATA_AUTH_METHOD
 from .aas_token_retrieval import async_get_aas_token  # entry-scoped AAS provider
 from .gpsoauth_loader import (
     GpsoauthModule,
+    load_gpsoauth_exceptions,
     require_gpsoauth,
 )
 from .gpsoauth_loader import (
@@ -70,6 +72,13 @@ from .token_retrieval import (
 from .username_provider import async_get_username, username_string
 
 _LOGGER = logging.getLogger(__name__)
+
+# Optional gpsoauth exceptions module (``None`` when the dependency is absent).
+# Mirrors ``aas_token_retrieval.gpsoauth_exceptions`` / ``token_retrieval`` so the
+# ADM OAuth path can classify a typed gpsoauth ``AuthError`` structurally (by
+# type) instead of relying on its (HTTP-generic) message text, which
+# ``_is_non_retryable_auth`` deliberately does not treat as non-retryable.
+gpsoauth_exceptions: ModuleType | None = load_gpsoauth_exceptions()
 
 # Constants for gpsoauth (kept for compatibility/reference)
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
@@ -639,14 +648,34 @@ async def _perform_oauth_with_provided_aas(
     def _run() -> str:
         gpsoauth: GpsoauthModule = require_gpsoauth()
 
-        resp = gpsoauth.perform_oauth(
-            username,
-            aas_token,
-            android_id,
-            service="oauth2:https://www.googleapis.com/auth/android_device_manager",
-            app=_APP_ID,
-            client_sig=_CLIENT_SIG,
-        )
+        try:
+            resp = gpsoauth.perform_oauth(
+                username,
+                aas_token,
+                android_id,
+                service="oauth2:https://www.googleapis.com/auth/android_device_manager",
+                app=_APP_ID,
+                client_sig=_CLIENT_SIG,
+            )
+        except Exception as oauth_err:  # noqa: BLE001
+            # A typed gpsoauth ``AuthError`` is a definitive credential rejection,
+            # independent of its message text. gpsoauth may raise it instead of
+            # returning an ``Error`` dict, and its text can be HTTP-generic only
+            # (e.g. "HTTP 403 Forbidden"), which ``_is_non_retryable_auth``
+            # deliberately does not treat as non-retryable. Promote it to the
+            # structured ``error_kind="auth_error"`` channel (in
+            # ``_NON_RETRYABLE_KINDS``), mirroring the AAS exchange path and the
+            # dict-``Error`` branch below, so the retry loop stops instead of
+            # hammering a rejected AAS token.
+            if gpsoauth_exceptions is not None and isinstance(
+                oauth_err, gpsoauth_exceptions.AuthError
+            ):
+                auth_err = RuntimeError(
+                    "gpsoauth authentication failed (kind=auth_error)"
+                )
+                auth_err.error_kind = "auth_error"  # type: ignore[attr-defined]
+                raise auth_err from oauth_err
+            raise
         if not isinstance(resp, dict):
             # Never include the raw `resp` in logs/errors
             non_dict_err = RuntimeError(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -2048,3 +2049,74 @@ def test_async_get_adm_token_isolated_without_cache_get(
     # Metadata should still be persisted
     assert "adm_token_issued_at_user@example.com" in persisted
     assert "adm_probe_startup_left_user@example.com" in persisted
+
+
+class _MockAuthError(Exception):
+    """Stand-in for ``gpsoauth.exceptions.AuthError`` (gpsoauth is absent in CI)."""
+
+
+@pytest.mark.asyncio
+async def test_isolated_oauth_typed_autherror_is_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed gpsoauth AuthError raised by ``perform_oauth`` on the isolated ADM
+    path must be promoted to the structured ``error_kind='auth_error'`` channel so
+    the retry loop treats it as non-retryable, even when its text is only
+    HTTP-generic (which ``_is_non_retryable_auth`` deliberately ignores). Mirrors
+    the AAS exchange path and ``token_retrieval``; without the structural promotion
+    the rejected AAS token would be hammered in the retry loop."""
+
+    monkeypatch.setattr(
+        adm_token_retrieval,
+        "gpsoauth_exceptions",
+        SimpleNamespace(AuthError=_MockAuthError),
+    )
+
+    def _raise(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise _MockAuthError("HTTP 403 Forbidden")
+
+    monkeypatch.setattr(
+        adm_token_retrieval,
+        "require_gpsoauth",
+        lambda: SimpleNamespace(perform_oauth=_raise),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com",
+            "aas_et/fake",
+            android_id=0x1234,
+        )
+    # The typed AuthError is promoted to the structured auth_error channel ...
+    assert getattr(excinfo.value, "error_kind", "") == "auth_error"
+    # ... and is therefore classified non-retryable by the isolated retry loop.
+    assert adm_token_retrieval._is_non_retryable_auth(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_isolated_oauth_typed_channel_absent_stays_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the gpsoauth exceptions module is unavailable, an HTTP-generic-only
+    failure keeps the safe default: no structural promotion, and
+    ``_is_non_retryable_auth`` stays False (retryable)."""
+
+    monkeypatch.setattr(adm_token_retrieval, "gpsoauth_exceptions", None)
+
+    def _raise(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("HTTP 403 Forbidden")
+
+    monkeypatch.setattr(
+        adm_token_retrieval,
+        "require_gpsoauth",
+        lambda: SimpleNamespace(perform_oauth=_raise),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com",
+            "aas_et/fake",
+            android_id=0x1234,
+        )
+    assert getattr(excinfo.value, "error_kind", "") != "auth_error"
+    assert adm_token_retrieval._is_non_retryable_auth(excinfo.value) is False

@@ -368,7 +368,10 @@ skip_covered = true
 # 1.7 fix series; the floor takes effect on the next pull request (a direct push
 # to 1.7 does not run the coverage gate, which is gated on pull_request and push
 # to main).
-fail_under = 72
+# Raised to 73 per maintainer request to lock in the coverage from the typed
+# gpsoauth AuthError classification tests; measured CI total is 73.26 %, so the
+# jitter margin is intentionally tightened to 0.26 Pp headroom here.
+fail_under = 73
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

@@ -10,6 +10,7 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from types import ModuleType
 from typing import Any
 
 from custom_components.googlefindmy.Auth.aas_token_retrieval import (
@@ -21,6 +22,7 @@ from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 from .gpsoauth_loader import (
     GpsoauthModule,
+    load_gpsoauth_exceptions,
     require_gpsoauth,
 )
 from .gpsoauth_loader import (
@@ -28,6 +30,13 @@ from .gpsoauth_loader import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Optional gpsoauth exceptions module (``None`` when the dependency is absent).
+# Mirrors ``aas_token_retrieval.gpsoauth_exceptions`` so both credential-exchange
+# paths can classify a genuine gpsoauth ``AuthError`` structurally (by type),
+# independent of its (possibly HTTP-generic) message text. Kept at module scope
+# so tests can monkeypatch it, exactly like the AAS exchange path.
+gpsoauth_exceptions: ModuleType | None = load_gpsoauth_exceptions()
 
 
 class InvalidAasTokenError(RuntimeError):
@@ -233,6 +242,20 @@ def _perform_oauth_sync(
         raise
     except Exception as err:  # noqa: BLE001
         message: str = str(err)
+        # A typed gpsoauth ``AuthError`` is a definitive credential rejection,
+        # independent of its message text. gpsoauth may raise it instead of
+        # returning an ``Error`` dict, and its text can be HTTP-generic only
+        # (e.g. "HTTP 403 Forbidden"), which the text matcher deliberately
+        # gates off (``allow_http_generic=False``). Classify it structurally,
+        # mirroring the AAS exchange path (``aas_token_retrieval`` treats
+        # ``gpsoauth.AuthError`` by type), so the rejected AAS token is
+        # invalidated/regenerated instead of being left in cache for a retry.
+        if gpsoauth_exceptions is not None and isinstance(
+            err, gpsoauth_exceptions.AuthError
+        ):
+            raise InvalidAasTokenError(
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
+            ) from err
         # Generic exception string: keep ``allow_http_generic=False`` so a
         # transport/network error whose text merely contains "unauthorized" or
         # "forbidden" cannot masquerade as an invalid AAS token. Only the
