@@ -39,12 +39,12 @@ from typing import Any, NamedTuple
 from cryptography.exceptions import InvalidTag
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.token_cache import TokenCache
 from custom_components.googlefindmy.Auth.username_provider import (
     async_get_username,
     username_string,
 )
-from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.KeyBackup.cloud_key_decryptor import (
     decrypt_owner_key,
 )

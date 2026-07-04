@@ -35,6 +35,7 @@ from aiohttp import ClientError, ClientSession
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from ._reauth_reason import ReauthReasonCode
 from .Auth.token_cache import TokenCache
 from .Auth.username_provider import username_string
 from .const import (
@@ -43,7 +44,6 @@ from .const import (
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DEFAULT_CONTRIBUTOR_MODE,
 )
-from .coordinator._reauth_reason import ReauthReasonCode
 from .NovaApi import nova_request
 from .NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,

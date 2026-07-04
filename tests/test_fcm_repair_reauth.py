@@ -17,9 +17,9 @@ import pytest
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.googlefindmy import repairs
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import DOMAIN, FcmReceiverHA
-from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
 
 

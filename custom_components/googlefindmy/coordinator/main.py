@@ -66,7 +66,7 @@ from datetime import datetime, timedelta
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ._reauth_reason import ReauthReason, ReauthReasonCode
+from .._reauth_reason import ReauthReason, ReauthReasonCode
 
 # Operations classes - currently empty mixins for future method extraction
 from .cache import CacheOperations

@@ -13,6 +13,7 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     CRASH_LOOP_FATAL_PREFIX,
 )
@@ -33,7 +34,6 @@ from custom_components.googlefindmy.coordinator import (
     FcmStatus,
     GoogleFindMyCoordinator,
 )
-from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.device_tracker import GoogleFindMyDeviceTracker
 from tests.helpers import drain_loop
 

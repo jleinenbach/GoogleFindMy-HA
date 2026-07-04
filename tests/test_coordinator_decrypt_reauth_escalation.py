@@ -25,8 +25,8 @@ from unittest.mock import MagicMock
 import pytest
 from homeassistant.config_entries import ConfigEntryAuthFailed
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.coordinator import polling as polling_mod
-from custom_components.googlefindmy.coordinator._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.coordinator.helpers.stats import CryptoStatus
 from custom_components.googlefindmy.coordinator.polling import (
     _MAX_DECRYPT_FAILURES,

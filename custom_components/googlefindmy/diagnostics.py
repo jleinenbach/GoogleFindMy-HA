@@ -259,7 +259,7 @@ def _reauth_reason_block(coordinator: Any) -> dict[str, Any] | None:
     been recorded yet so the coordinator block stays structurally unchanged.
 
     Redaction is guaranteed by the *literal-only input* invariant of
-    :class:`~.coordinator._reauth_reason.ReauthReason` (see AE-7): ``code`` is a
+    :class:`~._reauth_reason.ReauthReason` (see AE-7): ``code`` is a
     ``StrEnum`` value, ``origin`` is a constant literal string, and ``counters``
     are plain ints. No token, e-mail, or free-form ``str(err)`` content is ever
     stored on the reason, so nothing sensitive can reach this payload.

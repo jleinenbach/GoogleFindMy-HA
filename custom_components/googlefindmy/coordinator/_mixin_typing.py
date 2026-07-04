@@ -39,8 +39,8 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers import device_registry as dr
 
+    from .._reauth_reason import ReauthReason, ReauthReasonCode
     from ..api import GoogleFindMyAPI
-    from ._reauth_reason import ReauthReason, ReauthReasonCode
     from .subentry import SubentryMetadata
 
 

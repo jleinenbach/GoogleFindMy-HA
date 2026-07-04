@@ -1,4 +1,4 @@
-# custom_components/googlefindmy/coordinator/_reauth_reason.py
+# custom_components/googlefindmy/_reauth_reason.py
 """Structured, redaction-safe reauth-reason model for coordinator diagnostics.
 
 This module defines the small, self-contained data model used to persist *why*

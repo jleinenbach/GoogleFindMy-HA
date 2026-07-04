@@ -25,11 +25,11 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 
 import custom_components.googlefindmy.api as api_module
-from custom_components.googlefindmy.api import GoogleFindMyAPI
-from custom_components.googlefindmy.coordinator._reauth_reason import (
+from custom_components.googlefindmy._reauth_reason import (
     ReauthReason,
     ReauthReasonCode,
 )
+from custom_components.googlefindmy.api import GoogleFindMyAPI
 from custom_components.googlefindmy.diagnostics import _reauth_reason_block
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,

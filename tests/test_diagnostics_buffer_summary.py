@@ -9,6 +9,10 @@ from types import SimpleNamespace
 import pytest
 
 from custom_components.googlefindmy import diagnostics
+from custom_components.googlefindmy._reauth_reason import (
+    ReauthReason,
+    ReauthReasonCode,
+)
 from custom_components.googlefindmy.const import (
     CONF_OAUTH_TOKEN,
     DOMAIN,
@@ -18,10 +22,6 @@ from custom_components.googlefindmy.const import (
     OPT_GOOGLE_HOME_FILTER_KEYWORDS,
     OPT_IGNORED_DEVICES,
     OPT_LOCATION_POLL_INTERVAL,
-)
-from custom_components.googlefindmy.coordinator._reauth_reason import (
-    ReauthReason,
-    ReauthReasonCode,
 )
 from tests.helpers import drain_loop
 

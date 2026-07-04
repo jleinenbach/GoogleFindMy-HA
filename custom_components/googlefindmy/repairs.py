@@ -11,7 +11,7 @@ from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
-from .coordinator._reauth_reason import ReauthReasonCode
+from ._reauth_reason import ReauthReasonCode
 
 _LOGGER = logging.getLogger(__name__)
 

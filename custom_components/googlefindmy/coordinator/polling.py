@@ -45,6 +45,7 @@ from homeassistant.core import Event
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .._reauth_reason import ReauthReasonCode
 from ..Auth.fcm_receiver_ha import CRASH_LOOP_FATAL_PREFIX
 from ..const import (
     DEVICE_LIST_POLL_INTERVAL,
@@ -65,7 +66,6 @@ from ..SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
-from ._reauth_reason import ReauthReasonCode
 from .helpers.cache import carry_reused_accuracy
 from .helpers.cache import sanitize_decoder_row as _sanitize_decoder_row
 from .helpers.stats import ApiStatus, CryptoStatus, FcmStatus, StatusSnapshot

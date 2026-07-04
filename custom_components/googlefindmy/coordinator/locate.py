@@ -24,6 +24,7 @@ from typing import Any
 from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
+from .._reauth_reason import ReauthReasonCode
 from ..const import DEFAULT_MIN_POLL_INTERVAL
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -39,7 +40,6 @@ from ..NovaApi.nova_request import (
 )
 from ..SpotApi.spot_request import SpotAuthPermanentError
 from ._mixin_typing import _MixinBase
-from ._reauth_reason import ReauthReasonCode
 from .helpers.cache import (
     SOUND_UUID_MAX_AGE_S,
     carry_reused_accuracy,
