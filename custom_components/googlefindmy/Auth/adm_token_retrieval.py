@@ -17,8 +17,9 @@ Design & Fix for BadAuthentication:
   the retriever expects the full OAuth2 scope.
 - **Retry policy**: Transient network/library errors are retried with bounded backoff.
   Clear, non-recoverable auth errors (e.g., "BadAuthentication") are NOT retried.
-  Additionally, HTTP-style signals such as 401/403 or "unauthorized"/"forbidden" in
-  error messages are treated as non-retryable as well.
+  Non-retryable auth is determined structurally via ``error_kind``; broad HTTP
+  substrings (401/403, "unauthorized"/"forbidden") are deliberately NOT matched in
+  free-form error text, to avoid misclassifying network-adjacent failures.
 - Blocking `gpsoauth` calls (isolated flow) are executed in a thread executor to
   avoid blocking Home Assistant's event loop.
 
@@ -158,18 +159,19 @@ _NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
 
 # Substrings that surface in ``_clip(err)`` for callers that raise
 # ``RuntimeError`` without the ``error_kind`` attribute (legacy paths and the
-# existing test suite). HTTP-status substrings are kept here so plain text
-# surfaces like "server returned 401 unauthorized" stay non-retryable.
+# existing test suite). Only gpsoauth-specific vocabulary is matched here.
+# HTTP-generic tokens ("401", "403", "unauthorized", "forbidden") are
+# deliberately NOT listed: a transient message like "retry after 4012 ms"
+# contains "401" as a substring, so keying non-retryable auth on those would
+# misclassify network hiccups as permanent auth failures. Genuine HTTP auth
+# denials are already carried structurally (``error_kind`` and the typed
+# ``err.status`` check in ``api.py``), not via free-text substring matching.
 _NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
     "badauthentication",
     "invalid_grant",
     "missing 'auth' in gpsoauth response",
     "neither 'token' nor 'auth' found",
     "missing 'token'/'auth' in gpsoauth response",
-    "unauthorized",
-    "forbidden",
-    "401",
-    "403",
 )
 
 

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers import device_registry as dr
 
+    from .._reauth_reason import ReauthReason, ReauthReasonCode
     from ..api import GoogleFindMyAPI
     from .subentry import SubentryMetadata
 
@@ -103,6 +104,8 @@ class _MixinBase:
     _fcm_defer_started_mono: float
     _consecutive_transient_auth_failures: int
     _last_transient_auth_error: str | None
+    # Structured, redaction-safe record of the most recent reauth trigger (FIX 3).
+    _reauth_reason: ReauthReason | None
     _consecutive_decrypt_failures: int
     _last_decrypt_reauth_monotonic: float | None
     _last_decrypt_error: str | None
@@ -156,6 +159,15 @@ class _MixinBase:
 
     def note_error(
         self, exc: Exception, *, where: str = "", device: str | None = None
+    ) -> None:
+        raise NotImplementedError
+
+    def record_reauth_reason(
+        self,
+        code: ReauthReasonCode,
+        origin: str,
+        *,
+        counters: Mapping[str, int] | None = None,
     ) -> None:
         raise NotImplementedError
 

@@ -14,8 +14,17 @@ All functions are pure (no side effects) for easy testing and reuse.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+
+# Word-boundary matchers for HTTP status codes. Using ``\b`` prevents a
+# transient message like "retry after 4012 ms" (which contains the substring
+# "401") from being misread as an HTTP 401, while still matching a genuine
+# "401"/"404" that appears as a standalone token (e.g. "HTTP 401 Unauthorized",
+# "Error code: 401", "404 credential not found").
+_HTTP_401_TOKEN = re.compile(r"\b401\b")
+_HTTP_404_TOKEN = re.compile(r"\b404\b")
 
 __all__ = [
     "calculate_presence_ttl",
@@ -48,12 +57,15 @@ def is_fatal_fcm_auth_error(error: Any) -> bool:
 
     error_lower = error.lower()
 
-    # 401 errors are always fatal
-    if "401" in error:
+    # 401 errors are always fatal. Match the status code on a word boundary so a
+    # transient throttling message such as "retry after 4012 ms" (substring
+    # "401") is not misclassified as an authentication failure.
+    if _HTTP_401_TOKEN.search(error):
         return True
 
-    # 404 with credential mention is fatal
-    if "404" in error and "credential" in error_lower:
+    # 404 with credential mention is fatal. Same word-boundary guard so e.g.
+    # "retry after 40412 ms" (substring "404") cannot false-fire.
+    if _HTTP_404_TOKEN.search(error) and "credential" in error_lower:
         return True
 
     # Explicit credential/auth failure messages

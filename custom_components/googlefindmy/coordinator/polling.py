@@ -45,6 +45,7 @@ from homeassistant.core import Event
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from .._reauth_reason import ReauthReasonCode
 from ..Auth.fcm_receiver_ha import CRASH_LOOP_FATAL_PREFIX
 from ..const import (
     DEVICE_LIST_POLL_INTERVAL,
@@ -615,6 +616,7 @@ class PollingOperations(_MixinBase):
                 "is stale; a fresh secrets.json (re-authentication) "
                 "is required"
             )
+            reauth_exc.reauth_code = ReauthReasonCode.DECRYPT_STALE_KEY
             return True, reauth_exc, reauth_exc
         if self._decrypt_failure_is_account_wide(
             cycle_decrypt_error, cycle_had_successful_decrypt
@@ -1111,7 +1113,13 @@ class PollingOperations(_MixinBase):
                             fatal_error,
                         )
                         self._set_auth_state(failed=True, reason=fatal_error)
-                        raise ConfigEntryAuthFailed(fatal_error)
+                        # F-4: this raise is caught by the ConfigEntryAuthFailed
+                        # handler in _async_update_data (single recording choke
+                        # point), so only tag the exception here; do NOT record
+                        # directly to avoid a double record.
+                        fcm_exc = ConfigEntryAuthFailed(fatal_error)
+                        fcm_exc.reauth_code = ReauthReasonCode.FCM_AUTH_FATAL
+                        raise fcm_exc
 
                     # Track consecutive FCM errors for transient issues
                     if fatal_error != self._fcm_last_error:
@@ -1129,7 +1137,12 @@ class PollingOperations(_MixinBase):
                             fatal_error,
                         )
                         self._set_auth_state(failed=True, reason=fatal_error)
-                        raise ConfigEntryAuthFailed(fatal_error)
+                        # F-4: caught by the _async_update_data
+                        # ConfigEntryAuthFailed handler (single recording choke
+                        # point); tag only, do not record here.
+                        fcm_exc = ConfigEntryAuthFailed(fatal_error)
+                        fcm_exc.reauth_code = ReauthReasonCode.FCM_AUTH_FATAL
+                        raise fcm_exc
                     else:
                         _LOGGER.warning(
                             "FCM error detected (%d/%d): %s. Will retry before triggering re-auth.",
@@ -1546,6 +1559,14 @@ class PollingOperations(_MixinBase):
                 failed=True,
                 reason=f"Auth failed while fetching device list: {reason}",
             )
+            # FIX 3: single recording choke point for the awaited-refresh path.
+            # The reason code rides on the exception attribute (set at the raise
+            # site, e.g. api.py / polling FCM-fatal); default to UNKNOWN when the
+            # exception carries none.
+            self.record_reauth_reason(
+                getattr(auth_exc, "reauth_code", ReauthReasonCode.UNKNOWN),
+                origin="polling.py:1541",
+            )
             raise auth_exc
         except UpdateFailed as update_err:
             # Let pre-wrapped UpdateFailed bubble as-is after updating status
@@ -1574,6 +1595,14 @@ class PollingOperations(_MixinBase):
         records ``reauth_exc`` as ``last_exception`` so the ``finally`` block marks
         the update failed via ``async_set_update_error``.
         """
+        # FIX 3: single recording choke point for the fire-and-forget poll path.
+        # All six poll-cycle reauth sites (including the 2074 pre-converted
+        # ConfigEntryAuthFailed catch) funnel through here, so record exactly
+        # once. The reason code rides on the exception attribute when present.
+        self.record_reauth_reason(
+            getattr(reauth_exc, "reauth_code", ReauthReasonCode.UNKNOWN),
+            origin="polling.py:1565",
+        )
         entry = getattr(self, "config_entry", None)
         if entry is None:
             _LOGGER.debug("Cannot start reauth from poll cycle: no config entry bound.")
@@ -1985,6 +2014,7 @@ class PollingOperations(_MixinBase):
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google session invalid; re-authentication required"
                         )
+                        reauth_exc.reauth_code = ReauthReasonCode.SPOT_AUTH_PERMANENT
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
                         return
@@ -2002,6 +2032,9 @@ class PollingOperations(_MixinBase):
                         self._consecutive_timeouts = 0
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google session invalid; re-authentication required"
+                        )
+                        reauth_exc.reauth_code = (
+                            ReauthReasonCode.OWNER_KEY_EMPTY_RESPONSE
                         )
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
@@ -2024,6 +2057,7 @@ class PollingOperations(_MixinBase):
                         reauth_exc = ConfigEntryAuthFailed(
                             "Google credentials invalid; re-authentication required"
                         )
+                        reauth_exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
                         last_exception = reauth_exc
                         self._request_poll_reauth(reauth_exc)
                         return
@@ -2053,6 +2087,9 @@ class PollingOperations(_MixinBase):
                             self._consecutive_timeouts = 0
                             reauth_exc = ConfigEntryAuthFailed(
                                 f"Authentication failed after {self._consecutive_transient_auth_failures} attempts; re-authentication required"
+                            )
+                            reauth_exc.reauth_code = (
+                                ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
                             )
                             last_exception = reauth_exc
                             self._request_poll_reauth(reauth_exc)

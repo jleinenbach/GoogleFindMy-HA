@@ -13,6 +13,7 @@ import pytest
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import (
     CRASH_LOOP_FATAL_PREFIX,
 )
@@ -233,6 +234,37 @@ def test_fatal_fcm_registration_triggers_reauth(
             "message": fatal_error,
         },
     )
+
+
+def test_threshold_fcm_fatal_tags_reauth_code(
+    coordinator: GoogleFindMyCoordinator, dummy_api: _DummyAPI
+) -> None:
+    """FIX 3: a non-immediate FCM fatal that persists to the retry threshold
+    escalates to ConfigEntryAuthFailed tagged with FCM_AUTH_FATAL."""
+
+    # Non-auth, non-crash-loop fatal ⇒ counter path, not the immediate raise.
+    fatal_error = "Transient FCM error: connection reset"
+
+    class _DummyFcm:
+        def __init__(self, message: str) -> None:
+            self._fatal_error = message
+            self._fatal_errors = {coordinator.config_entry.entry_id: message}
+
+    dummy_api.fcm = _DummyFcm(fatal_error)
+    coordinator.config_entry.runtime_data = SimpleNamespace(
+        coordinator=coordinator, fcm_receiver=dummy_api.fcm
+    )
+    coordinator._is_fcm_ready_soft = lambda: False
+    # One short of the threshold; the same recurring fatal tips it over.
+    coordinator._fcm_last_error = fatal_error
+    coordinator._fcm_error_count = 2
+
+    loop = coordinator.hass.loop
+    with pytest.raises(ConfigEntryAuthFailed) as excinfo:
+        loop.run_until_complete(coordinator._async_update_data())
+
+    # Mutation-sharp: the wrong (or missing) tag fails this identity check.
+    assert excinfo.value.reauth_code is ReauthReasonCode.FCM_AUTH_FATAL
 
 
 def test_global_fatal_error_ignored_for_clean_entry(

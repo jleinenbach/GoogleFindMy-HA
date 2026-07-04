@@ -35,6 +35,7 @@ from aiohttp import ClientError, ClientSession
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
+from ._reauth_reason import ReauthReasonCode
 from .Auth.token_cache import TokenCache
 from .Auth.username_provider import username_string
 from .const import (
@@ -1059,7 +1060,9 @@ class GoogleFindMyAPI:
                     err.status,
                     _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(_short_err(err)) from err
+                exc = ConfigEntryAuthFailed(_short_err(err))
+                exc.reauth_code = ReauthReasonCode.HTTP_401_AFTER_REFRESH
+                raise exc from err
             _LOGGER.warning(
                 "Device list temporarily unavailable (server error %s): %s",
                 err.status,
@@ -1068,10 +1071,27 @@ class GoogleFindMyAPI:
             raise UpdateFailed(_short_err(err)) from err
 
         except NovaAuthError as err:
-            _LOGGER.error(
-                "Authentication failed while listing devices: %s", _short_err(err)
-            )
-            raise ConfigEntryAuthFailed(_short_err(err)) from err
+            # Mirror the location path's base handler: a permanent credential
+            # failure (NovaAuthPermanentError subclass, or a base NovaAuthError
+            # flagged is_permanent=True after token refresh) must record the
+            # permanent reason, not the generic/transient one, so diagnostics
+            # point triage at the right credential layer. Control flow is
+            # unchanged (both cases raise ConfigEntryAuthFailed); only the
+            # reason code and log wording differ by permanence.
+            exc = ConfigEntryAuthFailed(_short_err(err))
+            if err.is_permanent:
+                _LOGGER.error(
+                    "Permanent authentication failure while listing devices: %s",
+                    _short_err(err),
+                )
+                exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
+            else:
+                _LOGGER.error(
+                    "Authentication failed while listing devices: %s",
+                    _short_err(err),
+                )
+                exc.reauth_code = ReauthReasonCode.NOVA_AUTH_FAILED
+            raise exc from err
 
         except NovaProtobufDecodeError as err:
             # Protobuf decode failures indicate corrupted response or protocol mismatch
@@ -1096,7 +1116,9 @@ class GoogleFindMyAPI:
                 or "Bad Authentication" in msg
             ):
                 _LOGGER.error("Authentication failed (gpsoauth): %s", _short_err(msg))
-                raise ConfigEntryAuthFailed(_short_err(msg)) from err
+                exc = ConfigEntryAuthFailed(_short_err(msg))
+                exc.reauth_code = ReauthReasonCode.BADAUTH_GPSOAUTH
+                raise exc from err
 
             # TokenCache closed indicates the integration is in an invalid state
             # (e.g., after a failed reload or during shutdown). Trigger re-auth
@@ -1106,9 +1128,11 @@ class GoogleFindMyAPI:
                     "TokenCache is closed; integration state is invalid. "
                     "Triggering re-authentication to reinitialize."
                 )
-                raise ConfigEntryAuthFailed(
+                exc = ConfigEntryAuthFailed(
                     "Integration state invalid (cache closed); please re-authenticate"
-                ) from err
+                )
+                exc.reauth_code = ReauthReasonCode.TOKENCACHE_CLOSED
+                raise exc from err
 
             # Detect and tame the multi-entry guard (INFO once, DEBUG thereafter)
             if _is_multi_entry_guard_message(msg):
@@ -1275,7 +1299,9 @@ class GoogleFindMyAPI:
                 device_id,
                 _short_err(err),
             )
-            raise ConfigEntryAuthFailed(_short_err(err)) from err
+            exc = ConfigEntryAuthFailed(_short_err(err))
+            exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
+            raise exc from err
 
         except NovaAuthError as err:
             # Transient auth failure - may self-heal in subsequent poll cycles.
@@ -1287,7 +1313,9 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(_short_err(err)) from err
+                exc = ConfigEntryAuthFailed(_short_err(err))
+                exc.reauth_code = ReauthReasonCode.NOVA_AUTH_PERMANENT
+                raise exc from err
 
             _LOGGER.warning(
                 "Transient authentication error for %s (%s): %s. May resolve in next poll cycle.",
@@ -1308,7 +1336,9 @@ class GoogleFindMyAPI:
                     device_id,
                     _short_err(err),
                 )
-                raise ConfigEntryAuthFailed(_short_err(err)) from err
+                exc = ConfigEntryAuthFailed(_short_err(err))
+                exc.reauth_code = ReauthReasonCode.HTTP_401_AFTER_REFRESH
+                raise exc from err
             _LOGGER.warning(
                 "Server error (%s) while getting location for %s (%s): %s",
                 err.status,

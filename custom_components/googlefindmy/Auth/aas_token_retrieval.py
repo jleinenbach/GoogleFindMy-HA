@@ -30,8 +30,10 @@ Enhancements (defensive validation & retries):
   We **do not reuse** such values. Instead, we disqualify them for the OAuth→AAS
   exchange and fall back to the next available source. This avoids brittle shortcuts.
 - Retry policy: transient transport/library errors retry with bounded exponential
-  backoff; clear auth failures (e.g., "BadAuthentication", "invalid_grant", 401/403
-  semantics like "unauthorized"/"forbidden") are **not** retried.
+  backoff; clear auth failures (e.g., "BadAuthentication", "invalid_grant") are
+  **not** retried. Non-retryable auth is matched structurally via ``error_kind``,
+  not via broad HTTP substrings (401/403, "unauthorized"/"forbidden") in free-form
+  text.
 """
 
 from __future__ import annotations
@@ -140,13 +142,15 @@ _NON_RETRYABLE_KINDS: frozenset[str] = frozenset(
 )
 
 # Substrings that surface in ``_clip(err)`` for callers that raise
-# ``RuntimeError`` without the ``error_kind`` attribute (e.g. HTTP-status
-# surfaces in sibling modules and the existing test suite).
+# ``RuntimeError`` without the ``error_kind`` attribute (legacy paths and the
+# existing test suite). Only gpsoauth-specific vocabulary is matched here. The
+# HTTP-generic tokens ("unauthorized" / "forbidden") are deliberately NOT
+# listed: genuine HTTP auth denials are carried structurally (``error_kind``),
+# and a free-text substring must not force a network-adjacent error to be
+# treated as a permanent, non-retryable auth failure.
 _NON_RETRYABLE_PATTERNS: tuple[str, ...] = (
     "badauthentication",
     "invalid_grant",
-    "unauthorized",
-    "forbidden",
     "missing 'token' in gpsoauth response",
 )
 
@@ -491,8 +495,9 @@ async def async_get_aas_token(
         - Issuance timestamp stored under `aas_token_issued_at_<username>` for TTL learning.
 
     Retry policy:
-        - Non-retryable auth failures (e.g., "BadAuthentication", "invalid_grant",
-          "unauthorized"/"forbidden") abort immediately.
+        - Non-retryable auth failures (e.g., "BadAuthentication", "invalid_grant")
+          abort immediately, matched structurally via ``error_kind`` rather than via
+          broad HTTP substrings ("unauthorized"/"forbidden") in free-form text.
         - Transient errors (network/timeouts/library) retry with exponential backoff.
 
     Args:

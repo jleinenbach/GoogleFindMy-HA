@@ -7,7 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 from homeassistant.config_entries import ConfigEntryAuthFailed
+from homeassistant.exceptions import HomeAssistantError
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.const import OPT_SEMANTIC_LOCATIONS
 from custom_components.googlefindmy.coordinator import (
     CryptoStatus,
@@ -24,6 +26,12 @@ from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_
 from custom_components.googlefindmy.NovaApi.nova_request import (
     NovaAuthError,
     NovaAuthPermanentError,
+)
+from custom_components.googlefindmy.SpotApi.GetEidInfoForE2eeDevices.get_eid_info_request import (
+    SpotApiEmptyResponseError,
+)
+from custom_components.googlefindmy.SpotApi.spot_request import (
+    SpotAuthPermanentError,
 )
 from tests.helpers.homeassistant import GoogleFindMyConfigEntryStub
 
@@ -92,6 +100,10 @@ def _base_coordinator(
     coordinator._consecutive_timeouts = 0
     coordinator._consecutive_transient_auth_failures = 0
     coordinator._last_transient_auth_error = None
+    # FIX 3: reauth-reason state normally seeded by ``__init__`` (bypassed via
+    # ``__new__`` here); the poll-reauth choke point records through these.
+    coordinator._reauth_reason = None
+    coordinator._reauth_reason_logged = set()
     coordinator._consecutive_decrypt_failures = 0
     coordinator._last_decrypt_reauth_monotonic = None
     coordinator._last_decrypt_error = None
@@ -750,6 +762,48 @@ async def test_poll_cycle_nova_permanent_auth_starts_reauth() -> None:
         coordinator.hass
     )
     assert any(kw.get("failed") for kw in auth_calls)
+    # The poll site tags the exception so diagnostics record the specific cause.
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.NOVA_AUTH_PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_spot_auth_permanent_tags_reauth_code() -> None:
+    """A permanent Spot/AAS auth failure in the poll cycle records
+    SPOT_AUTH_PERMANENT (a general Spot-transport condition, not owner-key)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(
+        SpotAuthPermanentError("AAS token invalid after refresh.")
+    )
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.SPOT_AUTH_PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_poll_cycle_spot_empty_response_tags_reauth_code() -> None:
+    """An empty SPOT GetEidInfo response in the poll cycle records
+    OWNER_KEY_EMPTY_RESPONSE (SpotApiEmptyResponseError is raised only from the
+    EID/owner-key retrieval layer, so the owner-key code names the same root)."""
+    coordinator = _polling_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(
+        SpotApiEmptyResponseError("SPOT returned an empty response")
+    )
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.OWNER_KEY_EMPTY_RESPONSE
 
 
 @pytest.mark.asyncio
@@ -770,6 +824,17 @@ async def test_poll_cycle_transient_nova_auth_starts_reauth_after_threshold() ->
     await coordinator._async_start_poll_cycle([{"id": "dev-1", "name": "Hub"}])
     coordinator.config_entry.async_start_reauth.assert_called_once_with(
         coordinator.hass
+    )
+    # Distinct code from the immediate NOVA_AUTH_FAILED: this is the
+    # retries-exhausted case, and the counter snapshot proves the escalation.
+    assert coordinator._reauth_reason is not None
+    assert (
+        coordinator._reauth_reason.code
+        is ReauthReasonCode.NOVA_AUTH_TRANSIENT_EXHAUSTED
+    )
+    assert (
+        coordinator._reauth_reason.counters["consecutive_transient_auth_failures"]
+        == _MAX_TRANSIENT_AUTH_FAILURES
     )
 
 
@@ -952,3 +1017,52 @@ async def test_poll_cycle_mixed_stale_and_success_keeps_last_decrypt_error() -> 
     assert coordinator.crypto_status.state == CryptoStatus.TRACKER_KEY_OUTDATED
     assert coordinator._last_decrypt_error is not None
     assert coordinator._last_decrypt_error.split(":", 1)[0] == "StaleOwnerKeyError"
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_spot_auth_permanent_tags_reauth_code() -> None:
+    """The direct manual-locate SpotAuthPermanentError site records
+    SPOT_AUTH_PERMANENT, the SAME canonical code the poll-cycle equivalent uses
+    (polling.py) for the same exception type. It must NOT record an owner-key code:
+    SpotAuthPermanentError is a generic Spot-transport auth failure. Guards the
+    poll-vs-direct code-consistency invariant (a mislabel would point diagnostics
+    triage at the wrong credential layer)."""
+    coordinator = _base_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(
+        SpotAuthPermanentError("AAS token invalid after refresh.")
+    )
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    with pytest.raises(HomeAssistantError):
+        await coordinator.async_locate_device("device-1")
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.SPOT_AUTH_PERMANENT
+
+
+@pytest.mark.asyncio
+async def test_manual_locate_stale_shared_key_tags_reauth_code() -> None:
+    """The direct manual-locate account-wide DecryptionError site records
+    DECRYPT_STALE_KEY, the SAME canonical code the poll-cycle equivalent uses
+    (_finalize_cycle_decrypt_state). It must NOT record an AAS/token code: the
+    condition is a stale shared key, a different credential layer. Guards the
+    poll-vs-direct code-consistency invariant (the Codex finding on PR #1160)."""
+    coordinator = _base_coordinator({}, _TrackingFilter(), {})
+    coordinator.api = _DecryptFailAPI(SharedKeyMismatchError("stale shared key"))
+    # Seed the account-wide counter one below the threshold so this single locate
+    # call crosses it and escalates (the first escalation always fires: the
+    # cooldown sentinel is None).
+    coordinator._consecutive_decrypt_failures = _MAX_DECRYPT_FAILURES - 1
+    coordinator.config_entry.async_start_reauth = MagicMock()
+
+    with pytest.raises(HomeAssistantError):
+        await coordinator.async_locate_device("device-1")
+
+    coordinator.config_entry.async_start_reauth.assert_called_once_with(
+        coordinator.hass
+    )
+    assert coordinator._reauth_reason is not None
+    assert coordinator._reauth_reason.code is ReauthReasonCode.DECRYPT_STALE_KEY

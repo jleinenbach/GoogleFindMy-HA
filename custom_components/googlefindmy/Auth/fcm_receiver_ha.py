@@ -81,6 +81,7 @@ from cryptography.exceptions import InvalidTag
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
@@ -3001,6 +3002,19 @@ class FcmReceiverHA:
             if escalate and hass is not None:
                 entry = getattr(coordinator, "config_entry", None)
                 if entry is not None:
+                    # FIX 3: direct reauth site (background decrypt escalation for
+                    # a stale shared key); record the classified reason on the
+                    # matching coordinator before starting the flow. This escalation
+                    # is only reached on the account-wide stale-shared-key decrypt
+                    # path (note_decrypt_failure returns False for stale=True), so it
+                    # maps to DECRYPT_STALE_KEY -- the same code the poll and locate
+                    # equivalents use -- not an AAS/token code.
+                    recorder = getattr(coordinator, "record_reauth_reason", None)
+                    if callable(recorder):
+                        recorder(
+                            ReauthReasonCode.DECRYPT_STALE_KEY,
+                            origin="fcm_receiver_ha.py:3004",
+                        )
                     entry.async_start_reauth(hass)
 
     def _note_decrypt_success_for_entry(self, entry_id: str) -> None:

@@ -66,6 +66,8 @@ from datetime import datetime, timedelta
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from .._reauth_reason import ReauthReason, ReauthReasonCode
+
 # Operations classes - currently empty mixins for future method extraction
 from .cache import CacheOperations
 from .helpers.cache import (
@@ -892,6 +894,14 @@ class GoogleFindMyCoordinator(
         self._consecutive_transient_auth_failures: int = 0
         self._last_transient_auth_error: str | None = None
 
+        # FIX 3: structured, redaction-safe record of the most recent reauth
+        # trigger, mirrored into diagnostics so the reason is visible without a
+        # debug log capture. ``None`` until the first reauth is recorded.
+        self._reauth_reason: ReauthReason | None = None
+        # De-dup set for the once-per (code, origin) WARNING emitted by
+        # ``record_reauth_reason`` so a repeating trigger does not spam the log.
+        self._reauth_reason_logged: set[tuple[str, str]] = set()
+
         # Stale/missing shared-key decryption failures escalate to a reauth flow
         # only after several consecutive cycles, with a cooldown so the flow is not
         # re-fired on every poll once it is already open. Mirrors the transient-auth
@@ -1472,6 +1482,64 @@ class GoogleFindMyCoordinator(
             prefix += f"({device})"
         err_type = type(exc).__name__
         self._append_recent_error(err_type, f"{prefix}: {exc}")
+
+    def record_reauth_reason(
+        self,
+        code: ReauthReasonCode,
+        origin: str,
+        *,
+        counters: Mapping[str, int] | None = None,
+    ) -> None:
+        """Persist a structured, redaction-safe reason for a reauth trigger.
+
+        This is the single choke point that turns a classified reauth trigger
+        into diagnosable state. It stores a :class:`ReauthReason` on the
+        coordinator (mirrored into diagnostics) and emits a **once-per**
+        ``(code, origin)`` WARNING with structured ``extra=`` fields so a
+        repeating trigger does not spam the log.
+
+        The inputs are literal-only by contract: ``code`` is a
+        :class:`ReauthReasonCode`, ``origin`` is a constant literal string
+        supplied at the call site, and ``counters`` (defaulting to a snapshot of
+        the transient-auth-failure counter and its threshold) are plain ints.
+        No token, e-mail, or ``str(err)`` content is ever stored or logged here.
+
+        Args:
+            code: The classified reauth reason code.
+            origin: A constant literal string identifying the call site.
+            counters: Optional counter snapshot; when omitted the current
+                transient-auth-failure count and its threshold are captured.
+        """
+        if counters is None:
+            snapshot: dict[str, int] = {
+                "consecutive_transient_auth_failures": int(
+                    self._consecutive_transient_auth_failures
+                ),
+                "max_transient_auth_failures": int(_MAX_TRANSIENT_AUTH_FAILURES),
+            }
+        else:
+            snapshot = {key: int(value) for key, value in counters.items()}
+
+        self._reauth_reason = ReauthReason(
+            code=code,
+            origin=origin,
+            counters=snapshot,
+            recorded_at=time.time(),
+        )
+
+        dedup_key = (str(code), origin)
+        if dedup_key not in self._reauth_reason_logged:
+            self._reauth_reason_logged.add(dedup_key)
+            _LOGGER.warning(
+                "Re-authentication triggered (%s at %s)",
+                code,
+                origin,
+                extra={
+                    "reauth_code": str(code),
+                    "reauth_origin": origin,
+                    "reauth_counters": snapshot,
+                },
+            )
 
     # Safe getters for durations based on keys that __init__.py may set.
     def get_metric(self, key: str) -> float | None:

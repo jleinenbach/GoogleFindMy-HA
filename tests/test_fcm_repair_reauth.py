@@ -17,6 +17,7 @@ import pytest
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.googlefindmy import repairs
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import DOMAIN, FcmReceiverHA
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
@@ -204,6 +205,38 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
     # success path clears it.
     assert flow._async_start_reauth() is True
 
+    entry.async_start_reauth.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_confirm_records_reauth_reason() -> None:
+    """FIX 3: confirming the repair records the FCM_AUTH_FATAL reason.
+
+    The recorder lives on the coordinator (reachable via ``runtime_data``), not
+    on the RepairsFlow; the flow records defensively when it is available.
+    """
+    recorder = MagicMock(return_value=None)
+    entry = SimpleNamespace(
+        async_start_reauth=MagicMock(return_value=None),
+        runtime_data=SimpleNamespace(
+            coordinator=SimpleNamespace(
+                record_reauth_reason=recorder,
+            )
+        ),
+    )
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+        )
+    )
+    flow = repairs.FcmReauthRepairFlow("entry-id")
+    flow.hass = hass
+
+    assert flow._async_start_reauth() is True
+
+    recorder.assert_called_once_with(
+        ReauthReasonCode.FCM_AUTH_FATAL, origin="repairs.py:112"
+    )
     entry.async_start_reauth.assert_called_once_with(hass)
 
 

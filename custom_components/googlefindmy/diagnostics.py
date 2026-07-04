@@ -252,6 +252,50 @@ def _status_snapshot_to_dict(snapshot: Any) -> dict[str, Any] | None:
     }
 
 
+def _reauth_reason_block(coordinator: Any) -> dict[str, Any] | None:
+    """Serialize the coordinator's structured reauth reason for diagnostics.
+
+    Mirrors :func:`_status_snapshot_to_dict`: returns ``None`` when no reauth has
+    been recorded yet so the coordinator block stays structurally unchanged.
+
+    Redaction is guaranteed by the *literal-only input* invariant of
+    :class:`~._reauth_reason.ReauthReason` (see AE-7): ``code`` is a
+    ``StrEnum`` value, ``origin`` is a constant literal string, and ``counters``
+    are plain ints. No token, e-mail, or free-form ``str(err)`` content is ever
+    stored on the reason, so nothing sensitive can reach this payload.
+    """
+    reason = getattr(coordinator, "_reauth_reason", None)
+    if reason is None:
+        return None
+
+    try:
+        code = getattr(reason, "code", None)
+        origin = getattr(reason, "origin", None)
+        raw_counters = getattr(reason, "counters", None)
+        recorded_at = getattr(reason, "recorded_at", None)
+    except Exception:
+        return None
+
+    counters: dict[str, int] = {}
+    if isinstance(raw_counters, Mapping):
+        for key, value in raw_counters.items():
+            if (
+                isinstance(key, str)
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
+                counters[key] = value
+
+    return {
+        "code": str(code) if code is not None else None,
+        "origin": _safe_truncate(origin) if origin is not None else None,
+        "counters": counters,
+        "recorded_at": _iso_utc(
+            recorded_at if isinstance(recorded_at, (int, float)) else None
+        ),
+    }
+
+
 def _sanitize_diag_entry(payload: Any) -> dict[str, Any]:
     """Return a diagnostics-friendly snapshot of a buffer entry."""
     if not isinstance(payload, dict):
@@ -669,6 +713,11 @@ async def async_get_config_entry_diagnostics(
             coordinator_block["setup_performance"] = setup_perf
         if recent_errors:
             coordinator_block["recent_errors"] = recent_errors
+
+        # FIX 3: structured, redaction-safe reauth reason (only when recorded).
+        reauth_reason_block = _reauth_reason_block(coordinator)
+        if reauth_reason_block is not None:
+            coordinator_block["reauth_reason"] = reauth_reason_block
 
         # Anonymized per-device telemetry (P1-3): opaque index plus seven coarse
         # fields, no names/IDs/coordinates/keys. Resilient: [] on any failure.
