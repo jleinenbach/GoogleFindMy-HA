@@ -35,8 +35,6 @@ class ReauthReasonCode(StrEnum):
     HTTP_401_AFTER_REFRESH = "http_401_after_refresh"
     # api.py gpsoauth BadAuthentication / missing token.
     BADAUTH_GPSOAUTH = "badauth_gpsoauth"
-    # Invalid AAS credential material.
-    AAS_INVALID = "aas_invalid"
     # Spot transport permanent auth failure (SpotAuthPermanentError from
     # spot_request.py: AAS token invalid after refresh / gRPC UNAUTHENTICATED /
     # PERMISSION_DENIED). General Spot-session-permanent, not owner-key specific.

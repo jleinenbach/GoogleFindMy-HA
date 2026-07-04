@@ -510,9 +510,13 @@ class LocateOperations(_MixinBase):
                     reason=f"Auth failed during manual locate: {auth_err}",
                 )
                 # FIX 3: direct reauth site (no exception bubbles to a coordinator
-                # catch), so record the classified reason directly.
+                # catch), so record the classified reason directly. The condition
+                # is a generic Spot-transport auth failure (SpotAuthPermanentError
+                # is raised only in spot_request.py, e.g. "AAS token invalid after
+                # refresh"), so it maps to SPOT_AUTH_PERMANENT -- the same code the
+                # poll-cycle equivalent uses (polling.py) -- not an owner-key code.
                 self.record_reauth_reason(
-                    ReauthReasonCode.OWNER_KEY_PERMANENT,
+                    ReauthReasonCode.SPOT_AUTH_PERMANENT,
                     origin="locate.py:521",
                 )
                 entry = getattr(self, "config_entry", None)
@@ -653,9 +657,12 @@ class LocateOperations(_MixinBase):
                     ),
                 )
                 # FIX 3: direct reauth site (a stale shared key needs fresh
-                # credentials); record the classified reason directly.
+                # credentials); record the classified reason directly. This is the
+                # account-wide stale-shared-key decrypt condition, so it maps to
+                # DECRYPT_STALE_KEY -- the same code the poll-cycle equivalent uses
+                # (polling.py, _finalize_cycle_decrypt_state) -- not an AAS/token code.
                 self.record_reauth_reason(
-                    ReauthReasonCode.AAS_INVALID,
+                    ReauthReasonCode.DECRYPT_STALE_KEY,
                     origin="locate.py:656",
                 )
                 entry = getattr(self, "config_entry", None)

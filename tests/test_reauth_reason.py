@@ -49,8 +49,10 @@ class TestReauthReasonModel:
         assert str(ReauthReasonCode.UNKNOWN) == "unknown"
 
     def test_dataclass_is_slotted_and_defaults_empty(self) -> None:
-        reason = ReauthReason(code=ReauthReasonCode.AAS_INVALID, origin="locate.py:656")
-        assert reason.code is ReauthReasonCode.AAS_INVALID
+        reason = ReauthReason(
+            code=ReauthReasonCode.DECRYPT_STALE_KEY, origin="locate.py:656"
+        )
+        assert reason.code is ReauthReasonCode.DECRYPT_STALE_KEY
         assert reason.origin == "locate.py:656"
         assert reason.counters == {}
         assert reason.recorded_at == 0.0
@@ -86,7 +88,7 @@ class TestRecordReauthReason:
     def test_explicit_counters_override_default_snapshot(self) -> None:
         coord = self._coordinator()
         coord.record_reauth_reason(
-            ReauthReasonCode.AAS_INVALID,
+            ReauthReasonCode.DECRYPT_STALE_KEY,
             "locate.py:656",
             counters={"custom": 7},
         )
@@ -98,12 +100,16 @@ class TestRecordReauthReason:
     def test_warns_once_per_code_origin(self, caplog: pytest.LogCaptureFixture) -> None:
         coord = self._coordinator()
         with caplog.at_level(logging.WARNING):
-            coord.record_reauth_reason(ReauthReasonCode.AAS_INVALID, "locate.py:656")
-            coord.record_reauth_reason(ReauthReasonCode.AAS_INVALID, "locate.py:656")
+            coord.record_reauth_reason(
+                ReauthReasonCode.DECRYPT_STALE_KEY, "locate.py:656"
+            )
+            coord.record_reauth_reason(
+                ReauthReasonCode.DECRYPT_STALE_KEY, "locate.py:656"
+            )
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         # De-dup: identical (code, origin) warns exactly once.
         assert len(warnings) == 1
-        assert warnings[0].reauth_code == "aas_invalid"
+        assert warnings[0].reauth_code == "decrypt_stale_key"
         assert warnings[0].reauth_origin == "locate.py:656"
 
     def test_distinct_origin_warns_again(
@@ -111,8 +117,14 @@ class TestRecordReauthReason:
     ) -> None:
         coord = self._coordinator()
         with caplog.at_level(logging.WARNING):
-            coord.record_reauth_reason(ReauthReasonCode.AAS_INVALID, "locate.py:521")
-            coord.record_reauth_reason(ReauthReasonCode.AAS_INVALID, "locate.py:656")
+            # Same code, two real emitting origins (locate direct + poll cycle):
+            # a distinct origin is a distinct dedup key, so it warns again.
+            coord.record_reauth_reason(
+                ReauthReasonCode.DECRYPT_STALE_KEY, "polling.py:619"
+            )
+            coord.record_reauth_reason(
+                ReauthReasonCode.DECRYPT_STALE_KEY, "locate.py:656"
+            )
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         # A different origin is a distinct dedup key ⇒ warns again.
         assert len(warnings) == 2

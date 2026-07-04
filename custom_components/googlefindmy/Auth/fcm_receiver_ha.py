@@ -3004,11 +3004,15 @@ class FcmReceiverHA:
                 if entry is not None:
                     # FIX 3: direct reauth site (background decrypt escalation for
                     # a stale shared key); record the classified reason on the
-                    # matching coordinator before starting the flow.
+                    # matching coordinator before starting the flow. This escalation
+                    # is only reached on the account-wide stale-shared-key decrypt
+                    # path (note_decrypt_failure returns False for stale=True), so it
+                    # maps to DECRYPT_STALE_KEY -- the same code the poll and locate
+                    # equivalents use -- not an AAS/token code.
                     recorder = getattr(coordinator, "record_reauth_reason", None)
                     if callable(recorder):
                         recorder(
-                            ReauthReasonCode.AAS_INVALID,
+                            ReauthReasonCode.DECRYPT_STALE_KEY,
                             origin="fcm_receiver_ha.py:3004",
                         )
                     entry.async_start_reauth(hass)
