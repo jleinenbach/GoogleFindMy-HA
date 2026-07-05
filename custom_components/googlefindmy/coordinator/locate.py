@@ -517,7 +517,7 @@ class LocateOperations(_MixinBase):
                 # poll-cycle equivalent uses (polling.py) -- not an owner-key code.
                 self.record_reauth_reason(
                     ReauthReasonCode.SPOT_AUTH_PERMANENT,
-                    origin="locate.py:521",
+                    origin="locate.py:async_locate_device:spot_auth",
                 )
                 entry = getattr(self, "config_entry", None)
                 reauth_started = False
@@ -663,7 +663,7 @@ class LocateOperations(_MixinBase):
                 # (polling.py, _finalize_cycle_decrypt_state) -- not an AAS/token code.
                 self.record_reauth_reason(
                     ReauthReasonCode.DECRYPT_STALE_KEY,
-                    origin="locate.py:656",
+                    origin="locate.py:async_locate_device:decrypt_stale_key",
                 )
                 entry = getattr(self, "config_entry", None)
                 reauth_started = False

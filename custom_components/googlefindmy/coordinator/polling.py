@@ -1565,7 +1565,7 @@ class PollingOperations(_MixinBase):
             # exception carries none.
             self.record_reauth_reason(
                 getattr(auth_exc, "reauth_code", ReauthReasonCode.UNKNOWN),
-                origin="polling.py:1541",
+                origin="polling.py:_async_update_data",
             )
             raise auth_exc
         except UpdateFailed as update_err:
@@ -1601,7 +1601,7 @@ class PollingOperations(_MixinBase):
         # once. The reason code rides on the exception attribute when present.
         self.record_reauth_reason(
             getattr(reauth_exc, "reauth_code", ReauthReasonCode.UNKNOWN),
-            origin="polling.py:1565",
+            origin="polling.py:_request_poll_reauth",
         )
         entry = getattr(self, "config_entry", None)
         if entry is None:

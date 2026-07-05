@@ -3117,7 +3117,7 @@ class FcmReceiverHA:
                     if callable(recorder):
                         recorder(
                             ReauthReasonCode.DECRYPT_STALE_KEY,
-                            origin="fcm_receiver_ha.py:3004",
+                            origin="fcm_receiver_ha.py:_note_decrypt_failure_for_entry",
                         )
                     entry.async_start_reauth(hass)
 
