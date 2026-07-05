@@ -250,9 +250,10 @@ def _perform_oauth_sync(
         # mirroring the AAS exchange path (``aas_token_retrieval`` treats
         # ``gpsoauth.AuthError`` by type), so the rejected AAS token is
         # invalidated/regenerated instead of being left in cache for a retry.
-        if gpsoauth_exceptions is not None and isinstance(
+        is_typed_autherror = gpsoauth_exceptions is not None and isinstance(
             err, gpsoauth_exceptions.AuthError
-        ):
+        )
+        if is_typed_autherror:
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
             ) from err
@@ -264,6 +265,34 @@ def _perform_oauth_sync(
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
             ) from err
+        # AP-2 field probe (typed-vs-untyped denial). The vendor auth endpoint is
+        # reverse-engineered: a genuine credential denial arrives as an ``Error``
+        # dict (handled above) or a typed ``gpsoauth.AuthError``; anything else
+        # reaching this fall-through is, by the vendor model, a transport or
+        # intermediary artifact and is (correctly) surfaced as a retryable
+        # ``RuntimeError``. Record the classification *signature* so a field
+        # occurrence of "untyped error whose text still carries an HTTP auth
+        # marker, treated as transient" -- the fingerprint of a *missed* denial
+        # slipping past ``allow_http_generic=False`` -- becomes observable.
+        # Redaction: only the exception type name, the typed-flag and which
+        # markers are present; never ``str(err)`` (may carry a token or email).
+        # ``is_typed_autherror`` is structurally False here (the typed branch
+        # raised above); it is logged verbatim so the fall-through signature is
+        # explicit rather than implied.
+        http_auth_markers = [
+            marker
+            for marker in ("401", "403", "unauthorized", "forbidden")
+            if marker in message.lower()
+        ]
+        _LOGGER.debug(
+            "Auth token fetch for scope %r fell through to a retryable "
+            "RuntimeError (err_type=%s, is_typed_autherror=%s, "
+            "http_auth_markers=%s)",
+            scope,
+            type(err).__name__,
+            is_typed_autherror,
+            http_auth_markers,
+        )
         raise RuntimeError(
             f"Failed to get auth token for scope '{scope}': {err}"
         ) from err
