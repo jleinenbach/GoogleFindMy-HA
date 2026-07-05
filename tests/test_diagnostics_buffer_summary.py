@@ -245,7 +245,7 @@ def test_diagnostics_includes_reauth_reason_when_recorded(
     coordinator = _StubCoordinator()
     coordinator._reauth_reason = ReauthReason(
         code=ReauthReasonCode.HTTP_401_AFTER_REFRESH,
-        origin="polling.py:1541",
+        origin="polling.py:_async_update_data",
         counters={"consecutive_transient_auth_failures": 3},
         recorded_at=1_700_000_000.0,
     )
@@ -268,6 +268,6 @@ def test_diagnostics_includes_reauth_reason_when_recorded(
 
     reauth = payload["coordinator"]["reauth_reason"]
     assert reauth["code"] == "http_401_after_refresh"
-    assert reauth["origin"] == "polling.py:1541"
+    assert reauth["origin"] == "polling.py:_async_update_data"
     assert reauth["counters"] == {"consecutive_transient_auth_failures": 3}
     # Mutation counter-check: skipping the wiring line drops this key entirely.

@@ -50,10 +50,11 @@ class TestReauthReasonModel:
 
     def test_dataclass_is_slotted_and_defaults_empty(self) -> None:
         reason = ReauthReason(
-            code=ReauthReasonCode.DECRYPT_STALE_KEY, origin="locate.py:656"
+            code=ReauthReasonCode.DECRYPT_STALE_KEY,
+            origin="locate.py:async_locate_device:decrypt_stale_key",
         )
         assert reason.code is ReauthReasonCode.DECRYPT_STALE_KEY
-        assert reason.origin == "locate.py:656"
+        assert reason.origin == "locate.py:async_locate_device:decrypt_stale_key"
         assert reason.counters == {}
         assert reason.recorded_at == 0.0
         # slots=True ⇒ no __dict__, and unknown attributes are rejected.
@@ -73,13 +74,13 @@ class TestRecordReauthReason:
     def test_stores_reason_with_code_origin_and_counter_snapshot(self) -> None:
         coord = self._coordinator()
         coord.record_reauth_reason(
-            ReauthReasonCode.HTTP_401_AFTER_REFRESH, "polling.py:1541"
+            ReauthReasonCode.HTTP_401_AFTER_REFRESH, "polling.py:_async_update_data"
         )
         reason = coord._reauth_reason
         assert reason is not None
         # Mutation-sharp: wrong code or origin fails here.
         assert reason.code is ReauthReasonCode.HTTP_401_AFTER_REFRESH
-        assert reason.origin == "polling.py:1541"
+        assert reason.origin == "polling.py:_async_update_data"
         # Default snapshot captures the live transient-auth counter + threshold.
         assert reason.counters["consecutive_transient_auth_failures"] == 2
         assert reason.counters["max_transient_auth_failures"] >= 1
@@ -89,7 +90,7 @@ class TestRecordReauthReason:
         coord = self._coordinator()
         coord.record_reauth_reason(
             ReauthReasonCode.DECRYPT_STALE_KEY,
-            "locate.py:656",
+            "locate.py:async_locate_device:decrypt_stale_key",
             counters={"custom": 7},
         )
         reason = coord._reauth_reason
@@ -101,16 +102,21 @@ class TestRecordReauthReason:
         coord = self._coordinator()
         with caplog.at_level(logging.WARNING):
             coord.record_reauth_reason(
-                ReauthReasonCode.DECRYPT_STALE_KEY, "locate.py:656"
+                ReauthReasonCode.DECRYPT_STALE_KEY,
+                "locate.py:async_locate_device:decrypt_stale_key",
             )
             coord.record_reauth_reason(
-                ReauthReasonCode.DECRYPT_STALE_KEY, "locate.py:656"
+                ReauthReasonCode.DECRYPT_STALE_KEY,
+                "locate.py:async_locate_device:decrypt_stale_key",
             )
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         # De-dup: identical (code, origin) warns exactly once.
         assert len(warnings) == 1
         assert warnings[0].reauth_code == "decrypt_stale_key"
-        assert warnings[0].reauth_origin == "locate.py:656"
+        assert (
+            warnings[0].reauth_origin
+            == "locate.py:async_locate_device:decrypt_stale_key"
+        )
 
     def test_distinct_origin_warns_again(
         self, caplog: pytest.LogCaptureFixture
@@ -120,10 +126,11 @@ class TestRecordReauthReason:
             # Same code, two real emitting origins (locate direct + poll cycle):
             # a distinct origin is a distinct dedup key, so it warns again.
             coord.record_reauth_reason(
-                ReauthReasonCode.DECRYPT_STALE_KEY, "polling.py:619"
+                ReauthReasonCode.DECRYPT_STALE_KEY, "polling.py:_request_poll_reauth"
             )
             coord.record_reauth_reason(
-                ReauthReasonCode.DECRYPT_STALE_KEY, "locate.py:656"
+                ReauthReasonCode.DECRYPT_STALE_KEY,
+                "locate.py:async_locate_device:decrypt_stale_key",
             )
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         # A different origin is a distinct dedup key ⇒ warns again.
@@ -139,14 +146,14 @@ class TestDiagnosticsReauthReasonBlock:
     def test_serializes_recorded_reason(self) -> None:
         reason = ReauthReason(
             code=ReauthReasonCode.HTTP_401_AFTER_REFRESH,
-            origin="api.py:1062",
+            origin="fixture:diagnostics_serialization",
             counters={"consecutive_transient_auth_failures": 3},
             recorded_at=1_700_000_000.0,
         )
         block = _reauth_reason_block(MagicMock(_reauth_reason=reason))
         assert block is not None
         assert block["code"] == "http_401_after_refresh"
-        assert block["origin"] == "api.py:1062"
+        assert block["origin"] == "fixture:diagnostics_serialization"
         assert block["counters"] == {"consecutive_transient_auth_failures": 3}
         # recorded_at is rendered as an ISO-8601 string, not a raw float.
         assert isinstance(block["recorded_at"], str)
@@ -156,7 +163,7 @@ class TestDiagnosticsReauthReasonBlock:
         # Literal-only invariant: only genuine ints survive; bool/str dropped.
         reason = ReauthReason(
             code=ReauthReasonCode.UNKNOWN,
-            origin="api.py:1099",
+            origin="fixture:counter_filter",
             counters={"good": 4, "flag": True, "text": "leak"},  # type: ignore[dict-item]
             recorded_at=1_700_000_000.0,
         )
