@@ -81,6 +81,7 @@ from cryptography.exceptions import InvalidTag
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth.firebase_messaging.fcmregister import (
     FcmRegisterHTTPError,
 )
@@ -118,9 +119,14 @@ try:
         FCM_ABORT_ON_SEQ_ERROR_COUNT,
         FCM_CLIENT_HEARTBEAT_INTERVAL_S,
         FCM_CONNECTION_RETRY_COUNT,
+        FCM_DATA_STARVATION_S,
         FCM_IDLE_RESET_AFTER_S,
         FCM_MONITOR_INTERVAL_S,
         FCM_SERVER_HEARTBEAT_INTERVAL_S,
+        FCM_ZOMBIE_CHECK_INTERVAL_S,
+        FCM_ZOMBIE_MAX_RECONNECTS,
+        FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S,
+        FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S,
         OPT_IGNORED_DEVICES,  # for ignore fallback via options
     )
 except ImportError:  # pragma: no cover
@@ -130,8 +136,39 @@ except ImportError:  # pragma: no cover
     FCM_CONNECTION_RETRY_COUNT = 5
     FCM_MONITOR_INTERVAL_S = 1
     FCM_ABORT_ON_SEQ_ERROR_COUNT = 3
+    FCM_DATA_STARVATION_S = 900
+    FCM_ZOMBIE_CHECK_INTERVAL_S = 30
+    FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S = 60
+    FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S = 900
+    FCM_ZOMBIE_MAX_RECONNECTS = 5
     DOMAIN = "googlefindmy"
     OPT_IGNORED_DEVICES = "ignored_devices"
+
+
+# Readiness budget (seconds) for a fresh FCM identity to reach the STARTED
+# state after a (re)connect.  Derived from the library's connection-retry
+# count rather than a fixed value: a brand-new identity's first MCS connect
+# can take the full retry budget (FCM_CONNECTION_RETRY_COUNT attempts at
+# ~_FCM_READY_WAIT_PER_ATTEMPT_S each) plus a small margin.  SINGLE SOURCE OF
+# TRUTH shared by the manual-/first-locate path and the zombie-starvation
+# watchdog so the two readiness budgets can never drift.  The watchdog in
+# particular must NOT wait the full FCM_DATA_STARVATION_S (900s) here: its
+# reconnect wrapper holds the shared per-entry first-locate lock while
+# waiting, so a 900s budget would block a concurrent manual locate on the
+# same entry for up to 15 minutes (Codex F1).  The 900s starvation threshold
+# still governs the *decision* to reconnect (``_is_data_starved``); only this
+# wait-for-STARTED budget is bounded by it.
+_FCM_READY_WAIT_PER_ATTEMPT_S: float = 4.0
+_FCM_READY_WAIT_MARGIN_S: float = 2.0
+
+
+def _max_ready_wait_s() -> float:
+    """Return the STARTED-readiness budget in seconds (see note above)."""
+    return (
+        int(FCM_CONNECTION_RETRY_COUNT) * _FCM_READY_WAIT_PER_ATTEMPT_S
+        + _FCM_READY_WAIT_MARGIN_S
+    )
+
 
 # Optional import of worker run-state enum (for robust state checks)
 if TYPE_CHECKING:
@@ -425,6 +462,33 @@ class FcmReceiverHA:
         self._activity_stale_after_s: float = float(FCM_IDLE_RESET_AFTER_S)
         self._entry_health: dict[str, bool] = {}
         self._entry_last_connected_wall: dict[str, float] = {}
+
+        # Data-starvation liveness watchdog (re-arming zombie self-heal).
+        #
+        # ``_entry_last_data_delivery_monotonic`` is a *separate* clock from the
+        # activity clock above: it advances ONLY on a real locate data delivery
+        # (the cb-hit branch of ``_handle_notification_async``), never on a bare
+        # heartbeat ack. This separation is the crux of the fix -- the activity
+        # clock is heartbeat-poisoned and therefore masks starvation, so the
+        # watchdog must not consult it for "data flowing". A missing entry means
+        # "no data delivered yet" (only starved once a locate has been sent).
+        self._entry_last_data_delivery_monotonic: dict[str, float] = {}
+        # ``_entry_last_locate_sent_monotonic`` records the last time a locate was
+        # dispatched for the entry (stamped in ``async_register_for_location_
+        # updates``). The predicate requires "at least one locate since the last
+        # delivery" so an empty account (no locates -> no expected delivery) is
+        # never mis-classified as a zombie.
+        self._entry_last_locate_sent_monotonic: dict[str, float] = {}
+        # Per-entry watchdog backoff state and throttle clock.
+        self._zombie_reconnect_attempts: dict[str, int] = {}
+        self._zombie_next_allowed_reconnect_monotonic: dict[str, float] = {}
+        self._zombie_next_eval_monotonic: dict[str, float] = {}
+        # Tracked in-flight watchdog reconnect tasks (one per entry). The reconnect
+        # runs in a SEPARATE task (never inline in the supervisor monitor loop,
+        # which would deadlock: ``_force_first_locate_reconnect`` awaits a fresh
+        # STARTED pc that only the supervisor's outer loop can build). Cancelled
+        # on teardown in ``_purge_entry_tokens``.
+        self._zombie_reconnect_tasks: dict[str, asyncio.Task[None]] = {}
 
         # One-shot first-locate reconnect (#1150) serialization. Concurrent
         # manual locates for different trackers on the *same* entry both enter
@@ -1688,6 +1752,19 @@ class FcmReceiverHA:
                         )
                         if not writes_suppressed:
                             self._update_entry_health(entry_id, healthy)
+                            # Data-starvation liveness watchdog (AP4). Evaluated
+                            # only when writes are not suppressed (never against a
+                            # superseded/tombstoned generation), and throttled to
+                            # FCM_ZOMBIE_CHECK_INTERVAL_S rather than every 1s
+                            # tick. Detection + scheduling only -- the reconnect
+                            # runs as its own task, so the loop is never blocked
+                            # (no ``break``, no inline ``await`` on the reconnect).
+                            next_eval = self._zombie_next_eval_monotonic.get(entry_id)
+                            if next_eval is None or monotonic_now >= next_eval:
+                                self._zombie_next_eval_monotonic[entry_id] = (
+                                    monotonic_now + FCM_ZOMBIE_CHECK_INTERVAL_S
+                                )
+                                self._maybe_reconnect_starved(entry_id, monotonic_now)
                         if state is None:
                             _LOGGER.info(
                                 "[entry=%s] FCM client state unknown; scheduling restart",
@@ -2511,6 +2588,10 @@ class FcmReceiverHA:
 
             cb = self.location_update_callbacks.get(canonic_id)
             if cb:
+                # Real locate data delivery: stamp the data-delivery clock for
+                # every routed target entry and clear any watchdog backoff state,
+                # since data is flowing again (re-arm on the next starvation).
+                self._stamp_data_delivery(target_entries)
                 self._log_push_received(canonic_id, target_entries, route_src, 1)
                 await self._run_callback_async(cb, canonic_id, hex_string)
                 return
@@ -2554,6 +2635,30 @@ class FcmReceiverHA:
             _LOGGER.exception("Failed to handle FCM notification safely")
 
     # -------------------- Routing helpers --------------------
+
+    def _stamp_data_delivery(self, target_entries: set[str] | None) -> None:
+        """Record a real locate data delivery for every routed target entry.
+
+        Called ONLY from the cb-hit branch of ``_handle_notification_async`` (a
+        genuine locate data message), never on heartbeat acks and never from
+        ``_log_push_received``. Token routing can fan out to several receiver
+        entries under multi-account setups, so all entries in ``target_entries``
+        are stamped; a ``None`` routing set (broadcast / unknown owner) is
+        conservatively left unstamped so it can never mask starvation on a
+        specific entry. Delivery also re-arms the watchdog by clearing any
+        backoff state (data is flowing again).
+        """
+        if not target_entries:
+            return
+        now = time.monotonic()
+        for eid in target_entries:
+            self._entry_last_data_delivery_monotonic[eid] = now
+            self._reset_zombie_backoff(eid)
+
+    def _reset_zombie_backoff(self, entry_id: str) -> None:
+        """Clear the watchdog backoff/count state for *entry_id* (re-arm)."""
+        self._zombie_reconnect_attempts.pop(entry_id, None)
+        self._zombie_next_allowed_reconnect_monotonic.pop(entry_id, None)
 
     def _extract_hex_payload(self, payload: Mapping[str, Any]) -> str | None:
         """Return the decoded hex payload or None when absent."""
@@ -3001,6 +3106,19 @@ class FcmReceiverHA:
             if escalate and hass is not None:
                 entry = getattr(coordinator, "config_entry", None)
                 if entry is not None:
+                    # FIX 3: direct reauth site (background decrypt escalation for
+                    # a stale shared key); record the classified reason on the
+                    # matching coordinator before starting the flow. This escalation
+                    # is only reached on the account-wide stale-shared-key decrypt
+                    # path (note_decrypt_failure returns False for stale=True), so it
+                    # maps to DECRYPT_STALE_KEY -- the same code the poll and locate
+                    # equivalents use -- not an AAS/token code.
+                    recorder = getattr(coordinator, "record_reauth_reason", None)
+                    if callable(recorder):
+                        recorder(
+                            ReauthReasonCode.DECRYPT_STALE_KEY,
+                            origin="fcm_receiver_ha.py:_note_decrypt_failure_for_entry",
+                        )
                     entry.async_start_reauth(hass)
 
     def _note_decrypt_success_for_entry(self, entry_id: str) -> None:
@@ -3456,6 +3574,18 @@ class FcmReceiverHA:
     def _purge_entry_tokens(self, entry_id: str) -> None:
         """Remove all routing references and per-entry runtime state for an entry."""
         self._entry_last_activity_monotonic.pop(entry_id, None)
+        # Data-starvation watchdog state (LC-13): drop the data/locate clocks and
+        # the backoff/count/throttle records, and cancel any in-flight watchdog
+        # reconnect task so it cannot keep working against the torn-down ``pc``
+        # after the entry is purged.
+        self._entry_last_data_delivery_monotonic.pop(entry_id, None)
+        self._entry_last_locate_sent_monotonic.pop(entry_id, None)
+        self._zombie_reconnect_attempts.pop(entry_id, None)
+        self._zombie_next_allowed_reconnect_monotonic.pop(entry_id, None)
+        self._zombie_next_eval_monotonic.pop(entry_id, None)
+        zombie_task = self._zombie_reconnect_tasks.pop(entry_id, None)
+        if zombie_task is not None and not zombie_task.done():
+            zombie_task.cancel()
         # First-locate reconnect serialization state (#1150 follow-up): drop the
         # per-entry lock and the consumed-replacement record so a later reload
         # under the same entry_id starts from a clean slate.
@@ -3812,6 +3942,174 @@ class FcmReceiverHA:
                 self._first_locate_reconnect_done[entry_id] = fresh_pc
             return fresh_pc
 
+    # -------------------- Data-starvation liveness watchdog --------------------
+
+    def _is_data_starved(self, entry_id: str, now: float) -> bool:  # noqa: PLR0911
+        """True if *entry_id* is a data-starvation zombie at monotonic time *now*.
+
+        Pure and side-effect-free (no IO): safe to call every evaluation tick.
+        Returns True only when ALL hold:
+
+        * a live client exists and is ``STARTED`` (``_is_started``);
+        * the session is *established* (``age >= _CHURN_WINDOW_S``) -- a young
+          session is the one-shot first-locate reconnect's job, not the watchdog;
+        * the activity clock (K4) is *fresh* -- the heartbeat is alive, so this
+          is a "STARTED, heartbeating, but silent" zombie, not a dead socket
+          (that is the idle-reset's job);
+        * at least ``FCM_DATA_STARVATION_S`` elapsed since the last real data
+          delivery (a missing data clock counts as "never delivered", starved
+          only in combination with the locate-sent gate below); and
+        * a locate was sent for this entry AND it is at or after the last data
+          delivery (>= 1 locate since the last delivery) -- this is what rules
+          out an empty account with no pending locate.
+        """
+        pc = self.pcs.get(entry_id)
+        if pc is None or not self._is_started(pc):
+            return False
+        age = self._session_age_s(pc)
+        if age is None or age < _CHURN_WINDOW_S:
+            return False
+        last_activity = self._entry_last_activity_monotonic.get(entry_id)
+        stale_after = max(self._activity_stale_after_s, 0.0)
+        if last_activity is None:
+            return False
+        if stale_after > 0.0 and now - last_activity > stale_after:
+            # Heartbeat is not fresh: a dead session, not a data-starved zombie.
+            return False
+        last_locate = self._entry_last_locate_sent_monotonic.get(entry_id)
+        if last_locate is None:
+            # No locate ever dispatched for this entry: nothing to expect.
+            return False
+        last_delivery = self._entry_last_data_delivery_monotonic.get(entry_id)
+        if last_delivery is None:
+            # Never delivered, but a locate was sent: starved once the locate is
+            # old enough that a healthy session would have answered.
+            return now - last_locate >= FCM_DATA_STARVATION_S
+        if now - last_delivery < FCM_DATA_STARVATION_S:
+            return False
+        # Require >= 1 locate since the last delivery, else a quiet-but-healthy
+        # account (delivered, then no new locate) would look starved.
+        return last_locate >= last_delivery
+
+    async def _reconnect_for_starvation(self, entry_id: str, max_wait_s: float) -> None:
+        """Force one cooperative reconnect for a data-starved zombie session.
+
+        Runs in its OWN task (scheduled by ``_maybe_reconnect_starved``), never
+        inline in the supervisor monitor loop -- awaiting the reconnect there
+        would deadlock, because ``_force_first_locate_reconnect`` waits for a
+        fresh STARTED client that only the supervisor's outer loop can build.
+
+        Acquires the shared ``_get_first_locate_lock(entry_id)`` (serialises
+        against the first-/manual-locate reconnect so the same ``pc`` is never
+        torn down twice), re-reads the live client under the lock, and -- if it
+        is still a live STARTED session -- calls ``_force_first_locate_reconnect``
+        UNCONDITIONALLY. It deliberately does NOT go through
+        ``_reconnect_for_first_locate``: that method's reuse gate
+        (``not _needs_first_locate_reconnect(current)``) is always True for an
+        aged zombie (``_needs_first_locate_reconnect`` returns False once
+        ``age >= _CHURN_WINDOW_S``) and would return ``current`` WITHOUT
+        reconnecting. The backoff / count / one-in-flight guard has already made
+        the reconnect decision before this runs. ``_first_locate_reconnect_done``
+        is left untouched (that latch belongs to the first-locate path).
+        """
+        async with self._get_first_locate_lock(entry_id):
+            current = self.pcs.get(entry_id)
+            if current is None or not self._is_started(current):
+                # The supervisor tore the client down (or it is no longer
+                # STARTED) between scheduling and lock acquisition; nothing to do.
+                return
+            await self._force_first_locate_reconnect(entry_id, current, max_wait_s)
+
+    def _maybe_reconnect_starved(self, entry_id: str, now: float) -> None:
+        """Schedule a watchdog reconnect if *entry_id* is a starved zombie.
+
+        Called from the supervisor monitor loop (throttled to
+        ``FCM_ZOMBIE_CHECK_INTERVAL_S``). Detection + scheduling only: it never
+        awaits the reconnect (that runs as a separate task). Guards:
+
+        * predicate ``_is_data_starved`` must hold;
+        * the backoff window must be open
+          (``now >= _zombie_next_allowed_reconnect_monotonic``);
+        * the hard reconnect ceiling ``FCM_ZOMBIE_MAX_RECONNECTS`` must not be
+          reached; and
+        * no watchdog reconnect task may be in flight for this entry.
+
+        When all pass it schedules ``_reconnect_for_starvation`` via
+        ``hass.async_create_task`` and, only once that task is created, commits
+        the next (exponentially larger, capped) backoff window and the
+        incremented attempt count. If scheduling raises ``RuntimeError`` (event
+        loop closing during shutdown) it leaves all scheduler state untouched so
+        a later tick can retry, rather than spending an attempt with no task.
+        """
+        if self._hass is None:
+            return
+        existing = self._zombie_reconnect_tasks.get(entry_id)
+        if existing is not None and not existing.done():
+            return  # one-in-flight guard (b): a reconnect is already running.
+        if not self._is_data_starved(entry_id, now):
+            return
+        next_allowed = self._zombie_next_allowed_reconnect_monotonic.get(entry_id)
+        if next_allowed is not None and now < next_allowed:
+            return  # still inside the current backoff window.
+        attempts = self._zombie_reconnect_attempts.get(entry_id, 0)
+        if attempts >= FCM_ZOMBIE_MAX_RECONNECTS:
+            return  # hard ceiling reached for this starvation episode.
+        # Plan the next backoff window (exponential from BASE, doubled per
+        # attempt, capped) and record the attempt before scheduling.
+        backoff = min(
+            FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S * (2**attempts),
+            FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S,
+        )
+        # F1: bound the reconnect's wait-for-STARTED to the conservative
+        # readiness budget (~22s), NOT FCM_DATA_STARVATION_S (900s).
+        # ``_reconnect_for_starvation`` holds the shared per-entry first-locate
+        # lock while awaiting STARTED; a 900s budget would starve a concurrent
+        # manual locate on the same entry for up to 15 minutes.  The 900s
+        # starvation threshold still gates the reconnect *decision* above; only
+        # the STARTED-wait is capped here.  Shared SSOT with the native locate
+        # path via ``_max_ready_wait_s`` so the two budgets cannot drift.
+        max_wait_s = _max_ready_wait_s()
+        # F3: schedule the task FIRST and commit the backoff-window / attempt
+        # counter only once it is guaranteed created.  During HA shutdown the
+        # event loop is closing and ``async_create_task`` raises ``RuntimeError``
+        # (same failure mode guarded at the direct-schedule paths above); if the
+        # counter were bumped before that raise, this tick would "spend" a
+        # reconnect attempt with no task ever running, drifting the entry toward
+        # ``FCM_ZOMBIE_MAX_RECONNECTS`` while never actually reconnecting.  On
+        # failure we leave all scheduler state untouched so a post-restart tick
+        # can retry.  There is no ``await`` between task creation and return, so
+        # the task body cannot run before the state below is committed.
+        try:
+            task = self._hass.async_create_task(
+                self._reconnect_for_starvation(entry_id, max_wait_s),
+                name=f"fcm_zombie_reconnect_{entry_id}",
+            )
+        except RuntimeError:
+            _LOGGER.debug(
+                "[entry=%s] Deferred watchdog reconnect: event loop unavailable "
+                "(shutdown in progress); scheduler state left intact for a later "
+                "tick",
+                entry_id,
+            )
+            return
+        self._zombie_next_allowed_reconnect_monotonic[entry_id] = now + backoff
+        self._zombie_reconnect_attempts[entry_id] = attempts + 1
+        self._zombie_reconnect_tasks[entry_id] = task
+
+        def _clear_task(_done: asyncio.Task[None], _eid: str = entry_id) -> None:
+            if self._zombie_reconnect_tasks.get(_eid) is _done:
+                self._zombie_reconnect_tasks.pop(_eid, None)
+
+        task.add_done_callback(_clear_task)
+        _LOGGER.info(
+            "[entry=%s] FCM data starvation detected (attempt %d/%d); forcing a "
+            "watchdog reconnect (next backoff %ds)",
+            entry_id,
+            attempts + 1,
+            FCM_ZOMBIE_MAX_RECONNECTS,
+            backoff,
+        )
+
     async def _reconnect_and_refresh_token(
         self, entry_id: str, previous_token: str, max_wait_s: float
     ) -> str | None:
@@ -3890,6 +4188,10 @@ class FcmReceiverHA:
             return None
 
         self.location_update_callbacks[canonic_id] = callback
+        # Watchdog signal (AP2.5): a locate has now been dispatched for this
+        # entry. The starvation predicate requires >= 1 locate since the last
+        # delivery, so an empty account (no locates) never looks like a zombie.
+        self._entry_last_locate_sent_monotonic[entry_id] = time.monotonic()
 
         token: str | None = None
         try:
@@ -3929,12 +4231,7 @@ class FcmReceiverHA:
                 # small margin keeps a fresh registration from being abandoned
                 # prematurely, which is the root of the deterministic first-run
                 # locate timeout.
-                _PER_ATTEMPT_WAIT_S = 4.0
-                _READY_WAIT_MARGIN_S = 2.0
-                _MAX_READY_WAIT_S = (
-                    int(FCM_CONNECTION_RETRY_COUNT) * _PER_ATTEMPT_WAIT_S
-                    + _READY_WAIT_MARGIN_S
-                )
+                _MAX_READY_WAIT_S = _max_ready_wait_s()
                 started_pc = await self._await_entry_started(
                     entry_id, pc, _MAX_READY_WAIT_S
                 )

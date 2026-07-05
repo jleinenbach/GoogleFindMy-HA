@@ -8,6 +8,7 @@ Keep comments and docstrings in English; user-facing strings belong in translati
 from __future__ import annotations
 
 import hashlib
+import math
 import time
 from collections.abc import Mapping, Sequence
 from typing import Final, Literal
@@ -26,7 +27,7 @@ CONFIG_ENTRY_VERSION: int = 2
 # cross-reference, so the manifest side is anchored in this directory's AGENTS.md
 # ("Version bump touches three files"). pyproject.toml carries the reverse reference
 # in a TOML comment.
-INTEGRATION_VERSION: str = "1.7.9"
+INTEGRATION_VERSION: str = "1.7.10"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants
@@ -290,6 +291,27 @@ def _coerce_aliases(value: object) -> list[str]:
     return []
 
 
+def _finite_int_or_none(value: object) -> int | None:
+    """Convert a finite ``int``/``float`` to ``int``; return ``None`` otherwise.
+
+    ``bool``, non-numeric types, and non-finite floats (``NaN``/``±inf``) all
+    yield ``None``. This exists because ``int(float("nan"))`` raises
+    ``ValueError`` and ``int(float("inf"))`` raises ``OverflowError`` -- either
+    would defeat the drop-invalid, never-raise contract of the coercer below
+    when a corrupt ``.storage`` edit or a direct-options writer stores such a
+    value. Guarding on ``math.isfinite`` keeps that coercer total.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return int(value)
+    return None
+
+
 def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
     """Coerce various legacy shapes into v2 mapping.
     Accepted inputs:
@@ -346,8 +368,9 @@ def coerce_ignored_mapping(raw: object) -> tuple[IgnoredMapping, bool]:
                         name = name_value
                     aliases = _coerce_aliases(str_meta.get(_IGN_KEY_ALIASES))
                     ignored_value = str_meta.get(_IGN_KEY_IGNORED_AT)
-                    if isinstance(ignored_value, (int, float)):
-                        ignored_at = int(ignored_value)
+                    coerced_at = _finite_int_or_none(ignored_value)
+                    if coerced_at is not None:
+                        ignored_at = coerced_at
                     source_value = str_meta.get(_IGN_KEY_SOURCE)
                     if isinstance(source_value, str) and source_value:
                         source = source_value
@@ -489,6 +512,50 @@ FCM_IDLE_RESET_AFTER_S: float = 90.0
 FCM_CONNECTION_RETRY_COUNT: int = 5
 FCM_MONITOR_INTERVAL_S: int = 1
 FCM_ABORT_ON_SEQ_ERROR_COUNT: int = 3
+
+# --------------------------------------------------------------------------------------
+# FCM data-starvation liveness watchdog (re-arming zombie self-heal)
+# --------------------------------------------------------------------------------------
+# A "zombie" FCM session is STARTED and keeps acking heartbeats (so the activity
+# clock and readiness gate both look healthy), yet has stopped delivering
+# ``push_received`` data messages despite locates being sent. The one-shot
+# first-locate reconnect only covers a *young* session (age < _CHURN_WINDOW_S);
+# a long-running session that goes silent is only healed by a manual reload
+# today (empirically sometimes twice). The watchdog below detects this and
+# forces a cooperative, backoff-limited reconnect that re-arms after each cycle.
+#
+# FCM_DATA_STARVATION_S: minimum gap (seconds) since the last real data delivery
+# before a STARTED, heartbeating, locate-active session is treated as starved.
+# Calibration (live DEBUG capture 2026-07-04, 2h23m healthy window): normal gaps
+# between data messages reach ~349s (they grow with the observation window; only
+# ~305s over a 71-min window), so the threshold must be a *generous* multiple of
+# the poll cycle, well above 349s, never a value near it. 900s ≈ 3 default poll
+# cycles (300s) and ≈ 30× the 30s locate timeout — conservatively large so the
+# watchdog reacts later, never more aggressively (storm-safe by construction).
+# The MCS session lifetime is ~2h, so 15-minute detection is fast enough.
+FCM_DATA_STARVATION_S: int = 900
+
+# FCM_ZOMBIE_CHECK_INTERVAL_S: how often the watchdog *evaluates* starvation.
+# The supervisor monitor loop ticks every FCM_MONITOR_INTERVAL_S (1s); evaluating
+# the predicate every tick is wasteful, so the watchdog is throttled to run at
+# most once per this interval (30× rarer than the tick, far denser than the
+# starvation window, so detection latency stays well under a minute).
+FCM_ZOMBIE_CHECK_INTERVAL_S: int = 30
+
+# FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S: first backoff window after the first
+# watchdog reconnect. Subsequent windows double (60 → 120 → 240 → …) up to the
+# cap below, so a session that stays starved is retried with growing patience.
+FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S: int = 60
+
+# FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S: upper bound of the exponential backoff
+# (equals the starvation window: never retry faster than the detection cadence).
+FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S: int = 900
+
+# FCM_ZOMBIE_MAX_RECONNECTS: hard ceiling on watchdog reconnects per starvation
+# episode. The count (and backoff) reset on the first successful data delivery
+# after a reconnect. Together with the cap and the one-in-flight lock this bounds
+# the worst case to a slow, finite series — never a reconnect storm / self-DoS.
+FCM_ZOMBIE_MAX_RECONNECTS: int = 5
 
 # --------------------------------------------------------------------------------------
 # Feature Flags (compile-time toggles for optional functionality)
@@ -664,6 +731,11 @@ __all__ = [
     "FCM_CONNECTION_RETRY_COUNT",
     "FCM_MONITOR_INTERVAL_S",
     "FCM_ABORT_ON_SEQ_ERROR_COUNT",
+    "FCM_DATA_STARVATION_S",
+    "FCM_ZOMBIE_CHECK_INTERVAL_S",
+    "FCM_ZOMBIE_RECONNECT_BACKOFF_BASE_S",
+    "FCM_ZOMBIE_RECONNECT_BACKOFF_CAP_S",
+    "FCM_ZOMBIE_MAX_RECONNECTS",
     "EVENT_AUTH_ERROR",
     "EVENT_AUTH_OK",
     "TRANSLATION_KEY_AUTH_STATUS",

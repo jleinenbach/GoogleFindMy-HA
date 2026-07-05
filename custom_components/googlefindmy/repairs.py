@@ -11,6 +11,9 @@ from homeassistant.components.repairs import RepairsFlow
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 
+from ._reauth_reason import ReauthReasonCode
+from .coordinator import GoogleFindMyCoordinator
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -107,6 +110,32 @@ class FcmReauthRepairFlow(RepairsFlow):  # type: ignore[misc]
                 self._entry_id,
             )
             return False
+
+        # FIX 3: direct reauth site. NOTE (SA-11): the plan's AE-5 assumed a
+        # coordinator ``self`` is available here, but this method lives on the
+        # ``FcmReauthRepairFlow`` (a RepairsFlow), not on the coordinator. The
+        # coordinator is reachable only via ``entry.runtime_data`` and only when
+        # the entry is loaded, so record defensively and never let a missing
+        # coordinator break the repair UI.
+        #
+        # RUNTIME_DATA DUALITY (mirrors the ``isinstance`` handling in
+        # ``__init__.py``): in the normal case ``runtime_data`` is a wrapper
+        # whose ``.coordinator`` attribute holds the coordinator, but on the
+        # legacy sub-entry path ``runtime_data`` *is* a bare
+        # ``GoogleFindMyCoordinator``. Resolve both shapes so the reauth reason
+        # is never silently dropped on legacy sub-entries.
+        rd = getattr(entry, "runtime_data", None)
+        coordinator = (
+            rd
+            if isinstance(rd, GoogleFindMyCoordinator)
+            else getattr(rd, "coordinator", None)
+        )
+        recorder = getattr(coordinator, "record_reauth_reason", None)
+        if callable(recorder):
+            recorder(
+                ReauthReasonCode.FCM_AUTH_FATAL,
+                origin="repairs.py:_async_start_reauth",
+            )
 
         try:
             entry.async_start_reauth(self.hass)

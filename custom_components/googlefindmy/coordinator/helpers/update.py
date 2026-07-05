@@ -14,8 +14,17 @@ All functions are pure (no side effects) for easy testing and reuse.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+
+# Word-boundary matchers for HTTP status codes. Using ``\b`` prevents a
+# transient message like "retry after 4012 ms" (which contains the substring
+# "401") from being misread as an HTTP 401, while still matching a genuine
+# "401"/"404" that appears as a standalone token (e.g. "HTTP 401 Unauthorized",
+# "Error code: 401", "404 credential not found").
+_HTTP_401_TOKEN = re.compile(r"\b401\b")
+_HTTP_404_TOKEN = re.compile(r"\b404\b")
 
 __all__ = [
     "calculate_presence_ttl",
@@ -48,12 +57,15 @@ def is_fatal_fcm_auth_error(error: Any) -> bool:
 
     error_lower = error.lower()
 
-    # 401 errors are always fatal
-    if "401" in error:
+    # 401 errors are always fatal. Match the status code on a word boundary so a
+    # transient throttling message such as "retry after 4012 ms" (substring
+    # "401") is not misclassified as an authentication failure.
+    if _HTTP_401_TOKEN.search(error):
         return True
 
-    # 404 with credential mention is fatal
-    if "404" in error and "credential" in error_lower:
+    # 404 with credential mention is fatal. Same word-boundary guard so e.g.
+    # "retry after 40412 ms" (substring "404") cannot false-fire.
+    if _HTTP_404_TOKEN.search(error) and "credential" in error_lower:
         return True
 
     # Explicit credential/auth failure messages
@@ -217,7 +229,10 @@ def is_poll_cycle_due(
     Poll is due when:
     1. Cold start (first poll with no location data) - always due
     2. Elapsed time >= effective_interval AND not predictively blocked
-    3. Predictive due AND hard limit passed
+    3. Predictive due AND hard limit passed AND elapsed >= effective_interval
+       (min_poll_interval alone no longer triggers a poll below the chosen
+       cadence; effective_interval governs the cadence, min_poll_interval
+       stays a pure API safety floor)
 
     Args:
         elapsed: Time since last poll in seconds.
@@ -238,8 +253,13 @@ def is_poll_cycle_due(
     if elapsed >= effective_interval and not predictive_block:
         return True
 
-    # Predictive due with hard limit passed
-    if predictive_due and hard_limit_passed:
+    # Predictive due, but never below the chosen cadence. min_poll_interval
+    # stays a pure API safety floor; effective_interval governs the cadence,
+    # so predictive pre-fetch no longer pulls polling below effective_interval.
+    # hard_limit_passed is redundant while callers keep the invariant
+    # effective_interval >= min_poll_interval, but is retained so this pure
+    # function stays correct for any caller (do not "simplify" it away).
+    if predictive_due and hard_limit_passed and elapsed >= effective_interval:
         return True
 
     return False

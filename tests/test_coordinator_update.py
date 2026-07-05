@@ -77,6 +77,25 @@ class TestIsFatalFcmAuthError:
         assert is_fatal_fcm_auth_error("HTTP 500 Server Error") is False
         assert is_fatal_fcm_auth_error("Network unreachable") is False
 
+    def test_retry_after_4012_ms_not_fatal(self) -> None:
+        """FIX 5: a throttling message must not false-fire the 401 matcher.
+
+        "retry after 4012 ms" contains "401" as a raw substring. The
+        word-boundary matcher (\\b401\\b) must NOT treat it as an HTTP 401, so
+        transient throttling stays retryable instead of forcing re-auth.
+        """
+        assert is_fatal_fcm_auth_error("retry after 4012 ms") is False
+        # Analogous 404 substring guard: "retry after 40412 ms" contains "404".
+        assert (
+            is_fatal_fcm_auth_error("retry after 40412 ms; credential refresh") is False
+        )
+
+    def test_genuine_401_still_fatal_after_hardening(self) -> None:
+        """FIX 5: a genuine standalone 401 auth signal remains fatal."""
+        assert is_fatal_fcm_auth_error("401 unauthorized") is True
+        assert is_fatal_fcm_auth_error("HTTP 401 Unauthorized") is True
+        assert is_fatal_fcm_auth_error("Error code: 401") is True
+
     def test_empty_string_not_fatal(self) -> None:
         """Empty string should not be fatal."""
         assert is_fatal_fcm_auth_error("") is False
@@ -420,8 +439,14 @@ class TestIsPollCycleDue:
         )
         assert result is False
 
-    def test_due_on_predictive_due_with_hard_limit(self) -> None:
-        """Should be due on predictive_due when hard limit passed."""
+    def test_not_due_on_predictive_due_below_cadence(self) -> None:
+        """Predictive due must not trigger below the chosen cadence.
+
+        Stage-1 cadence fix: min_poll_interval (reflected here by
+        hard_limit_passed=True) alone no longer pulls a poll below
+        effective_interval. Predictive pre-fetch only fires once
+        elapsed >= effective_interval.
+        """
         result = is_poll_cycle_due(
             elapsed=30.0,
             effective_interval=60.0,
@@ -430,7 +455,7 @@ class TestIsPollCycleDue:
             hard_limit_passed=True,
             is_cold_start=False,
         )
-        assert result is True
+        assert result is False
 
     def test_not_due_on_predictive_due_without_hard_limit(self) -> None:
         """Should not be due on predictive_due without hard limit."""
@@ -487,6 +512,73 @@ class TestIsPollCycleDue:
             effective_interval=60.0,
             predictive_block=False,
             predictive_due=False,
+            hard_limit_passed=False,
+            is_cold_start=False,
+        )
+        assert result is False
+
+    def test_predictive_due_below_real_cadence_not_due(self) -> None:
+        """Cadence fix: predictive due below effective_interval must not poll.
+
+        Discriminating case for the Stage-1 fix using the reported real-world
+        cadence (effective_interval=241s). elapsed=100 is past the raw
+        min_poll_interval floor (hard_limit_passed=True) but below the chosen
+        cadence, so the poll must NOT fire. Reverting the fix
+        (dropping ``and elapsed >= effective_interval``) flips this to True,
+        which keeps the mutation gegenprobe sharp.
+        """
+        result = is_poll_cycle_due(
+            elapsed=100.0,
+            effective_interval=241.0,
+            predictive_block=False,
+            predictive_due=True,
+            hard_limit_passed=True,
+            is_cold_start=False,
+        )
+        assert result is False
+
+    def test_predictive_due_at_cadence_due_via_interval(self) -> None:
+        """At/above the cadence, the normal interval branch fires (branch 2)."""
+        result = is_poll_cycle_due(
+            elapsed=245.0,
+            effective_interval=241.0,
+            predictive_block=False,
+            predictive_due=True,
+            hard_limit_passed=True,
+            is_cold_start=False,
+        )
+        assert result is True
+
+    def test_predictive_due_past_cadence_due_when_blocked(self) -> None:
+        """Predictive branch 3 fires past cadence even when interval branch is blocked.
+
+        With predictive_block=True the normal interval branch (2) is skipped,
+        so this exercises the TRUE path of the new ``elapsed >= effective_interval``
+        term inside branch 3 (predictive due, past cadence -> poll).
+        """
+        result = is_poll_cycle_due(
+            elapsed=245.0,
+            effective_interval=241.0,
+            predictive_block=True,
+            predictive_due=True,
+            hard_limit_passed=True,
+            is_cold_start=False,
+        )
+        assert result is True
+
+    def test_hard_limit_gate_still_blocks_branch_three(self) -> None:
+        """hard_limit_passed must still gate branch 3, even past cadence.
+
+        Pins the retained ``hard_limit_passed`` term: with it False, branch 3
+        must not fire even though elapsed >= effective_interval and the interval
+        branch is blocked. Dropping ``hard_limit_passed`` from branch 3 flips
+        this to True, so the contract stays locked (caller-independence).
+        """
+        result = is_poll_cycle_due(
+            elapsed=245.0,
+            effective_interval=241.0,
+            predictive_block=True,
+            predictive_due=True,
             hard_limit_passed=False,
             is_cold_start=False,
         )

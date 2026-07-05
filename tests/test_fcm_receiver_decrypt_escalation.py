@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import FcmReceiverHA
 from custom_components.googlefindmy.NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
@@ -49,6 +50,24 @@ def test_push_decrypt_failure_starts_reauth_when_threshold_reached() -> None:
 
     coordinator.note_decrypt_failure.assert_called_once_with(stale=False, error=err)
     entry.async_start_reauth.assert_called_once_with(receiver._hass)
+
+
+def test_push_decrypt_failure_records_decrypt_stale_key_reason() -> None:
+    """The background-push escalation records DECRYPT_STALE_KEY, the SAME canonical
+    code the poll and locate equivalents use for the account-wide stale-shared-key
+    decrypt condition. This escalation is only reached on the stale=False path
+    (note_decrypt_failure returns False for stale=True), so it must NOT record an
+    AAS/token code. Guards the poll-vs-direct code-consistency invariant."""
+    receiver, coordinator, entry = _receiver_with_coordinator(escalate=True)
+    err = DecryptionError("stale shared key")
+
+    receiver._note_decrypt_failure_for_entry("entry-1", stale=False, error=err)
+
+    coordinator.record_reauth_reason.assert_called_once()
+    assert (
+        coordinator.record_reauth_reason.call_args.args[0]
+        is ReauthReasonCode.DECRYPT_STALE_KEY
+    )
 
 
 def test_push_decrypt_failure_below_threshold_does_not_start_reauth() -> None:

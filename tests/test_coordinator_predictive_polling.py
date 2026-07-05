@@ -149,10 +149,17 @@ async def test_predictive_polling_defers_until_predicted_window(
 
 
 @pytest.mark.asyncio
-async def test_predictive_polling_triggers_overdue_poll(
+async def test_predictive_overdue_does_not_poll_below_cadence_floor(
     coordinator: GoogleFindMyCoordinator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Overdue predictions trigger an immediate poll when limits allow."""
+    """An overdue prediction must not pull polling below the cadence floor.
+
+    Stage 1 makes ``effective_interval`` govern the cadence: predictive
+    pre-fetch no longer fires while ``elapsed < effective_interval``. Here
+    ``elapsed == min_poll_interval`` (the API safety floor) but stays below
+    ``effective_interval``, so no poll is scheduled even though the device's
+    prediction is overdue.
+    """
 
     wall_now = time.time()
     coordinator._device_update_history["dev-id"] = deque(
@@ -160,7 +167,73 @@ async def test_predictive_polling_triggers_overdue_poll(
         maxlen=4,
     )
     _prime_cached_devices(coordinator, wall_now)
+    # elapsed == min_poll_interval < effective_interval → below the cadence floor.
     coordinator._last_poll_mono = time.monotonic() - coordinator.min_poll_interval
+    baseline_polls = sum(
+        1 for _, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"
+    )
+
+    monkeypatch.setattr(coordinator, "_ensure_service_device_exists", lambda: None)
+    monkeypatch.setattr(
+        coordinator, "_ensure_registry_for_devices", lambda *_args, **_kwargs: 0
+    )
+    monkeypatch.setattr(
+        coordinator, "_refresh_subentry_index", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        coordinator,
+        "_async_build_device_snapshot_with_fallbacks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(coordinator, "_store_subentry_snapshots", lambda _snap: None)
+
+    poll_cycle = AsyncMock(return_value=None)
+    coordinator._async_start_poll_cycle = poll_cycle
+
+    short_retries: list[float] = []
+    coordinator._schedule_short_retry = short_retries.append
+
+    await coordinator._async_update_data()
+    poll_tasks = [
+        task
+        for task, name in coordinator.hass.created
+        if name == f"{DOMAIN}.poll_cycle"
+    ]
+    # Below the cadence floor the overdue prediction is suppressed: no poll,
+    # and no short retry is scheduled (that only happens on predictive_block).
+    assert len(poll_tasks) == baseline_polls
+    assert not short_retries
+    assert poll_cycle.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_predictive_overdue_polls_at_cadence_floor(
+    coordinator: GoogleFindMyCoordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An overdue prediction does not suppress the poll at the cadence floor.
+
+    Guard companion to the below-floor case: with ``elapsed >= effective_interval``
+    the regular cadence branch admits the poll, and this test proves the overdue
+    prediction (``predictive_due``) neither blocks it nor triggers a short retry.
+    The discriminating coverage of the new ``elapsed >= effective_interval`` term
+    on the predictive branch itself lives in the pure-function unit tests
+    (``test_coordinator_update.py``); at integration level ``predictive_block``
+    is not freely settable, so the cadence branch is the only realistic path.
+    Uses the same ``max(location_poll_interval, min_poll_interval)`` the
+    coordinator computes (no magic value).
+    """
+
+    wall_now = time.time()
+    coordinator._device_update_history["dev-id"] = deque(
+        [wall_now - 900, wall_now - 600, wall_now - 350],
+        maxlen=4,
+    )
+    _prime_cached_devices(coordinator, wall_now)
+    effective_interval = max(
+        coordinator.location_poll_interval, coordinator.min_poll_interval
+    )
+    # elapsed == effective_interval → the cadence floor is satisfied.
+    coordinator._last_poll_mono = time.monotonic() - effective_interval
     baseline_polls = sum(
         1 for _, name in coordinator.hass.created if name == f"{DOMAIN}.poll_cycle"
     )

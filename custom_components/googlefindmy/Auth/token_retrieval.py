@@ -10,6 +10,7 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from types import ModuleType
 from typing import Any
 
 from custom_components.googlefindmy.Auth.aas_token_retrieval import (
@@ -21,6 +22,7 @@ from custom_components.googlefindmy.exceptions import MissingTokenCacheError
 
 from .gpsoauth_loader import (
     GpsoauthModule,
+    load_gpsoauth_exceptions,
     require_gpsoauth,
 )
 from .gpsoauth_loader import (
@@ -28,6 +30,13 @@ from .gpsoauth_loader import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Optional gpsoauth exceptions module (``None`` when the dependency is absent).
+# Mirrors ``aas_token_retrieval.gpsoauth_exceptions`` so both credential-exchange
+# paths can classify a genuine gpsoauth ``AuthError`` structurally (by type),
+# independent of its (possibly HTTP-generic) message text. Kept at module scope
+# so tests can monkeypatch it, exactly like the AAS exchange path.
+gpsoauth_exceptions: ModuleType | None = load_gpsoauth_exceptions()
 
 
 class InvalidAasTokenError(RuntimeError):
@@ -43,15 +52,27 @@ def _gpsoauth() -> GpsoauthModule:
 gpsoauth = _gpsoauth_proxy
 
 
-def _is_invalid_aas_error_text(text: str) -> bool:
-    """Return True when the error string indicates an invalid AAS token."""
+def _is_invalid_aas_error_text(text: str, *, allow_http_generic: bool = False) -> bool:
+    """Return True when the error string indicates an invalid AAS token.
+
+    The gpsoauth-specific tokens (``badauthentication``, ``needsbrowser``, and
+    the ``invalid`` + credential vocabulary) are unique to the gpsoauth
+    ``Error`` field and stay active on every call. The HTTP-generic tokens
+    (``unauthorized`` / ``forbidden``) are only honoured when
+    ``allow_http_generic`` is set, because an arbitrary transport/network
+    exception string must not be able to masquerade as an invalid AAS token
+    and discard otherwise-valid credential material. Callers that pass the
+    structured gpsoauth ``Error`` field opt in via ``allow_http_generic=True``;
+    callers that pass a generic ``str(err)`` from an ``except Exception`` block
+    keep the safe default (``False``).
+    """
 
     lowered = text.lower()
     if "badauthentication" in lowered:
         return True
     if "needsbrowser" in lowered:
         return True
-    if "unauthorized" in lowered or "forbidden" in lowered:
+    if allow_http_generic and ("unauthorized" in lowered or "forbidden" in lowered):
         return True
     if "invalid" in lowered:
         if "token" in lowered or "auth" in lowered or "credential" in lowered:
@@ -210,7 +231,9 @@ def _perform_oauth_sync(
             return token_value
 
         error_detail = str(auth_response.get("Error", "")).strip()
-        if error_detail and _is_invalid_aas_error_text(error_detail):
+        if error_detail and _is_invalid_aas_error_text(
+            error_detail, allow_http_generic=True
+        ):
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {error_detail}"
             )
@@ -219,10 +242,57 @@ def _perform_oauth_sync(
         raise
     except Exception as err:  # noqa: BLE001
         message: str = str(err)
+        # A typed gpsoauth ``AuthError`` is a definitive credential rejection,
+        # independent of its message text. gpsoauth may raise it instead of
+        # returning an ``Error`` dict, and its text can be HTTP-generic only
+        # (e.g. "HTTP 403 Forbidden"), which the text matcher deliberately
+        # gates off (``allow_http_generic=False``). Classify it structurally,
+        # mirroring the AAS exchange path (``aas_token_retrieval`` treats
+        # ``gpsoauth.AuthError`` by type), so the rejected AAS token is
+        # invalidated/regenerated instead of being left in cache for a retry.
+        is_typed_autherror = gpsoauth_exceptions is not None and isinstance(
+            err, gpsoauth_exceptions.AuthError
+        )
+        if is_typed_autherror:
+            raise InvalidAasTokenError(
+                f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
+            ) from err
+        # Generic exception string: keep ``allow_http_generic=False`` so a
+        # transport/network error whose text merely contains "unauthorized" or
+        # "forbidden" cannot masquerade as an invalid AAS token. Only the
+        # gpsoauth-specific vocabulary may promote this to InvalidAasTokenError.
         if message and _is_invalid_aas_error_text(message):
             raise InvalidAasTokenError(
                 f"gpsoauth rejected the AAS token while requesting scope '{scope}': {message}"
             ) from err
+        # AP-2 field probe (typed-vs-untyped denial). The vendor auth endpoint is
+        # reverse-engineered: a genuine credential denial arrives as an ``Error``
+        # dict (handled above) or a typed ``gpsoauth.AuthError``; anything else
+        # reaching this fall-through is, by the vendor model, a transport or
+        # intermediary artifact and is (correctly) surfaced as a retryable
+        # ``RuntimeError``. Record the classification *signature* so a field
+        # occurrence of "untyped error whose text still carries an HTTP auth
+        # marker, treated as transient" -- the fingerprint of a *missed* denial
+        # slipping past ``allow_http_generic=False`` -- becomes observable.
+        # Redaction: only the exception type name, the typed-flag and which
+        # markers are present; never ``str(err)`` (may carry a token or email).
+        # ``is_typed_autherror`` is structurally False here (the typed branch
+        # raised above); it is logged verbatim so the fall-through signature is
+        # explicit rather than implied.
+        http_auth_markers = [
+            marker
+            for marker in ("401", "403", "unauthorized", "forbidden")
+            if marker in message.lower()
+        ]
+        _LOGGER.debug(
+            "Auth token fetch for scope %r fell through to a retryable "
+            "RuntimeError (err_type=%s, is_typed_autherror=%s, "
+            "http_auth_markers=%s)",
+            scope,
+            type(err).__name__,
+            is_typed_autherror,
+            http_auth_markers,
+        )
         raise RuntimeError(
             f"Failed to get auth token for scope '{scope}': {err}"
         ) from err

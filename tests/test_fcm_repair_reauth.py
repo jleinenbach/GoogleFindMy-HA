@@ -17,6 +17,7 @@ import pytest
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.googlefindmy import repairs
+from custom_components.googlefindmy._reauth_reason import ReauthReasonCode
 from custom_components.googlefindmy.Auth import fcm_receiver_ha
 from custom_components.googlefindmy.Auth.fcm_receiver_ha import DOMAIN, FcmReceiverHA
 from custom_components.googlefindmy.exceptions import FatalRegistrationError
@@ -204,6 +205,79 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
     # success path clears it.
     assert flow._async_start_reauth() is True
 
+    entry.async_start_reauth.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_confirm_records_reauth_reason() -> None:
+    """FIX 3: confirming the repair records the FCM_AUTH_FATAL reason.
+
+    The recorder lives on the coordinator (reachable via ``runtime_data``), not
+    on the RepairsFlow; the flow records defensively when it is available.
+    """
+    recorder = MagicMock(return_value=None)
+    entry = SimpleNamespace(
+        async_start_reauth=MagicMock(return_value=None),
+        runtime_data=SimpleNamespace(
+            coordinator=SimpleNamespace(
+                record_reauth_reason=recorder,
+            )
+        ),
+    )
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+        )
+    )
+    flow = repairs.FcmReauthRepairFlow("entry-id")
+    flow.hass = hass
+
+    assert flow._async_start_reauth() is True
+
+    recorder.assert_called_once_with(
+        ReauthReasonCode.FCM_AUTH_FATAL, origin="repairs.py:_async_start_reauth"
+    )
+    entry.async_start_reauth.assert_called_once_with(hass)
+
+
+@pytest.mark.asyncio
+async def test_fix_flow_records_reason_on_legacy_subentry_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AP-1: on the legacy sub-entry path ``runtime_data`` *is* a bare
+    ``GoogleFindMyCoordinator`` (no wrapper). The reauth reason must still be
+    recorded via the ``isinstance`` branch, not silently dropped by a
+    wrapper-only ``.coordinator`` lookup.
+    """
+
+    class _BareCoordinator:
+        """Lightweight stand-in the production ``isinstance`` check accepts."""
+
+    recorder = MagicMock(return_value=None)
+    bare_coordinator = _BareCoordinator()
+    bare_coordinator.record_reauth_reason = recorder  # type: ignore[attr-defined]
+    # Make ``isinstance(rd, GoogleFindMyCoordinator)`` fire for the stand-in;
+    # constructing a real coordinator would drag in the full runtime.
+    monkeypatch.setattr(repairs, "GoogleFindMyCoordinator", _BareCoordinator)
+
+    entry = SimpleNamespace(
+        async_start_reauth=MagicMock(return_value=None),
+        # Legacy sub-entry shape: runtime_data IS the coordinator, no wrapper.
+        runtime_data=bare_coordinator,
+    )
+    hass = SimpleNamespace(
+        config_entries=SimpleNamespace(
+            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+        )
+    )
+    flow = repairs.FcmReauthRepairFlow("entry-id")
+    flow.hass = hass
+
+    assert flow._async_start_reauth() is True
+
+    recorder.assert_called_once_with(
+        ReauthReasonCode.FCM_AUTH_FATAL, origin="repairs.py:_async_start_reauth"
+    )
     entry.async_start_reauth.assert_called_once_with(hass)
 
 

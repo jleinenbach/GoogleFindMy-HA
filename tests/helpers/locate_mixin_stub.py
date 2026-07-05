@@ -86,6 +86,10 @@ class LocateStub(LocateOperations):
         self._api_push_ready = MagicMock(return_value=True)
         self._ensure_device_name_cache = MagicMock(return_value={})
         self._set_auth_state = MagicMock(return_value=None)
+        # FIX 3: cross-mixin choke point (real impl lives on the full
+        # coordinator, not on ``LocateOperations``); mock like its siblings so
+        # the direct locate-reauth sites can record without NotImplementedError.
+        self.record_reauth_reason = MagicMock(return_value=None)
         self._record_semantic_label = MagicMock(return_value=None)
         self._apply_semantic_mapping = MagicMock(return_value=False)
         self._get_google_home_filter = MagicMock(return_value=None)

@@ -24,6 +24,7 @@ from typing import Any
 from aiohttp import ClientConnectionError, ClientError
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 
+from .._reauth_reason import ReauthReasonCode
 from ..const import DEFAULT_MIN_POLL_INTERVAL
 from ..NovaApi.ExecuteAction.LocateTracker.decrypt_locations import (
     DecryptionError,
@@ -508,6 +509,16 @@ class LocateOperations(_MixinBase):
                     failed=True,
                     reason=f"Auth failed during manual locate: {auth_err}",
                 )
+                # FIX 3: direct reauth site (no exception bubbles to a coordinator
+                # catch), so record the classified reason directly. The condition
+                # is a generic Spot-transport auth failure (SpotAuthPermanentError
+                # is raised only in spot_request.py, e.g. "AAS token invalid after
+                # refresh"), so it maps to SPOT_AUTH_PERMANENT -- the same code the
+                # poll-cycle equivalent uses (polling.py) -- not an owner-key code.
+                self.record_reauth_reason(
+                    ReauthReasonCode.SPOT_AUTH_PERMANENT,
+                    origin="locate.py:async_locate_device:spot_auth",
+                )
                 entry = getattr(self, "config_entry", None)
                 reauth_started = False
                 if entry is not None:
@@ -644,6 +655,15 @@ class LocateOperations(_MixinBase):
                         "the shared key is stale and a fresh secrets.json "
                         "(re-authentication) is required"
                     ),
+                )
+                # FIX 3: direct reauth site (a stale shared key needs fresh
+                # credentials); record the classified reason directly. This is the
+                # account-wide stale-shared-key decrypt condition, so it maps to
+                # DECRYPT_STALE_KEY -- the same code the poll-cycle equivalent uses
+                # (polling.py, _finalize_cycle_decrypt_state) -- not an AAS/token code.
+                self.record_reauth_reason(
+                    ReauthReasonCode.DECRYPT_STALE_KEY,
+                    origin="locate.py:async_locate_device:decrypt_stale_key",
                 )
                 entry = getattr(self, "config_entry", None)
                 reauth_started = False

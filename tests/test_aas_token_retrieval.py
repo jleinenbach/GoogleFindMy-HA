@@ -328,12 +328,27 @@ def test_is_non_retryable_auth_invalid_grant() -> None:
     assert aas_token_retrieval._is_non_retryable_auth(err) is True
 
 
-def test_is_non_retryable_auth_unauthorized_forbidden() -> None:
-    """401/403-style errors should not be retryable."""
+def test_is_non_retryable_auth_unauthorized_forbidden_now_retryable() -> None:
+    """FIX 5: bare HTTP-generic "unauthorized"/"forbidden" strings are retryable.
+
+    These tokens were removed from ``_NON_RETRYABLE_PATTERNS`` because a
+    free-text HTTP surface must not force a network-adjacent error to be treated
+    as a permanent auth failure. Genuine denials are carried via ``error_kind``.
+    """
     assert (
-        aas_token_retrieval._is_non_retryable_auth(RuntimeError("unauthorized")) is True
+        aas_token_retrieval._is_non_retryable_auth(RuntimeError("unauthorized"))
+        is False
     )
-    assert aas_token_retrieval._is_non_retryable_auth(RuntimeError("forbidden")) is True
+    assert (
+        aas_token_retrieval._is_non_retryable_auth(RuntimeError("forbidden")) is False
+    )
+
+
+def test_is_non_retryable_auth_http_denial_via_error_kind() -> None:
+    """A structured HTTP auth denial surfaced via error_kind stays non-retryable."""
+    err = RuntimeError("server returned 401 unauthorized")
+    err.error_kind = "auth_error"  # type: ignore[attr-defined]
+    assert aas_token_retrieval._is_non_retryable_auth(err) is True
 
 
 def test_is_non_retryable_auth_missing_token() -> None:

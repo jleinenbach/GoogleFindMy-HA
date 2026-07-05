@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -216,12 +217,20 @@ def test_is_non_retryable_auth_via_error_kind_badauthentication() -> None:
     assert adm_token_retrieval._is_non_retryable_auth(err) is True
 
 
-def test_is_non_retryable_auth_string_fallback_still_works() -> None:
-    """RuntimeError without error_kind attribute still matches via substring."""
+def test_is_non_retryable_auth_string_fallback_gpsoauth_vocabulary() -> None:
+    """RuntimeError without error_kind still matches gpsoauth-specific vocabulary.
 
-    err = RuntimeError("server returned 401 unauthorized")
+    FIX 5: the substring fallback now only recognizes gpsoauth-specific tokens.
+    A generic HTTP surface such as "server returned 401 unauthorized" is
+    retryable (no ``error_kind``, no gpsoauth token), while a genuine
+    ``badauthentication`` surface stays non-retryable.
+    """
 
-    assert adm_token_retrieval._is_non_retryable_auth(err) is True
+    http_surface = RuntimeError("server returned 401 unauthorized")
+    assert adm_token_retrieval._is_non_retryable_auth(http_surface) is False
+
+    gpsoauth_surface = RuntimeError("gpsoauth rejected: BadAuthentication")
+    assert adm_token_retrieval._is_non_retryable_auth(gpsoauth_surface) is True
 
 
 def test_is_non_retryable_auth_falsy_error_kind_falls_back_to_string() -> None:
@@ -1074,10 +1083,23 @@ def test_normalize_service_whitespace() -> None:
     )
 
 
-def test_is_non_retryable_auth_http_signals() -> None:
-    """HTTP-style auth denials should not be retryable."""
-    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("401")) is True
-    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("403")) is True
+def test_is_non_retryable_auth_http_status_substrings_are_retryable() -> None:
+    """FIX 5: bare HTTP-status substrings are no longer non-retryable.
+
+    A message like "retry after 4012 ms" contains "401" as a substring; keying
+    non-retryable auth on that substring misclassified transient throttling as a
+    permanent auth failure. Genuine HTTP auth denials are carried structurally
+    (``error_kind`` / typed ``err.status``), not via free-text substrings, so a
+    plain ``RuntimeError("401")`` / ``("403")`` must now be treated as
+    retryable.
+    """
+    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("401")) is False
+    assert adm_token_retrieval._is_non_retryable_auth(RuntimeError("403")) is False
+    # The concrete false-fire the fix targets: a transient throttling message.
+    assert (
+        adm_token_retrieval._is_non_retryable_auth(RuntimeError("retry after 4012 ms"))
+        is False
+    )
 
 
 def test_is_non_retryable_auth_neither_marker() -> None:
@@ -2027,3 +2049,74 @@ def test_async_get_adm_token_isolated_without_cache_get(
     # Metadata should still be persisted
     assert "adm_token_issued_at_user@example.com" in persisted
     assert "adm_probe_startup_left_user@example.com" in persisted
+
+
+class _MockAuthError(Exception):
+    """Stand-in for ``gpsoauth.exceptions.AuthError`` (gpsoauth is absent in CI)."""
+
+
+@pytest.mark.asyncio
+async def test_isolated_oauth_typed_autherror_is_non_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typed gpsoauth AuthError raised by ``perform_oauth`` on the isolated ADM
+    path must be promoted to the structured ``error_kind='auth_error'`` channel so
+    the retry loop treats it as non-retryable, even when its text is only
+    HTTP-generic (which ``_is_non_retryable_auth`` deliberately ignores). Mirrors
+    the AAS exchange path and ``token_retrieval``; without the structural promotion
+    the rejected AAS token would be hammered in the retry loop."""
+
+    monkeypatch.setattr(
+        adm_token_retrieval,
+        "gpsoauth_exceptions",
+        SimpleNamespace(AuthError=_MockAuthError),
+    )
+
+    def _raise(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise _MockAuthError("HTTP 403 Forbidden")
+
+    monkeypatch.setattr(
+        adm_token_retrieval,
+        "require_gpsoauth",
+        lambda: SimpleNamespace(perform_oauth=_raise),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com",
+            "aas_et/fake",
+            android_id=0x1234,
+        )
+    # The typed AuthError is promoted to the structured auth_error channel ...
+    assert getattr(excinfo.value, "error_kind", "") == "auth_error"
+    # ... and is therefore classified non-retryable by the isolated retry loop.
+    assert adm_token_retrieval._is_non_retryable_auth(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_isolated_oauth_typed_channel_absent_stays_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the gpsoauth exceptions module is unavailable, an HTTP-generic-only
+    failure keeps the safe default: no structural promotion, and
+    ``_is_non_retryable_auth`` stays False (retryable)."""
+
+    monkeypatch.setattr(adm_token_retrieval, "gpsoauth_exceptions", None)
+
+    def _raise(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("HTTP 403 Forbidden")
+
+    monkeypatch.setattr(
+        adm_token_retrieval,
+        "require_gpsoauth",
+        lambda: SimpleNamespace(perform_oauth=_raise),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await adm_token_retrieval._perform_oauth_with_provided_aas(
+            "user@example.com",
+            "aas_et/fake",
+            android_id=0x1234,
+        )
+    assert getattr(excinfo.value, "error_kind", "") != "auth_error"
+    assert adm_token_retrieval._is_non_retryable_auth(excinfo.value) is False
