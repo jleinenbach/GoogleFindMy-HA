@@ -186,7 +186,16 @@ async def _invalidate_token_async(
         await cache.set(f"spot_token_{username}", None)
     elif kind == "adm":
         await cache.set(f"adm_token_{username}", None)
-    await cache.set(DATA_AAS_TOKEN, None)
+    else:
+        # Only clear the quasi-permanent AAS master token when the failing
+        # token is NOT a short-lived scoped token. A scoped (spot/adm) auth
+        # failure is routinely transient (an expired scoped token); nulling
+        # the AAS here would destroy the parent credential in the volatile
+        # cache and force a user-visible reauth, even though the retry can
+        # mint a fresh scoped token from the still-valid AAS. A genuinely
+        # revoked AAS is handled separately via _clear_aas_token_async /
+        # InvalidAasTokenError.
+        await cache.set(DATA_AAS_TOKEN, None)
 
 
 async def _clear_aas_token_async(*, cache: TokenCache | None = None) -> None:
