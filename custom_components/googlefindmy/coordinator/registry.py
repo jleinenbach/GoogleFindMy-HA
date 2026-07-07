@@ -797,7 +797,9 @@ class RegistryOperations(_MixinBase):
             )
         else:
             # Keep metadata fresh if it drifted (rare)
-            raw_device_identifiers = getattr(device, "identifiers", set()) or set()
+            raw_device_identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
             device_identifiers = set(raw_device_identifiers)
             identifiers_to_apply = set(identifiers)
             extraneous_service_identifiers: set[tuple[Any, ...]] = set()
