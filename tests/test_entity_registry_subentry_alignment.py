@@ -108,8 +108,8 @@ async def test_entity_registry_subentry_alignment(
         coro, name=name
     )
     hass.bus = SimpleNamespace(
-        async_listen=lambda *_args, **_kwargs: (lambda: None),
-        async_listen_once=lambda *_args, **_kwargs: (lambda: None),
+        async_listen=lambda *_args, **_kwargs: lambda: None,
+        async_listen_once=lambda *_args, **_kwargs: lambda: None,
     )
 
     entry = _ConfigEntryStub()

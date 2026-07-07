@@ -1588,8 +1588,9 @@ def test_get_driver_invariant_with_and_without_version(
     monkeypatch.setattr(
         uc_module,
         "Chrome",
-        lambda *, options, version_main=None, **k: captured.append(version_main)
-        or object(),
+        lambda *, options, version_main=None, **k: (
+            captured.append(version_main) or object()
+        ),
     )
     monkeypatch.setattr(chrome_driver, "get_chrome_version", lambda _p, **_k: 151)
 

@@ -527,7 +527,7 @@ async def async_rebuild_device_registry(hass: HomeAssistant, call: ServiceCall) 
                     if correct_tracker_subentry_id in normalized_subentries:
                         tracker_linked_entry_ids.add(normalized_entry_id)
 
-            raw_links = getattr(device, "config_entries", set()) or set()
+            raw_links: set[str] = getattr(device, "config_entries", set()) or set()
             linked_entry_ids = {
                 str(link_entry_id)
                 for link_entry_id in raw_links
@@ -1097,7 +1097,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             return token_cache[cache_key]
 
         def _device_is_service(device: Any) -> bool:
-            identifiers = getattr(device, "identifiers", set()) or set()
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
             for domain, ident in identifiers:
                 if domain != DOMAIN:
                     continue
@@ -1113,7 +1115,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
             if isinstance(serial, str) and serial:
                 return serial
 
-            identifiers = getattr(device, "identifiers", set()) or set()
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
             for domain, ident in identifiers:
                 if domain != DOMAIN:
                     continue
@@ -1140,7 +1144,9 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         dev_reg = dr.async_get(hass)
         updated_count = 0
         for device in getattr(dev_reg, "devices", {}).values():
-            identifiers = getattr(device, "identifiers", set()) or set()
+            identifiers: set[tuple[str, str]] = (
+                getattr(device, "identifiers", set()) or set()
+            )
             if not any(domain == DOMAIN for domain, _ in identifiers):
                 continue
 
