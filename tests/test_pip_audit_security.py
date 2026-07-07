@@ -42,6 +42,10 @@ IGNORED_VULNERABILITIES: dict[str, str] = {
     # The vulnerable sign_digest() function is NOT used in this project.
     # ECDH operations use the 'cryptography' library instead.
     "CVE-2024-23342": "ecdsa timing attack - sign_digest() not used; only curve definitions imported",
+    # Same finding as CVE-2024-23342 above, re-keyed by the advisory DB under a
+    # new primary PYSEC id (CVE-2024-23342 is now only an alias). The ignore
+    # match is by primary id, so the alias id must be listed explicitly.
+    "PYSEC-2026-1325": "ecdsa timing attack (alias of CVE-2024-23342) - sign_digest() not used; only curve definitions imported",
     # protobuf DoS via ParseDict() recursion bypass - this project only uses
     # MessageToDict/MessageToJson (protobuf→dict/json), never ParseDict (dict→protobuf).
     # The vulnerable json_format.ParseDict() function is NOT used anywhere.
