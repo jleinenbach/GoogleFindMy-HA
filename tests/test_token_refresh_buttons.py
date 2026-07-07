@@ -300,8 +300,8 @@ class TestTokenRefreshButtonAttributes:
         await button.async_setup_entry(hass, entry, add_entities)
         await asyncio.gather(*pending)
 
-        # Record cooldown
-        _record_refresh(entry.entry_id)
+        # Record cooldown for the FCM token type (per-type scoping)
+        _record_refresh(entry.entry_id, "fcm")
 
         # Find FCM token button
         fcm_button = next(
@@ -315,6 +315,77 @@ class TestTokenRefreshButtonAttributes:
 
         assert fcm_button is not None
         assert fcm_button.available is False
+
+    @pytest.mark.asyncio
+    async def test_fcm_cooldown_does_not_disable_adm_button(
+        self, stub_coordinator_factory: Any
+    ) -> None:
+        """A recorded FCM cooldown must not disable the ADM button.
+
+        Regression guard for the per-token-type cooldown scoping: an FCM
+        refresh previously flipped the sibling ADM button to ``unavailable``,
+        which surfaced in the logbook as an unintended ADM press.
+        """
+        from custom_components.googlefindmy.Auth.token_refresh import _record_refresh
+
+        loop = asyncio.get_running_loop()
+        hass = _make_hass(loop)
+
+        entry = _ConfigEntryStub()
+        service_subentry = ConfigSubentry(
+            data={"group_key": SERVICE_SUBENTRY_KEY, "features": ("button",)},
+            subentry_type=SUBENTRY_TYPE_SERVICE,
+            title="Service",
+            subentry_id="service-subentry",
+        )
+        entry.subentries = {service_subentry.subentry_id: service_subentry}
+
+        coordinator_cls = stub_coordinator_factory(
+            subentry_key="tracker",
+            service_subentry_key=SERVICE_SUBENTRY_KEY,
+        )
+        coordinator = coordinator_cls(
+            hass, cache=SimpleNamespace(entry_id=entry.entry_id)
+        )
+        coordinator.config_entry = entry
+
+        token_cache = _MockTokenCache(entry.entry_id)
+        entry.runtime_data = SimpleNamespace(
+            coordinator=coordinator,
+            token_cache=token_cache,
+        )
+
+        add_entities, added, pending = _make_add_entities(hass, loop)
+
+        await button.async_setup_entry(hass, entry, add_entities)
+        await asyncio.gather(*pending)
+
+        # Record a cooldown for the FCM token type only.
+        _record_refresh(entry.entry_id, "fcm")
+
+        fcm_button = next(
+            (
+                entity
+                for entity, _ in added
+                if "regenerate_fcm_token" in (getattr(entity, "unique_id", "") or "")
+            ),
+            None,
+        )
+        adm_button = next(
+            (
+                entity
+                for entity, _ in added
+                if "regenerate_adm_token" in (getattr(entity, "unique_id", "") or "")
+            ),
+            None,
+        )
+
+        assert fcm_button is not None
+        assert adm_button is not None
+        # Same-type button is rate-limited...
+        assert fcm_button.available is False
+        # ...but the sibling ADM button stays available (decoupled cooldown).
+        assert adm_button.available is True
 
     @pytest.mark.asyncio
     async def test_button_extra_state_attributes(
@@ -534,8 +605,8 @@ class TestTokenRefreshButtonPress:
         await button.async_setup_entry(hass, entry, add_entities)
         await asyncio.gather(*pending)
 
-        # Record cooldown before pressing
-        _record_refresh(entry.entry_id)
+        # Record cooldown before pressing (per-type scoping: match FCM button)
+        _record_refresh(entry.entry_id, "fcm")
 
         # Find FCM token button
         fcm_button = next(
