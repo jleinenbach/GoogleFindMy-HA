@@ -73,3 +73,37 @@ async def test_non_scoped_kind_still_clears_aas() -> None:
 
     # A non-scoped kind falls through and clears the AAS (defensive path).
     assert cache._data.get(DATA_AAS_TOKEN) is None
+
+
+@pytest.mark.asyncio
+async def test_revoked_aas_still_cleared_and_escalates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Counter-contract: a genuinely revoked AAS is still cleared and escalates.
+
+    The fix narrows *only* the scoped (spot/adm) invalidation path; it must not
+    weaken the security escalation for a truly invalid AAS. Here the scoped-token
+    derivation raises ``InvalidAasTokenError`` (revoked parent credential), so the
+    real ``async_spot_request`` retry loop must clear the AAS via
+    ``_clear_aas_token_async`` and, once the one clear attempt is spent, surface
+    ``SpotAuthPermanentError`` -- exactly the reauth escalation the fix preserves.
+    This drives the caller so the ``_pick_auth_token_async`` re-raise and the
+    loop's clear-and-escalate wiring are both exercised, not just the leaf helper.
+    """
+    cache = _DummyCache()
+    await cache.set("username", "user@example.com")
+    await cache.set(DATA_AAS_TOKEN, "aas_et/revoked")
+
+    async def _raise_invalid_aas(*_args: Any, **_kwargs: Any) -> str:
+        raise spot_request_module.InvalidAasTokenError("AAS revoked")
+
+    # Scoped-token derivation fails because the parent AAS is genuinely revoked.
+    monkeypatch.setattr(spot_request_module, "async_get_spot_token", _raise_invalid_aas)
+
+    with pytest.raises(spot_request_module.SpotAuthPermanentError):
+        await spot_request_module.async_spot_request(
+            "GetEidInfoForE2eeDevices", b"", cache=cache
+        )
+
+    # The revoked AAS was cleared by the escalation path (contract preserved).
+    assert cache._data.get(DATA_AAS_TOKEN) is None
