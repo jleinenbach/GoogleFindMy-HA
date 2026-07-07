@@ -90,7 +90,9 @@ def is_refresh_on_cooldown(
     Returns:
         Tuple of (is_on_cooldown, remaining_seconds)
     """
-    last_refresh = _last_refresh_timestamps.get(_cooldown_key(entry_id, token_type), 0.0)
+    last_refresh = _last_refresh_timestamps.get(
+        _cooldown_key(entry_id, token_type), 0.0
+    )
     elapsed = time.time() - last_refresh
     remaining = TOKEN_REFRESH_COOLDOWN_S - elapsed
     return (remaining > 0, max(0.0, remaining))
