@@ -973,3 +973,260 @@ async def test_checkin_or_register_preserves_on_transient(
     with pytest.raises(FcmCheckinTransientError):
         await register.checkin_or_register()
     assert register_called is False
+
+
+# ---------------------------------------------------------------------
+# gcm_unregister — best-effort orphan cleanup on re-registration
+# ---------------------------------------------------------------------
+
+_OLD_APP_ID = "wp:bundle#0d7d2715-75d9-47a0-88ec-32e9d91e88dd"
+_NEW_APP_ID = "wp:bundle#f23ca93d-683d-4fb9-aaee-fdbd82dd079a"
+_ANDROID_ID = "1234567890"
+_SECURITY_TOKEN = "9876543210"
+
+
+class _RaisingSession:
+    """Session stub whose ``post`` records the call, then raises (best-effort
+    failure path for the unregister)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def post(
+        self, *, url: str, headers: dict[str, str], data: dict[str, Any], timeout: Any
+    ) -> Any:
+        self.calls.append({"url": url, "data": dict(data), "headers": dict(headers)})
+        raise OSError("network down")
+
+
+def _build_reregister(
+    session: Any,
+    *,
+    old_app_id: str | None,
+    new_app_id: str = _NEW_APP_ID,
+) -> FcmRegister:
+    """FcmRegister wired for ``reregister_keeping_identity`` with every network
+    step EXCEPT the unregister POST stubbed out, so the only ``session.post``
+    that can occur is the orphan unregister under test."""
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    gcm_creds: dict[str, Any] = {
+        "android_id": _ANDROID_ID,
+        "security_token": _SECURITY_TOKEN,
+    }
+    if old_app_id is not None:
+        gcm_creds["app_id"] = old_app_id
+    credentials = {"gcm": gcm_creds, "fcm": {"registration": {"token": "old"}}}
+    register = FcmRegister(config, credentials=credentials, http_client_session=session)
+
+    async def fake_check_in(self, android_id=None, security_token=None):  # type: ignore[no-untyped-def]
+        return {"androidId": android_id, "securityToken": security_token}
+
+    async def fake_gcm_register(self, gcm_response, retries=5):  # type: ignore[no-untyped-def]
+        return {
+            "token": "new-gcm-token",
+            "app_id": new_app_id,
+            "android_id": gcm_response["androidId"],
+            "security_token": gcm_response["securityToken"],
+        }
+
+    def fake_generate_keys(self):  # type: ignore[no-untyped-def]
+        return {"public": "pub", "private": "priv", "auth_secret": "sec"}
+
+    async def fake_fcm_install_and_register(self, gcm_data, keys):  # type: ignore[no-untyped-def]
+        return {"registration": {"token": "new-fcm-token"}}
+
+    register.gcm_check_in = types.MethodType(fake_check_in, register)
+    register.gcm_register = types.MethodType(fake_gcm_register, register)
+    register.generate_keys = types.MethodType(fake_generate_keys, register)
+    register.fcm_install_and_register = types.MethodType(
+        fake_fcm_install_and_register, register
+    )
+    return register
+
+
+def test_reregister_unregisters_old_subscription() -> None:
+    """(a) A successful re-registration fires exactly one ``delete=true`` POST
+    to register3 carrying the OLD app_id as X-subtype."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert len(session.calls) == 1
+    call = session.calls[0]
+    assert call["url"] == GCM_REGISTER3_URL
+    assert call["data"]["delete"] == "true"
+    assert call["data"]["X-subtype"] == _OLD_APP_ID
+    assert call["data"]["device"] == _ANDROID_ID
+    assert call["headers"]["Authorization"] == (
+        f"AidLogin {_ANDROID_ID}:{_SECURITY_TOKEN}"
+    )
+
+
+def test_reregister_survives_unregister_failure() -> None:
+    """(b) An unregister that raises must not break the re-registration: the
+    caller still returns valid fresh credentials, and it was attempted once."""
+    session = _RaisingSession()
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert result["fcm"]["registration"]["token"] == "new-fcm-token"
+    assert len(session.calls) == 1  # exactly one best-effort attempt, no retry
+
+
+def test_reregister_without_old_app_id_skips_unregister() -> None:
+    """(c) Without a prior app_id (first-time / legacy identity) no delete POST
+    is emitted."""
+    session = _FakeSession([])  # any post would raise "no responses configured"
+    register = _build_reregister(session, old_app_id=None)
+
+    result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert session.calls == []
+
+
+def test_reregister_unchanged_app_id_skips_unregister() -> None:
+    """(c2) A no-op re-registration that yields the SAME app_id must not
+    self-delete the still-current subscription."""
+    session = _FakeSession([])
+    register = _build_reregister(
+        session, old_app_id=_OLD_APP_ID, new_app_id=_OLD_APP_ID
+    )
+
+    result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _OLD_APP_ID
+    assert session.calls == []
+
+
+def test_reregister_unregister_redacts_secrets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(d) No unredacted secret/id (old app_id, android_id, security_token, or
+    the AidLogin auth header) may appear in the DEBUG log; only the ``•••``
+    redacted tail form is emitted."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+    register._log_debug_verbose = True  # exercise the verbose request log too
+
+    with caplog.at_level(logging.DEBUG):
+        result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert _OLD_APP_ID not in logged
+    assert _ANDROID_ID not in logged
+    assert _SECURITY_TOKEN not in logged
+    assert "AidLogin" not in logged
+    assert "•••" in logged
+
+
+# ---------------------------------------------------------------------
+# gcm_unregister — outcome-log contract (each of the four terminal
+# outcomes must be observable at DEBUG, so a user who enables debug
+# logging and presses the "regenerate FCM token" button can tell whether
+# the orphan cleanup succeeded or not). These also close the parse-branch
+# coverage for the ``Error=`` and "no marker" responses.
+# ---------------------------------------------------------------------
+
+
+def test_reregister_unregister_success_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(e) A ``deleted=`` response logs an *effective* outcome at DEBUG,
+    without needing the verbose flag — this is what the user sees on a
+    successful button-triggered cleanup."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "GCM unregister effective" in logged
+    assert "deleted" in logged
+    assert _OLD_APP_ID not in logged  # still redacted
+
+
+def test_reregister_unregister_error_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(f) A server ``Error=<code>`` response is a non-exceptional, ineffective
+    outcome: no raise, exactly one attempt, and a DEBUG line naming the code so
+    the user sees the cleanup did NOT succeed. Closes the ``Error`` parse/log
+    branch."""
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}
+            )
+        ]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID  # re-registration unaffected
+    assert len(session.calls) == 1  # one best-effort attempt, no retry
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ineffective" in logged
+    assert "PHONE_REGISTRATION_ERROR" in logged
+    assert _OLD_APP_ID not in logged  # still redacted
+
+
+def test_reregister_unregister_no_marker_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(g) A 200 response with neither ``deleted`` nor ``Error`` (e.g. an HTML
+    error page) is reported as an ineffective "no marker" outcome at DEBUG,
+    never raising. Closes the else-branch of the parser."""
+    session = _FakeSession(
+        [_FakeResponse(200, "<html>gateway</html>", {"Content-Type": "text/html"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert len(session.calls) == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "no deleted/Error marker" in logged
+    assert _OLD_APP_ID not in logged  # still redacted
+
+
+def test_reregister_unregister_network_failure_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(h) A network/aiohttp failure is swallowed but reported at DEBUG as a
+    best-effort failure, so the user sees the cleanup was attempted and did not
+    succeed. Complements (b), which asserts survival without the log contract."""
+    session = _RaisingSession()
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = asyncio.run(register.reregister_keeping_identity())
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert len(session.calls) == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "failed (ignored, best-effort)" in logged
+    assert _OLD_APP_ID not in logged  # still redacted

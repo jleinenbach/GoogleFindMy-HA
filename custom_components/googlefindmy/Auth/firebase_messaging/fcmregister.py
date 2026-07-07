@@ -649,6 +649,108 @@ class FcmRegister:
         return None
 
     # ---------------------------------------------------------------------
+    # GCM (Unregister — best-effort orphan cleanup)
+    # ---------------------------------------------------------------------
+    async def gcm_unregister(
+        self,
+        app_id: str,
+        android_id: str,
+        security_token: str,
+    ) -> None:
+        """Best-effort unregister of a superseded GCM subscription.
+
+        Sends a ``delete=true`` POST to ``/c2dm/register3`` for the OLD
+        ``app_id`` (subtype) after a successful re-registration, so Google
+        stops delivering pushes for the now-orphaned subscription (the
+        source of the benign "Subtype does not match" debug logs).
+
+        The request mirrors the canonical Chromium GCM unregister body
+        (``app`` / ``X-subtype`` / ``device`` / ``delete=true``; see
+        Chromium ``google_apis/gcm/engine/unregistration_request.cc``).
+        The ``sender`` field is retained for parity with ``gcm_register``
+        and ignored by the server for a delete.
+
+        This is strictly best-effort: exactly one attempt, a fixed
+        timeout, and every failure is swallowed at ``debug`` level. An
+        unregister failure must NEVER break or delay the surrounding
+        re-registration — the new subscription is already live by the
+        time this runs (see ``reregister_keeping_identity``).
+
+        :param app_id: OLD (superseded) GCM app_id / subtype to delete.
+        :param android_id: Device android_id (stable identity; auth only).
+        :param security_token: Device security_token (auth only).
+        """
+        headers = {
+            "Authorization": f"AidLogin {android_id}:{security_token}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        body = {
+            "app": self.config.chrome_id,
+            "X-subtype": app_id,
+            "device": android_id,
+            "sender": GCM_SERVER_KEY_B64,
+            "delete": "true",
+        }
+
+        if self._log_debug_verbose:
+            _logger.debug(
+                "GCM unregister request via /c2dm/register3: "
+                "app=%s, X-subtype=%s, device=%s, delete=true",
+                body["app"],
+                self._redact(body["X-subtype"]),
+                self._redact(body["device"]),
+            )
+
+        try:
+            async with self._session.post(
+                url=GCM_REGISTER3_URL,
+                headers=headers,
+                data=body,
+                timeout=self.CLIENT_TIMEOUT,
+            ) as resp:
+                response_text = await resp.text()
+        except Exception as exc:  # network/aiohttp failure — best-effort
+            _logger.debug(
+                "GCM unregister for X-subtype=%s failed (ignored, best-effort): %s",
+                self._redact(app_id),
+                exc,
+            )
+            return
+
+        # Defensive line-based parse mirroring ``gcm_register``. A success
+        # echoes ``deleted=<app_id>``; ``Error=<code>`` or a missing/HTML
+        # body means the unregister was ineffective. All three outcomes are
+        # harmless and terminal — the surrounding flow is unaffected.
+        deleted = False
+        error_code: str | None = None
+        for line in response_text.splitlines():
+            key, _, value = line.partition("=")
+            lower_key = key.strip().lower()
+            if lower_key == "deleted":
+                deleted = True
+                break
+            if lower_key == "error":
+                error_code = value.strip().upper()
+
+        if deleted:
+            _logger.debug(
+                "GCM unregister effective for X-subtype=%s (deleted)",
+                self._redact(app_id),
+            )
+        elif error_code:
+            _logger.debug(
+                "GCM unregister for X-subtype=%s ineffective (Error=%s, ignored)",
+                self._redact(app_id),
+                error_code,
+            )
+        else:
+            _logger.debug(
+                "GCM unregister for X-subtype=%s: no deleted/Error marker "
+                "in response (ignored)",
+                self._redact(app_id),
+            )
+
+    # ---------------------------------------------------------------------
     # FCM (Install + Registration)
     # ---------------------------------------------------------------------
     async def fcm_install_and_register(
@@ -985,6 +1087,11 @@ class FcmRegister:
 
         android_id = self.credentials["gcm"]["android_id"]
         security_token = self.credentials["gcm"]["security_token"]
+        # Capture the OLD app_id BEFORE it is overwritten by the fresh
+        # registration below, so we can unregister the superseded
+        # subscription afterwards. ``.get()`` tolerates legacy credentials
+        # that predate the app_id key.
+        old_app_id = self.credentials["gcm"].get("app_id")
 
         # Step 1: Check-in with existing device identity
         try:
@@ -1033,6 +1140,14 @@ class FcmRegister:
                 self.credentials_updated_callback(res)
             except Exception as e:
                 _logger.debug("credentials_updated_callback raised", exc_info=e)
+
+        # Step 4: Best-effort unregister of the now-orphaned OLD subscription.
+        # Runs only AFTER the new registration is fully secured and persisted,
+        # so a failure here can never cost us the working subscription. Guarded
+        # against a no-op self-delete (missing/unchanged app_id).
+        new_app_id = gcm_data.get("app_id")
+        if old_app_id and old_app_id != new_app_id:
+            await self.gcm_unregister(old_app_id, android_id, security_token)
 
         _logger.info(
             "Re-registered FCM with existing device identity (android_id preserved)"
