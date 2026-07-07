@@ -62,27 +62,51 @@ async def _get_entry_id(cache: TokenCache) -> str:
     return "default"
 
 
-def is_refresh_on_cooldown(entry_id: str) -> tuple[bool, float]:
-    """Check if token refresh is on cooldown for the given entry.
+def _cooldown_key(entry_id: str, token_type: str | None = None) -> str:
+    """Build the per-entry, per-token-type cooldown key.
+
+    Scoping the cooldown by token type keeps FCM and ADM refreshes on
+    independent rate limits, so refreshing one token does not disable the
+    sibling button (which previously surfaced in the logbook as an
+    unintended press of the other button). ``token_type`` is normalized to
+    lowercase; ``None`` preserves the legacy entry-only key.
+    """
+    if not token_type:
+        return entry_id
+    return f"{entry_id}:{token_type.strip().lower()}"
+
+
+def is_refresh_on_cooldown(
+    entry_id: str, token_type: str | None = None
+) -> tuple[bool, float]:
+    """Check if token refresh is on cooldown for the given entry and type.
+
+    Args:
+        entry_id: Config entry ID
+        token_type: Optional token type ("fcm"/"adm"); scopes the cooldown so
+            FCM and ADM are rate-limited independently. ``None`` uses the
+            legacy entry-only key.
 
     Returns:
         Tuple of (is_on_cooldown, remaining_seconds)
     """
-    last_refresh = _last_refresh_timestamps.get(entry_id, 0.0)
+    last_refresh = _last_refresh_timestamps.get(
+        _cooldown_key(entry_id, token_type), 0.0
+    )
     elapsed = time.time() - last_refresh
     remaining = TOKEN_REFRESH_COOLDOWN_S - elapsed
     return (remaining > 0, max(0.0, remaining))
 
 
-def get_cooldown_remaining(entry_id: str) -> float:
-    """Get remaining cooldown time in seconds for the given entry."""
-    _, remaining = is_refresh_on_cooldown(entry_id)
+def get_cooldown_remaining(entry_id: str, token_type: str | None = None) -> float:
+    """Get remaining cooldown time in seconds for the given entry and type."""
+    _, remaining = is_refresh_on_cooldown(entry_id, token_type)
     return remaining
 
 
-def _record_refresh(entry_id: str) -> None:
+def _record_refresh(entry_id: str, token_type: str | None = None) -> None:
     """Record that a token refresh was performed for cooldown tracking."""
-    _last_refresh_timestamps[entry_id] = time.time()
+    _last_refresh_timestamps[_cooldown_key(entry_id, token_type)] = time.time()
 
 
 async def async_regenerate_fcm_token(
@@ -105,7 +129,7 @@ async def async_regenerate_fcm_token(
         True if regeneration succeeded or was started, False otherwise
     """
     async with _refresh_lock:
-        on_cooldown, remaining = is_refresh_on_cooldown(entry_id)
+        on_cooldown, remaining = is_refresh_on_cooldown(entry_id, "fcm")
         if on_cooldown:
             _LOGGER.info(
                 "FCM token regeneration blocked: cooldown active (%.1fs remaining)",
@@ -140,7 +164,7 @@ async def async_regenerate_fcm_token(
             success = await receiver.async_reregister_fcm(entry_id)
 
             if success:
-                _record_refresh(entry_id)
+                _record_refresh(entry_id, "fcm")
                 _LOGGER.info(
                     "FCM token regeneration successful (entry: %s)",
                     entry_id,
@@ -191,7 +215,7 @@ async def async_regenerate_adm_token(
     entry_id = await _get_entry_id(cache)
 
     async with _refresh_lock:
-        on_cooldown, remaining = is_refresh_on_cooldown(entry_id)
+        on_cooldown, remaining = is_refresh_on_cooldown(entry_id, "adm")
         if on_cooldown:
             _LOGGER.info(
                 "ADM token regeneration blocked: cooldown active (%.1fs remaining)",
@@ -226,7 +250,7 @@ async def async_regenerate_adm_token(
             new_token = await async_get_adm_token(username=user, cache=cache)
 
             if new_token:
-                _record_refresh(entry_id)
+                _record_refresh(entry_id, "adm")
                 _LOGGER.info(
                     "ADM token regeneration successful for %s",
                     masked_user,
@@ -248,9 +272,9 @@ async def async_regenerate_adm_token(
             return False
 
 
-def clear_cooldown(entry_id: str) -> None:
-    """Clear the cooldown for a specific entry (for testing purposes)."""
-    _last_refresh_timestamps.pop(entry_id, None)
+def clear_cooldown(entry_id: str, token_type: str | None = None) -> None:
+    """Clear the cooldown for a specific entry/type (for testing purposes)."""
+    _last_refresh_timestamps.pop(_cooldown_key(entry_id, token_type), None)
 
 
 def clear_all_cooldowns() -> None:
