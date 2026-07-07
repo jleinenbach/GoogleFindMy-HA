@@ -491,6 +491,70 @@ async def test_t7_purge_resets_state_and_cancels_task(
 
 
 # ---------------------------------------------------------------------------
+# Re-registration path (button-triggered) also cancels the in-flight zombie
+# reconnect task -- mirror of T7 for ``async_reregister_fcm`` (step 4b).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reregister_cancels_zombie_reconnect_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``async_reregister_fcm`` cancels the in-flight watchdog reconnect task.
+
+    Step 2 cancels the supervisor and step 4 stops the client, but the zombie
+    reconnect runs in a SEPARATE task; left alive it would race step 5's
+    supervisor restart and build a second live ``FcmPushClient`` for the same
+    entry (the two-instance subtype-mismatch / InvalidTag symptom). This proves
+    the step-4b cancel closes that race, mirroring ``_purge_entry_tokens``.
+    """
+    receiver = _make_receiver(monkeypatch)
+    entry_id = "entry-1"
+    now = time.monotonic()
+
+    # Guard 2 (entry known to receiver) via ``creds`` and NOT ``pcs``, so step 4's
+    # ``pcs.pop`` is a no-op and no real ``pc.stop()`` plumbing is required.
+    receiver.creds[entry_id] = {"gcm": {"app_id": "APPID"}}  # type: ignore[assignment]
+    receiver._zombie_reconnect_attempts[entry_id] = 2
+    receiver._zombie_next_allowed_reconnect_monotonic[entry_id] = now + 60.0
+    receiver._zombie_next_eval_monotonic[entry_id] = now + 30.0
+
+    # Neutralize the surrounding steps so only the 4b cancel is under test.
+    started_supervisor: list[str] = []
+
+    async def _noop_invalidate(eid: str) -> None:
+        return None
+
+    async def _noop_start(eid: str, cache: object) -> None:
+        started_supervisor.append(eid)
+
+    monkeypatch.setattr(receiver, "_invalidate_fcm_tokens", _noop_invalidate)
+    monkeypatch.setattr(receiver, "_start_supervisor_for_entry", _noop_start)
+
+    started = asyncio.Event()
+
+    async def _long_reconnect() -> None:
+        started.set()
+        await asyncio.Event().wait()  # never completes on its own
+
+    task = asyncio.get_event_loop().create_task(_long_reconnect())
+    receiver._zombie_reconnect_tasks[entry_id] = task  # type: ignore[assignment]
+    await started.wait()
+
+    result = await receiver.async_reregister_fcm(entry_id)
+
+    assert result is True
+    assert started_supervisor == [entry_id]  # step 5 ran (supervisor restarted)
+    assert entry_id not in receiver._zombie_reconnect_tasks
+    assert entry_id not in receiver._zombie_reconnect_attempts
+    assert entry_id not in receiver._zombie_next_allowed_reconnect_monotonic
+    assert entry_id not in receiver._zombie_next_eval_monotonic
+    assert task.cancelled() or task.cancelling()  # cancellation requested
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+# ---------------------------------------------------------------------------
 # T8 -- deadlock regression: reconnect is scheduled, never inline-awaited
 # ---------------------------------------------------------------------------
 
