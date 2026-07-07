@@ -65,7 +65,8 @@ class _FakeSession:
         return self._responses.pop(0)
 
 
-def test_gcm_register_prefers_legacy_sender_first(
+@pytest.mark.asyncio
+async def test_gcm_register_prefers_legacy_sender_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The initial request starts with the legacy server key sender."""
@@ -88,14 +89,15 @@ def test_gcm_register_prefers_legacy_sender_first(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(register.gcm_register({"androidId": 1, "securityToken": 2}))
+    result = await register.gcm_register({"androidId": 1, "securityToken": 2})
 
     assert result["token"] == "abc123"
     assert session.calls[0]["url"] == GCM_REGISTER3_URL
     assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_html_response_rotates_endpoint_not_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """HTML/404 responses retry on the same endpoint without switching sender (upstream alignment)."""
@@ -120,9 +122,7 @@ def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with caplog.at_level(logging.WARNING):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 42, "securityToken": 99})
-        )
+        result = await register.gcm_register({"androidId": 42, "securityToken": 99})
 
     assert result["token"] == "abc123"
     assert result["android_id"] == 42
@@ -137,7 +137,8 @@ def test_gcm_register_html_response_rotates_endpoint_not_sender(
     ]
 
 
-def test_gcm_register_404_retries_with_same_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_404_retries_with_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 404 retries on the same endpoint with the same legacy sender."""
@@ -161,7 +162,7 @@ def test_gcm_register_404_retries_with_same_sender(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(register.gcm_register({"androidId": 11, "securityToken": 22}))
+    result = await register.gcm_register({"androidId": 11, "securityToken": 22})
 
     assert result["token"] == "abc123"
     # No endpoint rotation — always /c2dm/register3 (upstream alignment)
@@ -176,7 +177,8 @@ def test_gcm_register_404_retries_with_same_sender(
     ]
 
 
-def test_gcm_register_success_log_includes_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_success_log_includes_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Success log records endpoint and sender fallback context."""
@@ -195,9 +197,7 @@ def test_gcm_register_success_log_includes_sender(
     register = FcmRegister(config, http_client_session=session)
 
     with caplog.at_level(logging.INFO):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2})
-        )
+        result = await register.gcm_register({"androidId": 1, "securityToken": 2})
 
     assert result["token"] == "success"
     assert any(
@@ -208,7 +208,10 @@ def test_gcm_register_success_log_includes_sender(
     )
 
 
-def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_gcm_register_non_retryable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A non-retryable error code stops the retry loop and returns None."""
 
     responses = [
@@ -230,15 +233,16 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(
-        register.gcm_register({"androidId": 1, "securityToken": 2}, retries=2)
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=2
     )
 
     assert result is None
     assert len(session.calls) == 2
 
 
-def test_gcm_register_phone_registration_error_retries_same_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_phone_registration_error_retries_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PHONE_REGISTRATION_ERROR is transient — retries with the same sender (no switch)."""
@@ -264,8 +268,8 @@ def test_gcm_register_phone_registration_error_retries_same_sender(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(
-        register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
+    result = await register.gcm_register(
+        {"androidId": 7, "securityToken": 9}, retries=3
     )
 
     assert result["token"] == "xyz"
@@ -275,7 +279,8 @@ def test_gcm_register_phone_registration_error_retries_same_sender(
     assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_phone_registration_error_logs_transient(
+@pytest.mark.asyncio
+async def test_gcm_register_phone_registration_error_logs_transient(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """PHONE_REGISTRATION_ERROR log reports the error as transient."""
@@ -302,8 +307,8 @@ def test_gcm_register_phone_registration_error_logs_transient(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with caplog.at_level(logging.INFO):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
+        result = await register.gcm_register(
+            {"androidId": 7, "securityToken": 9}, retries=3
         )
 
     assert result["token"] == "xyz"
@@ -314,7 +319,8 @@ def test_gcm_register_phone_registration_error_logs_transient(
     )
 
 
-def test_checkin_or_register_reuses_cached_credentials(
+@pytest.mark.asyncio
+async def test_checkin_or_register_reuses_cached_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Existing credentials trigger a check-in using cached android/security tokens."""
@@ -347,14 +353,15 @@ def test_checkin_or_register_reuses_cached_credentials(
     register.gcm_check_in = types.MethodType(fake_gcm_check_in, register)
     register.register = types.MethodType(fail_register, register)
 
-    result = asyncio.run(register.checkin_or_register())
+    result = await register.checkin_or_register()
 
     assert result is cached_creds
     assert recorded["android_id"] == cached_creds["gcm"]["android_id"]
     assert recorded["security_token"] == cached_creds["gcm"]["security_token"]
 
 
-def test_gcm_register_raises_on_persistent_404(
+@pytest.mark.asyncio
+async def test_gcm_register_raises_on_persistent_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After the retry budget is exhausted on persistent 404 responses,
@@ -382,14 +389,13 @@ def test_gcm_register_raises_on_persistent_404(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 404
 
 
-def test_gcm_register_raises_on_persistent_401(
+@pytest.mark.asyncio
+async def test_gcm_register_raises_on_persistent_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After the retry budget is exhausted on persistent 401 responses
@@ -419,9 +425,7 @@ def test_gcm_register_raises_on_persistent_401(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 401
 
