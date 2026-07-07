@@ -545,23 +545,29 @@ async def async_setup_entry(  # noqa: PLR0915
             ):
                 return built
             mapping: dict[str, Callable[[], BinarySensorEntity]] = {
-                f"{entry_id}:{service_subentry_identifier}:polling": lambda: GoogleFindMyPollingSensor(
-                    coordinator,
-                    entry,
-                    subentry_key=service_subentry_key,
-                    subentry_identifier=service_subentry_identifier,
+                f"{entry_id}:{service_subentry_identifier}:polling": lambda: (
+                    GoogleFindMyPollingSensor(
+                        coordinator,
+                        entry,
+                        subentry_key=service_subentry_key,
+                        subentry_identifier=service_subentry_identifier,
+                    )
                 ),
-                f"{entry_id}:{service_subentry_identifier}:auth_status": lambda: GoogleFindMyAuthStatusSensor(
-                    coordinator,
-                    entry,
-                    subentry_key=service_subentry_key,
-                    subentry_identifier=service_subentry_identifier,
+                f"{entry_id}:{service_subentry_identifier}:auth_status": lambda: (
+                    GoogleFindMyAuthStatusSensor(
+                        coordinator,
+                        entry,
+                        subentry_key=service_subentry_key,
+                        subentry_identifier=service_subentry_identifier,
+                    )
                 ),
-                f"{entry_id}:{service_subentry_identifier}:connectivity": lambda: GoogleFindMyConnectivitySensor(
-                    coordinator,
-                    entry,
-                    subentry_key=service_subentry_key,
-                    subentry_identifier=service_subentry_identifier,
+                f"{entry_id}:{service_subentry_identifier}:connectivity": lambda: (
+                    GoogleFindMyConnectivitySensor(
+                        coordinator,
+                        entry,
+                        subentry_key=service_subentry_key,
+                        subentry_identifier=service_subentry_identifier,
+                    )
                 ),
             }
             for unique_id, factory in mapping.items():

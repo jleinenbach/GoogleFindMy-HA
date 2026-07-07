@@ -222,8 +222,8 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     dt_module.utcnow = lambda: datetime.now(UTC)
     dt_module.as_local = lambda value: value
     dt_module.UTC = UTC
-    dt_module.as_utc = (
-        lambda value: value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    dt_module.as_utc = lambda value: (
+        value if value.tzinfo is not None else value.replace(tzinfo=UTC)
     )
 
     def _parse_datetime(value: Any) -> datetime | None:

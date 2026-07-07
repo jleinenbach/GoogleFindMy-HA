@@ -125,7 +125,7 @@ def _initialize_repair_coordinator(
 
     hass = HomeAssistant()
     hass.loop = loop
-    hass.bus = SimpleNamespace(async_listen=lambda *_args, **_kwargs: (lambda: None))
+    hass.bus = SimpleNamespace(async_listen=lambda *_args, **_kwargs: lambda: None)
     hass.data = {DOMAIN: {}}
 
     created_tasks: list[asyncio.Task[Any]] = []

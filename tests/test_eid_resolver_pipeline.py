@@ -37,8 +37,9 @@ def _build_resolver(monkeypatch: pytest.MonkeyPatch) -> GoogleFindMyEIDResolver:
 
     resolver = GoogleFindMyEIDResolver.__new__(GoogleFindMyEIDResolver)
     resolver.hass = SimpleNamespace(
-        async_create_task=lambda coro,
-        name=None: asyncio.get_running_loop().create_task(coro),
+        async_create_task=lambda coro, name=None: (
+            asyncio.get_running_loop().create_task(coro)
+        ),
         async_add_executor_job=_run_in_executor,
         data={},
     )
@@ -198,11 +199,9 @@ async def test_refresh_pipeline_is_deterministic_and_invariant(
     monkeypatch.setattr(
         resolver.__class__,
         "_generate_variant",
-        lambda self,
-        key_bytes,
-        *,
-        time_counter,
-        variant: f"{variant.value}-{time_counter}".encode(),
+        lambda self, key_bytes, *, time_counter, variant: (
+            f"{variant.value}-{time_counter}".encode()
+        ),
     )
 
     await resolver._refresh_cache()

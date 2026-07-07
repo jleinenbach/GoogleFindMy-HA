@@ -31,14 +31,16 @@ class _FakeHass:
             runtime_owner = config_entry_with_cloud_runtime()
         self._entry = runtime_owner
         self.config_entries = SimpleNamespace(
-            async_entries=lambda domain: [runtime_owner]
-            if domain == DOMAIN and runtime_owner is not None
-            else []
+            async_entries=lambda domain: (
+                [runtime_owner]
+                if domain == DOMAIN and runtime_owner is not None
+                else []
+            )
         )
         self.config = SimpleNamespace(
             language="en", components=set(), top_level_components=set()
         )
-        self.bus = SimpleNamespace(async_listen_once=lambda event, cb: (lambda: None))
+        self.bus = SimpleNamespace(async_listen_once=lambda event, cb: lambda: None)
 
     async def async_add_executor_job(self, func, *args) -> Any:
         return func(*args)
@@ -75,9 +77,7 @@ def test_secrets_watcher_triggers_new_discovery(
         return True
 
     monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _fake_trigger)
-    monkeypatch.setattr(
-        discovery, "async_track_time_interval", lambda *_: (lambda: None)
-    )
+    monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
     monkeypatch.setattr(discovery.cf, "_find_entry_by_email", lambda *_: None)
 
     async def _fake_translations(hass_obj, language, category, integrations):
@@ -129,9 +129,7 @@ def test_secrets_watcher_updates_existing_entry(
         )
 
     monkeypatch.setattr(discovery, "_trigger_cloud_discovery", _fake_trigger)
-    monkeypatch.setattr(
-        discovery, "async_track_time_interval", lambda *_: (lambda: None)
-    )
+    monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
     monkeypatch.setattr(
         discovery.cf, "_find_entry_by_email", lambda *_hass, __email: None
     )

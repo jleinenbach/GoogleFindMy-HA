@@ -219,8 +219,8 @@ class TestDecryptLocationsDataFlow:
 
         # Add required methods for update_device_cache
         coordinator._is_on_hass_loop = lambda: True
-        coordinator._normalize_identity_key = (
-            lambda x: x if isinstance(x, bytes) else None
+        coordinator._normalize_identity_key = lambda x: (
+            x if isinstance(x, bytes) else None
         )
         coordinator._apply_weighted_location_fusion = lambda dev_id, slot: True
         coordinator._apply_semantic_mapping = lambda slot: None
