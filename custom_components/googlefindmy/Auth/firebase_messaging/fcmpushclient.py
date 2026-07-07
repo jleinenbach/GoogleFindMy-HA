@@ -685,9 +685,16 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             # amplification loop: the foreign push is simply not for us. The
             # caller (``_handle_message``) still selective-acks the message on
             # the normal path, so the server stops redelivering it.
-            self._log_warn_with_limit(
-                "Subtype %s in data message does not match"
-                + "app id client was registered with %s",
+            #
+            # Log at *debug*, not warning. Dropping a foreign-subtype push is an
+            # expected, benign event (Google replays orphaned/superseded
+            # subscriptions under our own android_id, e.g. on reconnect); it is
+            # handled correctly above and requires no user action. Surfacing it
+            # at warning level only alarmed users about a non-issue. It stays
+            # visible under debug logging for diagnosis.
+            self.logger.debug(
+                "Subtype %s in data message does not match "
+                "app id client was registered with %s",
                 subtype,
                 self.credentials["gcm"]["app_id"],
             )
