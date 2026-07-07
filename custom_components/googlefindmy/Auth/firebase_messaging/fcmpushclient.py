@@ -641,7 +641,21 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
     def _handle_data_message(
         self,
         msg: DataMessageStanza,
-    ) -> None:
+    ) -> bool:
+        """Decrypt and dispatch one data message; report whether it was delivered.
+
+        Returns ``True`` only when a real payload was decrypted and handed to the
+        notification callback. Returns ``False`` for the non-delivering paths that
+        the caller must still selective-ack but must NOT record as a delivery: a
+        ``deleted_messages`` control stanza, a missing-credentials guard hit, and a
+        foreign-``subtype`` drop (a push encrypted for a superseded GCM
+        registration). The caller (``_handle_message``) gates ``persistent_ids`` on
+        this return, keeping both consumers of that list accurate: the first-locate
+        reconnect proof (``fcm_receiver_ha._needs_first_locate_reconnect``) and the
+        RMQ2 login dedup (``received_persistent_id``). A decrypt failure raises (it
+        is caught upstream in ``_process_one_inbound_message``) and therefore also
+        does not count as delivered -- the raise skips the caller's append.
+        """
         self.logger.debug(
             "Received data message Stream ID: %s, Last: %s, Status: %s",
             msg.stream_id,
@@ -654,7 +668,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             == "deleted_messages"
         ):
             # The deleted_messages message does not contain data.
-            return
+            return False
         crypto_key = self._extract_header_param(
             self._app_data_by_key(msg, "crypto-key"), "dh"
         )
@@ -670,7 +684,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         # unreachable dead code for the ``None``/``{}`` states it was meant to
         # protect against.
         if not self.credentials:
-            return
+            return False
         if subtype != self.credentials["gcm"]["app_id"]:
             # Drop, do not fall through to decrypt. A subtype mismatch means this
             # push was encrypted for a *different* (superseded) GCM registration
@@ -698,7 +712,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 subtype,
                 self.credentials["gcm"]["app_id"],
             )
-            return
+            return False
 
         decrypted = self._decrypt_raw_data(
             self.credentials, crypto_key, salt, msg.raw_data
@@ -754,6 +768,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 "Unexpected exception calling notification callback\n"
             )
             self._try_increment_error_count(ErrorType.NOTIFY)
+
+        # Reached only after a real decrypt + callback dispatch: a genuine
+        # delivery, so the caller records ``persistent_id`` as delivered.
+        return True
 
     def _new_input_stream_id_available(self) -> bool:
         return self.last_input_stream_id_reported != self.input_stream_id
@@ -868,9 +886,16 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             return
 
         if isinstance(msg, DataMessageStanza):
-            self._handle_data_message(msg)
-            self.persistent_ids.append(msg.persistent_id)
-            # Acking is cheap; keep it to avoid server redelivery
+            delivered = self._handle_data_message(msg)
+            if delivered:
+                # Record only genuine deliveries. ``persistent_ids`` is both the
+                # first-locate reconnect's "has delivered" proof and the RMQ2
+                # login dedup; a dropped foreign-subtype/control push must not be
+                # counted, or a superseded push arriving before the first real
+                # locate would falsely suppress the needed reconnect.
+                self.persistent_ids.append(msg.persistent_id)
+            # Ack unconditionally (cheap): even a dropped/foreign push must be
+            # selective-acked so the server stops redelivering it.
             await self._send_selective_ack(msg.persistent_id)
         elif isinstance(msg, HeartbeatPing):
             await self._handle_ping(msg)

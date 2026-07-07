@@ -3868,8 +3868,11 @@ class FcmReceiverHA:
         STARTED transition) **and** this client has not delivered any data
         message since login.  Delivery is read from the library's
         ``persistent_ids`` list, which is reset to ``[]`` on each successful
-        login and appended to only for a ``DataMessageStanza`` — so a non-empty
-        list is a clean "has delivered" proof.  It deliberately does *not* use
+        login and appended to only when a ``DataMessageStanza`` is *actually
+        delivered* (decrypted and dispatched to the callback) — a dropped
+        foreign-subtype or control push is selective-acked but deliberately not
+        recorded, so a non-empty list stays a clean "has delivered" proof.  It
+        deliberately does *not* use
         the activity clock (``last_message_time`` / ``_entry_last_activity_
         monotonic``), which a bare heartbeat ack also advances and which would
         therefore never separate a broken fresh session (heartbeats, zero data)
