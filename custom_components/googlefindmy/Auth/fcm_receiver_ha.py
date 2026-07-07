@@ -2125,7 +2125,17 @@ class FcmReceiverHA:
                 # Identity is usable: strip only the renewable GCM token parts
                 # and keep android_id/security_token for a fast re-register.
                 gcm.pop("token", None)
-                gcm.pop("app_id", None)
+                # Rescue the superseded subscription id across the invalidation
+                # so the subsequent reregister_keeping_identity() can unregister
+                # the now-orphaned webpush subscription. Popping it outright (the
+                # pre-fix #1169 behaviour) left ``old_app_id = None`` at capture
+                # time, so the unregister guard never fired and orphaned
+                # subscriptions kept accumulating at Google (the "does not match"
+                # warnings). Keeping it in a dedicated slot also lets a
+                # restart-triggered re-register clean up the orphan.
+                orphan_app_id = gcm.pop("app_id", None)
+                if orphan_app_id:
+                    gcm["orphan_app_id"] = orphan_app_id
                 _LOGGER.info(
                     "[entry=%s] Invalidated FCM tokens; "
                     "android_id/security_token preserved for re-registration",

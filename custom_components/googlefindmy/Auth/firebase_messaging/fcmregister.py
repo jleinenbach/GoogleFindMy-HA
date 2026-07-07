@@ -1089,9 +1089,13 @@ class FcmRegister:
         security_token = self.credentials["gcm"]["security_token"]
         # Capture the OLD app_id BEFORE it is overwritten by the fresh
         # registration below, so we can unregister the superseded
-        # subscription afterwards. ``.get()`` tolerates legacy credentials
-        # that predate the app_id key.
-        old_app_id = self.credentials["gcm"].get("app_id")
+        # subscription afterwards. In the live button/restart flow the active
+        # ``app_id`` slot has already been cleared by ``_invalidate_fcm_tokens``,
+        # which rescues the value into ``orphan_app_id``; fall back to that so the
+        # unregister still fires. ``.get()`` tolerates legacy credentials that
+        # predate both keys.
+        gcm_creds = self.credentials["gcm"]
+        old_app_id = gcm_creds.get("app_id") or gcm_creds.get("orphan_app_id")
 
         # Step 1: Check-in with existing device identity
         try:
