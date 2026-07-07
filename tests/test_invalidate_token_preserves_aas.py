@@ -1,3 +1,4 @@
+# tests/test_invalidate_token_preserves_aas.py
 """Regression guard for AAS-token preservation on scoped-token invalidation.
 
 Root cause (v1.7.10): ``_invalidate_token_async`` unconditionally nulled the
