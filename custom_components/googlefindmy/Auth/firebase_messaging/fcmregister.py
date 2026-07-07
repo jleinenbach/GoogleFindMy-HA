@@ -176,6 +176,16 @@ class FcmRegister:
 
     CLIENT_TIMEOUT = ClientTimeout(total=100)
 
+    # Short, bounded timeout for the best-effort orphan unregister. It runs
+    # inside the re-registration critical path (see ``reregister_keeping_identity``
+    # step 4) AFTER the new subscription is already persisted, so a stalled
+    # ``/c2dm/register3`` delete (e.g. silently dropped traffic) must not hold
+    # the caller — and thus push reception — hostage for the full 100 s
+    # ``CLIENT_TIMEOUT``. A healthy delete round-trips in well under a second;
+    # 5 s tolerates a slow-but-alive network while capping the worst-case
+    # push-offline window.
+    UNREGISTER_TIMEOUT = ClientTimeout(total=5)
+
     def __init__(
         self,
         config: FcmRegisterConfig,
@@ -670,11 +680,15 @@ class FcmRegister:
         The ``sender`` field is retained for parity with ``gcm_register``
         and ignored by the server for a delete.
 
-        This is strictly best-effort: exactly one attempt, a fixed
-        timeout, and every failure is swallowed at ``debug`` level. An
-        unregister failure must NEVER break or delay the surrounding
-        re-registration — the new subscription is already live by the
-        time this runs (see ``reregister_keeping_identity``).
+        This is strictly best-effort: exactly one attempt, a short fixed
+        timeout (``UNREGISTER_TIMEOUT``, 5 s — NOT the class-wide 100 s
+        ``CLIENT_TIMEOUT``), and every failure is swallowed at ``debug``
+        level. An unregister failure must NEVER break or delay the
+        surrounding re-registration — the new subscription is already
+        live by the time this runs (see ``reregister_keeping_identity``).
+        Because this runs synchronously inside that critical path, the
+        short timeout bounds how long a stalled delete can keep push
+        reception offline (worst case 5 s instead of 100 s).
 
         :param app_id: OLD (superseded) GCM app_id / subtype to delete.
         :param android_id: Device android_id (stable identity; auth only).
@@ -706,7 +720,7 @@ class FcmRegister:
                 url=GCM_REGISTER3_URL,
                 headers=headers,
                 data=body,
-                timeout=self.CLIENT_TIMEOUT,
+                timeout=self.UNREGISTER_TIMEOUT,
             ) as resp:
                 response_text = await resp.text()
         except Exception as exc:  # network/aiohttp failure — best-effort

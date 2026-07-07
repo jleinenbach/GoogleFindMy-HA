@@ -59,7 +59,14 @@ class _FakeSession:
     def post(
         self, *, url: str, headers: dict[str, str], data: dict[str, Any], timeout: Any
     ) -> _FakeResponse:
-        self.calls.append({"url": url, "data": dict(data), "headers": dict(headers)})
+        self.calls.append(
+            {
+                "url": url,
+                "data": dict(data),
+                "headers": dict(headers),
+                "timeout": timeout,
+            }
+        )
         if not self._responses:
             raise AssertionError("No more responses configured for FakeSession")
         return self._responses.pop(0)
@@ -1075,6 +1082,29 @@ async def test_reregister_unregisters_old_subscription() -> None:
     assert call["headers"]["Authorization"] == (
         f"AidLogin {_ANDROID_ID}:{_SECURITY_TOKEN}"
     )
+
+
+@pytest.mark.asyncio
+async def test_unregister_uses_short_bounded_timeout() -> None:
+    """(a2) The best-effort unregister runs inside the re-registration critical
+    path, so it MUST use the short ``UNREGISTER_TIMEOUT`` (5 s), never the
+    class-wide 100 s ``CLIENT_TIMEOUT`` — otherwise a stalled delete keeps push
+    reception offline for up to 100 s after the new subscription is already
+    persisted (Codex P2)."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    await register.reregister_keeping_identity()
+
+    assert len(session.calls) == 1
+    used = session.calls[0]["timeout"]
+    assert used is FcmRegister.UNREGISTER_TIMEOUT
+    assert used is not FcmRegister.CLIENT_TIMEOUT
+    assert used.total == 5
+    # Intent guard: the cleanup bound must stay well below the register path.
+    assert used.total < FcmRegister.CLIENT_TIMEOUT.total
 
 
 @pytest.mark.asyncio
