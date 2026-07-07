@@ -672,12 +672,26 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         if not self.credentials:
             return
         if subtype != self.credentials["gcm"]["app_id"]:
+            # Drop, do not fall through to decrypt. A subtype mismatch means this
+            # push was encrypted for a *different* (superseded) GCM registration
+            # -- e.g. an old client instance still listening after an FCM
+            # re-registration minted a fresh ``wp:...#<uuid>`` app_id. Its key
+            # material can never match, so ``_decrypt_raw_data`` below would fail
+            # with a guaranteed ``ECEException``/InvalidTag. That failure is
+            # caught in ``_process_one_inbound_message`` and counts toward
+            # ``_consecutive_decrypt_failures``, which at the threshold escalates
+            # to a *bogus* re-registration -- minting yet another app_id and
+            # provoking the next stale client. Returning here breaks that
+            # amplification loop: the foreign push is simply not for us. The
+            # caller (``_handle_message``) still selective-acks the message on
+            # the normal path, so the server stops redelivering it.
             self._log_warn_with_limit(
                 "Subtype %s in data message does not match"
                 + "app id client was registered with %s",
                 subtype,
                 self.credentials["gcm"]["app_id"],
             )
+            return
 
         decrypted = self._decrypt_raw_data(
             self.credentials, crypto_key, salt, msg.raw_data

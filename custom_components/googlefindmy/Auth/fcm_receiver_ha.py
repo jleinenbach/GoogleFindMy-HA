@@ -3462,6 +3462,27 @@ class FcmReceiverHA:
             except Exception:  # noqa: BLE001
                 pass
 
+        # 4b. Cancel any in-flight data-starvation watchdog reconnect task and
+        #     drop its backoff/throttle state for this entry, mirroring the
+        #     teardown path ``_purge_entry_tokens``. Step 2 cancels the
+        #     supervisor and step 4 stops the client, but a ``zombie`` reconnect
+        #     (``_reconnect_for_starvation``, which awaits
+        #     ``_force_first_locate_reconnect``) runs in a SEPARATE task; left
+        #     alive it would race step 5 and build a *second* live
+        #     ``FcmPushClient`` for the same entry -- the two-instance symptom
+        #     behind the cross-registration subtype-mismatch / InvalidTag
+        #     reports. Fire-and-forget ``cancel()`` (no await), exactly like
+        #     ``_purge_entry_tokens``: the zombie task awaits a fresh STARTED pc
+        #     that only the supervisor's outer loop (restarted just below in
+        #     step 5) can build, so awaiting it here would deadlock (see the
+        #     ``_zombie_reconnect_tasks`` note in ``__init__``).
+        self._zombie_reconnect_attempts.pop(entry_id, None)
+        self._zombie_next_allowed_reconnect_monotonic.pop(entry_id, None)
+        self._zombie_next_eval_monotonic.pop(entry_id, None)
+        zombie_task = self._zombie_reconnect_tasks.pop(entry_id, None)
+        if zombie_task is not None and not zombie_task.done():
+            zombie_task.cancel()
+
         # 5. Restart the supervisor (will re-register with fresh tokens)
         cache = self._entry_caches.get(entry_id)
         await self._start_supervisor_for_entry(entry_id, cache)
