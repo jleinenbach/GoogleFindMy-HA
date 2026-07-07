@@ -1327,10 +1327,11 @@ class GoogleFindMyLocateButton(GoogleFindMyButtonEntity):
 class GoogleFindMyTokenRefreshButtonBase(
     GoogleFindMyEntity, ButtonEntity, RestoreEntityType
 ):
-    """Base class for token regeneration buttons with shared cooldown logic.
+    """Base class for token regeneration buttons with per-type cooldown logic.
 
-    Token regeneration buttons are disabled by default and share a cooldown
-    across all token refresh operations for the same config entry.
+    Token regeneration buttons are disabled by default. The refresh cooldown
+    is scoped per token type (see ``_token_type``), so regenerating one token
+    only rate-limits its own button and leaves the sibling button available.
     """
 
     _attr_has_entity_name = True
@@ -1385,11 +1386,15 @@ class GoogleFindMyTokenRefreshButtonBase(
 
     @property
     def available(self) -> bool:
-        """Return True if the button is not on cooldown."""
+        """Return True if the button is not on cooldown.
+
+        The cooldown is scoped per token type, so a refresh of one token
+        (e.g. FCM) does not disable the sibling button (e.g. ADM).
+        """
         from .Auth.token_refresh import is_refresh_on_cooldown
 
         entry_id = self.entry_id or "default"
-        on_cooldown, _ = is_refresh_on_cooldown(entry_id)
+        on_cooldown, _ = is_refresh_on_cooldown(entry_id, self._token_type)
         return not on_cooldown
 
     @property
@@ -1398,7 +1403,7 @@ class GoogleFindMyTokenRefreshButtonBase(
         from .Auth.token_refresh import get_cooldown_remaining
 
         entry_id = self.entry_id or "default"
-        remaining = get_cooldown_remaining(entry_id)
+        remaining = get_cooldown_remaining(entry_id, self._token_type)
 
         attrs: dict[str, Any] = {
             "cooldown_seconds": TOKEN_REFRESH_COOLDOWN_S,
