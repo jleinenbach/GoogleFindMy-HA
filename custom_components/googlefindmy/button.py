@@ -1450,7 +1450,13 @@ class GoogleFindMyRegenerateFcmTokenButton(GoogleFindMyTokenRefreshButtonBase):
         """Handle the button press to regenerate FCM token."""
         from .Auth.token_refresh import async_regenerate_fcm_token
 
-        entry_id = self.entry_id or "unknown"
+        # Fall back to "default", matching ``available``/``extra_state_attributes``
+        # and ``__init__`` above. The value becomes the cooldown key
+        # (``async_regenerate_fcm_token`` records under it); a divergent fallback
+        # here (e.g. "unknown") would record the cooldown under a different key
+        # than ``available`` reads, so an ``entry_id is None`` button could never
+        # see its own cooldown. Keep every fallback identical.
+        entry_id = self.entry_id or "default"
 
         if not self.available:
             _LOGGER.info(
@@ -1524,7 +1530,11 @@ class GoogleFindMyRegenerateAdmTokenButton(GoogleFindMyTokenRefreshButtonBase):
         """Handle the button press to regenerate ADM token."""
         from .Auth.token_refresh import async_regenerate_adm_token
 
-        entry_id = self.entry_id or "unknown"
+        # Fall back to "default", matching ``available`` above. This value is the
+        # cooldown key; a divergent fallback (e.g. "unknown") would record the
+        # cooldown under a different key than ``available`` reads, so an
+        # ``entry_id is None`` button could never see its own cooldown.
+        entry_id = self.entry_id or "default"
 
         if not self.available:
             _LOGGER.info(

@@ -2,7 +2,7 @@
 """Unit tests for token regeneration functionality.
 
 Tests cover:
-- Cooldown mechanism (shared across all token refresh operations)
+- Cooldown mechanism (scoped per entry and per token type)
 - AAS token regeneration
 - ADM token regeneration
 - Token dependency handling (ADM depends on AAS)

@@ -690,6 +690,14 @@ class FcmRegister:
         short timeout bounds how long a stalled delete can keep push
         reception offline (worst case 5 s instead of 100 s).
 
+        No retry by design: since the receiver now hard-drops foreign-subtype
+        pushes at the decrypt boundary (see ``fcmpushclient`` subtype guard), a
+        failed unregister is merely cosmetic -- the orphaned subscription can
+        only produce benign "Subtype does not match" debug logs, never a
+        functional fault or the decrypt-failure amplification loop. Retrying a
+        best-effort cleanup would add latency to the critical re-registration
+        path for zero correctness benefit, so a single attempt is intentional.
+
         :param app_id: OLD (superseded) GCM app_id / subtype to delete.
         :param android_id: Device android_id (stable identity; auth only).
         :param security_token: Device security_token (auth only).

@@ -72,8 +72,36 @@ async def test_non_scoped_kind_still_clears_aas() -> None:
         "aas", "user@example.com", cache=cache
     )
 
-    # A non-scoped kind falls through and clears the AAS (defensive path).
+    # The explicit "aas" kind clears the AAS (intentional, documented path).
     assert cache._data.get(DATA_AAS_TOKEN) is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_kind_preserves_aas_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Defensive tail: an unrecognized kind must NOT clear the AAS master.
+
+    Only "spot"/"adm" (scoped) and the explicit "aas" kind are handled; any
+    future/unknown kind must fall into the whitelist tail, which logs a warning
+    and clears nothing (in particular it must never null the parent AAS
+    credential -- the destructive default this hardening removes).
+    """
+    cache = _DummyCache()
+    await cache.set(DATA_AAS_TOKEN, "aas_et/master")
+    await cache.set("spot_token_user@example.com", "ya29.scoped")
+
+    with caplog.at_level("WARNING"):
+        await spot_request_module._invalidate_token_async(
+            "nova", "user@example.com", cache=cache
+        )
+
+    # Nothing cleared: AAS master and the unrelated scoped token both survive.
+    assert cache._data.get(DATA_AAS_TOKEN) == "aas_et/master"
+    assert cache._data.get("spot_token_user@example.com") == "ya29.scoped"
+    assert any(
+        "Unexpected token kind" in record.getMessage() for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

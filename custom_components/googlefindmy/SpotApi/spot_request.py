@@ -186,16 +186,28 @@ async def _invalidate_token_async(
         await cache.set(f"spot_token_{username}", None)
     elif kind == "adm":
         await cache.set(f"adm_token_{username}", None)
-    else:
-        # Only clear the quasi-permanent AAS master token when the failing
-        # token is NOT a short-lived scoped token. A scoped (spot/adm) auth
-        # failure is routinely transient (an expired scoped token); nulling
-        # the AAS here would destroy the parent credential in the volatile
-        # cache and force a user-visible reauth, even though the retry can
-        # mint a fresh scoped token from the still-valid AAS. A genuinely
-        # revoked AAS is handled separately via _clear_aas_token_async /
-        # InvalidAasTokenError.
+    elif kind == "aas":
+        # Intentional, explicit clear of the quasi-permanent AAS master token.
+        # This branch is only taken for a genuinely non-scoped kind; a scoped
+        # (spot/adm) auth failure is routinely transient (an expired scoped
+        # token), and nulling the AAS there would destroy the parent credential
+        # in the volatile cache and force a user-visible reauth, even though the
+        # retry can mint a fresh scoped token from the still-valid AAS. A
+        # genuinely revoked AAS is normally handled via _clear_aas_token_async /
+        # InvalidAasTokenError; this explicit "aas" kind mirrors that intent.
         await cache.set(DATA_AAS_TOKEN, None)
+    else:
+        # Defensive whitelist tail: an unrecognized token kind must NEVER fall
+        # through to the destructive AAS-master clear. The sole caller
+        # (_pick_auth_token_async) currently yields only "spot"/"adm"; a future
+        # third scoped kind added there would otherwise silently null the parent
+        # AAS credential (the exact destructive default this hardening removes).
+        # Log and no-op instead, leaving every cached token untouched.
+        _LOGGER.warning(
+            "Unexpected token kind %r in _invalidate_token_async; no token "
+            "cleared (AAS master preserved)",
+            kind,
+        )
 
 
 async def _clear_aas_token_async(*, cache: TokenCache | None = None) -> None:
