@@ -408,8 +408,22 @@ class GoogleFindMyMapView(HomeAssistantView):
                 if entity_id in history:
                     for state in history[entity_id]:
                         try:
-                            lat = float(state.attributes.get("latitude"))
-                            lon = float(state.attributes.get("longitude"))
+                            # Stale/blank recorded states withhold the plain
+                            # latitude/longitude keys; the last known fix lives in
+                            # the recorder-only last_latitude/last_longitude keys.
+                            # Fall back to those so the history still plots the
+                            # point (a TypeError from a fully missing pair is
+                            # caught below and skips the sample).
+                            lat = float(
+                                state.attributes.get(
+                                    "latitude", state.attributes.get("last_latitude")
+                                )
+                            )
+                            lon = float(
+                                state.attributes.get(
+                                    "longitude", state.attributes.get("last_longitude")
+                                )
+                            )
                             # Read the accuracy value AND its estimated-provenance
                             # flag from the same authoritative source. ``accuracy_m``
                             # is the stable producer attribute; it survives Home

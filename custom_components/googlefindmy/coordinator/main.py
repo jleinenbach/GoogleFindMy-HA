@@ -524,8 +524,11 @@ def _sync_get_last_gps_from_history(
 
         last_state = samples[-1]
         attrs = getattr(last_state, "attributes", {}) or {}
-        lat = attrs.get("latitude")
-        lon = attrs.get("longitude")
+        # Stale/blank recorded states withhold the plain latitude/longitude keys;
+        # the last known fix lives in the recorder-only last_latitude/last_longitude
+        # keys. Fall back to those so history reconstruction still finds a position.
+        lat = attrs.get("latitude", attrs.get("last_latitude"))
+        lon = attrs.get("longitude", attrs.get("last_longitude"))
         if lat is None or lon is None:
             return None
 
@@ -1664,8 +1667,15 @@ class GoogleFindMyCoordinator(
 
             state = self.hass.states.get(entity_id)
             if state:
-                lat = state.attributes.get("latitude")
-                lon = state.attributes.get("longitude")
+                # Stale/blank states withhold the plain latitude/longitude keys;
+                # fall back to the recorder-only last_latitude/last_longitude so
+                # the snapshot keeps the last known position.
+                lat = state.attributes.get(
+                    "latitude", state.attributes.get("last_latitude")
+                )
+                lon = state.attributes.get(
+                    "longitude", state.attributes.get("last_longitude")
+                )
                 # Same authoritative read as the history path: take accuracy
                 # from accuracy_m (stable producer attribute) over the volatile
                 # gps_accuracy and carry accuracy_estimated, so a fallback radius

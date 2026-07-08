@@ -925,6 +925,47 @@ async def test_restore_without_timestamp_leaves_last_seen_unset(
     assert entity._get_location_age(seeded) is None
 
 
+@pytest.mark.asyncio
+async def test_restore_falls_back_to_recorder_only_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A state recorded while stale withholds the plain latitude/longitude keys.
+
+    The producer strips them so HA does not republish a withheld position as the
+    live GPS attribute (Codex #1177) and keeps the last known fix in the
+    recorder-only last_latitude/last_longitude keys. Restore must fall back to
+    those so a restart still recovers the position instead of coming up empty.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    old_epoch = time.time() - (DEFAULT_STALE_THRESHOLD + 5000)
+    old_iso = (
+        datetime.fromtimestamp(old_epoch, tz=UTC).isoformat().replace("+00:00", "Z")
+    )
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            # No plain latitude/longitude: this state was stale at record time,
+            # so the producer stripped them. Only the recorder-only keys carry
+            # the last known fix.
+            "last_latitude": 10.0,
+            "last_longitude": 20.0,
+            "accuracy_m": 50,
+            "last_seen": old_iso,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    seeded = coordinator.primed["data"]
+    # Position recovered via the recorder-only fallback keys.
+    assert seeded["latitude"] == 10.0
+    assert seeded["longitude"] == 20.0
+    # And the recovered fix still carries its true (stale) age.
+    assert seeded["last_seen"] == pytest.approx(old_epoch, abs=1.0)
+
+
 # ---------------------------------------------------------------------------
 # Regression tests for the stale-threshold retune (spurious "unknown" flapping)
 # and the latent accuracy-less-fallback bug B1 (PR #201 follow-up audit).
@@ -1109,13 +1150,14 @@ def test_accuracy_less_row_ties_all_metadata_to_display_row() -> None:
     assert attrs["location_age"] == 1980  # round(2000/60)*60
 
 
-def test_stale_branch_keeps_recorder_positional_attributes() -> None:
-    """Codex BSkando #202 follow-up: a stale state must KEEP the recorder-facing
-    producer keys (latitude/longitude/accuracy_m) so async_added_to_hass() can
-    re-seed the cache after a restart and map_view retains the location history.
-    These keys are distinct from the live entity coordinates (which stay blanked
-    while stale) and share the same display row as last_latitude/last_longitude,
-    so no #202 divergence is reintroduced."""
+def test_stale_branch_strips_live_coordinate_keys() -> None:
+    """Codex #1177: a stale state must NOT leave the plain latitude/longitude keys
+    in extra_state_attributes. HA merges extra_state_attributes last and exposes
+    those keys as the device_tracker GPS attributes, so keeping them would
+    republish the withheld (stale) position as the live location for
+    closest()/proximity/the built-in map. The last known fix is exposed via the
+    recorder-only last_latitude/last_longitude keys instead; accuracy_m is not an
+    HA GPS attribute and stays for restore/history/snapshot."""
 
     coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
     coordinator._row = {
@@ -1136,10 +1178,12 @@ def test_stale_branch_keeps_recorder_positional_attributes() -> None:
     # Live tracker coordinates are withheld while stale.
     assert entity._attr_latitude is None
     assert entity._attr_longitude is None
-    # But the recorder-facing producer keys are preserved for restore + maps.
-    assert attrs["latitude"] == 12.0
-    assert attrs["longitude"] == 22.0
+    # The plain GPS keys must be stripped so HA does not republish the stale
+    # position as the live location (the #1177 leak).
+    assert "latitude" not in attrs
+    assert "longitude" not in attrs
+    # accuracy_m is not an HA GPS attribute; it stays for restore/history.
     assert attrs["accuracy_m"] == 8.0
-    # The dedicated last-known keys remain part of the public attribute contract.
+    # The last known position is exposed via the recorder-only keys instead.
     assert attrs["last_latitude"] == 12.0
     assert attrs["last_longitude"] == 22.0
