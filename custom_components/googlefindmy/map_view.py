@@ -172,6 +172,30 @@ def _fallback_recorded_accuracy_pair(
     return raw, (bool(flag) if flag is not None else None)
 
 
+_PARSE_LAST_SEEN_TIMESTAMP: Any = None
+
+
+def _resolve_parse_last_seen_timestamp() -> Any:
+    """Import the canonical last_seen timestamp parser lazily.
+
+    ``parse_last_seen_timestamp`` is the single source of truth for turning a
+    recorded ``last_seen``/``last_seen_utc`` attribute (numeric epoch or ISO 8601
+    string) back into epoch seconds. Resolving it here (re-exported on
+    ``.coordinator``, exactly like ``_resolve_safe_accuracy``) keeps the map
+    history timestamps in lockstep with the device_tracker restore path instead
+    of re-deriving the parsing in the view. The stub coordinator module exposes
+    it as a direct attribute (see the test loader), mirroring ``safe_accuracy``,
+    so no in-view fallback copy is needed.
+    """
+
+    global _PARSE_LAST_SEEN_TIMESTAMP
+    if _PARSE_LAST_SEEN_TIMESTAMP is None:
+        from .coordinator import parse_last_seen_timestamp as _parse
+
+        _PARSE_LAST_SEEN_TIMESTAMP = _parse
+    return _PARSE_LAST_SEEN_TIMESTAMP
+
+
 # ------------------------------- HTML Helpers -------------------------------
 
 
@@ -388,6 +412,7 @@ class GoogleFindMyMapView(HomeAssistantView):
         safe_accuracy = _resolve_safe_accuracy()
         is_valid_accuracy = _resolve_is_valid_accuracy()
         recorded_accuracy_pair = _resolve_recorded_accuracy_pair()
+        parse_last_seen_timestamp = _resolve_parse_last_seen_timestamp()
         if entity_id:
             try:
                 from homeassistant.components.recorder import get_instance
@@ -455,20 +480,26 @@ class GoogleFindMyMapView(HomeAssistantView):
                             if accuracy_filter > 0 and acc > accuracy_filter:
                                 continue
 
-                            # Determine timestamp (prefer last_seen attribute if available for precision)
+                            # Determine timestamp (prefer the recorded report
+                            # time over the recorder write time for precision).
+                            # Parse ``last_seen`` first, then ``last_seen_utc`` as
+                            # the same fallback, through the canonical parser --
+                            # mirroring the device_tracker restore path, which
+                            # accepts recorder-only rows carrying only
+                            # ``last_seen_utc``. Without the second key those
+                            # restored/legacy rows would plot at ``last_updated``
+                            # (the recorder write/restart time), making a stale
+                            # fix appear fresh and sort/dedupe incorrectly.
                             ts = state.last_updated.timestamp()
-                            raw_last_seen = state.attributes.get("last_seen")
-                            if raw_last_seen is not None:
-                                try:
-                                    ts = float(raw_last_seen)
-                                except (ValueError, TypeError):
-                                    if isinstance(raw_last_seen, str):
-                                        try:
-                                            ts = datetime.fromisoformat(
-                                                raw_last_seen.replace("Z", "+00:00")
-                                            ).timestamp()
-                                        except ValueError:
-                                            pass
+                            parsed_ts = parse_last_seen_timestamp(
+                                state.attributes.get("last_seen")
+                            )
+                            if parsed_ts is None:
+                                parsed_ts = parse_last_seen_timestamp(
+                                    state.attributes.get("last_seen_utc")
+                                )
+                            if parsed_ts is not None:
+                                ts = parsed_ts
 
                             if ts in seen_timestamps:
                                 continue
