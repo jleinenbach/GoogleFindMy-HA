@@ -73,6 +73,13 @@ from .ha_typing import RestoreEntity, TrackerEntity, callback
 
 _LOGGER = logging.getLogger(__name__)
 
+# Sentinel distinguishing "caller passed no row" (fall back to the live
+# current-or-cache lookup) from "caller explicitly passed a row" (which may
+# legitimately be None -> no data). Without this, an explicit None argument
+# would silently fall back to the internal lookup and reintroduce a second
+# source of truth for the published age/status (Codex #202).
+_ROW_UNSET: Any = object()
+
 # Read-only mirror of coordinator state; no I/O performed per-entity.
 PARALLEL_UPDATES = 0
 
@@ -1071,9 +1078,37 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         except (TypeError, ValueError):
             return DEFAULT_STALE_THRESHOLD
 
-    def _get_location_age(self) -> float | None:
-        """Return the age of the location data in seconds, or None if unknown."""
-        data = self._current_row() or self._last_good_accuracy_data
+    def _select_display_row(self) -> dict[str, Any] | None:
+        """Return the single row whose data is actually published.
+
+        This is the one source of truth for every published value (coordinates,
+        name, age, status, extra attributes): the current row if it carries a
+        usable accuracy, otherwise the last accuracy-bearing fix. A fresh update
+        can arrive with valid lat/lon yet no accuracy; publishing coordinates
+        from the cached fix while deriving age/status/attributes from the
+        accuracy-less current row would show cached coordinates with fresh
+        metadata (Codex #202). Binding every consumer to this row keeps the
+        published snapshot internally consistent.
+        """
+        current = self._current_row()
+        if current and current.get("accuracy") is not None:
+            return current
+        return self._last_good_accuracy_data
+
+    def _get_location_age(self, row: Any = _ROW_UNSET) -> float | None:
+        """Return the age of the location data in seconds, or None if unknown.
+
+        With no argument the age reflects the live current-or-cache lookup (used
+        by the liveness gate). When an explicit ``row`` is passed it is used
+        verbatim, so callers can tie the published age to the same row that
+        produced the coordinates (``_ROW_UNSET`` distinguishes "omitted" from an
+        explicit ``None``).
+        """
+        data = (
+            (self._current_row() or self._last_good_accuracy_data)
+            if row is _ROW_UNSET
+            else row
+        )
         if not data:
             return None
         last_seen = data.get("last_seen")
@@ -1093,9 +1128,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         threshold = self._get_stale_threshold()
         return age > threshold
 
-    def _get_location_status(self) -> str:
-        """Return the location status string based on data age."""
-        age = self._get_location_age()
+    def _get_location_status(self, row: Any = _ROW_UNSET) -> str:
+        """Return the location status string based on data age.
+
+        Accepts an explicit ``row`` so the published status describes the age of
+        the same row that produced the coordinates (Codex #202).
+        """
+        age = self._get_location_age(row)
         if age is None:
             return "unknown"
         threshold = self._get_stale_threshold()
@@ -1127,6 +1166,14 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         """
         stale = self._is_location_stale()
 
+        # Single source of truth for every published value below (coordinates,
+        # name, age, status, extra attributes). Binding them all to this one
+        # row prevents publishing cached coordinates with fresh metadata from an
+        # accuracy-less current row (Codex #202). The liveness gate above stays
+        # separate on purpose: a live device sending accuracy-less rows must
+        # keep showing its last good position instead of flapping to "unknown".
+        display_data = self._select_display_row()
+
         # --- latitude / longitude / location_accuracy ---
         if stale:
             self._attr_latitude = None
@@ -1134,25 +1181,19 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             self._attr_location_accuracy = 0.0
             self._attr_location_name = None
         else:
-            # Prefer the current row, but only if it carries a usable accuracy.
-            # A fresh update can arrive with valid lat/lon yet no accuracy; in
-            # that case fall back to the last fix that DID carry accuracy so an
-            # accuracy-less update does not blank out otherwise-valid
-            # coordinates (spurious "unknown"). The write path keeps
-            # ``_last_good_accuracy_data`` restricted to accuracy-bearing fixes.
-            data = self._current_row()
-            if not data or data.get("accuracy") is None:
-                data = self._last_good_accuracy_data
-            if not data or data.get("accuracy") is None:
-                # Accuracy must be present for a valid GPS fix; without it
-                # HA's zone engine raises TypeError on comparison.
+            # ``display_data`` already prefers the current row and only falls
+            # back to the cached accuracy-bearing fix when the current row lacks
+            # a usable accuracy. A row without accuracy cannot be published:
+            # HA's zone engine raises TypeError on comparison, so blank the
+            # coordinates in that case.
+            if not display_data or display_data.get("accuracy") is None:
                 self._attr_latitude = None
                 self._attr_longitude = None
                 self._attr_location_accuracy = 0.0
             else:
-                self._attr_latitude = data.get("latitude")
-                self._attr_longitude = data.get("longitude")
-                acc = data.get("accuracy")
+                self._attr_latitude = display_data.get("latitude")
+                self._attr_longitude = display_data.get("longitude")
+                acc = display_data.get("accuracy")
                 try:
                     self._attr_location_accuracy = (
                         float(acc) if acc is not None else 0.0
@@ -1160,14 +1201,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 except (TypeError, ValueError):
                     self._attr_location_accuracy = 0.0
 
-            # --- location_name ---
-            name_data = self._current_row()
-            if not name_data:
+            # --- location_name (same display row as the coordinates) ---
+            if not display_data:
                 self._attr_location_name = None
             else:
-                lat = name_data.get("latitude")
-                lon = name_data.get("longitude")
-                sem = name_data.get("semantic_name")
+                lat = display_data.get("latitude")
+                lon = display_data.get("longitude")
+                sem = display_data.get("semantic_name")
                 if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
                     # Coordinates present -> let HA zone engine decide.
                     self._attr_location_name = None
@@ -1179,13 +1219,20 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 else:
                     self._attr_location_name = sem
 
-        # --- extra_state_attributes ---
-        row = self._current_row()
-        attributes: dict[str, Any] = _as_ha_attributes(row) or {}
+        # --- extra_state_attributes (bound to the SAME display row) ---
+        # Deriving from display_data keeps the attribute set from exposing a
+        # position that differs from the published coordinates (Codex #202).
+        attributes: dict[str, Any] = _as_ha_attributes(display_data) or {}
+        if self._attr_latitude is None:
+            # Coordinates were withheld (stale, or a display row without
+            # accuracy). Strip the positional keys so the attributes never
+            # resurrect coordinates the tracker is deliberately not publishing.
+            for _pos_key in ("latitude", "longitude", "accuracy_m", "altitude_m"):
+                attributes.pop(_pos_key, None)
 
         attributes["google_device_id"] = self.device_id
 
-        location_age = self._get_location_age()
+        location_age = self._get_location_age(display_data)
         # Use the _opt() helper so options-first lookups stay consistent with
         # the rest of the integration and mypy --strict no longer flags the
         # config_entry attribute access (Any | None has no attribute options).
@@ -1204,17 +1251,17 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # When show_location_age is False the attribute is omitted entirely.
         # Absolute timestamps remain available via the "last_seen" attribute
         # and the sensor.*_last_seen entity.
-        attributes["location_status"] = self._get_location_status()
+        attributes["location_status"] = self._get_location_status(display_data)
 
-        if stale:
-            stale_data = self._current_row() or self._last_good_accuracy_data
-            if stale_data:
-                last_lat = stale_data.get("latitude")
-                last_lon = stale_data.get("longitude")
-                if last_lat is not None:
-                    attributes["last_latitude"] = last_lat
-                if last_lon is not None:
-                    attributes["last_longitude"] = last_lon
+        if stale and display_data:
+            # Main coordinates are withheld while stale; surface the last known
+            # position via dedicated keys instead (same display row).
+            last_lat = display_data.get("latitude")
+            last_lon = display_data.get("longitude")
+            if last_lat is not None:
+                attributes["last_latitude"] = last_lat
+            if last_lon is not None:
+                attributes["last_longitude"] = last_lon
 
         self._attr_extra_state_attributes = attributes
 
@@ -1313,9 +1360,13 @@ class GoogleFindMyLastLocationTracker(GoogleFindMyDeviceTracker):
         """Never stale - always show last known location."""
         return False
 
-    def _get_location_status(self) -> str:
-        """Return location status - always shows 'last_known' when data is aged."""
-        age = self._get_location_age()
+    def _get_location_status(self, row: Any = _ROW_UNSET) -> str:
+        """Return location status - always shows 'last_known' when data is aged.
+
+        Mirrors the parent's ``row`` parameter so the published status describes
+        the same row that produced the coordinates (Codex #202).
+        """
+        age = self._get_location_age(row)
         if age is None:
             return "unknown"
         threshold = self._get_stale_threshold()
