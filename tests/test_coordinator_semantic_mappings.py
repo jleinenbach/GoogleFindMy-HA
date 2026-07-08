@@ -82,8 +82,8 @@ def _base_coordinator(
     coordinator.async_set_updated_data = lambda *_args, **_kwargs: None
     coordinator.push_updated = lambda *_args, **_kwargs: None
     coordinator._apply_report_type_cooldown = lambda *_args, **_kwargs: None
-    coordinator._should_preserve_precise_home_coordinates = (
-        lambda *_args, **_kwargs: False
+    coordinator._should_preserve_precise_home_coordinates = lambda *_args, **_kwargs: (
+        False
     )
     coordinator._normalize_coords = lambda *_args, **_kwargs: True
     coordinator._is_significant_update = lambda *_args, **_kwargs: True

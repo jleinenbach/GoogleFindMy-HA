@@ -590,3 +590,90 @@ async def test_non_ece_poison_never_escalates(
     assert client.credential_error is None
     assert client._send_selective_ack.await_count == count
     assert not _outer_catch_was_hit(caplog)
+
+
+# ---------------------------------------------------------------------------
+# RMQ2 dedup parity for the poison path (Codex follow-up on PR #1173): a
+# selective-acked poison push must also be recorded in ``persistent_ids`` so the
+# next ``_login`` reports it in ``received_persistent_id``. The decrypt-failure
+# raise unwinds ``_handle_message`` before its own append, so the ack site in
+# ``_process_one_inbound_message`` records it instead -- but only on a real ack.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_poison_ack_records_persistent_id_for_rmq2(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A selective-acked poison push is recorded in ``persistent_ids`` (RMQ2 dedup).
+
+    Without this the next ``_login`` omits the id from ``received_persistent_id``,
+    so the server replays the same undecryptable push across reconnects (repeated
+    decrypt failures drifting toward a bogus re-registration).
+    """
+    caplog.set_level(logging.WARNING)
+    client = FcmPushClientSlim()
+    msg = make_poison_data_message("poison-rmq2-001", kind="padding")
+    client._receive_msg = _stream_messages(client, [msg])
+    client._handle_message = _make_handle_side_effect(
+        [binascii.Error("Incorrect padding")]
+    )
+
+    await client._listen()
+
+    client._send_selective_ack.assert_awaited_once_with("poison-rmq2-001")
+    assert client.persistent_ids == ["poison-rmq2-001"]
+
+
+@pytest.mark.asyncio
+async def test_dead_writer_poison_not_recorded_for_rmq2(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A poison push whose ack fails (dead writer) is NOT recorded for RMQ2.
+
+    ``_ack_or_disconnect`` returns ``False`` when the writer half is dead, so the
+    push was never acknowledged. Recording it would wrongly tell RMQ2 the server
+    may drop it; instead the supervisor reconnects, the server replays it, and a
+    later successful ack records it then. ``persistent_ids`` must stay empty.
+    """
+    caplog.set_level(logging.WARNING)
+    client = FcmPushClientSlim()
+    msg = make_poison_data_message("poison-rmq2-002", kind="padding")
+    client._receive_msg = _stream_messages(client, [msg])
+    client._handle_message = _make_handle_side_effect(
+        [binascii.Error("Incorrect padding")]
+    )
+    client._send_selective_ack = AsyncMock(side_effect=OSError("writer half-dead"))
+
+    await client._listen()
+
+    assert client.do_listen is False
+    assert client.persistent_ids == []
+
+
+@pytest.mark.asyncio
+async def test_escalating_ece_not_recorded_but_prior_acks_are(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On stale-key escalation only the acked ECEs are recorded, not the escalating one.
+
+    The nth consecutive ECE raises ``CredentialDecryptionError`` *before* the ack
+    site, so it is never acked and never recorded. The first n-1 were acked, so
+    ``persistent_ids`` holds exactly those n-1 ids for RMQ2 dedup.
+    """
+    caplog.set_level(logging.ERROR)
+    client = FcmPushClientSlim()
+    n = _MAX_CONSECUTIVE_DECRYPT_FAILURES
+    messages = [
+        make_poison_data_message(f"ece-rmq2-{i:03d}", kind="value") for i in range(n)
+    ]
+    client._receive_msg = _stream_messages(client, messages)
+    client._handle_message = _make_handle_side_effect(
+        [http_ece.ECEException("Decryption error: bad auth tag")] * n
+    )
+
+    await client._listen()
+
+    assert isinstance(client.credential_error, CredentialDecryptionError)
+    expected = [f"ece-rmq2-{i:03d}" for i in range(n - 1)]
+    assert client.persistent_ids == expected

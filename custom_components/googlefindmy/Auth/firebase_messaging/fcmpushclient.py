@@ -307,12 +307,22 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
         # Monotonic timestamp of this client's STARTED transition (set in
-        # ``_handle_message`` on a successful login, alongside ``persistent_ids``).
+        # ``_handle_message`` on a successful login, alongside the
+        # ``persistent_ids`` and ``_first_data_message_delivered`` resets).
         # Consumers measure "session age since STARTED" from this instead of the
         # supervisor's pre-start timestamp, which is recorded before ``start()``
         # and can trail the actual STARTED transition by the connection budget
         # (~15-20s). ``None`` until the client first reaches STARTED.
         self._started_monotonic: float | None = None
+        # First-locate reconnect "has delivered" proof, kept *separate* from
+        # ``persistent_ids``. ``persistent_ids`` must record every selective-acked
+        # message for the RMQ2 login dedup (``received_persistent_id``); this flag
+        # must count only genuine deliveries (decrypted + dispatched). The two
+        # contracts conflict on one field, so they are split: this flag is set
+        # only when ``_handle_data_message`` reports a real delivery and reset to
+        # ``False`` on each successful login, alongside ``persistent_ids = []``.
+        # Consumed cross-module by ``fcm_receiver_ha._needs_first_locate_reconnect``.
+        self._first_data_message_delivered: bool = False
         self.tasks: list[asyncio.Task[None]] = []
         # Set by ``_listen`` when stored FCM key material is found to be
         # corrupt/undecodable. The supervisor reads this after the listener
@@ -641,7 +651,29 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
     def _handle_data_message(
         self,
         msg: DataMessageStanza,
-    ) -> None:
+    ) -> bool:
+        """Decrypt and dispatch one data message; report whether it was delivered.
+
+        Returns ``True`` only when a real payload was decrypted and handed to the
+        notification callback. Returns ``False`` for the non-delivering paths that
+        the caller must still selective-ack but must NOT count as a delivery: a
+        ``deleted_messages`` control stanza, a missing-credentials guard hit, and a
+        foreign-``subtype`` drop (a push encrypted for a superseded GCM
+        registration). The caller (``_handle_message``) uses this return to gate
+        the *delivery proof only* (``_first_data_message_delivered``, read by
+        ``fcm_receiver_ha._needs_first_locate_reconnect``); it still records
+        ``persistent_ids`` for EVERY acked message, because that list is the RMQ2
+        login dedup (``received_persistent_id``) and must include even dropped
+        pushes to stop the server replaying them. The two consumers therefore use
+        two separate signals -- their contracts conflict on a single field (all
+        acked vs. only delivered), so a shared ``persistent_ids`` cannot satisfy
+        both. A decrypt failure raises (caught upstream in
+        ``_process_one_inbound_message``): it never counts as delivered, and the
+        raise unwinds before the caller's own ``persistent_ids`` append. That
+        handler still records the acked ``persistent_id`` for RMQ2 dedup when it
+        selective-acks the poison push, so the append happens at the ack site
+        instead of here (see ``_process_one_inbound_message``).
+        """
         self.logger.debug(
             "Received data message Stream ID: %s, Last: %s, Status: %s",
             msg.stream_id,
@@ -654,7 +686,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
             == "deleted_messages"
         ):
             # The deleted_messages message does not contain data.
-            return
+            return False
         crypto_key = self._extract_header_param(
             self._app_data_by_key(msg, "crypto-key"), "dh"
         )
@@ -670,14 +702,43 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         # unreachable dead code for the ``None``/``{}`` states it was meant to
         # protect against.
         if not self.credentials:
-            return
-        if subtype != self.credentials["gcm"]["app_id"]:
-            self._log_warn_with_limit(
-                "Subtype %s in data message does not match"
-                + "app id client was registered with %s",
+            return False
+        # Resolve our registered app_id defensively. ``credentials`` is truthy
+        # here, but the ``gcm`` sub-dict or its ``app_id`` can be transiently
+        # absent during a credential swap/invalidate window; a hard
+        # ``["gcm"]["app_id"]`` would raise ``KeyError`` in that window. The
+        # sibling read in ``_decrypt_raw_data`` already uses ``.get("gcm")`` for
+        # the same reason. A ``None`` registered id simply means we cannot own
+        # this push, so the mismatch check below drops it safely.
+        registered_app_id = (self.credentials.get("gcm") or {}).get("app_id")
+        if subtype != registered_app_id:
+            # Drop, do not fall through to decrypt. A subtype mismatch means this
+            # push was encrypted for a *different* (superseded) GCM registration
+            # -- e.g. an old client instance still listening after an FCM
+            # re-registration minted a fresh ``wp:...#<uuid>`` app_id. Its key
+            # material can never match, so ``_decrypt_raw_data`` below would fail
+            # with a guaranteed ``ECEException``/InvalidTag. That failure is
+            # caught in ``_process_one_inbound_message`` and counts toward
+            # ``_consecutive_decrypt_failures``, which at the threshold escalates
+            # to a *bogus* re-registration -- minting yet another app_id and
+            # provoking the next stale client. Returning here breaks that
+            # amplification loop: the foreign push is simply not for us. The
+            # caller (``_handle_message``) still selective-acks the message on
+            # the normal path, so the server stops redelivering it.
+            #
+            # Log at *debug*, not warning. Dropping a foreign-subtype push is an
+            # expected, benign event (Google replays orphaned/superseded
+            # subscriptions under our own android_id, e.g. on reconnect); it is
+            # handled correctly above and requires no user action. Surfacing it
+            # at warning level only alarmed users about a non-issue. It stays
+            # visible under debug logging for diagnosis.
+            self.logger.debug(
+                "Subtype %s in data message does not match "
+                "app id client was registered with %s",
                 subtype,
-                self.credentials["gcm"]["app_id"],
+                registered_app_id,
             )
+            return False
 
         decrypted = self._decrypt_raw_data(
             self.credentials, crypto_key, salt, msg.raw_data
@@ -733,6 +794,10 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 "Unexpected exception calling notification callback\n"
             )
             self._try_increment_error_count(ErrorType.NOTIFY)
+
+        # Reached only after a real decrypt + callback dispatch: a genuine
+        # delivery, so the caller records ``persistent_id`` as delivered.
+        return True
 
     def _new_input_stream_id_available(self) -> bool:
         return self.last_input_stream_id_reported != self.input_stream_id
@@ -842,14 +907,34 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 self._started_monotonic = time.monotonic()
                 self.run_state = FcmPushClientRunState.STARTED
                 self.persistent_ids = []
+                # Reset the delivery proof for the new login session, mirroring
+                # the ``persistent_ids`` reset above (see ``__init__``): the fresh
+                # session has not delivered a data message yet.
+                self._first_data_message_delivered = False
                 # Refresh activity timestamp
                 self.last_message_time = time.time()
             return
 
         if isinstance(msg, DataMessageStanza):
-            self._handle_data_message(msg)
+            delivered = self._handle_data_message(msg)
+            # Record EVERY selective-acked message in ``persistent_ids``: it is the
+            # sole source ``_login`` extends into ``received_persistent_id`` (RMQ2
+            # dedup), so after a stream restart the server is told about all IDs we
+            # already received and does not redeliver them. A dropped
+            # foreign-subtype/control push is still received and acked, so it must
+            # be recorded here too -- omitting it lets the server replay that same
+            # orphan push across reconnects, delivering+acking it repeatedly.
             self.persistent_ids.append(msg.persistent_id)
-            # Acking is cheap; keep it to avoid server redelivery
+            if delivered:
+                # Delivery proof for the first-locate reconnect is a *separate*
+                # signal (see ``__init__``): only a genuine decrypt+dispatch counts.
+                # A dropped push must NOT set it, or a superseded push arriving
+                # before the first real locate would falsely suppress the needed
+                # reconnect. This is why the proof cannot share ``persistent_ids``
+                # (whose RMQ2 role requires recording that very dropped push).
+                self._first_data_message_delivered = True
+            # Ack unconditionally (cheap): even a dropped/foreign push must be
+            # selective-acked so the server stops redelivering it.
             await self._send_selective_ack(msg.persistent_id)
         elif isinstance(msg, HeartbeatPing):
             await self._handle_ping(msg)
@@ -1021,7 +1106,23 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 persistent_id,
                 decrypt_err,
             )
-            return await self._ack_or_disconnect(persistent_id)
+            acked = await self._ack_or_disconnect(persistent_id)
+            if acked and persistent_id:
+                # RMQ2-dedup parity with the delivered/dropped path in
+                # ``_handle_message``: a poison push we selective-ack must also be
+                # recorded in ``persistent_ids`` so the next ``_login`` reports it
+                # in ``received_persistent_id``. The decrypt-failure raise unwinds
+                # ``_handle_message`` *before* its own ``persistent_ids.append``,
+                # so without recording here the server keeps replaying the same
+                # undecryptable push across reconnects, re-incrementing
+                # ``_consecutive_decrypt_failures`` toward a bogus re-registration.
+                # Record only on a real ack: a dead-writer ``False`` means the push
+                # was NOT acked (the supervisor reconnects and the server replays,
+                # so a later attempt records it instead). The escalation branch
+                # above raises before reaching this point, so a message that
+                # escalates to re-registration is correctly never recorded.
+                self.persistent_ids.append(persistent_id)
+            return acked
 
     async def _listen(self) -> None:
         """Listens for push notifications until an error or stop() occurs."""

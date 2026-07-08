@@ -51,8 +51,9 @@ def _make_phone_device(
         ),
         userDefinedDeviceName=name,
         imageInformation=SimpleNamespace(url=""),
-        HasField=lambda field_name: field_name
-        not in ("information", "deviceRegistration"),
+        HasField=lambda field_name: (
+            field_name not in ("information", "deviceRegistration")
+        ),
         ListFields=lambda: [
             (SimpleNamespace(name="identifierInformation"), None),
             (SimpleNamespace(name="userDefinedDeviceName"), None),

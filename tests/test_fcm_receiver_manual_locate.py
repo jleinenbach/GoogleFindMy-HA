@@ -336,9 +336,13 @@ class _ReconnectPc:
         run_state: object,
         persistent_ids: list[str] | None = None,
         started_monotonic: float | None = None,
+        first_data_message_delivered: bool = False,
     ) -> None:
         self.run_state = run_state
         self.persistent_ids = list(persistent_ids or [])
+        # Delivery proof read by ``_needs_first_locate_reconnect`` (split from
+        # ``persistent_ids``, which now carries only the RMQ2 receipt list).
+        self._first_data_message_delivered = first_data_message_delivered
         # STARTED-transition anchor consumed by ``_session_age_s``. Defaults to
         # "just reached STARTED" (young session) so the common case is terse;
         # the established-session test passes an old timestamp explicitly.
@@ -459,8 +463,8 @@ async def test_manual_locate_no_reconnect_when_already_delivered(
     cache = DummyCache()
     _wire_manual_locate(monkeypatch, receiver, entry_id, cache)
 
-    # Young (default STARTED stamp) but already delivered (persistent_ids set).
-    stale = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=["pid-1"])
+    # Young (default STARTED stamp) but already delivered (delivery proof set).
+    stale = _ReconnectPc(run_state=_RunState.STARTED, first_data_message_delivered=True)
     receiver.pcs[entry_id] = stale  # type: ignore[assignment]
 
     nudged: list[str | None] = []
@@ -816,7 +820,7 @@ async def test_first_locate_reconnect_uses_current_when_no_longer_fresh(
     """A client that has since delivered is used as-is, without a reconnect.
 
     Between the cheap branch pre-check and acquiring the per-entry lock the
-    session may have delivered its first push (``persistent_ids`` filled).  The
+    session may have delivered its first push (delivery proof set).  The
     authoritative re-check under the lock must then reuse it, never tear it down.
     """
     receiver = FcmReceiverHA()
@@ -828,7 +832,9 @@ async def test_first_locate_reconnect_uses_current_when_no_longer_fresh(
         receiver, "nudge_retry", lambda eid=None: bool(nudged.append(eid)) or True
     )
 
-    delivered = _ReconnectPc(run_state=_RunState.STARTED, persistent_ids=["pid-1"])
+    delivered = _ReconnectPc(
+        run_state=_RunState.STARTED, first_data_message_delivered=True
+    )
     receiver.pcs[entry_id] = delivered  # type: ignore[assignment]
 
     result = await receiver._reconnect_for_first_locate(entry_id, 5.0)

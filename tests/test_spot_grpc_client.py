@@ -187,7 +187,13 @@ async def test_spot_request_retries_transient_status(
 async def test_spot_request_auth_failure_retries_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auth errors should invalidate the token once and then fail permanently."""
+    """Auth errors invalidate the scoped token once and then fail permanently.
+
+    The scoped-token invalidation must NOT null the quasi-permanent AAS master
+    token (v1.7.11 fix): a transient spot auth failure only clears the spot
+    token, leaving the AAS intact so the retry can mint a fresh scoped token.
+    A genuinely revoked AAS escalates separately via InvalidAasTokenError.
+    """
 
     plan = [
         grpclib.exceptions.GRPCError(Status.UNAUTHENTICATED, "expired"),
@@ -201,7 +207,8 @@ async def test_spot_request_auth_failure_retries_once(
 
     assert stub_method.call_count == 2
     assert ("spot_token_user@example.com", None) in cache.set_calls
-    assert (spot_request_module.DATA_AAS_TOKEN, None) in cache.set_calls
+    # AAS master token is preserved on a scoped (spot) invalidation.
+    assert (spot_request_module.DATA_AAS_TOKEN, None) not in cache.set_calls
 
 
 @pytest.mark.asyncio

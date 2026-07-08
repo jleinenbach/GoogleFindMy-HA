@@ -2,7 +2,7 @@
 """Unit tests for token regeneration functionality.
 
 Tests cover:
-- Cooldown mechanism (shared across all token refresh operations)
+- Cooldown mechanism (scoped per entry and per token type)
 - AAS token regeneration
 - ADM token regeneration
 - Token dependency handling (ADM depends on AAS)
@@ -175,7 +175,7 @@ class TestFcmTokenRegeneration:
         )
 
         hass = _MockHass("test-entry")
-        _record_refresh("test-entry")
+        _record_refresh("test-entry", "fcm")
 
         result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
@@ -193,7 +193,7 @@ class TestFcmTokenRegeneration:
 
         await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
-        on_cooldown, _ = is_refresh_on_cooldown("test-entry")
+        on_cooldown, _ = is_refresh_on_cooldown("test-entry", "fcm")
         assert on_cooldown
 
     @pytest.mark.asyncio
@@ -278,7 +278,7 @@ class TestAdmTokenRegeneration:
         )
 
         cache = _MockTokenCache("test-entry")
-        _record_refresh("test-entry")
+        _record_refresh("test-entry", "adm")
 
         # Should not call the actual token generation - the function returns early
         result = await async_regenerate_adm_token(cache=cache)
@@ -327,12 +327,12 @@ class TestAdmTokenRegeneration:
 
             await async_regenerate_adm_token(cache=cache)
 
-        on_cooldown, _ = is_refresh_on_cooldown("test-entry")
+        on_cooldown, _ = is_refresh_on_cooldown("test-entry", "adm")
         assert on_cooldown
 
 
-class TestSharedCooldown:
-    """Test that cooldown is shared between AAS and ADM token refresh."""
+class TestScopedCooldown:
+    """Cooldown is scoped per token type: FCM and ADM refresh independently."""
 
     def setup_method(self) -> None:
         """Clear cooldowns before each test."""
@@ -343,8 +343,8 @@ class TestSharedCooldown:
         clear_all_cooldowns()
 
     @pytest.mark.asyncio
-    async def test_fcm_refresh_blocks_adm_refresh(self) -> None:
-        """FCM refresh should block subsequent ADM refresh."""
+    async def test_fcm_refresh_does_not_block_adm_refresh(self) -> None:
+        """FCM refresh must NOT block a subsequent ADM refresh (per-type cooldown)."""
         hass = _MockHass("test-entry")
 
         from custom_components.googlefindmy.Auth.token_refresh import (
@@ -354,20 +354,32 @@ class TestSharedCooldown:
         result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
         assert result is True
 
-        # Now ADM should be blocked
+        # ADM must remain available despite the FCM cooldown (decoupled).
         cache = _MockTokenCache("test-entry")
 
-        from custom_components.googlefindmy.Auth.token_refresh import (
-            async_regenerate_adm_token,
-        )
+        with (
+            patch(
+                "custom_components.googlefindmy.Auth.adm_token_retrieval.async_get_adm_token",
+                new_callable=AsyncMock,
+                return_value="new-adm-token",
+            ),
+            patch(
+                "custom_components.googlefindmy.Auth.username_provider.async_get_username",
+                new_callable=AsyncMock,
+                return_value="test@example.com",
+            ),
+        ):
+            from custom_components.googlefindmy.Auth.token_refresh import (
+                async_regenerate_adm_token,
+            )
 
-        result = await async_regenerate_adm_token(cache=cache)
+            result = await async_regenerate_adm_token(cache=cache)
 
-        assert result is False
+        assert result is True
 
     @pytest.mark.asyncio
-    async def test_adm_refresh_blocks_fcm_refresh(self) -> None:
-        """ADM refresh should block subsequent FCM refresh."""
+    async def test_adm_refresh_does_not_block_fcm_refresh(self) -> None:
+        """ADM refresh must NOT block a subsequent FCM refresh (per-type cooldown)."""
         cache = _MockTokenCache("test-entry")
 
         with (
@@ -389,7 +401,7 @@ class TestSharedCooldown:
             result = await async_regenerate_adm_token(cache=cache)
             assert result is True
 
-        # Now FCM should be blocked
+        # FCM must remain available despite the ADM cooldown (decoupled).
         hass = _MockHass("test-entry")
 
         from custom_components.googlefindmy.Auth.token_refresh import (
@@ -398,7 +410,7 @@ class TestSharedCooldown:
 
         result = await async_regenerate_fcm_token(hass=hass, entry_id="test-entry")
 
-        assert result is False
+        assert result is True
 
 
 class TestEmailMasking:

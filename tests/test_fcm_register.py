@@ -59,13 +59,21 @@ class _FakeSession:
     def post(
         self, *, url: str, headers: dict[str, str], data: dict[str, Any], timeout: Any
     ) -> _FakeResponse:
-        self.calls.append({"url": url, "data": dict(data), "headers": dict(headers)})
+        self.calls.append(
+            {
+                "url": url,
+                "data": dict(data),
+                "headers": dict(headers),
+                "timeout": timeout,
+            }
+        )
         if not self._responses:
             raise AssertionError("No more responses configured for FakeSession")
         return self._responses.pop(0)
 
 
-def test_gcm_register_prefers_legacy_sender_first(
+@pytest.mark.asyncio
+async def test_gcm_register_prefers_legacy_sender_first(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The initial request starts with the legacy server key sender."""
@@ -88,14 +96,15 @@ def test_gcm_register_prefers_legacy_sender_first(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(register.gcm_register({"androidId": 1, "securityToken": 2}))
+    result = await register.gcm_register({"androidId": 1, "securityToken": 2})
 
     assert result["token"] == "abc123"
     assert session.calls[0]["url"] == GCM_REGISTER3_URL
     assert session.calls[0]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_html_response_rotates_endpoint_not_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """HTML/404 responses retry on the same endpoint without switching sender (upstream alignment)."""
@@ -120,9 +129,7 @@ def test_gcm_register_html_response_rotates_endpoint_not_sender(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with caplog.at_level(logging.WARNING):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 42, "securityToken": 99})
-        )
+        result = await register.gcm_register({"androidId": 42, "securityToken": 99})
 
     assert result["token"] == "abc123"
     assert result["android_id"] == 42
@@ -137,7 +144,8 @@ def test_gcm_register_html_response_rotates_endpoint_not_sender(
     ]
 
 
-def test_gcm_register_404_retries_with_same_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_404_retries_with_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 404 retries on the same endpoint with the same legacy sender."""
@@ -161,7 +169,7 @@ def test_gcm_register_404_retries_with_same_sender(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(register.gcm_register({"androidId": 11, "securityToken": 22}))
+    result = await register.gcm_register({"androidId": 11, "securityToken": 22})
 
     assert result["token"] == "abc123"
     # No endpoint rotation — always /c2dm/register3 (upstream alignment)
@@ -176,7 +184,8 @@ def test_gcm_register_404_retries_with_same_sender(
     ]
 
 
-def test_gcm_register_success_log_includes_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_success_log_includes_sender(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Success log records endpoint and sender fallback context."""
@@ -195,9 +204,7 @@ def test_gcm_register_success_log_includes_sender(
     register = FcmRegister(config, http_client_session=session)
 
     with caplog.at_level(logging.INFO):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2})
-        )
+        result = await register.gcm_register({"androidId": 1, "securityToken": 2})
 
     assert result["token"] == "success"
     assert any(
@@ -208,7 +215,10 @@ def test_gcm_register_success_log_includes_sender(
     )
 
 
-def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_gcm_register_non_retryable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A non-retryable error code stops the retry loop and returns None."""
 
     responses = [
@@ -230,15 +240,16 @@ def test_gcm_register_non_retryable_error(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(
-        register.gcm_register({"androidId": 1, "securityToken": 2}, retries=2)
+    result = await register.gcm_register(
+        {"androidId": 1, "securityToken": 2}, retries=2
     )
 
     assert result is None
     assert len(session.calls) == 2
 
 
-def test_gcm_register_phone_registration_error_retries_same_sender(
+@pytest.mark.asyncio
+async def test_gcm_register_phone_registration_error_retries_same_sender(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """PHONE_REGISTRATION_ERROR is transient — retries with the same sender (no switch)."""
@@ -264,8 +275,8 @@ def test_gcm_register_phone_registration_error_retries_same_sender(
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
-    result = asyncio.run(
-        register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
+    result = await register.gcm_register(
+        {"androidId": 7, "securityToken": 9}, retries=3
     )
 
     assert result["token"] == "xyz"
@@ -275,7 +286,8 @@ def test_gcm_register_phone_registration_error_retries_same_sender(
     assert session.calls[1]["data"]["sender"] == GCM_SERVER_KEY_B64
 
 
-def test_gcm_register_phone_registration_error_logs_transient(
+@pytest.mark.asyncio
+async def test_gcm_register_phone_registration_error_logs_transient(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """PHONE_REGISTRATION_ERROR log reports the error as transient."""
@@ -302,8 +314,8 @@ def test_gcm_register_phone_registration_error_logs_transient(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with caplog.at_level(logging.INFO):
-        result = asyncio.run(
-            register.gcm_register({"androidId": 7, "securityToken": 9}, retries=3)
+        result = await register.gcm_register(
+            {"androidId": 7, "securityToken": 9}, retries=3
         )
 
     assert result["token"] == "xyz"
@@ -314,7 +326,8 @@ def test_gcm_register_phone_registration_error_logs_transient(
     )
 
 
-def test_checkin_or_register_reuses_cached_credentials(
+@pytest.mark.asyncio
+async def test_checkin_or_register_reuses_cached_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Existing credentials trigger a check-in using cached android/security tokens."""
@@ -347,14 +360,15 @@ def test_checkin_or_register_reuses_cached_credentials(
     register.gcm_check_in = types.MethodType(fake_gcm_check_in, register)
     register.register = types.MethodType(fail_register, register)
 
-    result = asyncio.run(register.checkin_or_register())
+    result = await register.checkin_or_register()
 
     assert result is cached_creds
     assert recorded["android_id"] == cached_creds["gcm"]["android_id"]
     assert recorded["security_token"] == cached_creds["gcm"]["security_token"]
 
 
-def test_gcm_register_raises_on_persistent_404(
+@pytest.mark.asyncio
+async def test_gcm_register_raises_on_persistent_404(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After the retry budget is exhausted on persistent 404 responses,
@@ -382,14 +396,13 @@ def test_gcm_register_raises_on_persistent_404(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 404
 
 
-def test_gcm_register_raises_on_persistent_401(
+@pytest.mark.asyncio
+async def test_gcm_register_raises_on_persistent_401(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After the retry budget is exhausted on persistent 401 responses
@@ -419,9 +432,7 @@ def test_gcm_register_raises_on_persistent_401(
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
 
     with pytest.raises(FcmRegisterHTTPError) as exc_info:
-        asyncio.run(
-            register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
-        )
+        await register.gcm_register({"androidId": 1, "securityToken": 2}, retries=8)
 
     assert exc_info.value.status == 401
 
@@ -973,3 +984,292 @@ async def test_checkin_or_register_preserves_on_transient(
     with pytest.raises(FcmCheckinTransientError):
         await register.checkin_or_register()
     assert register_called is False
+
+
+# ---------------------------------------------------------------------
+# gcm_unregister — best-effort orphan cleanup on re-registration
+# ---------------------------------------------------------------------
+
+_OLD_APP_ID = "wp:bundle#0d7d2715-75d9-47a0-88ec-32e9d91e88dd"
+_NEW_APP_ID = "wp:bundle#f23ca93d-683d-4fb9-aaee-fdbd82dd079a"
+_ANDROID_ID = "1234567890"
+_SECURITY_TOKEN = "9876543210"
+
+
+class _RaisingSession:
+    """Session stub whose ``post`` records the call, then raises (best-effort
+    failure path for the unregister)."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def post(
+        self, *, url: str, headers: dict[str, str], data: dict[str, Any], timeout: Any
+    ) -> Any:
+        self.calls.append({"url": url, "data": dict(data), "headers": dict(headers)})
+        raise OSError("network down")
+
+
+def _build_reregister(
+    session: Any,
+    *,
+    old_app_id: str | None,
+    new_app_id: str = _NEW_APP_ID,
+) -> FcmRegister:
+    """FcmRegister wired for ``reregister_keeping_identity`` with every network
+    step EXCEPT the unregister POST stubbed out, so the only ``session.post``
+    that can occur is the orphan unregister under test."""
+    config = FcmRegisterConfig(
+        project_id="proj",
+        app_id="app",
+        api_key="key",
+        messaging_sender_id="1234567890123",
+        bundle_id="bundle",
+    )
+    gcm_creds: dict[str, Any] = {
+        "android_id": _ANDROID_ID,
+        "security_token": _SECURITY_TOKEN,
+    }
+    if old_app_id is not None:
+        gcm_creds["app_id"] = old_app_id
+    credentials = {"gcm": gcm_creds, "fcm": {"registration": {"token": "old"}}}
+    register = FcmRegister(config, credentials=credentials, http_client_session=session)
+
+    async def fake_check_in(self, android_id=None, security_token=None):  # type: ignore[no-untyped-def]
+        return {"androidId": android_id, "securityToken": security_token}
+
+    async def fake_gcm_register(self, gcm_response, retries=5):  # type: ignore[no-untyped-def]
+        return {
+            "token": "new-gcm-token",
+            "app_id": new_app_id,
+            "android_id": gcm_response["androidId"],
+            "security_token": gcm_response["securityToken"],
+        }
+
+    def fake_generate_keys(self):  # type: ignore[no-untyped-def]
+        return {"public": "pub", "private": "priv", "auth_secret": "sec"}
+
+    async def fake_fcm_install_and_register(self, gcm_data, keys):  # type: ignore[no-untyped-def]
+        return {"registration": {"token": "new-fcm-token"}}
+
+    register.gcm_check_in = types.MethodType(fake_check_in, register)
+    register.gcm_register = types.MethodType(fake_gcm_register, register)
+    register.generate_keys = types.MethodType(fake_generate_keys, register)
+    register.fcm_install_and_register = types.MethodType(
+        fake_fcm_install_and_register, register
+    )
+    return register
+
+
+@pytest.mark.asyncio
+async def test_reregister_unregisters_old_subscription() -> None:
+    """(a) A successful re-registration fires exactly one ``delete=true`` POST
+    to register3 carrying the OLD app_id as X-subtype."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert len(session.calls) == 1
+    call = session.calls[0]
+    assert call["url"] == GCM_REGISTER3_URL
+    assert call["data"]["delete"] == "true"
+    assert call["data"]["X-subtype"] == _OLD_APP_ID
+    assert call["data"]["device"] == _ANDROID_ID
+    assert call["headers"]["Authorization"] == (
+        f"AidLogin {_ANDROID_ID}:{_SECURITY_TOKEN}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unregister_uses_short_bounded_timeout() -> None:
+    """(a2) The best-effort unregister runs inside the re-registration critical
+    path, so it MUST use the short ``UNREGISTER_TIMEOUT`` (5 s), never the
+    class-wide 100 s ``CLIENT_TIMEOUT`` — otherwise a stalled delete keeps push
+    reception offline for up to 100 s after the new subscription is already
+    persisted (Codex P2)."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    await register.reregister_keeping_identity()
+
+    assert len(session.calls) == 1
+    used = session.calls[0]["timeout"]
+    assert used is FcmRegister.UNREGISTER_TIMEOUT
+    assert used is not FcmRegister.CLIENT_TIMEOUT
+    assert used.total == 5
+    # Intent guard: the cleanup bound must stay well below the register path.
+    assert used.total < FcmRegister.CLIENT_TIMEOUT.total
+
+
+@pytest.mark.asyncio
+async def test_reregister_survives_unregister_failure() -> None:
+    """(b) An unregister that raises must not break the re-registration: the
+    caller still returns valid fresh credentials, and it was attempted once."""
+    session = _RaisingSession()
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert result["fcm"]["registration"]["token"] == "new-fcm-token"
+    assert len(session.calls) == 1  # exactly one best-effort attempt, no retry
+
+
+@pytest.mark.asyncio
+async def test_reregister_without_old_app_id_skips_unregister() -> None:
+    """(c) Without a prior app_id (first-time / legacy identity) no delete POST
+    is emitted."""
+    session = _FakeSession([])  # any post would raise "no responses configured"
+    register = _build_reregister(session, old_app_id=None)
+
+    result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reregister_unchanged_app_id_skips_unregister() -> None:
+    """(c2) A no-op re-registration that yields the SAME app_id must not
+    self-delete the still-current subscription."""
+    session = _FakeSession([])
+    register = _build_reregister(
+        session, old_app_id=_OLD_APP_ID, new_app_id=_OLD_APP_ID
+    )
+
+    result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _OLD_APP_ID
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reregister_unregister_redacts_secrets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(d) No unredacted secret/id (old app_id, android_id, security_token, or
+    the AidLogin auth header) may appear in the DEBUG log; only the ``•••``
+    redacted tail form is emitted."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+    register._log_debug_verbose = True  # exercise the verbose request log too
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert _OLD_APP_ID not in logged
+    assert _ANDROID_ID not in logged
+    assert _SECURITY_TOKEN not in logged
+    assert "AidLogin" not in logged
+    assert "•••" in logged
+
+
+# ---------------------------------------------------------------------
+# gcm_unregister — outcome-log contract (each of the four terminal
+# outcomes must be observable at DEBUG, so a user who enables debug
+# logging and presses the "regenerate FCM token" button can tell whether
+# the orphan cleanup succeeded or not). These also close the parse-branch
+# coverage for the ``Error=`` and "no marker" responses.
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reregister_unregister_success_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(e) A ``deleted=`` response logs an *effective* outcome at DEBUG,
+    without needing the verbose flag — this is what the user sees on a
+    successful button-triggered cleanup."""
+    session = _FakeSession(
+        [_FakeResponse(200, f"deleted={_OLD_APP_ID}", {"Content-Type": "text/plain"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "GCM unregister effective" in logged
+    assert "deleted" in logged
+    assert _OLD_APP_ID not in logged  # still redacted
+
+
+@pytest.mark.asyncio
+async def test_reregister_unregister_error_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(f) A server ``Error=<code>`` response is a non-exceptional, ineffective
+    outcome: no raise, exactly one attempt, and a DEBUG line naming the code so
+    the user sees the cleanup did NOT succeed. Closes the ``Error`` parse/log
+    branch."""
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                200, "Error=PHONE_REGISTRATION_ERROR", {"Content-Type": "text/plain"}
+            )
+        ]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID  # re-registration unaffected
+    assert len(session.calls) == 1  # one best-effort attempt, no retry
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ineffective" in logged
+    assert "PHONE_REGISTRATION_ERROR" in logged
+    assert _OLD_APP_ID not in logged  # still redacted
+
+
+@pytest.mark.asyncio
+async def test_reregister_unregister_no_marker_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(g) A 200 response with neither ``deleted`` nor ``Error`` (e.g. an HTML
+    error page) is reported as an ineffective "no marker" outcome at DEBUG,
+    never raising. Closes the else-branch of the parser."""
+    session = _FakeSession(
+        [_FakeResponse(200, "<html>gateway</html>", {"Content-Type": "text/html"})]
+    )
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert len(session.calls) == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "no deleted/Error marker" in logged
+    assert _OLD_APP_ID not in logged  # still redacted
+
+
+@pytest.mark.asyncio
+async def test_reregister_unregister_network_failure_is_visible_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """(h) A network/aiohttp failure is swallowed but reported at DEBUG as a
+    best-effort failure, so the user sees the cleanup was attempted and did not
+    succeed. Complements (b), which asserts survival without the log contract."""
+    session = _RaisingSession()
+    register = _build_reregister(session, old_app_id=_OLD_APP_ID)
+
+    with caplog.at_level(logging.DEBUG):
+        result = await register.reregister_keeping_identity()
+
+    assert result["gcm"]["app_id"] == _NEW_APP_ID
+    assert len(session.calls) == 1
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "failed (ignored, best-effort)" in logged
+    assert _OLD_APP_ID not in logged  # still redacted

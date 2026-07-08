@@ -2125,7 +2125,17 @@ class FcmReceiverHA:
                 # Identity is usable: strip only the renewable GCM token parts
                 # and keep android_id/security_token for a fast re-register.
                 gcm.pop("token", None)
-                gcm.pop("app_id", None)
+                # Rescue the superseded subscription id across the invalidation
+                # so the subsequent reregister_keeping_identity() can unregister
+                # the now-orphaned webpush subscription. Popping it outright (the
+                # pre-fix #1169 behaviour) left ``old_app_id = None`` at capture
+                # time, so the unregister guard never fired and orphaned
+                # subscriptions kept accumulating at Google (the "does not match"
+                # warnings). Keeping it in a dedicated slot also lets a
+                # restart-triggered re-register clean up the orphan.
+                orphan_app_id = gcm.pop("app_id", None)
+                if orphan_app_id:
+                    gcm["orphan_app_id"] = orphan_app_id
                 _LOGGER.info(
                     "[entry=%s] Invalidated FCM tokens; "
                     "android_id/security_token preserved for re-registration",
@@ -3462,6 +3472,27 @@ class FcmReceiverHA:
             except Exception:  # noqa: BLE001
                 pass
 
+        # 4b. Cancel any in-flight data-starvation watchdog reconnect task and
+        #     drop its backoff/throttle state for this entry, mirroring the
+        #     teardown path ``_purge_entry_tokens``. Step 2 cancels the
+        #     supervisor and step 4 stops the client, but a ``zombie`` reconnect
+        #     (``_reconnect_for_starvation``, which awaits
+        #     ``_force_first_locate_reconnect``) runs in a SEPARATE task; left
+        #     alive it would race step 5 and build a *second* live
+        #     ``FcmPushClient`` for the same entry -- the two-instance symptom
+        #     behind the cross-registration subtype-mismatch / InvalidTag
+        #     reports. Fire-and-forget ``cancel()`` (no await), exactly like
+        #     ``_purge_entry_tokens``: the zombie task awaits a fresh STARTED pc
+        #     that only the supervisor's outer loop (restarted just below in
+        #     step 5) can build, so awaiting it here would deadlock (see the
+        #     ``_zombie_reconnect_tasks`` note in ``__init__``).
+        self._zombie_reconnect_attempts.pop(entry_id, None)
+        self._zombie_next_allowed_reconnect_monotonic.pop(entry_id, None)
+        self._zombie_next_eval_monotonic.pop(entry_id, None)
+        zombie_task = self._zombie_reconnect_tasks.pop(entry_id, None)
+        if zombie_task is not None and not zombie_task.done():
+            zombie_task.cancel()
+
         # 5. Restart the supervisor (will re-register with fresh tokens)
         cache = self._entry_caches.get(entry_id)
         await self._start_supervisor_for_entry(entry_id, cache)
@@ -3835,10 +3866,17 @@ class FcmReceiverHA:
         Trigger (T-A + per-entry sharpening): the session is *young*
         (STARTED age < ``_CHURN_WINDOW_S``, measured from this client's own
         STARTED transition) **and** this client has not delivered any data
-        message since login.  Delivery is read from the library's
-        ``persistent_ids`` list, which is reset to ``[]`` on each successful
-        login and appended to only for a ``DataMessageStanza`` — so a non-empty
-        list is a clean "has delivered" proof.  It deliberately does *not* use
+        message since login.  Delivery is read from the library's dedicated
+        ``_first_data_message_delivered`` flag, which is reset to ``False`` on
+        each successful login and set ``True`` only when a ``DataMessageStanza``
+        is *actually delivered* (decrypted and dispatched to the callback).  It
+        deliberately does *not* read ``persistent_ids`` for this: that list
+        records *every* selective-acked message (including dropped
+        foreign-subtype/control pushes) because it is the RMQ2 login dedup, so a
+        dropped orphan push arriving first would falsely mark the session as
+        "has delivered" — the two contracts (all acked vs. only delivered)
+        conflict on one field, so delivery proof is a separate signal.  It also
+        deliberately does *not* use
         the activity clock (``last_message_time`` / ``_entry_last_activity_
         monotonic``), which a bare heartbeat ack also advances and which would
         therefore never separate a broken fresh session (heartbeats, zero data)
@@ -3849,7 +3887,7 @@ class FcmReceiverHA:
         age = self._session_age_s(pc)
         if age is None or age >= _CHURN_WINDOW_S:
             return False
-        delivered = bool(getattr(pc, "persistent_ids", None))
+        delivered = bool(getattr(pc, "_first_data_message_delivered", False))
         return not delivered
 
     async def _force_first_locate_reconnect(

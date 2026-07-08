@@ -24,7 +24,6 @@ LEGACY_ALLOWLIST: set[str] = {
     "tests/test_e2ee_token_cache_propagation.py",
     "tests/test_fcm_receiver_guard.py",
     "tests/test_fcm_receiver_manual_locate.py",
-    "tests/test_fcm_register.py",
     "tests/test_location_recorder.py",
     "tests/test_location_request_cache_isolation.py",
     "tests/test_manual_locate_resolution.py",

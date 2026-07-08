@@ -405,17 +405,21 @@ async def test_entity_recovery_manager_recovers_missing_entities(
         if not isinstance(entry_id, str) or not entry_id:
             return built
         mapping = {
-            f"{entry_id}:{service_subentry_identifier}:polling": lambda: GoogleFindMyPollingSensor(
-                coordinator,
-                entry,
-                subentry_key=SERVICE_SUBENTRY_KEY,
-                subentry_identifier=service_subentry_identifier,
+            f"{entry_id}:{service_subentry_identifier}:polling": lambda: (
+                GoogleFindMyPollingSensor(
+                    coordinator,
+                    entry,
+                    subentry_key=SERVICE_SUBENTRY_KEY,
+                    subentry_identifier=service_subentry_identifier,
+                )
             ),
-            f"{entry_id}:{service_subentry_identifier}:auth_status": lambda: GoogleFindMyAuthStatusSensor(
-                coordinator,
-                entry,
-                subentry_key=SERVICE_SUBENTRY_KEY,
-                subentry_identifier=service_subentry_identifier,
+            f"{entry_id}:{service_subentry_identifier}:auth_status": lambda: (
+                GoogleFindMyAuthStatusSensor(
+                    coordinator,
+                    entry,
+                    subentry_key=SERVICE_SUBENTRY_KEY,
+                    subentry_identifier=service_subentry_identifier,
+                )
             ),
         }
         for unique_id, factory in mapping.items():

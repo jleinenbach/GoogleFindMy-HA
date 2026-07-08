@@ -43,11 +43,11 @@ def _make_hass() -> SimpleNamespace:
             }
         ),
     )
-    hass.config_entries.async_entries = (
-        lambda domain: [entry] if domain == DOMAIN else []
+    hass.config_entries.async_entries = lambda domain: (
+        [entry] if domain == DOMAIN else []
     )
-    hass.config_entries.async_get_entry = (
-        lambda entry_id: entry if entry_id == entry.entry_id else None
+    hass.config_entries.async_get_entry = lambda entry_id: (
+        entry if entry_id == entry.entry_id else None
     )
     hass._entry = entry
     return hass

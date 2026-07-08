@@ -195,7 +195,7 @@ async def test_fix_flow_confirm_starts_reauth() -> None:
     entry = SimpleNamespace(async_start_reauth=MagicMock(return_value=None))
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+            async_get_entry=lambda entry_id: entry if entry_id == "entry-id" else None
         )
     )
     flow = repairs.FcmReauthRepairFlow("entry-id")
@@ -226,7 +226,7 @@ async def test_fix_flow_confirm_records_reauth_reason() -> None:
     )
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+            async_get_entry=lambda entry_id: entry if entry_id == "entry-id" else None
         )
     )
     flow = repairs.FcmReauthRepairFlow("entry-id")
@@ -267,7 +267,7 @@ async def test_fix_flow_records_reason_on_legacy_subentry_coordinator(
     )
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+            async_get_entry=lambda entry_id: entry if entry_id == "entry-id" else None
         )
     )
     flow = repairs.FcmReauthRepairFlow("entry-id")
@@ -296,7 +296,7 @@ async def test_fix_flow_confirm_aborts_to_keep_issue_open() -> None:
     entry = SimpleNamespace(async_start_reauth=MagicMock(return_value=None))
     hass = SimpleNamespace(
         config_entries=SimpleNamespace(
-            async_get_entry=lambda entry_id: (entry if entry_id == "entry-id" else None)
+            async_get_entry=lambda entry_id: entry if entry_id == "entry-id" else None
         )
     )
     flow = repairs.FcmReauthRepairFlow("entry-id")

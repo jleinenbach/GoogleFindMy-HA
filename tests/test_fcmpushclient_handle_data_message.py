@@ -15,6 +15,7 @@ of the ``["gcm"]["app_id"]`` dereference; the poison stub is left untouched.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -49,22 +50,51 @@ class TestHandleDataMessage:
         client = FcmHandleSlim()
         msg = make_data_message(message_type="deleted_messages")
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is False
 
         assert not client.callback.called
         assert client.warnings == []
 
-    def test_subtype_mismatch_logs_warning(self) -> None:
-        """``subtype`` != registered app id -> warning, processing continues (R3 True)."""
+    def test_subtype_mismatch_drops_message(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``subtype`` != registered app id -> DEBUG log + DROP before decrypt (R3 True).
+
+        A subtype mismatch means the push was encrypted for a *superseded* GCM
+        registration (an old client still listening after an FCM re-registration
+        minted a fresh ``wp:...#<uuid>`` app_id). Its key material can never
+        match, so decrypting would fail with a guaranteed ``ECEException`` /
+        InvalidTag; that failure is caught upstream and counts toward
+        ``_consecutive_decrypt_failures``, escalating to a bogus re-registration
+        cascade. The handler therefore returns after logging.
+
+        Contract: dropping a foreign-subtype push is an *expected, benign* event,
+        so it is logged at DEBUG, never WARNING -- surfacing it at warning level
+        only alarmed users about a non-issue. This test pins that level: the
+        message appears at DEBUG and ``warnings`` stays empty. Regression guard:
+        ``_decrypt_raw_data`` is left unset, so a fall-through would raise
+        ``AttributeError`` and fail loudly; the callback must not fire.
+        """
         client = FcmHandleSlim()  # credentials gcm.app_id == "APPID"
-        _set_decrypt(client, b'{"ok": true}')
         msg = make_data_message(subtype="OTHER")
 
-        client._handle_data_message(msg)
+        with caplog.at_level(logging.DEBUG):
+            delivered = client._handle_data_message(msg)
 
-        assert any("does not match" in w for w in client.warnings)
-        # Processing continued past the warning to the callback.
-        assert client.callback.called
+        # A dropped foreign-subtype push is not a delivery: the caller must
+        # selective-ack it but must NOT record it in ``persistent_ids`` (Codex P2).
+        assert delivered is False
+        # Emitted at DEBUG, never WARNING (benign, expected event).
+        assert any(
+            "does not match" in r.getMessage() and r.levelno == logging.DEBUG
+            for r in caplog.records
+        )
+        assert client.warnings == []
+        # Positively pin the "never WARNING" contract, not just the empty
+        # ``warnings`` list: no record on this path may reach WARNING level.
+        assert not any(r.levelno == logging.WARNING for r in caplog.records)
+        # Dropped before decrypt/callback: foreign-subtype push is not for us.
+        assert not client.callback.called
 
     def test_subtype_match_no_warning(self) -> None:
         """``subtype`` == registered app id -> no mismatch warning (R3 False)."""
@@ -72,7 +102,7 @@ class TestHandleDataMessage:
         _set_decrypt(client, b'{"ok": true}')
         msg = make_data_message(subtype="APPID")
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is True
 
         assert client.warnings == []
         assert client.callback.called
@@ -91,7 +121,7 @@ class TestHandleDataMessage:
         client = FcmHandleSlim(credentials=credentials)
         msg = make_data_message(subtype="APPID")
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is False
 
         assert not client.callback.called
         assert client.warnings == []
@@ -102,7 +132,7 @@ class TestHandleDataMessage:
         _set_decrypt(client, b'{"k": "v"}')
         msg = make_data_message()
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is True
 
         client.callback.assert_called_once()
         ret_val = client.callback.call_args.args[0]
@@ -160,7 +190,9 @@ class TestHandleDataMessage:
         _set_decrypt(client, b'{"k": "v"}')
         msg = make_data_message()
 
-        client._handle_data_message(msg)
+        # Delivered = decrypted + dispatched; a raising HA callback still counts as
+        # a delivery (the payload reached the callback), matching prior semantics.
+        assert client._handle_data_message(msg) is True
 
         client._try_increment_error_count.assert_called_once_with(ErrorType.NOTIFY)
         assert not client._reset_error_count.called

@@ -33,8 +33,9 @@ def _make_phone_device(name: str = "Galaxy S25 Ultra") -> SimpleNamespace:
         userDefinedDeviceName=name,
         imageInformation=SimpleNamespace(url=""),
         # Notably, phone devices do NOT have the 'information' field
-        HasField=lambda field_name: field_name
-        not in ("information", "deviceRegistration"),
+        HasField=lambda field_name: (
+            field_name not in ("information", "deviceRegistration")
+        ),
         ListFields=lambda: [
             (SimpleNamespace(name="identifierInformation"), None),
             (SimpleNamespace(name="userDefinedDeviceName"), None),
@@ -100,8 +101,9 @@ def _make_tracker_device_with_key(name: str = "Moto Tag") -> SimpleNamespace:
     device_registration = SimpleNamespace(
         encryptedUserSecrets=encrypted_user_secrets,
         deviceTypeInformation=device_type_info,
-        HasField=lambda field_name: field_name
-        in ("encryptedUserSecrets", "deviceTypeInformation"),
+        HasField=lambda field_name: (
+            field_name in ("encryptedUserSecrets", "deviceTypeInformation")
+        ),
         ListFields=lambda: [
             (SimpleNamespace(name="encryptedUserSecrets"), None),
             (SimpleNamespace(name="deviceTypeInformation"), None),

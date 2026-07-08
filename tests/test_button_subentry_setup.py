@@ -44,8 +44,8 @@ def _make_hass(loop: asyncio.AbstractEventLoop) -> HomeAssistant:
     hass.loop = loop
     hass.data = {"core.uuid": "test-instance"}
     hass.bus = SimpleNamespace(
-        async_listen=lambda *_args, **_kwargs: (lambda: None),
-        async_listen_once=lambda *_args, **_kwargs: (lambda: None),
+        async_listen=lambda *_args, **_kwargs: lambda: None,
+        async_listen_once=lambda *_args, **_kwargs: lambda: None,
     )
     hass.async_create_task = lambda coro, *, name=None: loop.create_task(
         coro, name=name

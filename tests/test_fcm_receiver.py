@@ -1079,7 +1079,38 @@ async def test_invalidate_fcm_tokens_preserves_complete_gcm_identity() -> None:
     assert gcm["android_id"] == 1234567890123456
     assert gcm["security_token"] == "9876543210987654"
     assert "token" not in gcm  # renewable gcm token stripped
+    # The active app_id slot is cleared, but the superseded id is rescued into
+    # ``orphan_app_id`` so reregister_keeping_identity() can unregister it.
     assert "app_id" not in gcm
+    assert gcm["orphan_app_id"] == "app-1"
+
+
+@pytest.mark.asyncio
+async def test_invalidate_fcm_tokens_no_app_id_leaves_no_orphan_slot() -> None:
+    """A complete identity without an ``app_id`` (first-time / legacy creds)
+    invalidates without creating an empty ``orphan_app_id`` slot.
+
+    Guards the falsy branch of the orphan-rescue: nothing to unregister means no
+    sidecar key, so reregister_keeping_identity() correctly skips the delete POST.
+    """
+    receiver = FcmReceiverHA()
+    entry_id = "entry-no-app-id"
+    receiver.creds[entry_id] = {
+        "gcm": {
+            "android_id": 1234567890123456,
+            "security_token": "9876543210987654",
+            "token": "gcm-tok",
+        },
+        "fcm": {"registration": {"token": "fcm-tok"}},
+        "keys": {"private": "x"},
+    }
+
+    await receiver._invalidate_fcm_tokens(entry_id)
+
+    gcm = receiver.creds[entry_id]["gcm"]
+    assert "token" not in gcm
+    assert "app_id" not in gcm
+    assert "orphan_app_id" not in gcm  # no orphan to rescue -> no empty slot
 
 
 @pytest.mark.asyncio
