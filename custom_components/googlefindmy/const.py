@@ -225,7 +225,7 @@ DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 # the tracker state becomes "unknown". This is always enabled.
 # Users who need the last known location can use the "Last Location" entity.
 #
-# Sachverhalt (empirically observed, HA history July 2026):
+# Situation (empirically observed, HA history July 2026):
 # A stationary device at home (smartphone with a dark display, or a Bluetooth
 # tag scanned only by the household's own dark-display phones) reports through
 # the FMDN network roughly every ~30 minutes. Every spurious "unknown" flip in
@@ -242,7 +242,7 @@ DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 # poll does not help - Google returns the last reported fix for a dozing
 # device, so last_seen only advances when the device itself reports.
 #
-# Entscheidungsgrundlage for the default: 3900 s (65 minutes) ~= 2x the
+# Rationale for the default: 3900 s (65 minutes) ~= 2x the
 # observed ~30 min home cadence plus margin to tolerate one missed report
 # cycle, which removes the flapping for both smartphones and tags while still
 # flagging a genuinely absent device within ~1 h. The threshold stays
