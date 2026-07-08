@@ -1223,13 +1223,14 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # Deriving from display_data keeps the attribute set from exposing a
         # position that differs from the published coordinates (Codex #202).
         attributes: dict[str, Any] = _as_ha_attributes(display_data) or {}
-        if self._attr_latitude is None:
-            # Coordinates were withheld (stale, or a display row without
-            # accuracy). Strip the positional keys so the attributes never
-            # resurrect coordinates the tracker is deliberately not publishing.
-            for _pos_key in ("latitude", "longitude", "accuracy_m", "altitude_m"):
-                attributes.pop(_pos_key, None)
-
+        # The positional keys (latitude/longitude/accuracy_m/altitude_m) are
+        # deliberately kept even when the entity coordinates are withheld
+        # (stale, or a display row without accuracy). They are recorder-facing
+        # producer keys, distinct from the live entity position (_attr_latitude):
+        # async_added_to_hass() restores the cache from them after a restart and
+        # map_view reads them for location history. Because they come from the
+        # same display row as last_latitude/last_longitude below, no divergence
+        # with the published coordinates is introduced (Codex #202 stays fixed).
         attributes["google_device_id"] = self.device_id
 
         location_age = self._get_location_age(display_data)

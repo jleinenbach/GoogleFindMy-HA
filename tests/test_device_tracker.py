@@ -1001,10 +1001,13 @@ def test_accuracy_less_row_ties_all_metadata_to_display_row() -> None:
     assert attrs["location_age"] == 1980  # round(2000/60)*60
 
 
-def test_stale_branch_strips_positional_attributes() -> None:
-    """Codex #202 sibling: when stale blanks the tracker coordinates, the extra
-    attributes must not resurrect latitude/longitude; the last known position
-    belongs in the dedicated last_latitude/last_longitude keys."""
+def test_stale_branch_keeps_recorder_positional_attributes() -> None:
+    """Codex BSkando #202 follow-up: a stale state must KEEP the recorder-facing
+    producer keys (latitude/longitude/accuracy_m) so async_added_to_hass() can
+    re-seed the cache after a restart and map_view retains the location history.
+    These keys are distinct from the live entity coordinates (which stay blanked
+    while stale) and share the same display row as last_latitude/last_longitude,
+    so no #202 divergence is reintroduced."""
 
     coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
     coordinator._row = {
@@ -1022,14 +1025,13 @@ def test_stale_branch_strips_positional_attributes() -> None:
     entity._sync_location_attrs()
     attrs = entity._attr_extra_state_attributes
 
-    # Tracker coordinates are withheld while stale.
+    # Live tracker coordinates are withheld while stale.
     assert entity._attr_latitude is None
     assert entity._attr_longitude is None
-    # The attribute set must NOT expose latitude/longitude (would contradict the
-    # blanked tracker properties).
-    assert "latitude" not in attrs
-    assert "longitude" not in attrs
-    assert "accuracy_m" not in attrs
-    # The last known position is surfaced via the dedicated keys instead.
+    # But the recorder-facing producer keys are preserved for restore + maps.
+    assert attrs["latitude"] == 12.0
+    assert attrs["longitude"] == 22.0
+    assert attrs["accuracy_m"] == 8.0
+    # The dedicated last-known keys remain part of the public attribute contract.
     assert attrs["last_latitude"] == 12.0
     assert attrs["last_longitude"] == 22.0
