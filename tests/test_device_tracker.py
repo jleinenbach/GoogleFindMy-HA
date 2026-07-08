@@ -9,6 +9,7 @@ import importlib
 import logging
 import time
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -815,6 +816,113 @@ async def test_restore_marks_estimated_for_flagless_invalid_accuracy(
 
     assert coordinator.primed["data"]["accuracy"] == 200.0
     assert coordinator.primed["data"]["accuracy_estimated"] is True
+
+
+@pytest.mark.asyncio
+async def test_restore_recovers_last_seen_age(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore must recover last_seen so staleness survives a restart.
+
+    Without last_seen the restored row has no age: _get_location_age() returns
+    None and _is_location_stale() assumes "not stale", so a fix that predates
+    the restart looks fresh until the next poll. The restore path parses the
+    recorded ISO last_seen back to epoch seconds and seeds it into the cache
+    row, so the recovered position is correctly aged and flagged stale.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    old_epoch = time.time() - (DEFAULT_STALE_THRESHOLD + 5000)
+    old_iso = (
+        datetime.fromtimestamp(old_epoch, tz=UTC).isoformat().replace("+00:00", "Z")
+    )
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 50,
+            "last_seen": old_iso,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    seeded = coordinator.primed["data"]
+    # last_seen is recovered as an epoch float within a second of the source.
+    assert seeded["last_seen"] == pytest.approx(old_epoch, abs=1.0)
+    assert entity._last_good_accuracy_data["last_seen"] == pytest.approx(
+        old_epoch, abs=1.0
+    )
+    # Behavioural consequence: the restored row carries its true age and the
+    # status derived from it is "stale" (not the age-less "unknown").
+    age = entity._get_location_age(seeded)
+    assert age is not None and age > DEFAULT_STALE_THRESHOLD
+    assert entity._get_location_status(seeded) == "stale"
+
+
+@pytest.mark.asyncio
+async def test_restore_recovers_last_seen_from_utc_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``last_seen`` is absent, the restore falls back to ``last_seen_utc``.
+
+    Both keys carry the same ISO timestamp; only one may be present in a given
+    recorded state. The fallback keeps the recovered age correct in either case.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    old_epoch = time.time() - (DEFAULT_STALE_THRESHOLD + 5000)
+    old_iso = (
+        datetime.fromtimestamp(old_epoch, tz=UTC).isoformat().replace("+00:00", "Z")
+    )
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 50,
+            # No "last_seen"; only the UTC mirror is recorded.
+            "last_seen_utc": old_iso,
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    seeded = coordinator.primed["data"]
+    assert seeded["last_seen"] == pytest.approx(old_epoch, abs=1.0)
+    assert entity._get_location_status(seeded) == "stale"
+
+
+@pytest.mark.asyncio
+async def test_restore_without_timestamp_leaves_last_seen_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded state without any timestamp seeds no last_seen (old behavior).
+
+    With neither ``last_seen`` nor ``last_seen_utc`` present, the restore must
+    not fabricate an age: the key stays absent and the age remains unknown.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 50,
+            # No last_seen / last_seen_utc at all.
+        },
+    )
+
+    await entity.async_added_to_hass()
+
+    seeded = coordinator.primed["data"]
+    assert "last_seen" not in seeded
+    assert entity._get_location_age(seeded) is None
 
 
 # ---------------------------------------------------------------------------
