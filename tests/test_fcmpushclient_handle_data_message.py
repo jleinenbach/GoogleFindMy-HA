@@ -50,7 +50,7 @@ class TestHandleDataMessage:
         client = FcmHandleSlim()
         msg = make_data_message(message_type="deleted_messages")
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is False
 
         assert not client.callback.called
         assert client.warnings == []
@@ -79,8 +79,11 @@ class TestHandleDataMessage:
         msg = make_data_message(subtype="OTHER")
 
         with caplog.at_level(logging.DEBUG):
-            client._handle_data_message(msg)
+            delivered = client._handle_data_message(msg)
 
+        # A dropped foreign-subtype push is not a delivery: the caller must
+        # selective-ack it but must NOT record it in ``persistent_ids`` (Codex P2).
+        assert delivered is False
         # Emitted at DEBUG, never WARNING (benign, expected event).
         assert any(
             "does not match" in r.getMessage() and r.levelno == logging.DEBUG
@@ -99,7 +102,7 @@ class TestHandleDataMessage:
         _set_decrypt(client, b'{"ok": true}')
         msg = make_data_message(subtype="APPID")
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is True
 
         assert client.warnings == []
         assert client.callback.called
@@ -118,7 +121,7 @@ class TestHandleDataMessage:
         client = FcmHandleSlim(credentials=credentials)
         msg = make_data_message(subtype="APPID")
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is False
 
         assert not client.callback.called
         assert client.warnings == []
@@ -129,7 +132,7 @@ class TestHandleDataMessage:
         _set_decrypt(client, b'{"k": "v"}')
         msg = make_data_message()
 
-        client._handle_data_message(msg)
+        assert client._handle_data_message(msg) is True
 
         client.callback.assert_called_once()
         ret_val = client.callback.call_args.args[0]
@@ -187,7 +190,9 @@ class TestHandleDataMessage:
         _set_decrypt(client, b'{"k": "v"}')
         msg = make_data_message()
 
-        client._handle_data_message(msg)
+        # Delivered = decrypted + dispatched; a raising HA callback still counts as
+        # a delivery (the payload reached the callback), matching prior semantics.
+        assert client._handle_data_message(msg) is True
 
         client._try_increment_error_count.assert_called_once_with(ErrorType.NOTIFY)
         assert not client._reset_error_count.called

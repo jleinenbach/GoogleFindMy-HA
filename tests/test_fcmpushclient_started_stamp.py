@@ -36,6 +36,7 @@ async def test_login_success_stamps_started_monotonic() -> None:
     slim._reset_error_count = Mock()  # type: ignore[attr-defined]
     slim.run_state = FcmPushClientRunState.CREATED  # type: ignore[attr-defined]
     slim.persistent_ids = ["stale-pid"]  # type: ignore[attr-defined]
+    slim._first_data_message_delivered = True  # type: ignore[attr-defined]
     slim._started_monotonic = None  # type: ignore[attr-defined]
 
     await slim._handle_message(LoginResponse())  # type: ignore[arg-type]
@@ -45,6 +46,9 @@ async def test_login_success_stamps_started_monotonic() -> None:
     # And the accompanying STARTED state + persistent-ids reset happened.
     assert slim.run_state == FcmPushClientRunState.STARTED  # type: ignore[attr-defined]
     assert slim.persistent_ids == []  # type: ignore[attr-defined]
+    # The separate delivery proof is reset too, so the fresh session correctly
+    # reads as "not yet delivered" until a real data message arrives.
+    assert slim._first_data_message_delivered is False  # type: ignore[attr-defined]
     slim._reset_error_count.assert_called_once_with(ErrorType.LOGIN)  # type: ignore[attr-defined]
 
 
