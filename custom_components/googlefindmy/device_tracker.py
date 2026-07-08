@@ -52,6 +52,7 @@ from .const import (
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    parse_last_seen_timestamp,
     recorded_accuracy_pair,
     resolve_seeded_accuracy,
 )
@@ -970,6 +971,22 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             restored = {}
 
         if restored:
+            # Restore last_seen so the recovered fix carries its true age.
+            # _get_location_age() reads ``last_seen`` as an epoch float; without
+            # it the age is unknown and _is_location_stale() assumes "not stale",
+            # so a position that predates the restart would look fresh until the
+            # next poll. The recorded value is an ISO string (or last_seen_utc);
+            # parse_last_seen_timestamp() normalizes both back to epoch seconds.
+            last_seen = parse_last_seen_timestamp(
+                last_state.attributes.get("last_seen")
+            )
+            if last_seen is None:
+                last_seen = parse_last_seen_timestamp(
+                    last_state.attributes.get("last_seen_utc")
+                )
+            if last_seen is not None:
+                restored["last_seen"] = last_seen
+
             self._last_good_accuracy_data = {**restored}
             # Prime coordinator cache using its public API (no private access).
             dev_id = self.device_id
