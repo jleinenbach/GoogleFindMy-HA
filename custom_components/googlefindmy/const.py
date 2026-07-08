@@ -162,7 +162,9 @@ LOCATE_COOLDOWN_S: int = DEFAULT_MIN_POLL_INTERVAL
 TOKEN_REFRESH_COOLDOWN_S: int = 180
 """Cooldown window (seconds) between token regeneration requests (3 minutes).
 
-This cooldown is shared across all token regeneration buttons (AAS/ADM).
+This window is applied per entry and per token type, so the FCM and ADM
+regeneration buttons are rate-limited independently (a refresh of one does
+not disable the sibling button). See ``token_refresh._cooldown_key``.
 """
 
 # EID resolver refresh trigger debounce policy

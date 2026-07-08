@@ -703,7 +703,15 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         # protect against.
         if not self.credentials:
             return False
-        if subtype != self.credentials["gcm"]["app_id"]:
+        # Resolve our registered app_id defensively. ``credentials`` is truthy
+        # here, but the ``gcm`` sub-dict or its ``app_id`` can be transiently
+        # absent during a credential swap/invalidate window; a hard
+        # ``["gcm"]["app_id"]`` would raise ``KeyError`` in that window. The
+        # sibling read in ``_decrypt_raw_data`` already uses ``.get("gcm")`` for
+        # the same reason. A ``None`` registered id simply means we cannot own
+        # this push, so the mismatch check below drops it safely.
+        registered_app_id = (self.credentials.get("gcm") or {}).get("app_id")
+        if subtype != registered_app_id:
             # Drop, do not fall through to decrypt. A subtype mismatch means this
             # push was encrypted for a *different* (superseded) GCM registration
             # -- e.g. an old client instance still listening after an FCM
@@ -728,7 +736,7 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 "Subtype %s in data message does not match "
                 "app id client was registered with %s",
                 subtype,
-                self.credentials["gcm"]["app_id"],
+                registered_app_id,
             )
             return False
 

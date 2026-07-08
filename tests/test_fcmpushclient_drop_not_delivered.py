@@ -167,5 +167,40 @@ async def test_dropped_then_delivered_records_both_ids_for_rmq2() -> None:
     assert client._first_data_message_delivered is True
 
 
+async def test_missing_gcm_key_drops_without_keyerror() -> None:
+    """Hardening: truthy credentials lacking the ``gcm`` sub-dict must drop, not raise.
+
+    During a credential swap/invalidate window ``self.credentials`` can be a
+    truthy dict without ``gcm``. A hard ``["gcm"]["app_id"]`` deref would raise
+    ``KeyError``; the ``.get("gcm")`` resolution treats the absent id as "not
+    ours" and drops the push on the same safe path as a subtype mismatch.
+    """
+    client = _HandleMessageSlim()
+    client.credentials = {"keys": {}}  # no "gcm" sub-dict
+    msg = _make_stanza(persistent_id="pid-nogcm", subtype="APPID")
+
+    # Must not raise; behaves like a foreign-subtype drop.
+    await client._handle_message(msg)
+
+    assert client.persistent_ids == ["pid-nogcm"]  # RMQ2 receipt kept
+    assert client._first_data_message_delivered is False  # not a delivery
+    client._send_selective_ack.assert_awaited_once_with("pid-nogcm")
+    assert not client.callback.called  # dropped before decrypt
+
+
+async def test_gcm_without_app_id_drops_without_keyerror() -> None:
+    """Hardening: ``gcm`` present but missing ``app_id`` must drop, not raise."""
+    client = _HandleMessageSlim()
+    client.credentials = {"gcm": {}, "keys": {}}  # gcm dict without app_id
+    msg = _make_stanza(persistent_id="pid-noappid", subtype="APPID")
+
+    await client._handle_message(msg)
+
+    assert client.persistent_ids == ["pid-noappid"]
+    assert client._first_data_message_delivered is False
+    client._send_selective_ack.assert_awaited_once_with("pid-noappid")
+    assert not client.callback.called
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

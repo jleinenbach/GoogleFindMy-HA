@@ -2,7 +2,9 @@
 """Token refresh utilities for manual regeneration of ADM and FCM tokens.
 
 This module provides entry-scoped token regeneration with:
-- Shared cooldown (3 minutes) across all token refresh operations
+- Per-entry, per-token-type cooldown (3 minutes); FCM and ADM refreshes are
+  rate-limited independently so refreshing one does not disable the sibling
+  button (see ``_cooldown_key``)
 - Proper dependency handling (ADM depends on AAS)
 - Info-level logging for visibility of regeneration operations
 
@@ -117,7 +119,7 @@ async def async_regenerate_fcm_token(
     """Regenerate FCM/GCM tokens while preserving device identity.
 
     This function:
-    1. Checks and enforces the shared cooldown
+    1. Checks and enforces the per-token-type cooldown
     2. Invalidates FCM tokens (keeps GCM android_id/security_token)
     3. Triggers re-registration via the FCM receiver
 
@@ -194,7 +196,7 @@ async def async_regenerate_adm_token(
     """Regenerate the ADM token.
 
     This function:
-    1. Checks and enforces the shared cooldown
+    1. Checks and enforces the per-token-type cooldown
     2. Invalidates the ADM token in the cache
     3. Triggers a fresh ADM token generation (which may use existing AAS
        or regenerate it if needed)
@@ -273,7 +275,16 @@ async def async_regenerate_adm_token(
 
 
 def clear_cooldown(entry_id: str, token_type: str | None = None) -> None:
-    """Clear the cooldown for a specific entry/type (for testing purposes)."""
+    """Clear the cooldown for a specific entry/type (for testing purposes).
+
+    ``token_type`` must be supplied to clear a real production cooldown:
+    production only ever records per-type keys (``entry_id:fcm`` /
+    ``entry_id:adm`` via ``_record_refresh``). Calling this without a
+    ``token_type`` targets the legacy entry-only key (see ``_cooldown_key``)
+    and is therefore a no-op against the typed keys the buttons actually use.
+    To wipe every key for a test, use ``clear_all_cooldowns()`` or call this
+    once per token type.
+    """
     _last_refresh_timestamps.pop(_cooldown_key(entry_id, token_type), None)
 
 
