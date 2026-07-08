@@ -225,19 +225,33 @@ DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 # the tracker state becomes "unknown". This is always enabled.
 # Users who need the last known location can use the "Last Location" entity.
 #
-# Based on real-world FMDN tracker update intervals:
-# - Typical update interval: 2-4 minutes (median ~3.4 min)
-# - 95th percentile: ~8 minutes
-# - 99th percentile: ~14 minutes
+# Situation (empirically observed, HA history July 2026):
+# A stationary device at home (smartphone with a dark display, or a Bluetooth
+# tag scanned only by the household's own dark-display phones) reports through
+# the FMDN network roughly every ~30 minutes. Every spurious "unknown" flip in
+# the field carried last_seen ~1800-1835 s old, i.e. exactly at the previous
+# 1800 s threshold: the threshold sat directly on the natural home reporting
+# cadence, so any minor delay tipped an otherwise-present device into "stale"
+# and blanked its coordinates until the next report arrived.
 #
-# Note: EID rotation (1024s) is NOT relevant here. When participating in the
-# FMDN network, we receive updates from smartphones that see the tracker.
-# The update frequency depends on smartphone density and tracker visibility,
-# not on EID rotation.
+# The earlier 1800 s were calibrated to ACTIVE FMDN tracker-scan statistics
+# (median ~3.4 min, p95 ~8 min, p99 ~14 min) that hold when many foreign
+# phones continuously scan a tracker. They do NOT hold for a device sitting at
+# home: a dozing smartphone reports its own position only occasionally, and a
+# tag at home is seen only by the few (also dozing) household phones. A shorter
+# poll does not help - Google returns the last reported fix for a dozing
+# device, so last_seen only advances when the device itself reports.
 #
-# Default: 1800 seconds (30 minutes) - conservative value for "really gone"
-# Minimum: 300 seconds (5 minutes) - allows ~2-3 typical update cycles
-DEFAULT_STALE_THRESHOLD: int = 1800
+# Rationale for the default: 3900 s (65 minutes) ~= 2x the
+# observed ~30 min home cadence plus margin to tolerate one missed report
+# cycle, which removes the flapping for both smartphones and tags while still
+# flagging a genuinely absent device within ~1 h. The threshold stays
+# user-configurable (min 300 s, max 86400 s); only the default was mistuned.
+#
+# Note: EID rotation (1024s) is NOT relevant here.
+# Default: 3900 seconds (65 minutes) - ~2x the observed home reporting cadence
+# Minimum: 300 seconds (5 minutes) - allows ~2-3 active-scan update cycles
+DEFAULT_STALE_THRESHOLD: int = 3900
 DEFAULT_SHOW_LOCATION_AGE: bool = True
 
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"

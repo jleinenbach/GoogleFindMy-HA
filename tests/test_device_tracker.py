@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import time
 from collections.abc import Callable, Coroutine
 from types import SimpleNamespace
 from typing import Any
@@ -14,7 +15,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from custom_components.googlefindmy.const import DOMAIN, TRACKER_SUBENTRY_KEY
+from custom_components.googlefindmy.const import (
+    DEFAULT_STALE_THRESHOLD,
+    DOMAIN,
+    TRACKER_SUBENTRY_KEY,
+)
 from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator import registry as coordinator_registry
 from tests.helpers.config_entries_stub import make_config_entry
@@ -810,3 +815,120 @@ async def test_restore_marks_estimated_for_flagless_invalid_accuracy(
 
     assert coordinator.primed["data"]["accuracy"] == 200.0
     assert coordinator.primed["data"]["accuracy_estimated"] is True
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the stale-threshold retune (spurious "unknown" flapping)
+# and the latent accuracy-less-fallback bug B1 (PR #201 follow-up audit).
+#
+# Root cause: a stationary device at home (dozing smartphone, or a tag scanned
+# only by the household's own dozing phones) reports via FMDN roughly every
+# ~30 min. The previous 1800 s default sat exactly on that cadence, so any
+# delayed report tipped an otherwise-present device into "stale" and blanked
+# its coordinates. B1 is the sibling defect: a fresh row with valid lat/lon but
+# no accuracy was blanked instead of falling back to the last accuracy-bearing
+# fix, and the "last good accuracy" cache was overwritten by accuracy-less
+# rows.
+# ---------------------------------------------------------------------------
+
+
+def _make_stale_probe_tracker(coordinator: _ShowAgeCoordinatorStub) -> Any:
+    """Build a tracker with the REAL stale methods (no overrides), so the
+    default threshold actually governs the stale decision."""
+
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
+    entity = device_tracker.GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "show-age-device", "name": "Tracker"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=TRACKER_SUBENTRY_KEY,
+    )
+    entity.hass = SimpleNamespace()
+    return entity
+
+
+def test_home_cadence_report_not_stale_under_default_threshold() -> None:
+    """A ~35 min old fix (typical home reporting cadence) must NOT be stale
+    under the retuned default. Under the previous 1800 s default the very same
+    age would have flipped to "stale" and blanked the coordinates."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
+    entity = _make_stale_probe_tracker(coordinator)
+    # 2100 s = 35 min: above the old 1800 s default, below the new 3900 s one.
+    entity._get_location_age = lambda: 2100.0  # type: ignore[method-assign]
+
+    assert entity._get_stale_threshold() == DEFAULT_STALE_THRESHOLD
+    assert DEFAULT_STALE_THRESHOLD > 1800, "default must be retuned above 1800 s"
+    assert entity._is_location_stale() is False, (
+        "a 35 min old home report must not be treated as stale"
+    )
+
+
+def test_accuracy_less_fresh_row_falls_back_to_cached_fix() -> None:
+    """B1 read path: a fresh row with valid lat/lon but no accuracy must fall
+    back to the last accuracy-bearing fix instead of blanking coordinates."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=100.0)
+    # Fresh current row: valid coordinates, but the accuracy key is absent.
+    coordinator._row = {
+        "id": "show-age-device",
+        "device_id": "show-age-device",
+        "name": "Tracker",
+        "latitude": 11.0,
+        "longitude": 21.0,
+        "last_seen": time.time(),
+    }
+    entity = _make_show_age_tracker(coordinator, age_seconds=100.0)
+    # Prime the cache with a good, accuracy-bearing fix.
+    entity._last_good_accuracy_data = {
+        "latitude": 10.0,
+        "longitude": 20.0,
+        "accuracy": 5,
+        "last_seen": time.time() - 100,
+    }
+
+    entity._sync_location_attrs()
+
+    # Coordinates come from the cached accuracy-bearing fix, not nulled.
+    assert entity._attr_latitude == 10.0
+    assert entity._attr_longitude == 20.0
+    assert entity._attr_location_accuracy == 5.0
+
+
+def test_accuracy_less_update_does_not_poison_accuracy_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 write path: an accuracy-less update must NOT overwrite the cached
+    accuracy-bearing fix (the cache is _last_good_ACCURACY_data)."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=100.0)
+    coordinator._row = {
+        "id": "show-age-device",
+        "device_id": "show-age-device",
+        "name": "Tracker",
+        "latitude": 11.0,
+        "longitude": 21.0,
+        "last_seen": time.time(),
+    }
+    entity = _make_show_age_tracker(coordinator, age_seconds=100.0)
+    good = {
+        "latitude": 10.0,
+        "longitude": 20.0,
+        "accuracy": 5,
+        "last_seen": time.time() - 100,
+    }
+    entity._last_good_accuracy_data = dict(good)
+    # Isolate the cache-update branch of _handle_coordinator_update.
+    monkeypatch.setattr(entity, "_sync_location_attrs", lambda: None)
+    monkeypatch.setattr(entity, "async_write_ha_state", lambda: None)
+    monkeypatch.setattr(
+        entity, "refresh_device_label_from_coordinator", lambda **kw: None
+    )
+
+    entity._handle_coordinator_update()
+
+    assert entity._last_good_accuracy_data == good, (
+        "an accuracy-less update must not poison the accuracy cache"
+    )

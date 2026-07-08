@@ -1134,7 +1134,15 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             self._attr_location_accuracy = 0.0
             self._attr_location_name = None
         else:
-            data = self._current_row() or self._last_good_accuracy_data
+            # Prefer the current row, but only if it carries a usable accuracy.
+            # A fresh update can arrive with valid lat/lon yet no accuracy; in
+            # that case fall back to the last fix that DID carry accuracy so an
+            # accuracy-less update does not blank out otherwise-valid
+            # coordinates (spurious "unknown"). The write path keeps
+            # ``_last_good_accuracy_data`` restricted to accuracy-bearing fixes.
+            data = self._current_row()
+            if not data or data.get("accuracy") is None:
+                data = self._last_good_accuracy_data
             if not data or data.get("accuracy") is None:
                 # Accuracy must be present for a valid GPS fix; without it
                 # HA's zone engine raises TypeError on comparison.
@@ -1237,11 +1245,19 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         lat = device_data.get("latitude")
         lon = device_data.get("longitude")
+        acc = device_data.get("accuracy")
 
-        if lat is not None and lon is not None:
+        if lat is not None and lon is not None and acc is not None:
+            # Only cache fixes that actually carry accuracy; the read-path
+            # fallback in _sync_location_attrs relies on this cache holding a
+            # usable fix (its name is _last_good_ACCURACY_data). Overwriting it
+            # with an accuracy-less fix would poison the fallback and could
+            # blank valid coordinates on a later accuracy-less update.
             self._last_good_accuracy_data = device_data.copy()
         elif self._last_good_accuracy_data is None:
-            # Preserve semantic-only updates when no prior location is available.
+            # Bootstrap only: preserve the first update (semantic-only or
+            # accuracy-less) when nothing better has been seen yet, so the
+            # entity still has *something* to report.
             self._last_good_accuracy_data = device_data.copy()
 
         self._sync_location_attrs()
