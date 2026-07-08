@@ -572,3 +572,54 @@ async def test_map_view_legacy_row_without_flag_prefers_accuracy_m(
     assert len(captured) == 1
     assert captured[0]["accuracy"] == 18.0
     assert captured[0]["accuracy_estimated"] is False
+
+
+@pytest.mark.asyncio
+async def test_map_view_history_uses_last_seen_utc_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row carrying only ``last_seen_utc`` plots at its report time.
+
+    Codex #1177: once the history fallback accepts recorder-only rows, the
+    timestamp logic must parse ``last_seen_utc`` as the same fallback as the
+    device_tracker restore path. Without it a restored/legacy row lacking the
+    plain ``last_seen`` attribute would fall back to ``state.last_updated`` (the
+    recorder write/restart time), making a stale fix appear fresh and
+    sort/dedupe incorrectly. The report time (2024-01-01) and the write time
+    (2024-08-01) are deliberately far apart so the assertion discriminates the
+    fallback from the write-time default.
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    device_id = "dev-lsu"
+    coordinator = _StubCoordinator(devices=[{"id": device_id, "name": "Device"}])
+    registry = _registry_for("entry-acc", device_id, coordinator)
+    entry, captured = _wire_view(
+        monkeypatch, map_view, device_id=device_id, registry=registry
+    )
+
+    report_time = datetime(2024, 1, 1, tzinfo=UTC)
+    write_time = datetime(2024, 8, 1, tzinfo=UTC)
+    states = [
+        SimpleNamespace(
+            attributes={
+                "latitude": "10.0",
+                "longitude": "20.0",
+                # Only the UTC mirror is present, no plain ``last_seen``.
+                "last_seen_utc": "2024-01-01T00:00:00Z",
+                "accuracy_m": 15.0,
+            },
+            last_updated=write_time,
+            state="legacy-lsu",
+        ),
+    ]
+    _install_history(monkeypatch, states)
+
+    response = await _run_get(map_view, entry, device_id)
+
+    assert response.status == 200
+    assert len(captured) == 1
+    # The point carries the recorded report time, not the recorder write time.
+    assert captured[0]["last_seen"] == pytest.approx(report_time.timestamp())
+    assert captured[0]["last_seen"] != pytest.approx(write_time.timestamp())

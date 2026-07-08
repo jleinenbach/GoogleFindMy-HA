@@ -172,6 +172,34 @@ def _load_real_is_valid_accuracy() -> Any:
     return geo.is_valid_accuracy
 
 
+def _load_real_parse_last_seen_timestamp() -> Any:
+    """Load the canonical ``parse_last_seen_timestamp`` from subentry.py by path.
+
+    Mirrors ``_load_real_safe_accuracy`` so the stub exposes the same timestamp
+    parser that production re-exports on ``coordinator.parse_last_seen_timestamp``.
+    subentry.py imports only ``math``/``datetime``/``typing`` (and defines its own
+    ``normalize_epoch_seconds`` helper), so it loads in isolation without dragging
+    in the heavy integration import chain.
+    """
+
+    subentry_path = (
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "googlefindmy"
+        / "coordinator"
+        / "helpers"
+        / "subentry.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "googlefindmy_test_subentry", subentry_path
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise RuntimeError("Failed to load subentry module for testing")
+    subentry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(subentry)
+    return subentry.parse_last_seen_timestamp
+
+
 def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     """Load the map_view module with stubbed Home Assistant dependencies."""
 
@@ -269,6 +297,13 @@ def _load_map_view_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     # coordinator/__init__.py) so the map can flag estimated points without the
     # plain ModuleType stub (no __path__) breaking the lazy import.
     coordinator_module.is_valid_accuracy = _load_real_is_valid_accuracy()
+    # Mirror the production re-export of ``parse_last_seen_timestamp`` (see
+    # coordinator/__init__.py) so the map history can normalize recorded
+    # last_seen/last_seen_utc attributes without the plain ModuleType stub (no
+    # __path__) breaking the lazy import.
+    coordinator_module.parse_last_seen_timestamp = (
+        _load_real_parse_last_seen_timestamp()
+    )
     monkeypatch.setitem(
         sys.modules, "custom_components.googlefindmy.coordinator", coordinator_module
     )
@@ -622,3 +657,33 @@ def test_resolve_is_valid_accuracy_falls_back_when_symbol_missing(
 
     # Second call must hit the cache instead of re-resolving (same object).
     assert map_view._resolve_is_valid_accuracy() is is_valid_accuracy
+
+
+def test_map_view_resolves_parse_last_seen_timestamp_under_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timestamp parser resolver must work under the coordinator stub.
+
+    The stub re-exports ``parse_last_seen_timestamp`` exactly like production
+    (coordinator/__init__.py), so ``_resolve_parse_last_seen_timestamp`` returns
+    the real parser. It normalizes numeric epochs and ISO 8601 strings (incl. the
+    ``last_seen_utc`` mirror) back to epoch seconds, and returns None for
+    unparseable input so the map history can fall through to ``last_updated``.
+    """
+
+    map_view = _load_map_view_module(monkeypatch)
+
+    parse_last_seen_timestamp = map_view._resolve_parse_last_seen_timestamp()
+
+    # ISO 8601 (the recorded last_seen/last_seen_utc shape) -> epoch seconds.
+    assert parse_last_seen_timestamp("2024-01-01T00:00:00Z") == pytest.approx(
+        datetime(2024, 1, 1, tzinfo=UTC).timestamp()
+    )
+    # Numeric epoch passes through as float.
+    assert parse_last_seen_timestamp(1704067200.0) == pytest.approx(1704067200.0)
+    # Unparseable input yields None (caller keeps the last_updated default).
+    assert parse_last_seen_timestamp("not-a-timestamp") is None
+    assert parse_last_seen_timestamp(None) is None
+
+    # Second call must hit the cache instead of re-importing (same object).
+    assert map_view._resolve_parse_last_seen_timestamp() is parse_last_seen_timestamp

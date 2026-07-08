@@ -52,6 +52,7 @@ from .const import (
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    parse_last_seen_timestamp,
     recorded_accuracy_pair,
     resolve_seeded_accuracy,
 )
@@ -922,12 +923,17 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         if not last_state:
             return
 
-        # Standard device_tracker attributes (with safe fallbacks for legacy keys)
+        # Standard device_tracker attributes. Fresh states expose the position via
+        # the plain latitude/longitude keys; stale/blank states withhold them (the
+        # producer strips them so a withheld position is not republished as the
+        # live GPS attribute) and keep the last known fix in the recorder-only
+        # last_latitude/last_longitude keys. Fall back to those so a restart still
+        # recovers the last position.
         lat = last_state.attributes.get(
-            ATTR_LATITUDE, last_state.attributes.get("latitude")
+            ATTR_LATITUDE, last_state.attributes.get("last_latitude")
         )
         lon = last_state.attributes.get(
-            ATTR_LONGITUDE, last_state.attributes.get("longitude")
+            ATTR_LONGITUDE, last_state.attributes.get("last_longitude")
         )
         # Read the accuracy value AND its estimated-provenance flag from the
         # same authoritative source as map_view and the snapshot builders:
@@ -970,6 +976,22 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             restored = {}
 
         if restored:
+            # Restore last_seen so the recovered fix carries its true age.
+            # _get_location_age() reads ``last_seen`` as an epoch float; without
+            # it the age is unknown and _is_location_stale() assumes "not stale",
+            # so a position that predates the restart would look fresh until the
+            # next poll. The recorded value is an ISO string (or last_seen_utc);
+            # parse_last_seen_timestamp() normalizes both back to epoch seconds.
+            last_seen = parse_last_seen_timestamp(
+                last_state.attributes.get("last_seen")
+            )
+            if last_seen is None:
+                last_seen = parse_last_seen_timestamp(
+                    last_state.attributes.get("last_seen_utc")
+                )
+            if last_seen is not None:
+                restored["last_seen"] = last_seen
+
             self._last_good_accuracy_data = {**restored}
             # Prime coordinator cache using its public API (no private access).
             dev_id = self.device_id
@@ -1223,13 +1245,22 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # Deriving from display_data keeps the attribute set from exposing a
         # position that differs from the published coordinates (Codex #202).
         attributes: dict[str, Any] = _as_ha_attributes(display_data) or {}
+        # Decouple the live GPS keys from the recorder-only keys. When the live
+        # coordinates are withheld (_attr_latitude is None: stale, or a display
+        # row without usable accuracy), HA's TrackerEntity.state_attributes omits
+        # latitude/longitude -- but extra_state_attributes is merged last
+        # (entity.py: attr |= extra_state_attributes), so leaving the plain
+        # latitude/longitude keys here would republish the withheld position as
+        # the live GPS attribute. closest()/proximity/the built-in map would then
+        # treat a stale fix as the current location (Codex #1177). Strip the plain
+        # keys (via the HA constants, same house-style as the timestamp sensor)
+        # and expose the last known position through the recorder-only
+        # last_latitude/last_longitude keys below. accuracy_m/altitude_m are not
+        # HA GPS attributes and stay untouched, so restore/history/snapshot keep
+        # the accuracy radius (Codex #202 stays fixed: no divergent live position).
         if self._attr_latitude is None:
-            # Coordinates were withheld (stale, or a display row without
-            # accuracy). Strip the positional keys so the attributes never
-            # resurrect coordinates the tracker is deliberately not publishing.
-            for _pos_key in ("latitude", "longitude", "accuracy_m", "altitude_m"):
-                attributes.pop(_pos_key, None)
-
+            attributes.pop(ATTR_LATITUDE, None)
+            attributes.pop(ATTR_LONGITUDE, None)
         attributes["google_device_id"] = self.device_id
 
         location_age = self._get_location_age(display_data)
@@ -1253,9 +1284,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         # and the sensor.*_last_seen entity.
         attributes["location_status"] = self._get_location_status(display_data)
 
-        if stale and display_data:
-            # Main coordinates are withheld while stale; surface the last known
-            # position via dedicated keys instead (same display row).
+        if self._attr_latitude is None and display_data:
+            # Live coordinates are withheld (stale, or a display row without
+            # usable accuracy -- both blank _attr_latitude, not just stale);
+            # surface the last known position via dedicated recorder-only keys
+            # instead (same display row). These feed the restore/history/snapshot
+            # readers, which fall back to them when the plain latitude/longitude
+            # keys are absent (stripped above).
             last_lat = display_data.get("latitude")
             last_lon = display_data.get("longitude")
             if last_lat is not None:
