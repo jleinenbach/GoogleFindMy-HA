@@ -667,9 +667,12 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
         pushes to stop the server replaying them. The two consumers therefore use
         two separate signals -- their contracts conflict on a single field (all
         acked vs. only delivered), so a shared ``persistent_ids`` cannot satisfy
-        both. A decrypt failure raises (it is caught upstream in
-        ``_process_one_inbound_message``) and therefore also does not count as
-        delivered -- the raise skips the caller's ``persistent_ids`` append too.
+        both. A decrypt failure raises (caught upstream in
+        ``_process_one_inbound_message``): it never counts as delivered, and the
+        raise unwinds before the caller's own ``persistent_ids`` append. That
+        handler still records the acked ``persistent_id`` for RMQ2 dedup when it
+        selective-acks the poison push, so the append happens at the ack site
+        instead of here (see ``_process_one_inbound_message``).
         """
         self.logger.debug(
             "Received data message Stream ID: %s, Last: %s, Status: %s",
@@ -1095,7 +1098,23 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 persistent_id,
                 decrypt_err,
             )
-            return await self._ack_or_disconnect(persistent_id)
+            acked = await self._ack_or_disconnect(persistent_id)
+            if acked and persistent_id:
+                # RMQ2-dedup parity with the delivered/dropped path in
+                # ``_handle_message``: a poison push we selective-ack must also be
+                # recorded in ``persistent_ids`` so the next ``_login`` reports it
+                # in ``received_persistent_id``. The decrypt-failure raise unwinds
+                # ``_handle_message`` *before* its own ``persistent_ids.append``,
+                # so without recording here the server keeps replaying the same
+                # undecryptable push across reconnects, re-incrementing
+                # ``_consecutive_decrypt_failures`` toward a bogus re-registration.
+                # Record only on a real ack: a dead-writer ``False`` means the push
+                # was NOT acked (the supervisor reconnects and the server replays,
+                # so a later attempt records it instead). The escalation branch
+                # above raises before reaching this point, so a message that
+                # escalates to re-registration is correctly never recorded.
+                self.persistent_ids.append(persistent_id)
+            return acked
 
     async def _listen(self) -> None:
         """Listens for push notifications until an error or stop() occurs."""
