@@ -478,8 +478,8 @@ def _make_show_age_tracker(
     entity.hass = SimpleNamespace()
     # Bypass stale-detection and force a deterministic age value.
     entity._is_location_stale = lambda: False  # type: ignore[method-assign]
-    entity._get_location_age = lambda: age_seconds  # type: ignore[method-assign]
-    entity._get_location_status = lambda: "available"  # type: ignore[method-assign]
+    entity._get_location_age = lambda *a, **k: age_seconds  # type: ignore[method-assign]
+    entity._get_location_status = lambda *a, **k: "available"  # type: ignore[method-assign]
     return entity
 
 
@@ -857,7 +857,7 @@ def test_home_cadence_report_not_stale_under_default_threshold() -> None:
     coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
     entity = _make_stale_probe_tracker(coordinator)
     # 2100 s = 35 min: above the old 1800 s default, below the new 3900 s one.
-    entity._get_location_age = lambda: 2100.0  # type: ignore[method-assign]
+    entity._get_location_age = lambda *a, **k: 2100.0  # type: ignore[method-assign]
 
     assert entity._get_stale_threshold() == DEFAULT_STALE_THRESHOLD
     assert DEFAULT_STALE_THRESHOLD > 1800, "default must be retuned above 1800 s"
@@ -932,3 +932,104 @@ def test_accuracy_less_update_does_not_poison_accuracy_cache(
     assert entity._last_good_accuracy_data == good, (
         "an accuracy-less update must not poison the accuracy cache"
     )
+
+
+def _make_plain_tracker(coordinator: _ShowAgeCoordinatorStub) -> Any:
+    """Build a tracker WITHOUT monkeypatching age/status/stale helpers.
+
+    Used to assert the real derivation ties every published value to the same
+    display row (Codex #202), which the show-age helper cannot verify because it
+    stubs those methods out.
+    """
+    device_tracker = importlib.import_module(
+        "custom_components.googlefindmy.device_tracker"
+    )
+    entity = device_tracker.GoogleFindMyDeviceTracker(
+        coordinator,
+        {"id": "show-age-device", "name": "Tracker"},
+        subentry_key=TRACKER_SUBENTRY_KEY,
+        subentry_identifier=TRACKER_SUBENTRY_KEY,
+    )
+    entity.hass = SimpleNamespace()
+    return entity
+
+
+def test_accuracy_less_row_ties_all_metadata_to_display_row() -> None:
+    """Codex #202: when coordinates fall back to the cached accuracy-bearing
+    fix, the age, status and extra attributes must describe that SAME cached
+    row, never the accuracy-less current row. Otherwise a moving device is shown
+    at cached coordinates with a fresh age and attributes exposing a different
+    lat/lon than the tracker properties."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
+    # Fresh current row: NEW lat/lon and a brand-new last_seen, but no accuracy.
+    coordinator._row = {
+        "id": "show-age-device",
+        "device_id": "show-age-device",
+        "name": "Tracker",
+        "latitude": 11.0,
+        "longitude": 21.0,
+        "last_seen": time.time(),
+    }
+    entity = _make_plain_tracker(coordinator)
+    # Cache: the last accuracy-bearing fix, ~2000 s old, at DIFFERENT
+    # coordinates. 2000 s sits in the "aging" band (> half the 3900 s default,
+    # below the full threshold) so its status differs from the fresh current
+    # row's "current" -- this makes the test sharp against age/status still
+    # being read from the current row.
+    entity._last_good_accuracy_data = {
+        "latitude": 10.0,
+        "longitude": 20.0,
+        "accuracy": 5,
+        "last_seen": time.time() - 2000,
+    }
+
+    entity._sync_location_attrs()
+    attrs = entity._attr_extra_state_attributes
+
+    # The liveness gate stays non-stale (current row is fresh), so coordinates
+    # are still published -- from the cached accuracy-bearing fix.
+    assert entity._attr_latitude == 10.0
+    assert entity._attr_longitude == 20.0
+    # Extra attributes must expose the SAME cached position, not the current
+    # row's 11.0/21.0 (this is the divergence Codex flagged).
+    assert attrs.get("latitude") == 10.0
+    assert attrs.get("longitude") == 20.0
+    # Age/status describe the cached row (~2000 s -> "aging"), NOT the fresh
+    # current row (which would read "current"/age 0).
+    assert attrs["location_status"] == "aging"
+    assert attrs["location_age"] == 1980  # round(2000/60)*60
+
+
+def test_stale_branch_strips_positional_attributes() -> None:
+    """Codex #202 sibling: when stale blanks the tracker coordinates, the extra
+    attributes must not resurrect latitude/longitude; the last known position
+    belongs in the dedicated last_latitude/last_longitude keys."""
+
+    coordinator = _ShowAgeCoordinatorStub(options={}, age_seconds=None)
+    coordinator._row = {
+        "id": "show-age-device",
+        "device_id": "show-age-device",
+        "name": "Tracker",
+        "latitude": 12.0,
+        "longitude": 22.0,
+        "accuracy": 8,
+        "last_seen": time.time() - 10000,
+    }
+    entity = _make_plain_tracker(coordinator)
+    entity._is_location_stale = lambda: True  # type: ignore[method-assign]
+
+    entity._sync_location_attrs()
+    attrs = entity._attr_extra_state_attributes
+
+    # Tracker coordinates are withheld while stale.
+    assert entity._attr_latitude is None
+    assert entity._attr_longitude is None
+    # The attribute set must NOT expose latitude/longitude (would contradict the
+    # blanked tracker properties).
+    assert "latitude" not in attrs
+    assert "longitude" not in attrs
+    assert "accuracy_m" not in attrs
+    # The last known position is surfaced via the dedicated keys instead.
+    assert attrs["last_latitude"] == 12.0
+    assert attrs["last_longitude"] == 22.0
