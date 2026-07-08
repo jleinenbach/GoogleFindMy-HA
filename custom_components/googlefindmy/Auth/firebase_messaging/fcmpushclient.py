@@ -307,12 +307,22 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         self.run_state: FcmPushClientRunState = FcmPushClientRunState.CREATED
         # Monotonic timestamp of this client's STARTED transition (set in
-        # ``_handle_message`` on a successful login, alongside ``persistent_ids``).
+        # ``_handle_message`` on a successful login, alongside the
+        # ``persistent_ids`` and ``_first_data_message_delivered`` resets).
         # Consumers measure "session age since STARTED" from this instead of the
         # supervisor's pre-start timestamp, which is recorded before ``start()``
         # and can trail the actual STARTED transition by the connection budget
         # (~15-20s). ``None`` until the client first reaches STARTED.
         self._started_monotonic: float | None = None
+        # First-locate reconnect "has delivered" proof, kept *separate* from
+        # ``persistent_ids``. ``persistent_ids`` must record every selective-acked
+        # message for the RMQ2 login dedup (``received_persistent_id``); this flag
+        # must count only genuine deliveries (decrypted + dispatched). The two
+        # contracts conflict on one field, so they are split: this flag is set
+        # only when ``_handle_data_message`` reports a real delivery and reset to
+        # ``False`` on each successful login, alongside ``persistent_ids = []``.
+        # Consumed cross-module by ``fcm_receiver_ha._needs_first_locate_reconnect``.
+        self._first_data_message_delivered: bool = False
         self.tasks: list[asyncio.Task[None]] = []
         # Set by ``_listen`` when stored FCM key material is found to be
         # corrupt/undecodable. The supervisor reads this after the listener
@@ -646,15 +656,20 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
 
         Returns ``True`` only when a real payload was decrypted and handed to the
         notification callback. Returns ``False`` for the non-delivering paths that
-        the caller must still selective-ack but must NOT record as a delivery: a
+        the caller must still selective-ack but must NOT count as a delivery: a
         ``deleted_messages`` control stanza, a missing-credentials guard hit, and a
         foreign-``subtype`` drop (a push encrypted for a superseded GCM
-        registration). The caller (``_handle_message``) gates ``persistent_ids`` on
-        this return, keeping both consumers of that list accurate: the first-locate
-        reconnect proof (``fcm_receiver_ha._needs_first_locate_reconnect``) and the
-        RMQ2 login dedup (``received_persistent_id``). A decrypt failure raises (it
-        is caught upstream in ``_process_one_inbound_message``) and therefore also
-        does not count as delivered -- the raise skips the caller's append.
+        registration). The caller (``_handle_message``) uses this return to gate
+        the *delivery proof only* (``_first_data_message_delivered``, read by
+        ``fcm_receiver_ha._needs_first_locate_reconnect``); it still records
+        ``persistent_ids`` for EVERY acked message, because that list is the RMQ2
+        login dedup (``received_persistent_id``) and must include even dropped
+        pushes to stop the server replaying them. The two consumers therefore use
+        two separate signals -- their contracts conflict on a single field (all
+        acked vs. only delivered), so a shared ``persistent_ids`` cannot satisfy
+        both. A decrypt failure raises (it is caught upstream in
+        ``_process_one_inbound_message``) and therefore also does not count as
+        delivered -- the raise skips the caller's ``persistent_ids`` append too.
         """
         self.logger.debug(
             "Received data message Stream ID: %s, Last: %s, Status: %s",
@@ -881,19 +896,32 @@ class FcmPushClient[NotificationContextT]:  # pylint:disable=too-many-instance-a
                 self._started_monotonic = time.monotonic()
                 self.run_state = FcmPushClientRunState.STARTED
                 self.persistent_ids = []
+                # Reset the delivery proof for the new login session, mirroring
+                # the ``persistent_ids`` reset above (see ``__init__``): the fresh
+                # session has not delivered a data message yet.
+                self._first_data_message_delivered = False
                 # Refresh activity timestamp
                 self.last_message_time = time.time()
             return
 
         if isinstance(msg, DataMessageStanza):
             delivered = self._handle_data_message(msg)
+            # Record EVERY selective-acked message in ``persistent_ids``: it is the
+            # sole source ``_login`` extends into ``received_persistent_id`` (RMQ2
+            # dedup), so after a stream restart the server is told about all IDs we
+            # already received and does not redeliver them. A dropped
+            # foreign-subtype/control push is still received and acked, so it must
+            # be recorded here too -- omitting it lets the server replay that same
+            # orphan push across reconnects, delivering+acking it repeatedly.
+            self.persistent_ids.append(msg.persistent_id)
             if delivered:
-                # Record only genuine deliveries. ``persistent_ids`` is both the
-                # first-locate reconnect's "has delivered" proof and the RMQ2
-                # login dedup; a dropped foreign-subtype/control push must not be
-                # counted, or a superseded push arriving before the first real
-                # locate would falsely suppress the needed reconnect.
-                self.persistent_ids.append(msg.persistent_id)
+                # Delivery proof for the first-locate reconnect is a *separate*
+                # signal (see ``__init__``): only a genuine decrypt+dispatch counts.
+                # A dropped push must NOT set it, or a superseded push arriving
+                # before the first real locate would falsely suppress the needed
+                # reconnect. This is why the proof cannot share ``persistent_ids``
+                # (whose RMQ2 role requires recording that very dropped push).
+                self._first_data_message_delivered = True
             # Ack unconditionally (cheap): even a dropped/foreign push must be
             # selective-acked so the server stops redelivering it.
             await self._send_selective_ack(msg.persistent_id)

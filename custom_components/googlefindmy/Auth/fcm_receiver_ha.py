@@ -3866,12 +3866,16 @@ class FcmReceiverHA:
         Trigger (T-A + per-entry sharpening): the session is *young*
         (STARTED age < ``_CHURN_WINDOW_S``, measured from this client's own
         STARTED transition) **and** this client has not delivered any data
-        message since login.  Delivery is read from the library's
-        ``persistent_ids`` list, which is reset to ``[]`` on each successful
-        login and appended to only when a ``DataMessageStanza`` is *actually
-        delivered* (decrypted and dispatched to the callback) — a dropped
-        foreign-subtype or control push is selective-acked but deliberately not
-        recorded, so a non-empty list stays a clean "has delivered" proof.  It
+        message since login.  Delivery is read from the library's dedicated
+        ``_first_data_message_delivered`` flag, which is reset to ``False`` on
+        each successful login and set ``True`` only when a ``DataMessageStanza``
+        is *actually delivered* (decrypted and dispatched to the callback).  It
+        deliberately does *not* read ``persistent_ids`` for this: that list
+        records *every* selective-acked message (including dropped
+        foreign-subtype/control pushes) because it is the RMQ2 login dedup, so a
+        dropped orphan push arriving first would falsely mark the session as
+        "has delivered" — the two contracts (all acked vs. only delivered)
+        conflict on one field, so delivery proof is a separate signal.  It also
         deliberately does *not* use
         the activity clock (``last_message_time`` / ``_entry_last_activity_
         monotonic``), which a bare heartbeat ack also advances and which would
@@ -3883,7 +3887,7 @@ class FcmReceiverHA:
         age = self._session_age_s(pc)
         if age is None or age >= _CHURN_WINDOW_S:
             return False
-        delivered = bool(getattr(pc, "persistent_ids", None))
+        delivered = bool(getattr(pc, "_first_data_message_delivered", False))
         return not delivered
 
     async def _force_first_locate_reconnect(
