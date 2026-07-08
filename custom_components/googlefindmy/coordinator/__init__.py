@@ -32,6 +32,10 @@ from ..KeyBackup.cloud_key_decryptor import decrypt_eik
 # Re-export helpers subpackage
 from . import helpers
 
+# Re-export the ISO/epoch timestamp parser (dependency-light, used by the
+# device_tracker restore path to recover last_seen after a restart).
+from .helpers import parse_last_seen_timestamp
+
 # Re-export the canonical GPS accuracy normalizer. Exposing it as a direct
 # attribute of the coordinator package (mirroring GoogleFindMyCoordinator) lets
 # lightweight consumers such as map_view resolve it without reaching into the
@@ -101,6 +105,7 @@ __all__ = [
     "get_recorder",
     "is_valid_accuracy",
     "normalize_epoch_seconds",
+    "parse_last_seen_timestamp",
     "recorded_accuracy_pair",
     "resolve_seeded_accuracy",
     "safe_accuracy",
