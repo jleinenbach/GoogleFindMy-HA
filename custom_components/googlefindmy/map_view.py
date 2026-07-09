@@ -626,9 +626,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                                         ts, tz=dt_util.UTC
                                     ).isoformat(),
                                     last_seen=ts,
-                                    is_own_report=state.attributes.get(
-                                        "is_own_report"
-                                    ),
+                                    is_own_report=state.attributes.get("is_own_report"),
                                     semantic_location=state.attributes.get(
                                         "semantic_name"
                                     ),

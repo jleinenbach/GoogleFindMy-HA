@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/vendor/openlocationcode/openlocationcode.py
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,13 +32,13 @@ See https://github.com/google/open-location-code for the full reference.
 import math
 
 # A separator used to break the code into two parts to aid memorability.
-SEPARATOR_ = '+'
+SEPARATOR_ = "+"
 
 # The number of characters to place before the separator.
 SEPARATOR_POSITION_ = 8
 
 # The character set used to encode the values.
-CODE_ALPHABET_ = '23456789CFGHJMPQRVWX'
+CODE_ALPHABET_ = "23456789CFGHJMPQRVWX"
 
 # The base to use to convert numbers to/from.
 ENCODING_BASE_ = len(CODE_ALPHABET_)
@@ -73,13 +74,15 @@ GRID_ROWS_ = 5
 
 # Multiply latitude by this much to make it a multiple of the finest
 # precision.
-FINAL_LAT_PRECISION_ = PAIR_PRECISION_ * GRID_ROWS_**(MAX_DIGIT_COUNT_ -
-                                                      PAIR_CODE_LENGTH_)
+FINAL_LAT_PRECISION_ = PAIR_PRECISION_ * GRID_ROWS_ ** (
+    MAX_DIGIT_COUNT_ - PAIR_CODE_LENGTH_
+)
 
 # Multiply longitude by this much to make it a multiple of the finest
 # precision.
-FINAL_LNG_PRECISION_ = PAIR_PRECISION_ * GRID_COLUMNS_**(MAX_DIGIT_COUNT_ -
-                                                         PAIR_CODE_LENGTH_)
+FINAL_LNG_PRECISION_ = PAIR_PRECISION_ * GRID_COLUMNS_ ** (
+    MAX_DIGIT_COUNT_ - PAIR_CODE_LENGTH_
+)
 
 
 def locationToIntegers(latitude: float, longitude: float) -> tuple[int, int]:
@@ -144,13 +147,13 @@ def encodeIntegers(latVal: int, lngVal: int, codeLength: int) -> str:
     This function is exposed for testing purposes and should not be called
     directly.
     """
-    if codeLength < MIN_DIGIT_COUNT_ or (codeLength < PAIR_CODE_LENGTH_ and
-                                         codeLength % 2 == 1):
-        raise ValueError('Invalid Open Location Code length - ' +
-                         str(codeLength))
+    if codeLength < MIN_DIGIT_COUNT_ or (
+        codeLength < PAIR_CODE_LENGTH_ and codeLength % 2 == 1
+    ):
+        raise ValueError("Invalid Open Location Code length - " + str(codeLength))
     codeLength = min(codeLength, MAX_DIGIT_COUNT_)
     # Initialise the code string.
-    code = ''
+    code = ""
 
     # Compute the grid part of the code if necessary.
     if codeLength > PAIR_CODE_LENGTH_:
@@ -176,8 +179,7 @@ def encodeIntegers(latVal: int, lngVal: int, codeLength: int) -> str:
 
     # If we don't need to pad the code, return the requested section.
     if codeLength >= SEPARATOR_POSITION_:
-        return code[0:codeLength + 1]
+        return code[0 : codeLength + 1]
 
     # Pad and return the code.
-    return code[0:codeLength] + ''.zfill(SEPARATOR_POSITION_ -
-                                         codeLength) + SEPARATOR_
+    return code[0:codeLength] + "".zfill(SEPARATOR_POSITION_ - codeLength) + SEPARATOR_

@@ -18,6 +18,7 @@ run inside pytest-asyncio's managed loop (see ``tests/AGENTS.md`` "Async tests")
 from __future__ import annotations
 
 import importlib
+import time
 from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 from typing import Any
@@ -33,7 +34,11 @@ from tests.helpers.config_entries_stub import make_config_entry
 # All tests in this module are async and run in pytest-asyncio's managed loop.
 pytestmark = pytest.mark.asyncio
 
-# A decoder row with a real position. Its latitude/longitude drive the encoder.
+# A fresh timestamp so the position rows pass the sensor's staleness gate (it
+# mirrors the tracker: a fix older than the configured threshold is withheld).
+_FRESH_LAST_SEEN = time.time()
+
+# A decoder row with a real, recent position. Its lat/lon drive the encoder.
 _POSITION_ROW: dict[str, Any] = {
     "id": "dev-1",
     "device_id": "dev-1",
@@ -41,7 +46,7 @@ _POSITION_ROW: dict[str, Any] = {
     "latitude": 52.5200,
     "longitude": 13.4050,
     "accuracy": 12.0,
-    "last_seen": 1_700_000_000,
+    "last_seen": _FRESH_LAST_SEEN,
     "source_label": "Owner",
     "source_rank": 1,
 }
@@ -49,12 +54,14 @@ _POSITION_ROW: dict[str, Any] = {
 # encode(52.5200, 13.4050, 10) at the pinned upstream commit. 11 chars incl. "+".
 _EXPECTED_CODE = "9F4MGCC4+22"
 
-# A row whose coordinates are missing -> the sensor must yield None (no code).
+# A row that clears the accuracy/staleness gate but has no coordinates -> the
+# sensor must yield None at the coordinate guard specifically.
 _NO_COORDS_ROW: dict[str, Any] = {
     "id": "dev-1",
     "device_id": "dev-1",
     "name": "Pixel",
-    "last_seen": 1_700_000_000,
+    "accuracy": 12.0,
+    "last_seen": _FRESH_LAST_SEEN,
 }
 
 
@@ -222,3 +229,33 @@ async def test_plus_code_sensor_non_finite_coords_yield_none(
     )
     assert nan_entity.native_value is None
     assert inf_entity.native_value is None
+
+
+async def test_plus_code_sensor_accuracy_less_row_yields_none(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """A fresh row with valid lat/lon but no accuracy -> native_value None.
+
+    Display-row policy (Codex #202 / PR #1179): the tracker withholds an
+    accuracy-less fix, so the Plus Code must not encode that coordinate either.
+    Reverting the accuracy gate turns this test red (mutation check).
+    """
+    accuracy_less_row = {**_POSITION_ROW, "accuracy": None}
+    entity = await _build_plus_code_sensor(
+        accuracy_less_row, deterministic_config_subentry_id
+    )
+    assert entity.native_value is None
+
+
+async def test_plus_code_sensor_stale_row_yields_none(
+    deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+) -> None:
+    """An accuracy-bearing but stale fix -> native_value None.
+
+    The tracker blanks live coordinates once a fix is older than the configured
+    stale threshold; the Plus Code applies the same gate. Reverting the
+    staleness gate turns this test red (mutation check).
+    """
+    stale_row = {**_POSITION_ROW, "last_seen": _FRESH_LAST_SEEN - 1_000_000}
+    entity = await _build_plus_code_sensor(stale_row, deterministic_config_subentry_id)
+    assert entity.native_value is None

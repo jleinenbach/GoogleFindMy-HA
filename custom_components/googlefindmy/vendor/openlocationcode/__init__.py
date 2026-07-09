@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/vendor/openlocationcode/__init__.py
 """Vendored Open Location Code (Plus Code) encoder.
 
 Apache-2.0, vendored from https://github.com/google/open-location-code; see the

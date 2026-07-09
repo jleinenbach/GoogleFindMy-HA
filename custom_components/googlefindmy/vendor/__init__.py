@@ -1,3 +1,4 @@
+# custom_components/googlefindmy/vendor/__init__.py
 """Vendored third-party code bundled with the integration.
 
 Each subpackage carries its own upstream license header and, where the license

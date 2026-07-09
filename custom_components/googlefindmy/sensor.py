@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -50,6 +51,9 @@ from .coordinator import (
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
     _as_ha_attributes,
+    has_usable_accuracy,
+    location_age_seconds,
+    resolve_stale_threshold,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -1457,11 +1461,23 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         )
 
     def _current_plus_code(self) -> str | None:
-        """Compute the Plus Code from the device's current location row.
+        """Compute the Plus Code from the device's published location.
 
-        Returns ``None`` when there is no row or the coordinates are missing or
-        non-finite (NaN/inf), so the sensor state is ``unknown`` rather than a
-        stale or bogus code.
+        Applies the same accuracy and staleness gate the device_tracker uses
+        before it publishes live coordinates (shared SSOT helpers), so the Plus
+        Code never encodes a position the tracker/map deliberately hide (Codex
+        #202 / PR #1179):
+
+        - a fix without a usable accuracy is withheld -> ``None``;
+        - a stale fix (older than the configured threshold) is withheld ->
+          ``None``.
+
+        This sensor intentionally holds no last-good-accuracy cache of its own.
+        When the current row lacks accuracy the tracker falls back to its cached
+        fix for the *marker*; the Plus Code reports ``unknown`` instead of
+        duplicating that per-entity cache and its restore wiring in a second
+        entity. Last-good parity, if ever wanted, is a separate feature, not
+        this bugfix.
         """
         dev_id = self._device_id
         if not dev_id:
@@ -1469,6 +1485,15 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         row = self.coordinator.get_device_location_data_for_subentry(
             self.subentry_key, dev_id
         )
+        # Accuracy gate: mirror the tracker's publish decision.
+        if not has_usable_accuracy(row):
+            return None
+        # Staleness gate: a fix older than the configured threshold is withheld
+        # exactly as the tracker blanks its live coordinates when stale.
+        threshold = resolve_stale_threshold(self.coordinator)
+        age = location_age_seconds(row, time.time())
+        if age is not None and age > threshold:
+            return None
         lat = row.get("latitude") if row else None
         lon = row.get("longitude") if row else None
         # Reject missing, boolean (a bool is an int subclass), and non-finite
