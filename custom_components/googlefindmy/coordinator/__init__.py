@@ -42,10 +42,14 @@ from .helpers import parse_last_seen_timestamp
 # nested .helpers.geo submodule, which keeps them tolerant of plain ModuleType
 # coordinator stubs in tests. geo is a pure, dependency-light module.
 from .helpers.geo import (
+    has_usable_accuracy,
     is_valid_accuracy,
+    location_age_seconds,
     recorded_accuracy_pair,
     resolve_seeded_accuracy,
+    resolve_stale_threshold,
     safe_accuracy,
+    select_display_row,
 )
 
 # Re-export stats classes from helpers (commonly needed)
@@ -103,12 +107,16 @@ __all__ = [
     # Public functions
     "format_epoch_utc",
     "get_recorder",
+    "has_usable_accuracy",
     "is_valid_accuracy",
+    "location_age_seconds",
     "normalize_epoch_seconds",
     "parse_last_seen_timestamp",
     "recorded_accuracy_pair",
     "resolve_seeded_accuracy",
+    "resolve_stale_threshold",
     "safe_accuracy",
+    "select_display_row",
     # Semi-public functions
     "_as_ha_attributes",
     "_sync_get_last_gps_from_history",

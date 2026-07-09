@@ -552,6 +552,10 @@ message listing the available IDs so you can pick the right account.
 - Böttger, L. (2024). GoogleFindMyTools [Computer software]. https://github.com/leonboe1/GoogleFindMyTools
 - Firebase Cloud Messaging integration. https://github.com/home-assistant/mobile-apps-fcm-push
 - @txitxo0 for his amazing work on the MQTT based tool that I used to help kickstart this project!
+- Open Location Code (Plus Code) encoder, (c) Google (Apache-2.0), vendored from
+  [google/open-location-code](https://github.com/google/open-location-code),
+  commit `dcff1534f70a0d7244d0d1c357c20f0aa28ab355`; modified: encode-only path.
+  See [`custom_components/googlefindmy/vendor/openlocationcode/LICENSE`](custom_components/googlefindmy/vendor/openlocationcode/LICENSE).
 
 [1]: https://developers.home-assistant.io/blog/2019/10/05/simple-mode/?utm_source=chatgpt.com "Simple Mode in Home Assistant 1.0"
 

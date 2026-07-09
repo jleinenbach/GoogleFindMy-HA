@@ -111,6 +111,7 @@ async def test_setup_iterates_sensor_subentries(stub_coordinator_factory: Any) -
         f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_encryption_key_status",
         f"{DOMAIN}_{entry.entry_id}_{service_subentry.subentry_id}_background_updates",
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_last_seen",
+        f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_device-1_plus_code",
     }
 
 
@@ -168,12 +169,13 @@ async def test_dispatcher_adds_new_tracker_subentries(
     await asyncio.gather(*pending)
 
     configs = [config for _, config in added]
-    assert configs.count(tracker_subentry.subentry_id) == 1
-    assert configs.count(new_subentry.subentry_id) == 1
+    # Each tracker device now emits two sensors: last_seen and plus_code.
+    assert configs.count(tracker_subentry.subentry_id) == 2
+    assert configs.count(new_subentry.subentry_id) == 2
     # Service scope now emits three diagnostic sensors: semantic_labels,
     # encryption_key_status (AP-10) and the background_updates stat.
     assert configs.count(service_subentry.subentry_id) == 3
-    assert len({entity.unique_id for entity, _ in added}) == 5
+    assert len({entity.unique_id for entity, _ in added}) == 7
     assert entry._unload_callbacks, "dispatcher listener should be cleaned up on unload"
 
 
@@ -225,9 +227,9 @@ async def test_dispatcher_deduplicates_existing_subentry_signals(
     async_dispatcher_send(hass, signal, service_subentry.subentry_id)
     await asyncio.gather(*pending)
 
-    # Four entities: service semantic_labels + encryption_key_status (AP-10) +
-    # background_updates stat, plus the tracker last_seen sensor.
-    assert len(added) == initial_count == 4
+    # Five entities: service semantic_labels + encryption_key_status (AP-10) +
+    # background_updates stat, plus the tracker last_seen and plus_code sensors.
+    assert len(added) == initial_count == 5
     assert {config for _, config in added} == {
         service_subentry.subentry_id,
         tracker_subentry.subentry_id,
@@ -276,6 +278,7 @@ async def test_hidden_tracker_sensors_skip_invisible_devices(
 
     assert {entity.unique_id for entity, _ in added} == {
         f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_visible-device_last_seen",
+        f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_visible-device_plus_code",
         f"{DOMAIN}_{entry.entry_id}_service_background_updates",
         f"{DOMAIN}_{entry.entry_id}_service_semantic_labels",
         f"{DOMAIN}_{entry.entry_id}_service_encryption_key_status",
@@ -340,16 +343,29 @@ async def test_recovery_skips_hidden_tracker_sensors(
     assert registration is not None
 
     visible_unique_id = f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_visible-device_last_seen"
+    visible_plus_code_unique_id = f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_visible-device_plus_code"
     hidden_unique_id = f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_hidden-device_last_seen"
+    hidden_plus_code_unique_id = f"{DOMAIN}_{entry.entry_id}_{tracker_subentry.subentry_id}_hidden-device_plus_code"
     service_unique_id = f"{DOMAIN}_{entry.entry_id}_service_background_updates"
 
-    assert registration.expected_unique_ids() == {visible_unique_id, service_unique_id}
+    assert registration.expected_unique_ids() == {
+        visible_unique_id,
+        visible_plus_code_unique_id,
+        service_unique_id,
+    }
 
-    missing = {visible_unique_id, hidden_unique_id, service_unique_id}
+    missing = {
+        visible_unique_id,
+        visible_plus_code_unique_id,
+        hidden_unique_id,
+        hidden_plus_code_unique_id,
+        service_unique_id,
+    }
     recovered = registration.entity_factory(missing)
 
     assert {entity.unique_id for entity in recovered} == {
         visible_unique_id,
+        visible_plus_code_unique_id,
         service_unique_id,
     }
 

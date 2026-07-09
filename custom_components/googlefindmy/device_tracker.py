@@ -43,18 +43,19 @@ from .const import (
     CONF_OAUTH_TOKEN,
     DATA_SECRET_BUNDLE,
     DEFAULT_SHOW_LOCATION_AGE,
-    DEFAULT_STALE_THRESHOLD,
     DOMAIN,
     OPT_SHOW_LOCATION_AGE,
-    OPT_STALE_THRESHOLD,
     TRACKER_SUBENTRY_KEY,
 )
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    location_age_seconds,
     parse_last_seen_timestamp,
     recorded_accuracy_pair,
     resolve_seeded_accuracy,
+    resolve_stale_threshold,
+    select_display_row,
 )
 from .discovery import (
     CLOUD_DISCOVERY_NAMESPACE,
@@ -1087,18 +1088,12 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         return True
 
     def _get_stale_threshold(self) -> int:
-        """Return the configured stale threshold in seconds."""
-        entry = getattr(self.coordinator, "config_entry", None)
-        if entry is None:
-            return DEFAULT_STALE_THRESHOLD
-        options = getattr(entry, "options", {})
-        if not isinstance(options, Mapping):
-            return DEFAULT_STALE_THRESHOLD
-        threshold = options.get(OPT_STALE_THRESHOLD, DEFAULT_STALE_THRESHOLD)
-        try:
-            return int(threshold)
-        except (TypeError, ValueError):
-            return DEFAULT_STALE_THRESHOLD
+        """Return the configured stale threshold in seconds.
+
+        Delegates to the shared SSOT reader so the tracker and the Plus Code
+        sensor resolve the threshold identically.
+        """
+        return resolve_stale_threshold(self.coordinator)
 
     def _select_display_row(self) -> dict[str, Any] | None:
         """Return the single row whose data is actually published.
@@ -1112,10 +1107,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
         metadata (Codex #202). Binding every consumer to this row keeps the
         published snapshot internally consistent.
         """
-        current = self._current_row()
-        if current and current.get("accuracy") is not None:
-            return current
-        return self._last_good_accuracy_data
+        return select_display_row(self._current_row(), self._last_good_accuracy_data)
 
     def _get_location_age(self, row: Any = _ROW_UNSET) -> float | None:
         """Return the age of the location data in seconds, or None if unknown.
@@ -1131,16 +1123,7 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             if row is _ROW_UNSET
             else row
         )
-        if not data:
-            return None
-        last_seen = data.get("last_seen")
-        if last_seen is None:
-            return None
-        try:
-            last_seen_epoch = float(last_seen)
-            return time.time() - last_seen_epoch
-        except (TypeError, ValueError):
-            return None
+        return location_age_seconds(data, time.time())
 
     def _is_location_stale(self) -> bool:
         """Return True if the location data is considered stale."""

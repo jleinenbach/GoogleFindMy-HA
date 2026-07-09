@@ -606,6 +606,9 @@
       "ble_battery": {
         "name": "BLE Battery"
       },
+      "plus_code": {
+        "name": "Plus Code"
+      },
       "last_seen": {
         "name": "Last Seen",
         "state_attributes": {
