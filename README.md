@@ -121,7 +121,7 @@ When a dependency pin changes, delete the archive (and `.wheelhouse/`) or rerun
 - ⏱️ **Configurable Polling**: Flexible polling intervals with rate limit protection
 - 🔔 **Sound Button Entity**: Devices include button entity that plays a sound on supported devices
 - ✅ **Attribute grading system**: Best location data is selected automatically based on recency, accuracy, and source of data
-- 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data
+- 📍 **Historical Map-View**: Each tracker has a filterable Map-View that shows tracker movement with location data, localized into every shipped UI language
 - 📋 **Statistic Entity**: Detailed statistics for monitoring integration performance
 - #️⃣ **Multi-Account Support**: Add multiple Find Hub Google accounts that show up separately
 - ❣️ **More to come!**
@@ -333,6 +333,22 @@ On **32-bit ARM (armv6/armv7)** there is no `gmpy2` wheel and a source build
 fails, so it cannot be used there. Because the effect is already small after the
 #1140 optimizations and only touches legacy trackers, installing `gmpy2` is a
 minor, optional tweak rather than a recommended step.
+
+## Map View localization
+
+The Map View is a self-rendered HTML page served by the integration, so it does
+**not** receive Home Assistant's frontend translations (those cover only entity,
+config and service strings). Its labels live in a dedicated catalog,
+[`custom_components/googlefindmy/map_i18n.py`](custom_components/googlefindmy/map_i18n.py),
+and are resolved server-side from `hass.config.language` with an English
+fallback. `Plus Code` stays untranslated on purpose (it is Google's brand name).
+
+To add or adjust a language, edit the `MAP_LABELS` dict in that module: add a
+locale entry with the **same key set** as `en` (a unit test enforces that every
+locale carries every key with a non-empty value). This catalog is intentionally
+separate from `strings.json` / `translations/`, so `make translation-check`,
+`translation_key_check.py` and `translation_placeholder_check.py` are unaffected
+by map-label changes and there is no hassfest schema risk.
 
 ## Known limitations
 
