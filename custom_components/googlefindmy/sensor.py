@@ -16,6 +16,7 @@ Best practices:
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -63,6 +64,7 @@ from .entity import (
     subentry_type as _subentry_type,
 )
 from .ha_typing import RestoreSensor, SensorEntity, callback
+from .vendor.openlocationcode import encode as _encode_plus_code
 
 if TYPE_CHECKING:
     from .eid_resolver import GoogleFindMyEIDResolver
@@ -88,6 +90,12 @@ LAST_SEEN_DESCRIPTION = SensorEntityDescription(
     translation_key="last_seen",
     icon="mdi:clock-outline",
     device_class=SensorDeviceClass.TIMESTAMP,
+)
+
+PLUS_CODE_DESCRIPTION = SensorEntityDescription(
+    key="plus_code",
+    translation_key="plus_code",
+    icon="mdi:map-marker",
 )
 
 SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
@@ -545,6 +553,19 @@ async def async_setup_entry(
                     known_ids.add(dev_id)
                     entities.append(entity)
 
+                    # --- Plus Code sensor (always, alongside LastSeen) ---
+                    plus_code_entity = GoogleFindMyPlusCodeSensor(
+                        coordinator,
+                        device,
+                        subentry_key=tracker_scope.subentry_key,
+                        subentry_identifier=tracker_identifier,
+                    )
+                    pc_uid = getattr(plus_code_entity, "unique_id", None)
+                    if not isinstance(pc_uid, str) or pc_uid not in added_unique_ids:
+                        if isinstance(pc_uid, str):
+                            added_unique_ids.add(pc_uid)
+                        entities.append(plus_code_entity)
+
                 # --- BLE Battery sensor (when resolver has data) ---
                 if dev_id not in known_battery_ids and resolver is not None:
                     battery_state = None
@@ -794,6 +815,9 @@ async def async_setup_entry(
                     expected.add(
                         f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
                     )
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
+                    )
             return expected
 
         def _build_entities(missing: set[str]) -> list[SensorEntity]:
@@ -838,17 +862,26 @@ async def async_setup_entry(
                         continue
                     if not _is_visible_device(dev_id):
                         continue
-                    unique_id = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
-                    if unique_id not in missing:
-                        continue
-                    built.append(
-                        GoogleFindMyLastSeenSensor(
-                            coordinator,
-                            device,
-                            subentry_key=tracker_scope.subentry_key,
-                            subentry_identifier=tracker_scope.identifier,
+                    ls_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
+                    pc_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
+                    if ls_uid in missing:
+                        built.append(
+                            GoogleFindMyLastSeenSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
                         )
-                    )
+                    if pc_uid in missing:
+                        built.append(
+                            GoogleFindMyPlusCodeSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
+                        )
             return built
 
         recovery_manager.register_sensor_platform(
@@ -1360,6 +1393,134 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
 
         # Set our native value now (no need to wait for next coordinator tick)
         self._attr_native_value = datetime.fromtimestamp(ts, tz=UTC)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Expose DeviceInfo using the shared entity helper."""
+
+        return super().device_info
+
+
+# ------------------------------- Per-Device Plus Code -------------------------
+
+
+class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
+    """Per-device sensor exposing the Google Plus Code (Open Location Code).
+
+    The value is a deterministic function of the device's latest known
+    latitude/longitude (offline, no API key, no network). It is derived live
+    from the coordinator's current location row:
+
+    - A valid fix -> the full 10-digit Plus Code (11 characters incl. the ``+``
+      separator, e.g. ``8FVC9G8F+6X``), directly usable in Google Maps.
+    - No fix / invalid coordinates -> ``None`` (no stale "last value"). The
+      underlying coordinate cache is restored by the device_tracker across
+      restarts, so this derived text needs no separate restore wiring; it
+      subclasses ``RestoreSensor`` for parity with the other per-device sensors.
+
+    Unlike the device_tracker, this is a plain text sensor and deliberately
+    carries no ``latitude``/``longitude`` attributes, so Home Assistant does not
+    plot a spurious extra map marker for it.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = PLUS_CODE_DESCRIPTION
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        # Namespace unique_id by entry for safety (keeps multi-entry setups clean).
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_plus_code",
+            separator="_",
+        )
+
+    def _current_plus_code(self) -> str | None:
+        """Compute the Plus Code from the device's current location row.
+
+        Returns ``None`` when there is no row or the coordinates are missing or
+        non-finite (NaN/inf), so the sensor state is ``unknown`` rather than a
+        stale or bogus code.
+        """
+        dev_id = self._device_id
+        if not dev_id:
+            return None
+        row = self.coordinator.get_device_location_data_for_subentry(
+            self.subentry_key, dev_id
+        )
+        lat = row.get("latitude") if row else None
+        lon = row.get("longitude") if row else None
+        # Reject missing, boolean (a bool is an int subclass), and non-finite
+        # (NaN/inf) coordinates so the state is ``unknown`` rather than bogus.
+        if (
+            not isinstance(lat, (int, float))
+            or not isinstance(lon, (int, float))
+            or isinstance(lat, bool)
+            or isinstance(lon, bool)
+            or not math.isfinite(lat)
+            or not math.isfinite(lon)
+        ):
+            return None
+        try:
+            return _encode_plus_code(float(lat), float(lon), 10)
+        except (ValueError, TypeError):
+            return None
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the current Plus Code (11 chars incl. ``+``) or ``None``."""
+        return self._current_plus_code()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return non-coordinate metadata.
+
+        Must not include ``latitude``/``longitude``: a text sensor that carried
+        both would be auto-plotted by HA as a spurious third map marker.
+        """
+        return {"code_length": 10}
+
+    @property
+    def available(self) -> bool:
+        """Mirror device presence, falling back to coordinator availability."""
+        if not super().available:
+            return False
+        dev_id = self._device_id
+        if not dev_id:
+            return False
+        return self.coordinator_has_device()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the device label in sync and push the recomputed state."""
+        if not self.coordinator_has_device():
+            self.async_write_ha_state()
+            return
+        self.refresh_device_label_from_coordinator(log_prefix="PlusCode")
+        current_name = self._device.get("name")
+        if isinstance(current_name, str):
+            self.maybe_update_device_registry_name(current_name)
         self.async_write_ha_state()
 
     @property

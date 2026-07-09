@@ -606,6 +606,9 @@
       "ble_battery": {
         "name": "סוללת BLE"
       },
+      "plus_code": {
+        "name": "Plus Code"
+      },
       "last_seen": {
         "name": "נראה לאחרונה",
         "state_attributes": {

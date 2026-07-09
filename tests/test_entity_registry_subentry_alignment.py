@@ -177,19 +177,25 @@ async def test_entity_registry_subentry_alignment(
     entries = list(getattr(registry, "entities", {}).values())
     assert entries, "platform setup should register at least one entity"
 
+    # Per-device tracker-scope sensors are identified by their unique_id suffix:
+    # last_seen (timestamp) and plus_code (Open Location Code) both belong to the
+    # tracker subentry, not the diagnostic service scope.
+    tracker_sensor_suffixes = ("_last_seen", "_plus_code")
+
     service_entries = [
         item
         for item in entries
         if item.platform == "binary_sensor"
         or (
-            item.platform == "sensor" and not str(item.unique_id).endswith("_last_seen")
+            item.platform == "sensor"
+            and not str(item.unique_id).endswith(tracker_sensor_suffixes)
         )
     ]
     tracker_entries = [
         item
         for item in entries
         if item.platform == "device_tracker"
-        or str(item.unique_id).endswith("_last_seen")
+        or str(item.unique_id).endswith(tracker_sensor_suffixes)
     ]
 
     assert service_entries, "diagnostic entities must be present for validation"
