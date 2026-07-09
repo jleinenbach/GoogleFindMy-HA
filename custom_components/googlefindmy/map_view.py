@@ -28,6 +28,7 @@ from .const import (
     map_token_secret_seed,
 )
 from .ha_typing import HomeAssistantView
+from .map_i18n import format_showing, is_rtl, resolve_map_labels
 from .vendor.openlocationcode import encode as _encode_plus_code
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +45,20 @@ def _resolve_coordinator_class() -> type[Any]:
 
         _COORDINATOR_CLASS = _GoogleFindMyCoordinator
     return _COORDINATOR_CLASS
+
+
+def _resolve_language(hass: Any) -> str | None:
+    """Best-effort read of the Home Assistant UI language.
+
+    Returns the configured ``hass.config.language`` when present, otherwise
+    ``None`` so the label resolver falls back to English. Read defensively via
+    ``getattr`` so a degraded or stubbed ``hass`` (no ``config``) never crashes
+    the map render; a missing language is a fail-safe English page, not an error.
+    """
+
+    config = getattr(hass, "config", None)
+    language = getattr(config, "language", None)
+    return language if isinstance(language, str) else None
 
 
 # Inline SVG "content copy" icon (no icon-font dependency). Braceless, so it is
@@ -474,7 +489,9 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         if not device_name:
             # Name fallback order: coordinator data -> device registry metadata -> placeholder.
-            device_name = "Unknown Device"
+            device_name = resolve_map_labels(_resolve_language(self.hass))[
+                "unknown_device"
+            ]
 
         # 4. Parse Filters (Time & Accuracy)
         end_time = dt_util.utcnow()
@@ -677,10 +694,22 @@ class GoogleFindMyMapView(HomeAssistantView):
         start_local = dt_util.as_local(start_time).strftime("%Y-%m-%dT%H:%M")
         end_local = dt_util.as_local(end_time).strftime("%Y-%m-%dT%H:%M")
 
+        # Localize the self-rendered map. HA frontend translations do not reach
+        # this hand-built HTML page, so labels are resolved server-side from the
+        # UI language (English fallback). Client-JS labels are serialized once as
+        # a JSON object and read by key in the browser; server-side panel labels
+        # are interpolated as escaped f-string values (plan A2/A3).
+        language = _resolve_language(self.hass)
+        labels = resolve_map_labels(language)
+        labels_json = json.dumps(labels)
+        html_attrs = f'lang="{escape(language or "en")}"'
+        if is_rtl(language):
+            html_attrs += ' dir="rtl"'
+
         return f"""<!DOCTYPE html>
-<html>
+<html {html_attrs}>
 <head>
-    <title>{escape(device_name)} - Location History</title>
+    <title>{escape(device_name)} - {escape(labels["location_history"])}</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -711,20 +740,20 @@ class GoogleFindMyMapView(HomeAssistantView):
     <div class="controls">
         <h3>{escape(device_name)}</h3>
         <div class="control-group">
-            <label>Start Time</label>
+            <label>{escape(labels["start_time"])}</label>
             <input type="datetime-local" id="start" value="{start_local}">
         </div>
         <div class="control-group">
-            <label>End Time</label>
+            <label>{escape(labels["end_time"])}</label>
             <input type="datetime-local" id="end" value="{end_local}">
         </div>
         <div class="control-group">
-            <label>Min Accuracy (meters): <span id="acc-val">{accuracy_filter}</span></label>
+            <label>{escape(labels["min_accuracy"])}: <span id="acc-val">{accuracy_filter}</span></label>
             <input type="range" id="accuracy" min="0" max="500" step="10" value="{accuracy_filter}" oninput="document.getElementById('acc-val').innerText = this.value">
         </div>
-        <button onclick="applyFilters()">Apply Filters</button>
+        <button onclick="applyFilters()">{escape(labels["apply_filters"])}</button>
         <div class="stats">
-            Showing {len(locations)} points
+            {escape(format_showing(labels, len(locations)))}
         </div>
     </div>
     <div id="map"></div>
@@ -740,6 +769,11 @@ class GoogleFindMyMapView(HomeAssistantView):
         var locations = {locations_json};
         var markers = L.layerGroup().addTo(map);
         var GFMY_COPY_ICON = '{_MAP_COPY_ICON_SVG}';
+        // Localized labels, serialized once server-side; read by key in the
+        // browser. json.dumps emits a valid JS object literal; the surrounding
+        // f-string treats this as a single replacement field, so the object's
+        // braces are inserted as data and never parsed as f-string syntax.
+        var GFMY_LABELS = {labels_json};
 {_MAP_COPY_HELPER_JS}
 
         // Accuracy-circle / marker-fade constants (two separate concerns):
@@ -820,29 +854,29 @@ class GoogleFindMyMapView(HomeAssistantView):
                 }});
 
                 var date = new Date(loc.timestamp).toLocaleString();
-                var source = loc.is_own_report ? "Own Device" : "Crowdsourced";
+                var source = loc.is_own_report ? GFMY_LABELS.own_device : GFMY_LABELS.crowdsourced;
 
                 // Google-Maps-ready decimal degrees: dot decimal separator (JS
                 // default) and "lat, lon" order with a comma+space separator.
                 var coordStr = loc.lat + ", " + loc.lon;
                 var popupHtml =
-                    "<b>Time:</b> " + date + "<br>" +
-                    "<b>Accuracy:</b> " + loc.accuracy.toFixed(1) + "m<br>" +
-                    "<b>Source:</b> " + source + "<br>";
+                    "<b>" + GFMY_LABELS.time + "</b> " + date + "<br>" +
+                    "<b>" + GFMY_LABELS.accuracy + "</b> " + loc.accuracy.toFixed(1) + "m<br>" +
+                    "<b>" + GFMY_LABELS.source + "</b> " + source + "<br>";
                 if (loc.semantic_location) {{
-                    popupHtml += "<b>Location:</b> " + loc.semantic_location + "<br>";
+                    popupHtml += "<b>" + GFMY_LABELS.location + "</b> " + loc.semantic_location + "<br>";
                 }}
                 if (loc.plus_code) {{
                     popupHtml += "<b>Plus Code:</b> " + loc.plus_code +
                         " <span class='gfmy-copy gfmy-copy-plus' role='button' tabindex='0'" +
-                        " title='Copy to clipboard'" +
-                        " aria-label='Copy Plus Code to clipboard'>" +
+                        " title='" + GFMY_LABELS.copy_to_clipboard + "'" +
+                        " aria-label='" + GFMY_LABELS.copy_plus_code + "'>" +
                         GFMY_COPY_ICON + "</span><br>";
                 }}
-                popupHtml += "<b>Coordinates:</b> " + coordStr +
+                popupHtml += "<b>" + GFMY_LABELS.coordinates + "</b> " + coordStr +
                     " <span class='gfmy-copy gfmy-copy-coords' role='button' tabindex='0'" +
-                    " title='Copy to clipboard'" +
-                    " aria-label='Copy coordinates to clipboard'>" +
+                    " title='" + GFMY_LABELS.copy_to_clipboard + "'" +
+                    " aria-label='" + GFMY_LABELS.copy_coordinates + "'>" +
                     GFMY_COPY_ICON + "</span>";
 
                 // autoPan: false keeps the auto-opened popup from panning the map
