@@ -559,7 +559,7 @@ class CacheOperations(_MixinBase):
         self._device_location_data[device_id] = slot
         # Coordinator last-good: advance only for reliable (non-estimated) fixes
         # so a sanitized accuracy-less update never overwrites the last reliable
-        # position the Plus Code display accessors fall back to (Nicht-Poison).
+        # position the Plus Code display accessors fall back to (non-poison).
         self._record_last_good_location(device_id, slot)
 
         # FIX #155: Only count background_updates for non-poll sources
@@ -655,7 +655,7 @@ class CacheOperations(_MixinBase):
             merged["last_updated"] = time.time()
 
             self._device_location_data[target_id] = merged
-            # Coordinator last-good for the shared target, same Nicht-Poison gate.
+            # Coordinator last-good for the shared target, same non-poison gate.
             self._record_last_good_location(target_id, merged)
 
             _LOGGER.debug(

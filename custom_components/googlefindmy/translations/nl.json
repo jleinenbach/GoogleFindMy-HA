@@ -601,6 +601,15 @@
           },
           "location_status": {
             "name": "Locatiestatus"
+          },
+          "last_latitude": {
+            "name": "Laatst bekende breedtegraad"
+          },
+          "last_longitude": {
+            "name": "Laatst bekende lengtegraad"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       }

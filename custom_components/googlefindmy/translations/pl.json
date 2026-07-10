@@ -601,6 +601,15 @@
           },
           "location_status": {
             "name": "Status lokalizacji"
+          },
+          "last_latitude": {
+            "name": "Ostatnia znana szerokość geograficzna"
+          },
+          "last_longitude": {
+            "name": "Ostatnia znana długość geograficzna"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       }
