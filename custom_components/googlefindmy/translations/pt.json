@@ -545,6 +545,9 @@
           },
           "last_longitude": {
             "name": "Última longitude conhecida"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       },
@@ -607,7 +610,12 @@
         "name": "Bateria BLE"
       },
       "plus_code": {
-        "name": "Plus Code"
+        "name": "Plus Code",
+        "state_attributes": {
+          "coordinates": {
+            "name": "Coordenadas"
+          }
+        }
       },
       "last_seen": {
         "name": "Visto pela última vez",

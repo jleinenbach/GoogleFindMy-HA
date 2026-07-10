@@ -545,6 +545,9 @@
           },
           "last_longitude": {
             "name": "קו אורך ידוע אחרון"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       },
@@ -607,7 +610,12 @@
         "name": "סוללת BLE"
       },
       "plus_code": {
-        "name": "Plus Code"
+        "name": "Plus Code",
+        "state_attributes": {
+          "coordinates": {
+            "name": "קואורדינטות"
+          }
+        }
       },
       "last_seen": {
         "name": "נראה לאחרונה",
