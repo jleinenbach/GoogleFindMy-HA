@@ -1,7 +1,7 @@
 # tests/test_plus_code_last_known.py
 """Last-known-semantics tests for the Plus Code sensor and tracker attribute.
 
-Covers the #1179 follow-up (nie stale): the standalone Plus Code sensor and the
+Covers the #1179 follow-up (not stale): the standalone Plus Code sensor and the
 device_tracker ``plus_code`` attribute both report the last known position from a
 single coordinator source, and never publish an accuracy-less coordinate the
 tracker hides (Codex #202 / PR #1179).
