@@ -1099,3 +1099,43 @@ async def test_newest_point_can_be_estimated(
     assert len(locations) == 2
     assert locations[0]["accuracy_estimated"] is False
     assert locations[-1]["accuracy_estimated"] is True
+
+
+@pytest.mark.asyncio
+async def test_popup_coordinates_display_is_shortened_copy_stays_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Popup shows rounded coordinates; the copy button keeps full precision.
+
+    The display line must read from ``coordDisplay`` (rounded via the named
+    ``GFMY_COORD_DISPLAY_DECIMALS`` constant, then padding zeros stripped), while
+    the coordinate copy handler must still serialize the raw ``loc.lat``/
+    ``loc.lon`` without any ``toFixed``. Reverting the display back to
+    ``coordStr`` (the mutation counter-proof) makes assertion (a)/(e) fail.
+    """
+
+    state = _StubState(latitude=10.8368252529521, longitude=49.7380204)
+    state.attributes["gps_accuracy"] = 58
+    state.attributes["last_seen"] = 1704067200.0
+
+    response = await _render_map_with_states(monkeypatch, [state], {"accuracy": "0"})
+    assert response.status == 200
+    html = response.text
+
+    # (a) display precision constant is defined at script level and set to 5
+    assert "var GFMY_COORD_DISPLAY_DECIMALS = 5;" in html
+    # (b) the coordinates display line reads coordDisplay, not the raw coordStr
+    assert 'GFMY_LABELS.coordinates + "</b> " + coordDisplay +' in html
+    # (c) mutation counter-proof: the display line must NOT use coordStr
+    assert 'GFMY_LABELS.coordinates + "</b> " + coordStr +' not in html
+    # (d) copy handler keeps the raw full-precision expression, no toFixed
+    assert 'gfmyCopyToClipboard(loc.lat + ", " + loc.lon, coBtn)' in html
+    # (e) display expression strips padding zeros via the outer Number(...)
+    assert (
+        "var coordDisplay = "
+        "Number(Number(loc.lat).toFixed(GFMY_COORD_DISPLAY_DECIMALS)) + "
+        '", " + '
+        "Number(Number(loc.lon).toFixed(GFMY_COORD_DISPLAY_DECIMALS));"
+    ) in html
+    # (f) copy path is untouched by rounding: no toFixed inside the copy handler
+    assert 'gfmyCopyToClipboard(loc.lat + ", " + loc.lon, coBtn).toFixed' not in html

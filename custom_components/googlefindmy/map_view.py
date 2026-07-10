@@ -774,6 +774,8 @@ class GoogleFindMyMapView(HomeAssistantView):
         // f-string treats this as a single replacement field, so the object's
         // braces are inserted as data and never parsed as f-string syntax.
         var GFMY_LABELS = {labels_json};
+        // Display-only precision for popup coordinates; copy keeps full precision.
+        var GFMY_COORD_DISPLAY_DECIMALS = 5;
 {_MAP_COPY_HELPER_JS}
 
         // Accuracy-circle / marker-fade constants (two separate concerns):
@@ -859,6 +861,9 @@ class GoogleFindMyMapView(HomeAssistantView):
                 // Google-Maps-ready decimal degrees: dot decimal separator (JS
                 // default) and "lat, lon" order with a comma+space separator.
                 var coordStr = loc.lat + ", " + loc.lon;
+                // Display-only: round to N decimals, then strip padding zeros so a
+                // shorter source value stays short. Copy path keeps coordStr raw.
+                var coordDisplay = Number(Number(loc.lat).toFixed(GFMY_COORD_DISPLAY_DECIMALS)) + ", " + Number(Number(loc.lon).toFixed(GFMY_COORD_DISPLAY_DECIMALS));
                 var popupHtml =
                     "<b>" + GFMY_LABELS.time + "</b> " + date + "<br>" +
                     "<b>" + GFMY_LABELS.accuracy + "</b> " + loc.accuracy.toFixed(1) + "m<br>" +
@@ -873,7 +878,7 @@ class GoogleFindMyMapView(HomeAssistantView):
                         " aria-label='" + GFMY_LABELS.copy_plus_code + "'>" +
                         GFMY_COPY_ICON + "</span><br>";
                 }}
-                popupHtml += "<b>" + GFMY_LABELS.coordinates + "</b> " + coordStr +
+                popupHtml += "<b>" + GFMY_LABELS.coordinates + "</b> " + coordDisplay +
                     " <span class='gfmy-copy gfmy-copy-coords' role='button' tabindex='0'" +
                     " title='" + GFMY_LABELS.copy_to_clipboard + "'" +
                     " aria-label='" + GFMY_LABELS.copy_coordinates + "'>" +
