@@ -164,8 +164,14 @@ class CacheOperations(_MixinBase):
         could not tell that sanitized row apart from a real fix; ``is_reliable_fix``
         excludes the estimated provenance. The ``elif`` is a bootstrap: when
         nothing reliable has been seen yet, the first (estimated/accuracy-less)
-        fix is kept so the display accessors still report a position, mirroring
-        the tracker's ``_last_good_accuracy_data`` bootstrap. The cache is lazily
+        fix is kept, mirroring the tracker's ``_last_good_accuracy_data``
+        bootstrap. An *estimated* bootstrap is still published (it carries the
+        200 m fallback, so ``select_display_row`` shows it); a *genuinely*
+        accuracy-less bootstrap (e.g. a legacy/partial restore that never went
+        through ``_is_significant_update``) is retained only so age / status /
+        ``has_last_known`` stay available -- ``select_display_row`` applies the
+        same ``has_usable_accuracy`` gate to it as to any other fallback and
+        never publishes it as a coordinate (Codex PR #1181). The cache is lazily
         initialized (mirroring the ``_device_update_history`` idiom below) so
         coordinators built via ``__new__`` need no extra wiring.
         """

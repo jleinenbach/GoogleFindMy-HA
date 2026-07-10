@@ -204,6 +204,21 @@ async def test_coordinator_restore_seed_with_estimated_bootstraps() -> None:
     assert coord._device_last_good_location["dev-1"] == good
 
 
+async def test_accuracy_less_restore_is_not_published_as_coordinate() -> None:
+    """A legacy/partial restore with lat/lon but no accuracy (never sanitized by
+    ``_is_significant_update``) must not surface a Plus Code: the display accessor
+    gates the accuracy-less fallback exactly where the tracker blanks its own
+    coordinates (Codex PR #1181, recheck on 465572c)."""
+    coord = _bare_coordinator()
+    accuracy_less = {"latitude": 48.0, "longitude": 11.0, "accuracy": None}
+    coord.prime_device_location_cache("dev-1", accuracy_less)
+
+    # The row is retained (age / has_last_known stay available)...
+    assert coord._device_last_good_location["dev-1"]["latitude"] == pytest.approx(48.0)
+    # ...but it is never published as a coordinate: no accuracy-less Plus Code.
+    assert coord.get_display_location_data("dev-1") is None
+
+
 async def test_coordinator_display_none_when_never_located() -> None:
     """No current fix and no last-good -> the display row is None."""
     coord = _bare_coordinator()

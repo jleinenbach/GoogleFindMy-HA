@@ -275,14 +275,26 @@ def select_display_row(
     """Return the single row whose data is actually published.
 
     The current row when it carries a usable accuracy, otherwise the last
-    accuracy-bearing fix. Binding every consumer to this one row keeps the
-    published snapshot internally consistent: a fresh update can arrive with
-    valid lat/lon yet no accuracy, and publishing that coordinate would leak a
-    position the tracker hides (Codex #202).
+    accuracy-bearing fix, otherwise ``None``. Binding every consumer to this one
+    row keeps the published snapshot internally consistent: a fresh update can
+    arrive with valid lat/lon yet no accuracy, and publishing that coordinate
+    would leak a position the tracker hides (Codex #202).
+
+    The fallback applies the *same* :func:`has_usable_accuracy` gate to
+    ``last_good`` that it applies to ``current``: the last-good cache can hold a
+    genuinely accuracy-less row (bootstrapped from a legacy/partial restore that
+    never went through ``_is_significant_update`` sanitization) purely so age /
+    status / ``has_last_known`` stay available, but such a row must never be
+    published as a coordinate. Gating both branches identically is what makes
+    the standalone Plus Code sensor and the tracker ``plus_code`` attribute
+    blank the coordinate exactly where the tracker already blanks its own
+    ``latitude``/``longitude`` (Codex PR #1181).
     """
     if has_usable_accuracy(current):
         return current
-    return last_good
+    if has_usable_accuracy(last_good):
+        return last_good
+    return None
 
 
 def is_reliable_fix(row: Mapping[str, Any] | None) -> bool:
