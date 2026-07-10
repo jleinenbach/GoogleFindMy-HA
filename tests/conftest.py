@@ -1992,6 +1992,7 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 self.subentry_manager: Any | None = None
                 self._device_names: dict[str, str] = {}
                 self._device_location_data: dict[str, Any] = {}
+                self._device_last_good_location: dict[str, Any] = {}
                 self._device_caps: dict[str, Any] = {}
                 self._present_last_seen: dict[str, float] = {}
                 self.first_refresh_calls = 0
@@ -2082,6 +2083,28 @@ def fixture_stub_coordinator_factory() -> Callable[..., type[Any]]:
                 self, subentry_key: str, device_id: str
             ) -> bool:
                 return True
+
+            def get_display_location_data_for_subentry(
+                self, subentry_key: str, device_id: str
+            ) -> dict[str, Any] | None:
+                # Mirror the real coordinator contract: return the display row
+                # (current fix if it has usable accuracy, else the last-good),
+                # not the raw current row, so display-semantics regressions are
+                # not masked when this stub is used.
+                from custom_components.googlefindmy.coordinator import (
+                    select_display_row,
+                )
+
+                if not self.is_device_visible_in_subentry(subentry_key, device_id):
+                    return None
+                current = self._device_location_data.get(device_id)
+                last_good = getattr(self, "_device_last_good_location", {}).get(
+                    device_id
+                )
+                row = select_display_row(
+                    current if isinstance(current, dict) else None, last_good
+                )
+                return dict(row) if row is not None else None
 
             def attach_subentry_manager(
                 self, manager: Any, *, is_reload: bool = False

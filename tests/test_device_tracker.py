@@ -336,6 +336,11 @@ def test_device_tracker_avoids_duplicate_accuracy_logs(
         ) -> dict[str, Any] | None:
             return self._device_location_data.get((key, device_id))
 
+        def get_display_location_data_for_subentry(
+            self, key: str | None, device_id: str
+        ) -> dict[str, Any] | None:
+            return self.get_device_location_data_for_subentry(key, device_id)
+
         def get_subentry_snapshot(
             self, key: str | None = None, feature: str | None = None
         ) -> list[dict[str, Any]]:
@@ -440,6 +445,11 @@ class _ShowAgeCoordinatorStub:
         return True
 
     def get_device_location_data_for_subentry(
+        self, key: str | None, device_id: str
+    ) -> dict[str, Any] | None:
+        return self._row
+
+    def get_display_location_data_for_subentry(
         self, key: str | None, device_id: str
     ) -> dict[str, Any] | None:
         return self._row

@@ -285,6 +285,39 @@ def select_display_row(
     return last_good
 
 
+def encode_plus_code_for_row(row: Mapping[str, Any] | None) -> str | None:
+    """Return the 10-digit Plus Code for ``row``'s coordinates, or ``None``.
+
+    Shared SSOT for the Plus Code sensor and the device_tracker ``plus_code``
+    attribute so both encode the identical display row (single source, no
+    duplicated encode logic). Rejects missing, boolean (a ``bool`` is an ``int``
+    subclass) and non-finite (NaN/inf) coordinates, mirroring the sensor's
+    original guard, so the result is ``None`` rather than a bogus code.
+    """
+    if not row:
+        return None
+    lat = row.get("latitude")
+    lon = row.get("longitude")
+    if (
+        not isinstance(lat, (int, float))
+        or not isinstance(lon, (int, float))
+        or isinstance(lat, bool)
+        or isinstance(lon, bool)
+        or not math.isfinite(lat)
+        or not math.isfinite(lon)
+    ):
+        return None
+    # Lazy import mirrors resolve_stale_threshold's const import below: keeps the
+    # vendored Open Location Code encoder off the module-import hot path.
+    from ...vendor.openlocationcode import encode
+
+    try:
+        return encode(float(lat), float(lon), 10)
+    except (ValueError, TypeError):  # pragma: no cover - defensive; inputs are
+        # already validated as finite numbers above, so encode does not raise.
+        return None
+
+
 def location_age_seconds(row: Mapping[str, Any] | None, now: float) -> float | None:
     """Return the age of ``row`` in seconds relative to ``now``, or ``None``.
 

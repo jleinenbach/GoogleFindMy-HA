@@ -34,8 +34,9 @@ from tests.helpers.config_entries_stub import make_config_entry
 # All tests in this module are async and run in pytest-asyncio's managed loop.
 pytestmark = pytest.mark.asyncio
 
-# A fresh timestamp so the position rows pass the sensor's staleness gate (it
-# mirrors the tracker: a fix older than the configured threshold is withheld).
+# A fresh timestamp for the baseline position rows. The Plus Code no longer has
+# a staleness gate (last_known semantics), so age only matters for the dedicated
+# stale-vs-code test below.
 _FRESH_LAST_SEEN = time.time()
 
 # A decoder row with a real, recent position. Its lat/lon drive the encoder.
@@ -68,12 +69,15 @@ _NO_COORDS_ROW: dict[str, Any] = {
 async def _build_plus_code_sensor(
     row: dict[str, Any] | None,
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
+    *,
+    last_good: dict[str, Any] | None = None,
 ) -> Any:
     """Construct a real ``GoogleFindMyPlusCodeSensor`` via the platform setup path.
 
     Mirrors the LastSeen test harness: a stub coordinator subclassing the real
-    coordinator serves ``row`` from ``get_device_location_data_for_subentry`` so
-    the value under test sees a controlled position.
+    coordinator holds ``row`` as the current fix and an optional ``last_good``
+    accuracy-bearing fix, so the sensor exercises the genuine coordinator display
+    path (``get_display_location_data_for_subentry`` -> ``select_display_row``).
     """
 
     del (
@@ -93,10 +97,14 @@ async def _build_plus_code_sensor(
             self.config_entry = make_config_entry(entry_id="entry-id")
             self.stats: dict[str, int] = {}
             self._device_names: dict[str, str] = {}
-            self._device_location_data: dict[str, Any] = {}
+            self._device_location_data: dict[str, Any] = (
+                {} if row is None else {"dev-1": dict(row)}
+            )
+            self._device_last_good_location: dict[str, Any] = (
+                {} if last_good is None else {"dev-1": dict(last_good)}
+            )
             self._device_caps: dict[str, Any] = {}
             self._present_last_seen: dict[str, float] = {}
-            self._row: dict[str, Any] | None = row
 
         def async_add_listener(
             self, listener: Callable[[], None]
@@ -128,10 +136,10 @@ async def _build_plus_code_sensor(
         ) -> list[dict[str, Any]]:
             return list(self._snapshot)
 
-        def get_device_location_data_for_subentry(
+        def is_device_visible_in_subentry(
             self, subentry_key: str, device_id: str
-        ) -> dict[str, Any] | None:
-            return self._row
+        ) -> bool:
+            return True
 
     class _StubConfigEntry:
         def __init__(self, coordinator: _StubCoordinator) -> None:
@@ -247,15 +255,18 @@ async def test_plus_code_sensor_accuracy_less_row_yields_none(
     assert entity.native_value is None
 
 
-async def test_plus_code_sensor_stale_row_yields_none(
+async def test_plus_code_sensor_stale_row_yields_code(
     deterministic_config_subentry_id: Callable[[Any, str, str | None], str],
 ) -> None:
-    """An accuracy-bearing but stale fix -> native_value None.
+    """An accuracy-bearing but stale fix -> the last known Plus Code (never stale).
 
-    The tracker blanks live coordinates once a fix is older than the configured
-    stale threshold; the Plus Code applies the same gate. Reverting the
-    staleness gate turns this test red (mutation check).
+    Inverted from the pre-#1179-followup behavior: the Plus Code now follows the
+    Last Location entity's ``last_known`` semantics and never blanks on age. A
+    stale fix that still carries a usable accuracy is the last known position, so
+    its code is published. The accuracy gate is unaffected (see
+    ``test_plus_code_sensor_accuracy_less_row_yields_none``): reinstating a
+    staleness gate would turn this test red (mutation check).
     """
     stale_row = {**_POSITION_ROW, "last_seen": _FRESH_LAST_SEEN - 1_000_000}
     entity = await _build_plus_code_sensor(stale_row, deterministic_config_subentry_id)
-    assert entity.native_value is None
+    assert entity.native_value == _EXPECTED_CODE

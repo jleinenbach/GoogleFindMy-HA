@@ -50,6 +50,7 @@ from .const import (
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    encode_plus_code_for_row,
     location_age_seconds,
     parse_last_seen_timestamp,
     recorded_accuracy_pair,
@@ -1280,6 +1281,20 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
                 attributes["last_latitude"] = last_lat
             if last_lon is not None:
                 attributes["last_longitude"] = last_lon
+
+        # Plus Code of the last known position. Sourced from the coordinator
+        # display accessor (not the tracker-private display_data) so it is
+        # value-identical to the standalone Plus Code sensor by construction
+        # (single source + shared encoder). String attribute -> no second map
+        # marker; recorded like last_latitude/last_longitude (changes only with
+        # the coordinate), so deliberately NOT in _unrecorded_attributes.
+        plus_code = encode_plus_code_for_row(
+            self.coordinator.get_display_location_data_for_subentry(
+                self.subentry_key, self.device_id
+            )
+        )
+        if plus_code is not None:
+            attributes["plus_code"] = plus_code
 
         self._attr_extra_state_attributes = attributes
 

@@ -732,6 +732,13 @@ class GoogleFindMyCoordinator(
         self._device_location_data: dict[
             str, dict[str, Any]
         ] = {}  # device_id -> location dict
+        # Last accuracy-bearing fix per device, the coordinator-level "last good"
+        # feeding the Plus Code display accessors (sensor + tracker attribute).
+        # Only updated for rows passing has_usable_accuracy (never poisoned by an
+        # accuracy-less fix), mirroring the tracker's private last-good policy.
+        self._device_last_good_location: dict[
+            str, dict[str, Any]
+        ] = {}  # device_id -> last accuracy-bearing location dict
         self._device_names: dict[str, str] = {}  # device_id -> human name
         self._device_caps: dict[
             str, dict[str, Any]

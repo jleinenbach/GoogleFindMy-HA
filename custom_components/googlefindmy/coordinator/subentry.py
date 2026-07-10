@@ -907,6 +907,20 @@ class SubentryOperations(_MixinBase):
             return None
         return self.get_device_location_data(device_id)
 
+    def get_display_location_data_for_subentry(
+        self, subentry_key: str, device_id: str
+    ) -> dict[str, Any] | None:
+        """Return the published display row for a device within the subentry.
+
+        Subentry-visibility-gated wrapper around ``get_display_location_data``
+        (coordinator last-good display selection), the shared source for the
+        Plus Code sensor and the device_tracker ``plus_code`` attribute.
+        """
+
+        if not self.is_device_visible_in_subentry(subentry_key, device_id):
+            return None
+        return self.get_display_location_data(device_id)
+
     def get_device_last_seen_for_subentry(
         self, subentry_key: str, device_id: str
     ) -> datetime | None:
