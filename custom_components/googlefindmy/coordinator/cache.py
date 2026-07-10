@@ -40,6 +40,8 @@ from .helpers.cache import (
 from .helpers.geo import (
     DEFAULT_ACCURACY_FALLBACK_M,
     MIN_PHYSICAL_ACCURACY_M,
+    is_reliable_fix,
+    select_display_row,
 )
 from .helpers.geo import (
     coerce_float as _coerce_float_impl,
@@ -133,6 +135,55 @@ class CacheOperations(_MixinBase):
             return None
         return dict(raw)
 
+    def get_display_location_data(self, device_id: str) -> dict[str, Any] | None:
+        """Return the row that is actually published for a device (copy).
+
+        The current fix when it carries a usable accuracy, otherwise the last
+        accuracy-bearing fix (coordinator last-good), otherwise ``None``. This is
+        the single source feeding both Plus Code consumers (the standalone sensor
+        and the device_tracker ``plus_code`` attribute), so they are last-known
+        by construction and never publish an accuracy-less coordinate the tracker
+        hides (Codex #202 / PR #1179).
+        """
+        row = select_display_row(
+            self.get_device_location_data(device_id),
+            getattr(self, "_device_last_good_location", {}).get(device_id),
+        )
+        return dict(row) if row is not None else None
+
+    def _record_last_good_location(
+        self, device_id: str, row: Mapping[str, Any]
+    ) -> None:
+        """Store ``row`` as the device's last *reliable* fix (last-good).
+
+        Only a reliable (non-estimated) fix advances the last-good, so a
+        sanitized accuracy-less fix (``_is_significant_update`` replaces its
+        missing/error-code accuracy with the 200 m fallback and sets
+        ``accuracy_estimated=True``) never poisons the fallback the Plus Code
+        display accessors read (#1179). A plain ``has_usable_accuracy`` check
+        could not tell that sanitized row apart from a real fix; ``is_reliable_fix``
+        excludes the estimated provenance. The ``elif`` is a bootstrap: when
+        nothing reliable has been seen yet, the first (estimated/accuracy-less)
+        fix is kept, mirroring the tracker's ``_last_good_accuracy_data``
+        bootstrap. An *estimated* bootstrap is still published (it carries the
+        200 m fallback, so ``select_display_row`` shows it); a *genuinely*
+        accuracy-less bootstrap (e.g. a legacy/partial restore that never went
+        through ``_is_significant_update``) is retained only so age / status /
+        ``has_last_known`` stay available -- ``select_display_row`` applies the
+        same ``has_usable_accuracy`` gate to it as to any other fallback and
+        never publishes it as a coordinate (Codex PR #1181). The cache is lazily
+        initialized (mirroring the ``_device_update_history`` idiom below) so
+        coordinators built via ``__new__`` need no extra wiring.
+        """
+        cache = getattr(self, "_device_last_good_location", None)
+        if cache is None:
+            cache = {}
+            self._device_last_good_location = cache
+        if is_reliable_fix(row):
+            cache[device_id] = dict(row)
+        elif device_id not in cache:
+            cache[device_id] = dict(row)
+
     def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         """Prime the internal location cache with externally-provided data.
 
@@ -147,6 +198,12 @@ class CacheOperations(_MixinBase):
             self._device_location_data[device_id] = merged
         else:
             self._device_location_data[device_id] = dict(data)
+        # Restore-seed the coordinator last-good from the primed row so the Plus
+        # Code display accessors return a value immediately after a restart,
+        # before the first poll. The device_tracker already calls this on restore
+        # (device_tracker.py) with the same row its private last-good restores
+        # from, keeping the two last-good caches in sync by construction.
+        self._record_last_good_location(device_id, data)
 
     def seed_device_last_seen(self, device_id: str, timestamp: float) -> None:
         """Seed a device's last-seen timestamp for cache initialization."""
@@ -506,6 +563,10 @@ class CacheOperations(_MixinBase):
                 name_cache[device_id] = name
 
         self._device_location_data[device_id] = slot
+        # Coordinator last-good: advance only for reliable (non-estimated) fixes
+        # so a sanitized accuracy-less update never overwrites the last reliable
+        # position the Plus Code display accessors fall back to (non-poison).
+        self._record_last_good_location(device_id, slot)
 
         # FIX #155: Only count background_updates for non-poll sources
         # to avoid double-counting with polled_updates.
@@ -600,6 +661,8 @@ class CacheOperations(_MixinBase):
             merged["last_updated"] = time.time()
 
             self._device_location_data[target_id] = merged
+            # Coordinator last-good for the shared target, same non-poison gate.
+            self._record_last_good_location(target_id, merged)
 
             _LOGGER.debug(
                 "Propagated location from %s to %s (shared tracker, source=%s)",

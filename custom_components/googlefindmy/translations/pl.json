@@ -545,6 +545,9 @@
           },
           "last_longitude": {
             "name": "Ostatnia znana długość geograficzna"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       },
@@ -598,6 +601,15 @@
           },
           "location_status": {
             "name": "Status lokalizacji"
+          },
+          "last_latitude": {
+            "name": "Ostatnia znana szerokość geograficzna"
+          },
+          "last_longitude": {
+            "name": "Ostatnia znana długość geograficzna"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       }
@@ -607,7 +619,12 @@
         "name": "Bateria BLE"
       },
       "plus_code": {
-        "name": "Plus Code"
+        "name": "Plus Code",
+        "state_attributes": {
+          "coordinates": {
+            "name": "Współrzędne"
+          }
+        }
       },
       "last_seen": {
         "name": "Ostatnio widziany",

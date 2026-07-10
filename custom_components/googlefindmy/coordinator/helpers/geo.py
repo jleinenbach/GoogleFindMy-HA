@@ -275,14 +275,82 @@ def select_display_row(
     """Return the single row whose data is actually published.
 
     The current row when it carries a usable accuracy, otherwise the last
-    accuracy-bearing fix. Binding every consumer to this one row keeps the
-    published snapshot internally consistent: a fresh update can arrive with
-    valid lat/lon yet no accuracy, and publishing that coordinate would leak a
-    position the tracker hides (Codex #202).
+    accuracy-bearing fix, otherwise ``None``. Binding every consumer to this one
+    row keeps the published snapshot internally consistent: a fresh update can
+    arrive with valid lat/lon yet no accuracy, and publishing that coordinate
+    would leak a position the tracker hides (Codex #202).
+
+    The fallback applies the *same* :func:`has_usable_accuracy` gate to
+    ``last_good`` that it applies to ``current``: the last-good cache can hold a
+    genuinely accuracy-less row (bootstrapped from a legacy/partial restore that
+    never went through ``_is_significant_update`` sanitization) purely so age /
+    status / ``has_last_known`` stay available, but such a row must never be
+    published as a coordinate. Gating both branches identically is what makes
+    the standalone Plus Code sensor and the tracker ``plus_code`` attribute
+    blank the coordinate exactly where the tracker already blanks its own
+    ``latitude``/``longitude`` (Codex PR #1181).
     """
     if has_usable_accuracy(current):
         return current
-    return last_good
+    if has_usable_accuracy(last_good):
+        return last_good
+    return None
+
+
+def is_reliable_fix(row: Mapping[str, Any] | None) -> bool:
+    """Return ``True`` when ``row`` carries a *real* (non-estimated) accuracy.
+
+    Stricter than :func:`has_usable_accuracy`, and the gate for the *retention*
+    of a last-good fix (coordinator ``_device_last_good_location`` and the
+    tracker's private ``_last_good_accuracy_data``). ``_is_significant_update``
+    replaces a missing or error-code accuracy with the conservative 200 m
+    fallback and marks ``accuracy_estimated=True``; that sanitized row is
+    accuracy-less in substance, so :func:`has_usable_accuracy` (a plain
+    ``accuracy is not None`` check) can no longer tell it apart from a real fix.
+    Retaining such a row as last-good would poison the fallback the Plus Code
+    display accessors read (#1179). :func:`has_usable_accuracy` stays the
+    *display* gate (:func:`select_display_row`) so a fresh estimated fix is
+    still shown; ``is_reliable_fix`` is the retention gate so only a real
+    measurement overwrites the last reliable position.
+    """
+    return (
+        has_usable_accuracy(row)
+        and row is not None
+        and not bool(row.get("accuracy_estimated"))
+    )
+
+
+def encode_plus_code_for_row(row: Mapping[str, Any] | None) -> str | None:
+    """Return the 10-digit Plus Code for ``row``'s coordinates, or ``None``.
+
+    Shared SSOT for the Plus Code sensor and the device_tracker ``plus_code``
+    attribute so both encode the identical display row (single source, no
+    duplicated encode logic). Rejects missing, boolean (a ``bool`` is an ``int``
+    subclass) and non-finite (NaN/inf) coordinates, mirroring the sensor's
+    original guard, so the result is ``None`` rather than a bogus code.
+    """
+    if not row:
+        return None
+    lat = row.get("latitude")
+    lon = row.get("longitude")
+    if (
+        not isinstance(lat, (int, float))
+        or not isinstance(lon, (int, float))
+        or isinstance(lat, bool)
+        or isinstance(lon, bool)
+        or not math.isfinite(lat)
+        or not math.isfinite(lon)
+    ):
+        return None
+    # Lazy import mirrors resolve_stale_threshold's const import below: keeps the
+    # vendored Open Location Code encoder off the module-import hot path.
+    from ...vendor.openlocationcode import encode
+
+    try:
+        return encode(float(lat), float(lon), 10)
+    except (ValueError, TypeError):  # pragma: no cover - defensive; inputs are
+        # already validated as finite numbers above, so encode does not raise.
+        return None
 
 
 def location_age_seconds(row: Mapping[str, Any] | None, now: float) -> float | None:

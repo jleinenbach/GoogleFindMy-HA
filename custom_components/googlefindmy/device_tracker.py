@@ -50,6 +50,8 @@ from .const import (
 from .coordinator import (
     GoogleFindMyCoordinator,
     _as_ha_attributes,
+    encode_plus_code_for_row,
+    is_reliable_fix,
     location_age_seconds,
     parse_last_seen_timestamp,
     recorded_accuracy_pair,
@@ -993,7 +995,13 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             if last_seen is not None:
                 restored["last_seen"] = last_seen
 
-            self._last_good_accuracy_data = {**restored}
+            # Same retention gate as the operational path and the coordinator
+            # prime below (is_reliable_fix + bootstrap): a restored estimated
+            # fix seeds the still-empty cache (``is None``) but must not overwrite
+            # a reliable fix once one exists, so the tracker's private last-good
+            # and the coordinator's stay in sync by construction (#1179).
+            if is_reliable_fix(restored) or self._last_good_accuracy_data is None:
+                self._last_good_accuracy_data = {**restored}
             # Prime coordinator cache using its public API (no private access).
             dev_id = self.device_id
             try:
@@ -1281,6 +1289,20 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
             if last_lon is not None:
                 attributes["last_longitude"] = last_lon
 
+        # Plus Code of the last known position. Sourced from the coordinator
+        # display accessor (not the tracker-private display_data) so it is
+        # value-identical to the standalone Plus Code sensor by construction
+        # (single source + shared encoder). String attribute -> no second map
+        # marker; recorded like last_latitude/last_longitude (changes only with
+        # the coordinate), so deliberately NOT in _unrecorded_attributes.
+        plus_code = encode_plus_code_for_row(
+            self.coordinator.get_display_location_data_for_subentry(
+                self.subentry_key, self.device_id
+            )
+        )
+        if plus_code is not None:
+            attributes["plus_code"] = plus_code
+
         self._attr_extra_state_attributes = attributes
 
     @callback
@@ -1310,19 +1332,20 @@ class GoogleFindMyDeviceTracker(GoogleFindMyDeviceEntity, TrackerEntity, Restore
 
         lat = device_data.get("latitude")
         lon = device_data.get("longitude")
-        acc = device_data.get("accuracy")
 
-        if lat is not None and lon is not None and acc is not None:
-            # Only cache fixes that actually carry accuracy; the read-path
-            # fallback in _sync_location_attrs relies on this cache holding a
-            # usable fix (its name is _last_good_ACCURACY_data). Overwriting it
-            # with an accuracy-less fix would poison the fallback and could
-            # blank valid coordinates on a later accuracy-less update.
+        if lat is not None and lon is not None and is_reliable_fix(device_data):
+            # Only cache *reliable* (non-estimated) fixes; the read-path fallback
+            # in _sync_location_attrs relies on this cache holding a usable fix
+            # (its name is _last_good_ACCURACY_data). A sanitized accuracy-less
+            # fix carries the 200 m fallback with accuracy_estimated=True, so a
+            # plain ``acc is not None`` check would let it overwrite the last
+            # reliable position and poison the fallback (kept in sync with the
+            # coordinator's is_reliable_fix retention gate, #1179).
             self._last_good_accuracy_data = device_data.copy()
         elif self._last_good_accuracy_data is None:
-            # Bootstrap only: preserve the first update (semantic-only or
-            # accuracy-less) when nothing better has been seen yet, so the
-            # entity still has *something* to report.
+            # Bootstrap only: preserve the first update (semantic-only,
+            # accuracy-less or estimated) when nothing reliable has been seen
+            # yet, so the entity still has *something* to report.
             self._last_good_accuracy_data = device_data.copy()
 
         self._sync_location_attrs()

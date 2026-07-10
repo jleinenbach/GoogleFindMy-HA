@@ -16,8 +16,6 @@ Best practices:
 from __future__ import annotations
 
 import logging
-import math
-import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
@@ -51,9 +49,7 @@ from .coordinator import (
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
     _as_ha_attributes,
-    has_usable_accuracy,
-    location_age_seconds,
-    resolve_stale_threshold,
+    encode_plus_code_for_row,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -68,7 +64,6 @@ from .entity import (
     subentry_type as _subentry_type,
 )
 from .ha_typing import RestoreSensor, SensorEntity, callback
-from .vendor.openlocationcode import encode as _encode_plus_code
 
 if TYPE_CHECKING:
     from .eid_resolver import GoogleFindMyEIDResolver
@@ -1431,6 +1426,11 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
     _attr_has_entity_name = True
     _attr_entity_registry_enabled_default = True
     entity_description = PLUS_CODE_DESCRIPTION
+    # HA flattens this to the ``attribution`` state attribute (not into
+    # extra_state_attributes, no map marker). Static end-user source credit; the
+    # divergence from the tracker's dynamic ``FMDN (email)`` attribution is
+    # deliberate (maintenance-free) and documented in the PR body.
+    _attr_attribution = "Data provided by Google"
 
     def __init__(
         self,
@@ -1461,56 +1461,33 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
         )
 
     def _current_plus_code(self) -> str | None:
-        """Compute the Plus Code from the device's published location.
+        """Compute the Plus Code from the device's last known published location.
 
-        Applies the same accuracy and staleness gate the device_tracker uses
-        before it publishes live coordinates (shared SSOT helpers), so the Plus
-        Code never encodes a position the tracker/map deliberately hide (Codex
-        #202 / PR #1179):
+        The value follows the ``last_known`` semantics of the device_tracker's
+        Last Location entity: it reports the last *reliable* position and never
+        goes stale. Both the coordinate row and the encoding come from shared
+        sources:
 
-        - a fix without a usable accuracy is withheld -> ``None``;
-        - a stale fix (older than the configured threshold) is withheld ->
-          ``None``.
+        - the row is the coordinator display row
+          (``get_display_location_data_for_subentry``): the current fix when it
+          carries a usable accuracy, otherwise the last accuracy-bearing fix
+          (coordinator last-good), otherwise ``None``;
+        - the encoding is ``encode_plus_code_for_row`` (shared with the tracker
+          ``plus_code`` attribute, single source, no duplicated logic).
 
-        This sensor intentionally holds no last-good-accuracy cache of its own.
-        When the current row lacks accuracy the tracker falls back to its cached
-        fix for the *marker*; the Plus Code reports ``unknown`` instead of
-        duplicating that per-entity cache and its restore wiring in a second
-        entity. Last-good parity, if ever wanted, is a separate feature, not
-        this bugfix.
+        The accuracy gate is inherent in the display-row selection, so an
+        accuracy-less coordinate the tracker/map deliberately hide is still never
+        published (Codex #202 / PR #1179): such a fix is skipped in favour of the
+        last good row, and if none exists the result is ``None`` (only for a
+        device that has never had a usable fix).
         """
         dev_id = self._device_id
         if not dev_id:
             return None
-        row = self.coordinator.get_device_location_data_for_subentry(
+        row = self.coordinator.get_display_location_data_for_subentry(
             self.subentry_key, dev_id
         )
-        # Accuracy gate: mirror the tracker's publish decision.
-        if not has_usable_accuracy(row):
-            return None
-        # Staleness gate: a fix older than the configured threshold is withheld
-        # exactly as the tracker blanks its live coordinates when stale.
-        threshold = resolve_stale_threshold(self.coordinator)
-        age = location_age_seconds(row, time.time())
-        if age is not None and age > threshold:
-            return None
-        lat = row.get("latitude") if row else None
-        lon = row.get("longitude") if row else None
-        # Reject missing, boolean (a bool is an int subclass), and non-finite
-        # (NaN/inf) coordinates so the state is ``unknown`` rather than bogus.
-        if (
-            not isinstance(lat, (int, float))
-            or not isinstance(lon, (int, float))
-            or isinstance(lat, bool)
-            or isinstance(lon, bool)
-            or not math.isfinite(lat)
-            or not math.isfinite(lon)
-        ):
-            return None
-        try:
-            return _encode_plus_code(float(lat), float(lon), 10)
-        except (ValueError, TypeError):
-            return None
+        return encode_plus_code_for_row(row)
 
     @property
     def native_value(self) -> str | None:
@@ -1519,12 +1496,28 @@ class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Return non-coordinate metadata.
+        """Return a copyable ``coordinates`` string for the last known position.
 
-        Must not include ``latitude``/``longitude``: a text sensor that carried
-        both would be auto-plotted by HA as a spurious third map marker.
+        The string uses the map popup's format (``"lat, lon"``, dot decimal
+        separator, raw values, see ``map_view.py``) so the user can copy the
+        tracker's last known coordinates straight into a maps app while searching
+        for it. Deliberately no numeric ``latitude``/``longitude``: a text sensor
+        carrying both would be auto-plotted by HA as a spurious extra map marker.
+
+        Coupling invariant: ``coordinates`` is present exactly when
+        ``native_value`` yields a code (both derive from the same display row);
+        otherwise the attributes are empty. ``attribution`` is set independently
+        via ``_attr_attribution`` and always present.
         """
-        return {"code_length": 10}
+        dev_id = self._device_id
+        if not dev_id:
+            return None
+        row = self.coordinator.get_display_location_data_for_subentry(
+            self.subentry_key, dev_id
+        )
+        if row is None or encode_plus_code_for_row(row) is None:
+            return None
+        return {"coordinates": f"{row['latitude']}, {row['longitude']}"}
 
     @property
     def available(self) -> bool:

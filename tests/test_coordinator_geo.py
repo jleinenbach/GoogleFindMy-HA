@@ -528,6 +528,25 @@ class TestSelectDisplayRow:
     def test_both_missing_yields_none(self) -> None:
         assert select_display_row(None, None) is None
 
+    def test_accuracy_less_last_good_is_not_published(self) -> None:
+        # A genuinely accuracy-less last-good (e.g. a legacy/partial restore that
+        # bypassed _is_significant_update sanitization) must not be published as
+        # a coordinate: the fallback applies the same has_usable_accuracy gate as
+        # the current branch (Codex PR #1181).
+        current = {"latitude": 1.0, "accuracy": None}
+        last_good = {"latitude": 9.0, "accuracy": None}
+        assert select_display_row(current, last_good) is None
+
+    def test_no_current_and_accuracy_less_last_good_yields_none(self) -> None:
+        last_good = {"latitude": 9.0, "accuracy": None}
+        assert select_display_row(None, last_good) is None
+
+    def test_estimated_last_good_is_still_published(self) -> None:
+        # A sanitized estimated fallback (accuracy=200) carries usable accuracy
+        # and stays displayable -- only genuinely accuracy-less rows are gated.
+        last_good = {"latitude": 9.0, "accuracy": 200.0, "accuracy_estimated": True}
+        assert select_display_row(None, last_good) is last_good
+
 
 class TestLocationAgeSeconds:
     """location_age_seconds - pure age arithmetic with an injected ``now``."""
