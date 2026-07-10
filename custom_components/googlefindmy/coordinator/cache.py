@@ -40,7 +40,7 @@ from .helpers.cache import (
 from .helpers.geo import (
     DEFAULT_ACCURACY_FALLBACK_M,
     MIN_PHYSICAL_ACCURACY_M,
-    has_usable_accuracy,
+    is_reliable_fix,
     select_display_row,
 )
 from .helpers.geo import (
@@ -154,20 +154,29 @@ class CacheOperations(_MixinBase):
     def _record_last_good_location(
         self, device_id: str, row: Mapping[str, Any]
     ) -> None:
-        """Store ``row`` as the device's last accuracy-bearing fix (last-good).
+        """Store ``row`` as the device's last *reliable* fix (last-good).
 
-        Only accuracy-bearing rows advance the last-good, so an accuracy-less
-        fix never poisons the fallback the Plus Code display accessors read. The
-        cache is lazily initialized (mirroring the ``_device_update_history``
-        idiom below) so coordinators built via ``__new__`` need no extra wiring.
+        Only a reliable (non-estimated) fix advances the last-good, so a
+        sanitized accuracy-less fix (``_is_significant_update`` replaces its
+        missing/error-code accuracy with the 200 m fallback and sets
+        ``accuracy_estimated=True``) never poisons the fallback the Plus Code
+        display accessors read (#1179). A plain ``has_usable_accuracy`` check
+        could not tell that sanitized row apart from a real fix; ``is_reliable_fix``
+        excludes the estimated provenance. The ``elif`` is a bootstrap: when
+        nothing reliable has been seen yet, the first (estimated/accuracy-less)
+        fix is kept so the display accessors still report a position, mirroring
+        the tracker's ``_last_good_accuracy_data`` bootstrap. The cache is lazily
+        initialized (mirroring the ``_device_update_history`` idiom below) so
+        coordinators built via ``__new__`` need no extra wiring.
         """
-        if not has_usable_accuracy(row):
-            return
         cache = getattr(self, "_device_last_good_location", None)
         if cache is None:
             cache = {}
             self._device_last_good_location = cache
-        cache[device_id] = dict(row)
+        if is_reliable_fix(row):
+            cache[device_id] = dict(row)
+        elif device_id not in cache:
+            cache[device_id] = dict(row)
 
     def prime_device_location_cache(self, device_id: str, data: dict[str, Any]) -> None:
         """Prime the internal location cache with externally-provided data.
@@ -548,9 +557,9 @@ class CacheOperations(_MixinBase):
                 name_cache[device_id] = name
 
         self._device_location_data[device_id] = slot
-        # Coordinator last-good: advance only for accuracy-bearing fixes so an
-        # accuracy-less update never overwrites the last reliable position the
-        # Plus Code display accessors fall back to (Nicht-Poison).
+        # Coordinator last-good: advance only for reliable (non-estimated) fixes
+        # so a sanitized accuracy-less update never overwrites the last reliable
+        # position the Plus Code display accessors fall back to (Nicht-Poison).
         self._record_last_good_location(device_id, slot)
 
         # FIX #155: Only count background_updates for non-poll sources

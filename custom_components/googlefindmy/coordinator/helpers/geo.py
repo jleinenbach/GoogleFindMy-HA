@@ -285,6 +285,29 @@ def select_display_row(
     return last_good
 
 
+def is_reliable_fix(row: Mapping[str, Any] | None) -> bool:
+    """Return ``True`` when ``row`` carries a *real* (non-estimated) accuracy.
+
+    Stricter than :func:`has_usable_accuracy`, and the gate for the *retention*
+    of a last-good fix (coordinator ``_device_last_good_location`` and the
+    tracker's private ``_last_good_accuracy_data``). ``_is_significant_update``
+    replaces a missing or error-code accuracy with the conservative 200 m
+    fallback and marks ``accuracy_estimated=True``; that sanitized row is
+    accuracy-less in substance, so :func:`has_usable_accuracy` (a plain
+    ``accuracy is not None`` check) can no longer tell it apart from a real fix.
+    Retaining such a row as last-good would poison the fallback the Plus Code
+    display accessors read (#1179). :func:`has_usable_accuracy` stays the
+    *display* gate (:func:`select_display_row`) so a fresh estimated fix is
+    still shown; ``is_reliable_fix`` is the retention gate so only a real
+    measurement overwrites the last reliable position.
+    """
+    return (
+        has_usable_accuracy(row)
+        and row is not None
+        and not bool(row.get("accuracy_estimated"))
+    )
+
+
 def encode_plus_code_for_row(row: Mapping[str, Any] | None) -> str | None:
     """Return the 10-digit Plus Code for ``row``'s coordinates, or ``None``.
 

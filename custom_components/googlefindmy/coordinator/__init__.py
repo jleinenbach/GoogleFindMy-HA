@@ -44,6 +44,7 @@ from .helpers import parse_last_seen_timestamp
 from .helpers.geo import (
     encode_plus_code_for_row,
     has_usable_accuracy,
+    is_reliable_fix,
     is_valid_accuracy,
     location_age_seconds,
     recorded_accuracy_pair,
@@ -110,6 +111,7 @@ __all__ = [
     "format_epoch_utc",
     "get_recorder",
     "has_usable_accuracy",
+    "is_reliable_fix",
     "is_valid_accuracy",
     "location_age_seconds",
     "normalize_epoch_seconds",

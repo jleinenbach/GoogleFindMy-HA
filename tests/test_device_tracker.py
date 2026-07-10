@@ -631,6 +631,39 @@ async def test_restore_preserves_accuracy_estimated_flag(
 
 
 @pytest.mark.asyncio
+async def test_restore_estimated_does_not_overwrite_existing_reliable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restore seed applies the same retention gate as the operational path.
+
+    An estimated restored fix must not overwrite an already-present reliable
+    last-good (defensive symmetry with the coordinator prime / operational gate,
+    #1179). In the normal lifecycle restore runs on a fresh entity, so this only
+    guards a re-entry, but it keeps the tracker and coordinator last-good in sync
+    by construction.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 200,
+            "accuracy_estimated": True,
+        },
+    )
+    reliable = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    entity._last_good_accuracy_data = dict(reliable)
+
+    await entity.async_added_to_hass()
+
+    # The estimated restore is skipped: the reliable last-good survives.
+    assert entity._last_good_accuracy_data == reliable
+
+
+@pytest.mark.asyncio
 async def test_restore_without_flag_leaves_estimated_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

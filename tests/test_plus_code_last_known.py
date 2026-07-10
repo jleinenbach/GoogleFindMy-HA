@@ -31,6 +31,7 @@ from custom_components.googlefindmy.const import TRACKER_SUBENTRY_KEY
 from custom_components.googlefindmy.coordinator import (
     GoogleFindMyCoordinator,
     encode_plus_code_for_row,
+    is_reliable_fix,
 )
 from tests.helpers.config_entries_stub import make_config_entry
 from tests.test_plus_code_sensor import (
@@ -160,10 +161,11 @@ async def test_coordinator_last_good_non_poison_and_fallback() -> None:
     assert coord.get_display_location_data("dev-1") == good
 
     # The current fix turns accuracy-less: it must not be published, and it must
-    # not poison the last-good. The display row stays the last good position.
+    # not poison the last-good. The display row stays the last good position
+    # (not-reliable + already-cached -> neither branch of _record fires).
     accuracy_less = {"latitude": 48.0, "longitude": 11.0, "accuracy": None}
     coord._device_location_data["dev-1"] = accuracy_less
-    coord._record_last_good_location("dev-1", accuracy_less)  # early-return path
+    coord._record_last_good_location("dev-1", accuracy_less)
     assert coord.get_display_location_data("dev-1") == good
 
     # A second good fix advances the existing last-good cache (cache-exists path).
@@ -179,6 +181,27 @@ async def test_coordinator_restore_seed_via_prime() -> None:
     good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
     coord.prime_device_location_cache("dev-1", good)
     assert coord.get_display_location_data("dev-1") == good
+
+
+async def test_coordinator_restore_seed_with_estimated_bootstraps() -> None:
+    """A restored estimated fix still bootstraps last-good (never-unknown), but a
+    later reliable fix replaces it (symmetric with the tracker restore gate)."""
+    coord = _bare_coordinator()
+    estimated = {
+        "latitude": 48.0,
+        "longitude": 11.0,
+        "accuracy": 200.0,
+        "accuracy_estimated": True,
+    }
+    coord.prime_device_location_cache("dev-1", estimated)
+    # Bootstrap: with nothing reliable yet, the estimated restore is still seeded.
+    row = coord.get_display_location_data("dev-1")
+    assert row is not None and row["latitude"] == pytest.approx(48.0)
+
+    # A subsequent reliable fix takes over the retention cache.
+    good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    coord._record_last_good_location("dev-1", good)
+    assert coord._device_last_good_location["dev-1"] == good
 
 
 async def test_coordinator_display_none_when_never_located() -> None:
@@ -323,3 +346,164 @@ async def test_sensor_and_tracker_share_plus_code(
     tracker._sync_location_attrs()
     tracker_code = tracker._attr_extra_state_attributes["plus_code"]
     assert sensor_entity.native_value == tracker_code == _EXPECTED_CODE
+
+
+# ---------------------------------------------------------------------------
+# Non-poison via the *production* path and cache lifecycle (Codex PR #1181)
+# ---------------------------------------------------------------------------
+#
+# _is_significant_update replaces a missing/error-code accuracy with the 200 m
+# fallback and sets accuracy_estimated=True, so by the time update_device_cache
+# records the last-good the row is no longer accuracy=None. has_usable_accuracy
+# (a plain None check) could not tell that sanitized row apart from a real fix;
+# is_reliable_fix excludes the estimated provenance. These tests exercise the
+# real update_device_cache path (not a direct accuracy=None call) which the
+# original suite left uncovered.
+
+
+def _make_update_coordinator(existing: dict[str, Any]) -> Any:
+    """A coordinator wired for the real update_device_cache path (sanitization)."""
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {"dev-1": dict(existing)}
+    coord._device_names = {}
+    coord._device_update_history = {}
+    coord.increment_stat = lambda *_a, **_k: None
+    coord._apply_report_type_cooldown = lambda *_a, **_k: None
+    coord._is_on_hass_loop = lambda: True
+    coord._run_on_hass_loop = lambda *_a, **_k: None
+    # Seed the reliable fix as the current last-good.
+    coord._record_last_good_location("dev-1", existing)
+    return coord
+
+
+async def test_is_reliable_fix_gate() -> None:
+    """The retention gate accepts only real (non-estimated) usable accuracies."""
+    assert is_reliable_fix({"accuracy": 12.0}) is True
+    assert is_reliable_fix({"accuracy": 12.0, "accuracy_estimated": False}) is True
+    # Sanitized accuracy-less fix: numeric fallback but estimated provenance.
+    assert is_reliable_fix({"accuracy": 200.0, "accuracy_estimated": True}) is False
+    assert is_reliable_fix({"accuracy": None}) is False
+    assert is_reliable_fix(None) is False
+
+
+async def test_estimated_fix_does_not_poison_last_good_direct() -> None:
+    """An estimated (sanitized) fix must not overwrite a reliable last-good.
+
+    The retention cache keeps the reliable fix; only once the current row is
+    truly accuracy-less does the display fall back to it (a fresh estimated
+    *current* is still shown by select_display_row, has_usable_accuracy=True).
+    """
+    coord = _bare_coordinator()
+    good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    coord._record_last_good_location("dev-1", good)
+
+    estimated = {
+        "latitude": 48.0,
+        "longitude": 11.0,
+        "accuracy": 200.0,
+        "accuracy_estimated": True,
+    }
+    coord._record_last_good_location("dev-1", estimated)
+    # The retention cache is untouched: it still holds the reliable fix.
+    assert coord._device_last_good_location["dev-1"] == good
+
+    # When the current row is truly accuracy-less, the fallback surfaces the
+    # reliable position, not the estimated coordinate.
+    coord._device_location_data["dev-1"] = {
+        "latitude": 48.0,
+        "longitude": 11.0,
+        "accuracy": None,
+    }
+    assert coord.get_display_location_data("dev-1") == good
+
+
+async def test_estimated_fix_does_not_poison_last_good_via_update_cache() -> None:
+    """Production path: an accuracy-less update sanitized to estimated 200 m must
+    not poison the coordinator last-good (Codex PR #1181, previously uncovered)."""
+    reliable = {
+        "latitude": 52.52,
+        "longitude": 13.405,
+        "accuracy": 12.0,
+        "last_seen": 1_700_000_000,
+        "status": "coordinate",
+    }
+    coord = _make_update_coordinator(reliable)
+    assert (
+        coord.get_display_location_data("dev-1")
+        == coord._device_last_good_location["dev-1"]
+    )
+
+    # A newer accuracy-less fix: update_device_cache sanitizes it to accuracy=200
+    # with accuracy_estimated=True before recording the last-good.
+    accuracy_less = {
+        "latitude": 48.0,
+        "longitude": 11.0,
+        "accuracy": None,
+        "last_seen": 1_700_000_500,
+        "status": "coordinate",
+    }
+    coord.update_device_cache("dev-1", accuracy_less)
+
+    # The stored current row is sanitized (proves the path really estimated it)...
+    stored = coord._device_location_data["dev-1"]
+    assert stored["accuracy_estimated"] is True
+    assert stored["accuracy"] == pytest.approx(200.0)
+    # ...yet the last-good fallback is untouched: still the reliable position.
+    last_good = coord._device_last_good_location["dev-1"]
+    assert last_good["latitude"] == pytest.approx(52.52)
+    assert last_good["accuracy"] == pytest.approx(12.0)
+
+
+async def test_bootstrap_keeps_first_estimated_fix() -> None:
+    """Never-unknown: with nothing reliable yet, the first estimated fix seeds
+    last-good so the display accessors still report a position."""
+    coord = _bare_coordinator()
+    estimated = {
+        "latitude": 48.0,
+        "longitude": 11.0,
+        "accuracy": 200.0,
+        "accuracy_estimated": True,
+    }
+    coord._record_last_good_location("dev-1", estimated)
+    row = coord.get_display_location_data("dev-1")
+    assert row is not None and row["latitude"] == pytest.approx(48.0)
+
+    # A later reliable fix replaces the bootstrap estimate.
+    good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    coord._record_last_good_location("dev-1", good)
+    assert coord.get_display_location_data("dev-1") == good
+
+
+async def test_purge_device_drops_last_good() -> None:
+    """purge_device drops the last-good so a deleted device stops exposing its
+    old Plus Code/coordinates (Codex PR #1181)."""
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {}
+    coord._device_update_history = {"dev-1": None}
+    coord._device_interval_history = {"dev-1": [1.0]}
+    coord._device_caps = {}
+    coord._locate_inflight = set()
+    coord._locate_cooldown_until = {}
+    coord._sound_request_uuids = {}
+    coord._sound_request_timestamps = {}
+    coord._device_poll_cooldown_until = {}
+    coord._present_device_ids = set()
+    coord._present_last_seen = {}
+    coord.data = []
+    coord._is_on_hass_loop = lambda: True
+    coord._ensure_device_name_cache = lambda: {}
+    coord._refresh_subentry_index = lambda *_a, **_k: None
+    coord._store_subentry_snapshots = lambda *_a, **_k: None
+    coord.async_set_updated_data = lambda *_a, **_k: None
+
+    good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    coord._record_last_good_location("dev-1", good)
+    assert coord.get_display_location_data("dev-1") == good
+
+    coord.purge_device("dev-1")
+
+    # Last-good, current row and the device-id-keyed timing caches are gone.
+    assert coord.get_display_location_data("dev-1") is None
+    assert "dev-1" not in coord._device_last_good_location
+    assert "dev-1" not in coord._device_update_history
+    assert "dev-1" not in coord._device_interval_history
