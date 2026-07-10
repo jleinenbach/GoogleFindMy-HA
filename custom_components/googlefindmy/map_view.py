@@ -28,6 +28,8 @@ from .const import (
     map_token_secret_seed,
 )
 from .ha_typing import HomeAssistantView
+from .map_i18n import format_showing, is_rtl, resolve_map_labels
+from .vendor.openlocationcode import encode as _encode_plus_code
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +45,112 @@ def _resolve_coordinator_class() -> type[Any]:
 
         _COORDINATOR_CLASS = _GoogleFindMyCoordinator
     return _COORDINATOR_CLASS
+
+
+def _resolve_language(hass: Any) -> str | None:
+    """Best-effort read of the Home Assistant UI language.
+
+    Returns the configured ``hass.config.language`` when present, otherwise
+    ``None`` so the label resolver falls back to English. Read defensively via
+    ``getattr`` so a degraded or stubbed ``hass`` (no ``config``) never crashes
+    the map render; a missing language is a fail-safe English page, not an error.
+    """
+
+    config = getattr(hass, "config", None)
+    language = getattr(config, "language", None)
+    return language if isinstance(language, str) else None
+
+
+# Inline SVG "content copy" icon (no icon-font dependency). Braceless, so it is
+# safe to interpolate into the map HTML f-string via a single placeholder.
+_MAP_COPY_ICON_SVG = (
+    '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">'
+    '<path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zm3 4H8a2 2 '
+    "0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"
+    '"/></svg>'
+)
+
+# Clipboard copy helper injected once into the map <script>. Defined as a plain
+# (non-f) string so its literal JS braces need no doubling; it is interpolated
+# into the f-string via a single ``{_MAP_COPY_HELPER_JS}`` placeholder.
+#
+# Secure-context aware: navigator.clipboard is undefined on plain-LAN
+# http://<ip>:8123 (window.isSecureContext === false); fall back to a hidden
+# textarea + execCommand so copy still works outside HTTPS / Nabu Casa.
+_MAP_COPY_HELPER_JS = """
+        function gfmyFlashCopied(iconEl) {
+            if (!iconEl) { return; }
+            iconEl.classList.add('gfmy-copied');
+            setTimeout(function() { iconEl.classList.remove('gfmy-copied'); }, 1000);
+        }
+        function gfmyFallbackCopy(value) {
+            var ta = document.createElement('textarea');
+            ta.value = value;            // property assignment, never innerHTML
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'absolute';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (e) { /* no-op */ }
+            document.body.removeChild(ta);
+        }
+        function gfmyCopyToClipboard(value, iconEl) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(value).then(
+                    function() { gfmyFlashCopied(iconEl); },
+                    function() { gfmyFallbackCopy(value); gfmyFlashCopied(iconEl); }
+                );
+                return;
+            }
+            gfmyFallbackCopy(value);
+            gfmyFlashCopied(iconEl);
+        }
+"""
+
+
+def _plus_code_for(lat: float, lon: float) -> str | None:
+    """Return the full 10-digit Plus Code for a coordinate, or None if invalid.
+
+    Offline, deterministic, no API key. Guards non-finite (NaN/inf) inputs so a
+    corrupted fix yields no code rather than a bogus one. The 10-digit code is an
+    11-character string including the ``+`` separator (e.g. ``8FVC9G8F+6X``).
+    """
+    try:
+        if not math.isfinite(lat) or not math.isfinite(lon):
+            return None
+        return _encode_plus_code(float(lat), float(lon), 10)
+    except (ValueError, TypeError):
+        return None
+
+
+def _build_location_entry(
+    *,
+    lat: float,
+    lon: float,
+    accuracy: float,
+    accuracy_estimated: bool,
+    timestamp: str,
+    last_seen: float,
+    is_own_report: Any,
+    semantic_location: Any,
+) -> dict[str, Any]:
+    """Build one map location payload dict, incl. the derived Plus Code.
+
+    Extracted as a pure module function so the server-side ``plus_code`` wiring
+    is unit-testable without the HTTP stack. All pre-existing fields are passed
+    through unchanged; ``plus_code`` is the only added key.
+    """
+    return {
+        "lat": lat,
+        "lon": lon,
+        "accuracy": accuracy,
+        "accuracy_estimated": accuracy_estimated,
+        "timestamp": timestamp,
+        "last_seen": last_seen,
+        "is_own_report": is_own_report,
+        "semantic_location": semantic_location,
+        "plus_code": _plus_code_for(lat, lon),
+    }
 
 
 _SAFE_ACCURACY: Any = None
@@ -381,7 +489,9 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         if not device_name:
             # Name fallback order: coordinator data -> device registry metadata -> placeholder.
-            device_name = "Unknown Device"
+            device_name = resolve_map_labels(_resolve_language(self.hass))[
+                "unknown_device"
+            ]
 
         # 4. Parse Filters (Time & Accuracy)
         end_time = dt_util.utcnow()
@@ -524,22 +634,20 @@ class GoogleFindMyMapView(HomeAssistantView):
                                 else not is_valid_accuracy(raw_accuracy)
                             )
                             locations.append(
-                                {
-                                    "lat": lat,
-                                    "lon": lon,
-                                    "accuracy": acc,
-                                    "accuracy_estimated": estimated,
-                                    "timestamp": datetime.fromtimestamp(
+                                _build_location_entry(
+                                    lat=lat,
+                                    lon=lon,
+                                    accuracy=acc,
+                                    accuracy_estimated=estimated,
+                                    timestamp=datetime.fromtimestamp(
                                         ts, tz=dt_util.UTC
                                     ).isoformat(),
-                                    "last_seen": ts,
-                                    "is_own_report": state.attributes.get(
-                                        "is_own_report"
-                                    ),
-                                    "semantic_location": state.attributes.get(
+                                    last_seen=ts,
+                                    is_own_report=state.attributes.get("is_own_report"),
+                                    semantic_location=state.attributes.get(
                                         "semantic_name"
                                     ),
-                                }
+                                )
                             )
                         except (ValueError, TypeError, KeyError):
                             continue  # Skip invalid states
@@ -586,10 +694,22 @@ class GoogleFindMyMapView(HomeAssistantView):
         start_local = dt_util.as_local(start_time).strftime("%Y-%m-%dT%H:%M")
         end_local = dt_util.as_local(end_time).strftime("%Y-%m-%dT%H:%M")
 
+        # Localize the self-rendered map. HA frontend translations do not reach
+        # this hand-built HTML page, so labels are resolved server-side from the
+        # UI language (English fallback). Client-JS labels are serialized once as
+        # a JSON object and read by key in the browser; server-side panel labels
+        # are interpolated as escaped f-string values (plan A2/A3).
+        language = _resolve_language(self.hass)
+        labels = resolve_map_labels(language)
+        labels_json = json.dumps(labels)
+        html_attrs = f'lang="{escape(language or "en")}"'
+        if is_rtl(language):
+            html_attrs += ' dir="rtl"'
+
         return f"""<!DOCTYPE html>
-<html>
+<html {html_attrs}>
 <head>
-    <title>{escape(device_name)} - Location History</title>
+    <title>{escape(device_name)} - {escape(labels["location_history"])}</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -611,26 +731,29 @@ class GoogleFindMyMapView(HomeAssistantView):
         }}
         button:hover {{ background: #0056b3; }}
         .stats {{ font-size: 12px; color: #666; text-align: center; margin-top: 10px; border-top: 1px solid #eee; padding-top: 5px; }}
+        .gfmy-copy {{ cursor: pointer; color: #007bff; display: inline-flex; vertical-align: middle; margin-left: 3px; }}
+        .gfmy-copy:hover {{ color: #0056b3; }}
+        .gfmy-copy.gfmy-copied {{ color: #28a745; }}
     </style>
 </head>
 <body>
     <div class="controls">
         <h3>{escape(device_name)}</h3>
         <div class="control-group">
-            <label>Start Time</label>
+            <label>{escape(labels["start_time"])}</label>
             <input type="datetime-local" id="start" value="{start_local}">
         </div>
         <div class="control-group">
-            <label>End Time</label>
+            <label>{escape(labels["end_time"])}</label>
             <input type="datetime-local" id="end" value="{end_local}">
         </div>
         <div class="control-group">
-            <label>Min Accuracy (meters): <span id="acc-val">{accuracy_filter}</span></label>
+            <label>{escape(labels["min_accuracy"])}: <span id="acc-val">{accuracy_filter}</span></label>
             <input type="range" id="accuracy" min="0" max="500" step="10" value="{accuracy_filter}" oninput="document.getElementById('acc-val').innerText = this.value">
         </div>
-        <button onclick="applyFilters()">Apply Filters</button>
+        <button onclick="applyFilters()">{escape(labels["apply_filters"])}</button>
         <div class="stats">
-            Showing {len(locations)} points
+            {escape(format_showing(labels, len(locations)))}
         </div>
     </div>
     <div id="map"></div>
@@ -645,6 +768,13 @@ class GoogleFindMyMapView(HomeAssistantView):
 
         var locations = {locations_json};
         var markers = L.layerGroup().addTo(map);
+        var GFMY_COPY_ICON = '{_MAP_COPY_ICON_SVG}';
+        // Localized labels, serialized once server-side; read by key in the
+        // browser. json.dumps emits a valid JS object literal; the surrounding
+        // f-string treats this as a single replacement field, so the object's
+        // braces are inserted as data and never parsed as f-string syntax.
+        var GFMY_LABELS = {labels_json};
+{_MAP_COPY_HELPER_JS}
 
         // Accuracy-circle / marker-fade constants (two separate concerns):
         // FOCUS_FILL_OPACITY: fill of the single focus disc. Deliberately below
@@ -724,20 +854,60 @@ class GoogleFindMyMapView(HomeAssistantView):
                 }});
 
                 var date = new Date(loc.timestamp).toLocaleString();
-                var source = loc.is_own_report ? "Own Device" : "Crowdsourced";
+                var source = loc.is_own_report ? GFMY_LABELS.own_device : GFMY_LABELS.crowdsourced;
+
+                // Google-Maps-ready decimal degrees: dot decimal separator (JS
+                // default) and "lat, lon" order with a comma+space separator.
+                var coordStr = loc.lat + ", " + loc.lon;
+                var popupHtml =
+                    "<b>" + GFMY_LABELS.time + "</b> " + date + "<br>" +
+                    "<b>" + GFMY_LABELS.accuracy + "</b> " + loc.accuracy.toFixed(1) + "m<br>" +
+                    "<b>" + GFMY_LABELS.source + "</b> " + source + "<br>";
+                if (loc.semantic_location) {{
+                    popupHtml += "<b>" + GFMY_LABELS.location + "</b> " + loc.semantic_location + "<br>";
+                }}
+                if (loc.plus_code) {{
+                    popupHtml += "<b>Plus Code:</b> " + loc.plus_code +
+                        " <span class='gfmy-copy gfmy-copy-plus' role='button' tabindex='0'" +
+                        " title='" + GFMY_LABELS.copy_to_clipboard + "'" +
+                        " aria-label='" + GFMY_LABELS.copy_plus_code + "'>" +
+                        GFMY_COPY_ICON + "</span><br>";
+                }}
+                popupHtml += "<b>" + GFMY_LABELS.coordinates + "</b> " + coordStr +
+                    " <span class='gfmy-copy gfmy-copy-coords' role='button' tabindex='0'" +
+                    " title='" + GFMY_LABELS.copy_to_clipboard + "'" +
+                    " aria-label='" + GFMY_LABELS.copy_coordinates + "'>" +
+                    GFMY_COPY_ICON + "</span>";
 
                 // autoPan: false keeps the auto-opened popup from panning the map
                 // away from fitBounds (see plan risk: openPopup autoPan jump).
-                marker.bindPopup(
-                    "<b>Time:</b> " + date + "<br>" +
-                    "<b>Accuracy:</b> " + loc.accuracy.toFixed(1) + "m<br>" +
-                    "<b>Source:</b> " + source + "<br>" +
-                    (loc.semantic_location ? "<b>Location:</b> " + loc.semantic_location : ""),
-                    {{autoPan: false}}
-                );
+                marker.bindPopup(popupHtml, {{autoPan: false}});
 
                 // LAYER 3 lifecycle: the single focus disc follows the popup.
-                marker.on('popupopen', function() {{ setFocus(loc, [loc.lat, loc.lon]); }});
+                // Copy icons are wired here (popupopen): the handlers read the
+                // raw value from the ``loc`` closure, never from the rendered
+                // DOM, so no value is round-tripped through markup (OWASP H1).
+                marker.on('popupopen', function(e) {{
+                    setFocus(loc, [loc.lat, loc.lon]);
+                    var popupEl = e.popup.getElement();
+                    if (!popupEl) {{ return; }}
+                    var pcBtn = popupEl.querySelector('.gfmy-copy-plus');
+                    if (pcBtn && loc.plus_code) {{
+                        pcBtn.onclick = function(ev) {{
+                            ev.stopPropagation();
+                            ev.preventDefault();
+                            gfmyCopyToClipboard(loc.plus_code, pcBtn);
+                        }};
+                    }}
+                    var coBtn = popupEl.querySelector('.gfmy-copy-coords');
+                    if (coBtn) {{
+                        coBtn.onclick = function(ev) {{
+                            ev.stopPropagation();
+                            ev.preventDefault();
+                            gfmyCopyToClipboard(loc.lat + ", " + loc.lon, coBtn);
+                        }};
+                    }}
+                }});
                 marker.on('popupclose', function() {{
                     if (focusCircle) {{ map.removeLayer(focusCircle); focusCircle = null; }}
                 }});

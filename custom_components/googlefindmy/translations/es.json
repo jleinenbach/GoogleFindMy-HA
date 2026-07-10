@@ -545,6 +545,9 @@
           },
           "last_longitude": {
             "name": "Última longitud conocida"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       },
@@ -598,6 +601,15 @@
           },
           "location_status": {
             "name": "Estado de la ubicación"
+          },
+          "last_latitude": {
+            "name": "Última latitud conocida"
+          },
+          "last_longitude": {
+            "name": "Última longitud conocida"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       }
@@ -605,6 +617,14 @@
     "sensor": {
       "ble_battery": {
         "name": "Batería BLE"
+      },
+      "plus_code": {
+        "name": "Plus Code",
+        "state_attributes": {
+          "coordinates": {
+            "name": "Coordenadas"
+          }
+        }
       },
       "last_seen": {
         "name": "Visto por última vez",

@@ -732,6 +732,15 @@ class GoogleFindMyCoordinator(
         self._device_location_data: dict[
             str, dict[str, Any]
         ] = {}  # device_id -> location dict
+        # Last *reliable* fix per device, the coordinator-level "last good"
+        # feeding the Plus Code display accessors (sensor + tracker attribute).
+        # Only advanced for rows passing is_reliable_fix (a sanitized
+        # accuracy-less fix carries the 200 m fallback with
+        # accuracy_estimated=True and must never poison it), mirroring the
+        # tracker's private last-good policy. Dropped in purge_device.
+        self._device_last_good_location: dict[
+            str, dict[str, Any]
+        ] = {}  # device_id -> last reliable (non-estimated) location dict
         self._device_names: dict[str, str] = {}  # device_id -> human name
         self._device_caps: dict[
             str, dict[str, Any]
@@ -2087,6 +2096,16 @@ class GoogleFindMyCoordinator(
             return
 
         self._device_location_data.pop(device_id, None)
+        # Drop the last-good fallback too: otherwise get_display_location_data
+        # keeps serving the purged device's last Plus Code/coordinates whenever
+        # the current row is gone, leaking a deleted device's position until
+        # restart or re-add (the current-row cache above is cleared, so the
+        # display accessors fall straight through to this map).
+        self._device_last_good_location.pop(device_id, None)
+        # Device-id-keyed timing caches follow the same lifecycle; drop them so a
+        # re-added device with the same id starts with clean poll-interval state.
+        self._device_update_history.pop(device_id, None)
+        self._device_interval_history.pop(device_id, None)
         self._ensure_device_name_cache().pop(device_id, None)
         self._device_caps.pop(device_id, None)
         self._locate_inflight.discard(device_id)

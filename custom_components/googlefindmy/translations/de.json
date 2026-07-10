@@ -545,6 +545,9 @@
           },
           "last_longitude": {
             "name": "Letzter bekannter Längengrad"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       },
@@ -579,7 +582,7 @@
             "name": "Quellenrang"
           },
           "is_own_report": {
-            "name": "Eigener Gerätebericht"
+            "name": "Meldung vom eigenen Gerät"
           },
           "latitude": {
             "name": "Breitengrad"
@@ -598,6 +601,15 @@
           },
           "location_status": {
             "name": "Standortstatus"
+          },
+          "last_latitude": {
+            "name": "Letzter bekannter Breitengrad"
+          },
+          "last_longitude": {
+            "name": "Letzter bekannter Längengrad"
+          },
+          "plus_code": {
+            "name": "Plus Code"
           }
         }
       }
@@ -605,6 +617,14 @@
     "sensor": {
       "ble_battery": {
         "name": "BLE-Akku"
+      },
+      "plus_code": {
+        "name": "Plus Code",
+        "state_attributes": {
+          "coordinates": {
+            "name": "Koordinaten"
+          }
+        }
       },
       "last_seen": {
         "name": "Zuletzt gesehen",

@@ -98,6 +98,7 @@ class MainCoordinatorStub(GoogleFindMyCoordinator):
 
         # Stats / device caches consumed by the public reporting helpers
         self._device_location_data: dict[str, dict[str, Any]] = {}
+        self._device_last_good_location: dict[str, dict[str, Any]] = {}
         self._device_names: dict[str, str] = {}
         self._device_names_by_user: dict[str, str] = {}
         self._present_device_ids: set[str] = set()

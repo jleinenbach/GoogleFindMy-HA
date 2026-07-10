@@ -49,6 +49,7 @@ from .coordinator import (
     GoogleFindMyCoordinator,
     SemanticLabelRecord,
     _as_ha_attributes,
+    encode_plus_code_for_row,
 )
 from .entity import (
     GoogleFindMyDeviceEntity,
@@ -88,6 +89,12 @@ LAST_SEEN_DESCRIPTION = SensorEntityDescription(
     translation_key="last_seen",
     icon="mdi:clock-outline",
     device_class=SensorDeviceClass.TIMESTAMP,
+)
+
+PLUS_CODE_DESCRIPTION = SensorEntityDescription(
+    key="plus_code",
+    translation_key="plus_code",
+    icon="mdi:map-marker",
 )
 
 SEMANTIC_LABEL_DESCRIPTION = SensorEntityDescription(
@@ -545,6 +552,19 @@ async def async_setup_entry(
                     known_ids.add(dev_id)
                     entities.append(entity)
 
+                    # --- Plus Code sensor (always, alongside LastSeen) ---
+                    plus_code_entity = GoogleFindMyPlusCodeSensor(
+                        coordinator,
+                        device,
+                        subentry_key=tracker_scope.subentry_key,
+                        subentry_identifier=tracker_identifier,
+                    )
+                    pc_uid = getattr(plus_code_entity, "unique_id", None)
+                    if not isinstance(pc_uid, str) or pc_uid not in added_unique_ids:
+                        if isinstance(pc_uid, str):
+                            added_unique_ids.add(pc_uid)
+                        entities.append(plus_code_entity)
+
                 # --- BLE Battery sensor (when resolver has data) ---
                 if dev_id not in known_battery_ids and resolver is not None:
                     battery_state = None
@@ -794,6 +814,9 @@ async def async_setup_entry(
                     expected.add(
                         f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
                     )
+                    expected.add(
+                        f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
+                    )
             return expected
 
         def _build_entities(missing: set[str]) -> list[SensorEntity]:
@@ -838,17 +861,26 @@ async def async_setup_entry(
                         continue
                     if not _is_visible_device(dev_id):
                         continue
-                    unique_id = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
-                    if unique_id not in missing:
-                        continue
-                    built.append(
-                        GoogleFindMyLastSeenSensor(
-                            coordinator,
-                            device,
-                            subentry_key=tracker_scope.subentry_key,
-                            subentry_identifier=tracker_scope.identifier,
+                    ls_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_last_seen"
+                    pc_uid = f"{DOMAIN}_{entry_id}_{tracker_scope.identifier}_{dev_id}_plus_code"
+                    if ls_uid in missing:
+                        built.append(
+                            GoogleFindMyLastSeenSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
                         )
-                    )
+                    if pc_uid in missing:
+                        built.append(
+                            GoogleFindMyPlusCodeSensor(
+                                coordinator,
+                                device,
+                                subentry_key=tracker_scope.subentry_key,
+                                subentry_identifier=tracker_scope.identifier,
+                            )
+                        )
             return built
 
         recovery_manager.register_sensor_platform(
@@ -1360,6 +1392,153 @@ class GoogleFindMyLastSeenSensor(GoogleFindMyDeviceEntity, RestoreSensor):
 
         # Set our native value now (no need to wait for next coordinator tick)
         self._attr_native_value = datetime.fromtimestamp(ts, tz=UTC)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Expose DeviceInfo using the shared entity helper."""
+
+        return super().device_info
+
+
+# ------------------------------- Per-Device Plus Code -------------------------
+
+
+class GoogleFindMyPlusCodeSensor(GoogleFindMyDeviceEntity, RestoreSensor):
+    """Per-device sensor exposing the Google Plus Code (Open Location Code).
+
+    The value is a deterministic function of the device's latest known
+    latitude/longitude (offline, no API key, no network). It is derived live
+    from the coordinator's current location row:
+
+    - A valid fix -> the full 10-digit Plus Code (11 characters incl. the ``+``
+      separator, e.g. ``8FVC9G8F+6X``), directly usable in Google Maps.
+    - No fix / invalid coordinates -> ``None`` (no stale "last value"). The
+      underlying coordinate cache is restored by the device_tracker across
+      restarts, so this derived text needs no separate restore wiring; it
+      subclasses ``RestoreSensor`` for parity with the other per-device sensors.
+
+    Unlike the device_tracker, this is a plain text sensor and deliberately
+    carries no ``latitude``/``longitude`` attributes, so Home Assistant does not
+    plot a spurious extra map marker for it.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_registry_enabled_default = True
+    entity_description = PLUS_CODE_DESCRIPTION
+    # HA flattens this to the ``attribution`` state attribute (not into
+    # extra_state_attributes, no map marker). Static end-user source credit; the
+    # divergence from the tracker's dynamic ``FMDN (email)`` attribution is
+    # deliberate (maintenance-free) and documented in the PR body.
+    _attr_attribution = "Data provided by Google"
+
+    def __init__(
+        self,
+        coordinator: GoogleFindMyCoordinator,
+        device: dict[str, Any],
+        *,
+        subentry_key: str,
+        subentry_identifier: str,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator,
+            device,
+            subentry_key=subentry_key,
+            subentry_identifier=subentry_identifier,
+            fallback_label=device.get("name"),
+        )
+        self._device_id: str | None = device.get("id")
+        safe_id = self._device_id if self._device_id is not None else "unknown"
+        entry_id = self.entry_id or "default"
+        # Namespace unique_id by entry for safety (keeps multi-entry setups clean).
+        self._attr_unique_id = self.build_unique_id(
+            DOMAIN,
+            entry_id,
+            subentry_identifier,
+            f"{safe_id}_plus_code",
+            separator="_",
+        )
+
+    def _current_plus_code(self) -> str | None:
+        """Compute the Plus Code from the device's last known published location.
+
+        The value follows the ``last_known`` semantics of the device_tracker's
+        Last Location entity: it reports the last *reliable* position and never
+        goes stale. Both the coordinate row and the encoding come from shared
+        sources:
+
+        - the row is the coordinator display row
+          (``get_display_location_data_for_subentry``): the current fix when it
+          carries a usable accuracy, otherwise the last accuracy-bearing fix
+          (coordinator last-good), otherwise ``None``;
+        - the encoding is ``encode_plus_code_for_row`` (shared with the tracker
+          ``plus_code`` attribute, single source, no duplicated logic).
+
+        The accuracy gate is inherent in the display-row selection, so an
+        accuracy-less coordinate the tracker/map deliberately hide is still never
+        published (Codex #202 / PR #1179): such a fix is skipped in favour of the
+        last good row, and if none exists the result is ``None`` (only for a
+        device that has never had a usable fix).
+        """
+        dev_id = self._device_id
+        if not dev_id:
+            return None
+        row = self.coordinator.get_display_location_data_for_subentry(
+            self.subentry_key, dev_id
+        )
+        return encode_plus_code_for_row(row)
+
+    @property
+    def native_value(self) -> str | None:
+        """Return the current Plus Code (11 chars incl. ``+``) or ``None``."""
+        return self._current_plus_code()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return a copyable ``coordinates`` string for the last known position.
+
+        The string uses the map popup's format (``"lat, lon"``, dot decimal
+        separator, raw values, see ``map_view.py``) so the user can copy the
+        tracker's last known coordinates straight into a maps app while searching
+        for it. Deliberately no numeric ``latitude``/``longitude``: a text sensor
+        carrying both would be auto-plotted by HA as a spurious extra map marker.
+
+        Coupling invariant: ``coordinates`` is present exactly when
+        ``native_value`` yields a code (both derive from the same display row);
+        otherwise the attributes are empty. ``attribution`` is set independently
+        via ``_attr_attribution`` and always present.
+        """
+        dev_id = self._device_id
+        if not dev_id:
+            return None
+        row = self.coordinator.get_display_location_data_for_subentry(
+            self.subentry_key, dev_id
+        )
+        if row is None or encode_plus_code_for_row(row) is None:
+            return None
+        return {"coordinates": f"{row['latitude']}, {row['longitude']}"}
+
+    @property
+    def available(self) -> bool:
+        """Mirror device presence, falling back to coordinator availability."""
+        if not super().available:
+            return False
+        dev_id = self._device_id
+        if not dev_id:
+            return False
+        return self.coordinator_has_device()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Keep the device label in sync and push the recomputed state."""
+        if not self.coordinator_has_device():
+            self.async_write_ha_state()
+            return
+        self.refresh_device_label_from_coordinator(log_prefix="PlusCode")
+        current_name = self._device.get("name")
+        if isinstance(current_name, str):
+            self.maybe_update_device_registry_name(current_name)
         self.async_write_ha_state()
 
     @property

@@ -57,6 +57,9 @@
       "last_seen": {
         "default": "mdi:clock-outline"
       },
+      "plus_code": {
+        "default": "mdi:map-marker"
+      },
       "semantic_labels": {
         "default": "mdi:format-list-text"
       },

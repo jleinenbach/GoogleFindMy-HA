@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypeVar
+
+_RowT = TypeVar("_RowT", bound=Mapping[str, Any])
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -243,6 +245,152 @@ def recorded_accuracy_pair(
         raw = attributes.get("gps_accuracy")
     flag = attributes.get("accuracy_estimated")
     return raw, (bool(flag) if flag is not None else None)
+
+
+# ---------------------------------------------------------------------------
+# Display-row selection & staleness
+# ---------------------------------------------------------------------------
+# Single source of truth for "which fix actually gets published" and "is that
+# fix too old to publish". The device_tracker owns the stateful last-good cache
+# and its restore wiring; these pure helpers let every location consumer
+# (tracker, Plus Code sensor) apply the identical accuracy/staleness gate so no
+# consumer publishes a coordinate the tracker deliberately hides (Codex #202 /
+# PR #1179).
+
+
+def has_usable_accuracy(row: Mapping[str, Any] | None) -> bool:
+    """Return ``True`` when ``row`` carries a non-``None`` accuracy.
+
+    Mirrors the tracker's publish gate: an accuracy-less fix is deliberately
+    withheld (HA's zone engine raises ``TypeError`` comparing it, and the
+    integration hides accuracy-less positions on purpose).
+    """
+    return row is not None and row.get("accuracy") is not None
+
+
+def select_display_row(
+    current: _RowT | None,
+    last_good: _RowT | None,
+) -> _RowT | None:
+    """Return the single row whose data is actually published.
+
+    The current row when it carries a usable accuracy, otherwise the last
+    accuracy-bearing fix, otherwise ``None``. Binding every consumer to this one
+    row keeps the published snapshot internally consistent: a fresh update can
+    arrive with valid lat/lon yet no accuracy, and publishing that coordinate
+    would leak a position the tracker hides (Codex #202).
+
+    The fallback applies the *same* :func:`has_usable_accuracy` gate to
+    ``last_good`` that it applies to ``current``: the last-good cache can hold a
+    genuinely accuracy-less row (bootstrapped from a legacy/partial restore that
+    never went through ``_is_significant_update`` sanitization) purely so age /
+    status / ``has_last_known`` stay available, but such a row must never be
+    published as a coordinate. Gating both branches identically is what makes
+    the standalone Plus Code sensor and the tracker ``plus_code`` attribute
+    blank the coordinate exactly where the tracker already blanks its own
+    ``latitude``/``longitude`` (Codex PR #1181).
+    """
+    if has_usable_accuracy(current):
+        return current
+    if has_usable_accuracy(last_good):
+        return last_good
+    return None
+
+
+def is_reliable_fix(row: Mapping[str, Any] | None) -> bool:
+    """Return ``True`` when ``row`` carries a *real* (non-estimated) accuracy.
+
+    Stricter than :func:`has_usable_accuracy`, and the gate for the *retention*
+    of a last-good fix (coordinator ``_device_last_good_location`` and the
+    tracker's private ``_last_good_accuracy_data``). ``_is_significant_update``
+    replaces a missing or error-code accuracy with the conservative 200 m
+    fallback and marks ``accuracy_estimated=True``; that sanitized row is
+    accuracy-less in substance, so :func:`has_usable_accuracy` (a plain
+    ``accuracy is not None`` check) can no longer tell it apart from a real fix.
+    Retaining such a row as last-good would poison the fallback the Plus Code
+    display accessors read (#1179). :func:`has_usable_accuracy` stays the
+    *display* gate (:func:`select_display_row`) so a fresh estimated fix is
+    still shown; ``is_reliable_fix`` is the retention gate so only a real
+    measurement overwrites the last reliable position.
+    """
+    return (
+        has_usable_accuracy(row)
+        and row is not None
+        and not bool(row.get("accuracy_estimated"))
+    )
+
+
+def encode_plus_code_for_row(row: Mapping[str, Any] | None) -> str | None:
+    """Return the 10-digit Plus Code for ``row``'s coordinates, or ``None``.
+
+    Shared SSOT for the Plus Code sensor and the device_tracker ``plus_code``
+    attribute so both encode the identical display row (single source, no
+    duplicated encode logic). Rejects missing, boolean (a ``bool`` is an ``int``
+    subclass) and non-finite (NaN/inf) coordinates, mirroring the sensor's
+    original guard, so the result is ``None`` rather than a bogus code.
+    """
+    if not row:
+        return None
+    lat = row.get("latitude")
+    lon = row.get("longitude")
+    if (
+        not isinstance(lat, (int, float))
+        or not isinstance(lon, (int, float))
+        or isinstance(lat, bool)
+        or isinstance(lon, bool)
+        or not math.isfinite(lat)
+        or not math.isfinite(lon)
+    ):
+        return None
+    # Lazy import mirrors resolve_stale_threshold's const import below: keeps the
+    # vendored Open Location Code encoder off the module-import hot path.
+    from ...vendor.openlocationcode import encode
+
+    try:
+        return encode(float(lat), float(lon), 10)
+    except (ValueError, TypeError):  # pragma: no cover - defensive; inputs are
+        # already validated as finite numbers above, so encode does not raise.
+        return None
+
+
+def location_age_seconds(row: Mapping[str, Any] | None, now: float) -> float | None:
+    """Return the age of ``row`` in seconds relative to ``now``, or ``None``.
+
+    ``now`` is injected rather than read from the clock so the computation stays
+    pure and testable. Returns ``None`` when there is no row or its ``last_seen``
+    is missing or non-numeric.
+    """
+    if not row:
+        return None
+    last_seen = row.get("last_seen")
+    if last_seen is None:
+        return None
+    try:
+        return now - float(last_seen)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_stale_threshold(coordinator: Any) -> int:
+    """Return the configured stale threshold in seconds for ``coordinator``.
+
+    Duck-typed SSOT reader shared by the device_tracker and the Plus Code
+    sensor: reads ``config_entry.options[OPT_STALE_THRESHOLD]`` and falls back
+    to ``DEFAULT_STALE_THRESHOLD`` on any absence or malformed value.
+    """
+    from ...const import DEFAULT_STALE_THRESHOLD, OPT_STALE_THRESHOLD
+
+    entry = getattr(coordinator, "config_entry", None)
+    if entry is None:
+        return DEFAULT_STALE_THRESHOLD
+    options = getattr(entry, "options", {})
+    if not isinstance(options, Mapping):
+        return DEFAULT_STALE_THRESHOLD
+    threshold = options.get(OPT_STALE_THRESHOLD, DEFAULT_STALE_THRESHOLD)
+    try:
+        return int(threshold)
+    except (TypeError, ValueError):
+        return DEFAULT_STALE_THRESHOLD
 
 
 def resolve_seeded_accuracy(raw: Any, flag: bool | None) -> tuple[float, bool | None]:

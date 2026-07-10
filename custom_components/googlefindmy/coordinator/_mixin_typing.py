@@ -71,6 +71,7 @@ class _MixinBase:
 
     # Internal caches
     _device_location_data: dict[str, dict[str, Any]]
+    _device_last_good_location: dict[str, dict[str, Any]]
     _device_caps: dict[str, dict[str, Any]]
     _present_last_seen: dict[str, float]
     _poll_lock: asyncio.Lock
@@ -364,6 +365,9 @@ class _MixinBase:
     # Cross-mixin methods: CacheOperations
     # ------------------------------------------------------------------
     def get_device_location_data(self, device_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def get_display_location_data(self, device_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def update_device_cache(

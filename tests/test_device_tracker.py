@@ -336,6 +336,11 @@ def test_device_tracker_avoids_duplicate_accuracy_logs(
         ) -> dict[str, Any] | None:
             return self._device_location_data.get((key, device_id))
 
+        def get_display_location_data_for_subentry(
+            self, key: str | None, device_id: str
+        ) -> dict[str, Any] | None:
+            return self.get_device_location_data_for_subentry(key, device_id)
+
         def get_subentry_snapshot(
             self, key: str | None = None, feature: str | None = None
         ) -> list[dict[str, Any]]:
@@ -440,6 +445,11 @@ class _ShowAgeCoordinatorStub:
         return True
 
     def get_device_location_data_for_subentry(
+        self, key: str | None, device_id: str
+    ) -> dict[str, Any] | None:
+        return self._row
+
+    def get_display_location_data_for_subentry(
         self, key: str | None, device_id: str
     ) -> dict[str, Any] | None:
         return self._row
@@ -618,6 +628,39 @@ async def test_restore_preserves_accuracy_estimated_flag(
     assert coordinator.primed["data"]["accuracy_estimated"] is True
     # The entity's stale-data snapshot must stay consistent with the cache.
     assert entity._last_good_accuracy_data.get("accuracy_estimated") is True
+
+
+@pytest.mark.asyncio
+async def test_restore_estimated_does_not_overwrite_existing_reliable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The restore seed applies the same retention gate as the operational path.
+
+    An estimated restored fix must not overwrite an already-present reliable
+    last-good (defensive symmetry with the coordinator prime / operational gate,
+    #1179). In the normal lifecycle restore runs on a fresh entity, so this only
+    guards a re-entry, but it keeps the tracker and coordinator last-good in sync
+    by construction.
+    """
+
+    coordinator = _RestoreCoordinatorStub()
+    entity = _build_restore_entity(
+        coordinator,
+        monkeypatch,
+        {
+            "latitude": 10.0,
+            "longitude": 20.0,
+            "gps_accuracy": 200,
+            "accuracy_estimated": True,
+        },
+    )
+    reliable = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    entity._last_good_accuracy_data = dict(reliable)
+
+    await entity.async_added_to_hass()
+
+    # The estimated restore is skipped: the reliable last-good survives.
+    assert entity._last_good_accuracy_data == reliable
 
 
 @pytest.mark.asyncio

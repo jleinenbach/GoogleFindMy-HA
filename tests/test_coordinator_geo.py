@@ -1,3 +1,4 @@
+# tests/test_coordinator_geo.py
 """Tests for coordinator_geo.py - Phase 1 of coordinator refactoring.
 
 These tests validate the geographic utility functions extracted
@@ -8,6 +9,7 @@ Test categories:
 2. coerce_float - Safe float conversion
 3. safe_accuracy - GPS accuracy normalization
 4. haversine_distance - Distance calculation between coordinates
+5. display-row selection & staleness - shared publish gate SSOT
 
 REQUIREMENT: 100% test coverage for all extracted functions.
 """
@@ -15,14 +17,23 @@ REQUIREMENT: 100% test coverage for all extracted functions.
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
+from custom_components.googlefindmy.const import (
+    DEFAULT_STALE_THRESHOLD,
+    OPT_STALE_THRESHOLD,
+)
 from custom_components.googlefindmy.coordinator.helpers.geo import (
     DEFAULT_ACCURACY_FALLBACK_M,
     clamp,
     coerce_float,
+    has_usable_accuracy,
     haversine_distance,
+    location_age_seconds,
     resolve_seeded_accuracy,
+    resolve_stale_threshold,
     safe_accuracy,
+    select_display_row,
 )
 
 # ---------------------------------------------------------------------------
@@ -469,3 +480,108 @@ class TestResolveSeededAccuracy:
         accuracy, estimated = resolve_seeded_accuracy(0.5, None)
         assert accuracy == 0.5
         assert estimated is None
+
+
+# ---------------------------------------------------------------------------
+# Display-row selection & staleness Tests (shared publish-gate SSOT)
+# ---------------------------------------------------------------------------
+
+
+class TestHasUsableAccuracy:
+    """has_usable_accuracy - the tracker's publish gate as a pure predicate."""
+
+    def test_none_row_is_not_usable(self) -> None:
+        assert has_usable_accuracy(None) is False
+
+    def test_row_without_accuracy_key_is_not_usable(self) -> None:
+        assert has_usable_accuracy({"latitude": 1.0, "longitude": 2.0}) is False
+
+    def test_row_with_none_accuracy_is_not_usable(self) -> None:
+        assert has_usable_accuracy({"accuracy": None}) is False
+
+    def test_row_with_numeric_accuracy_is_usable(self) -> None:
+        assert has_usable_accuracy({"accuracy": 12.0}) is True
+
+    def test_zero_accuracy_counts_as_present(self) -> None:
+        # ``has_usable_accuracy`` only checks presence; ``safe_accuracy`` owns
+        # the "0.0 means no accuracy" policy downstream.
+        assert has_usable_accuracy({"accuracy": 0.0}) is True
+
+
+class TestSelectDisplayRow:
+    """select_display_row - current row if it has accuracy, else last good."""
+
+    def test_current_with_accuracy_wins(self) -> None:
+        current = {"latitude": 1.0, "accuracy": 5.0}
+        last_good = {"latitude": 9.0, "accuracy": 5.0}
+        assert select_display_row(current, last_good) is current
+
+    def test_accuracy_less_current_falls_back_to_last_good(self) -> None:
+        current = {"latitude": 1.0, "accuracy": None}
+        last_good = {"latitude": 9.0, "accuracy": 5.0}
+        assert select_display_row(current, last_good) is last_good
+
+    def test_no_current_falls_back_to_last_good(self) -> None:
+        last_good = {"latitude": 9.0, "accuracy": 5.0}
+        assert select_display_row(None, last_good) is last_good
+
+    def test_both_missing_yields_none(self) -> None:
+        assert select_display_row(None, None) is None
+
+    def test_accuracy_less_last_good_is_not_published(self) -> None:
+        # A genuinely accuracy-less last-good (e.g. a legacy/partial restore that
+        # bypassed _is_significant_update sanitization) must not be published as
+        # a coordinate: the fallback applies the same has_usable_accuracy gate as
+        # the current branch (Codex PR #1181).
+        current = {"latitude": 1.0, "accuracy": None}
+        last_good = {"latitude": 9.0, "accuracy": None}
+        assert select_display_row(current, last_good) is None
+
+    def test_no_current_and_accuracy_less_last_good_yields_none(self) -> None:
+        last_good = {"latitude": 9.0, "accuracy": None}
+        assert select_display_row(None, last_good) is None
+
+    def test_estimated_last_good_is_still_published(self) -> None:
+        # A sanitized estimated fallback (accuracy=200) carries usable accuracy
+        # and stays displayable -- only genuinely accuracy-less rows are gated.
+        last_good = {"latitude": 9.0, "accuracy": 200.0, "accuracy_estimated": True}
+        assert select_display_row(None, last_good) is last_good
+
+
+class TestLocationAgeSeconds:
+    """location_age_seconds - pure age arithmetic with an injected ``now``."""
+
+    def test_none_row_yields_none(self) -> None:
+        assert location_age_seconds(None, 1_000.0) is None
+
+    def test_missing_last_seen_yields_none(self) -> None:
+        assert location_age_seconds({"latitude": 1.0}, 1_000.0) is None
+
+    def test_non_numeric_last_seen_yields_none(self) -> None:
+        assert location_age_seconds({"last_seen": "nope"}, 1_000.0) is None
+
+    def test_age_is_now_minus_last_seen(self) -> None:
+        assert location_age_seconds({"last_seen": 900.0}, 1_000.0) == 100.0
+
+
+class TestResolveStaleThreshold:
+    """resolve_stale_threshold - duck-typed config reader with safe fallbacks."""
+
+    def test_missing_config_entry_returns_default(self) -> None:
+        coordinator = SimpleNamespace(config_entry=None)
+        assert resolve_stale_threshold(coordinator) == DEFAULT_STALE_THRESHOLD
+
+    def test_non_mapping_options_returns_default(self) -> None:
+        entry = SimpleNamespace(options=None)
+        coordinator = SimpleNamespace(config_entry=entry)
+        assert resolve_stale_threshold(coordinator) == DEFAULT_STALE_THRESHOLD
+
+    def test_configured_value_is_returned(self) -> None:
+        entry = SimpleNamespace(options={OPT_STALE_THRESHOLD: 1234})
+        coordinator = SimpleNamespace(config_entry=entry)
+        assert resolve_stale_threshold(coordinator) == 1234
+
+    def test_malformed_value_falls_back_to_default(self) -> None:
+        entry = SimpleNamespace(options={OPT_STALE_THRESHOLD: "abc"})
+        coordinator = SimpleNamespace(config_entry=entry)
+        assert resolve_stale_threshold(coordinator) == DEFAULT_STALE_THRESHOLD

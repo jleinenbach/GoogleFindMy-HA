@@ -517,7 +517,7 @@ async def test_accuracy_filter_drops_points_worse_than_threshold(
     )
 
     assert response.status == 200
-    assert "showing 1 points" in response.text.lower()
+    assert "showing 1 point" in response.text.lower()
     assert '"lat": 10.0' in response.text
     assert '"lat": 50.0' not in response.text
 
@@ -640,7 +640,7 @@ async def test_invalid_accuracy_rendered_as_fallback_when_filter_off(
     response = await _render_map_with_states(monkeypatch, [unknown], {"accuracy": "0"})
 
     assert response.status == 200
-    assert "showing 1 points" in response.text.lower()
+    assert "showing 1 point" in response.text.lower()
     assert '"lat": 33.0' in response.text
     assert '"accuracy": 200.0' in response.text
     assert '"accuracy": 0.0' not in response.text
@@ -805,7 +805,7 @@ async def test_entity_entry_refetched_when_missing(
     )
 
     assert response.status == 200
-    assert "showing 1 points" in response.text.lower()
+    assert "showing 1 point" in response.text.lower()
 
 
 @pytest.mark.asyncio
@@ -897,7 +897,7 @@ async def test_last_seen_non_string_falls_back_to_state_time(
     )
 
     assert response.status == 200
-    assert "showing 1 points" in response.text.lower()
+    assert "showing 1 point" in response.text.lower()
 
 
 @pytest.mark.asyncio
@@ -916,7 +916,7 @@ async def test_last_seen_unparseable_string_falls_back_to_state_time(
     )
 
     assert response.status == 200
-    assert "showing 1 points" in response.text.lower()
+    assert "showing 1 point" in response.text.lower()
 
 
 @pytest.mark.asyncio
@@ -935,7 +935,7 @@ async def test_invalid_state_is_skipped(
     )
 
     assert response.status == 200
-    assert "showing 1 points" in response.text.lower()
+    assert "showing 1 point" in response.text.lower()
     assert '"lat": 77.0' in response.text
 
 
