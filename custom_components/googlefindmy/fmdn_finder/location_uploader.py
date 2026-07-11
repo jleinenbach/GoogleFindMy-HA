@@ -38,8 +38,7 @@ MIN_UPLOAD_INTERVAL_SCREEN_OFF = 300  # Additional delay when screen off
 MIN_UPLOAD_INTERVAL_BATTERY_SAVER = 900  # 15 minutes in battery saver mode
 
 # Accuracy thresholds
-MAX_ZONE_ACCURACY_METERS = 100  # Zone-based location accuracy
-DEFAULT_HOME_ZONE_ACCURACY = 50  # Default home zone accuracy
+DEFAULT_HOME_ZONE_ACCURACY = 50  # Fallback accuracy when a zone omits its radius
 
 # RSSI-based distance estimation thresholds (dBm)
 RSSI_THRESHOLD_VERY_CLOSE = -60  # < -60 dBm = very close (2m estimated)
@@ -263,8 +262,15 @@ def _location_from_zone_state(state: State, zone_name: str) -> LocationData:
     longitude = float(state.attributes["longitude"])
     radius = state.attributes.get("radius", DEFAULT_HOME_ZONE_ACCURACY)
 
-    # Zone-based location is inherently less accurate
-    accuracy = max(int(radius), MAX_ZONE_ACCURACY_METERS)
+    # The zone radius IS the location uncertainty: a device located via a zone is
+    # known to be within ``radius`` metres of the zone centre, so accuracy equals
+    # the radius. The previous ``max(int(radius), MAX_ZONE_ACCURACY_METERS)``
+    # floored accuracy up to 100 m and therefore reported every standard home
+    # zone (default radius 50 m) as *less* accurate than it is, which also
+    # permanently suppressed the accuracy-improvement upload branch in
+    # ``_should_upload_location``. DEFAULT_HOME_ZONE_ACCURACY is the fallback used
+    # above when a zone omits its radius.
+    accuracy = int(radius)
 
     return LocationData(
         latitude=latitude,

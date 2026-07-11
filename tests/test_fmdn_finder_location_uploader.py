@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from custom_components.googlefindmy.fmdn_finder.location_uploader import (
+    DEFAULT_HOME_ZONE_ACCURACY,
     LocationData,
     _calculate_accuracy_from_rssi,
     _haversine_distance,
+    _location_from_zone_state,
     _should_upload_location,
     async_process_fmdn_beacon_detection,
 )
@@ -255,3 +258,96 @@ async def test_process_fmdn_beacon_no_location(hass_mock):
 
         # No upload should occur
         assert not hass_mock.async_create_task.called
+
+
+_NO_RADIUS = object()
+
+
+def _zone_state(radius: object = _NO_RADIUS, *, lat: float = 52.52, lon: float = 13.405):
+    """Build a minimal zone State stub for ``_location_from_zone_state``.
+
+    Passing ``radius=_NO_RADIUS`` omits the ``radius`` attribute entirely so the
+    default-fallback path is exercised.
+    """
+    attributes: dict[str, object] = {"latitude": lat, "longitude": lon}
+    if radius is not _NO_RADIUS:
+        attributes["radius"] = radius
+    return SimpleNamespace(attributes=attributes)
+
+
+@pytest.mark.parametrize("radius", [10, 50, 100, 500])
+def test_zone_accuracy_equals_radius(radius):
+    """Contract: zone accuracy IS the zone radius (H1 regression).
+
+    The previous ``max(int(radius), 100)`` floored accuracy up to 100 m and thus
+    reported every zone smaller than 100 m (including the 50 m default home zone)
+    as less accurate than it really is. Accuracy must equal the radius.
+    """
+    loc = _location_from_zone_state(_zone_state(radius), "home")
+    assert loc.accuracy == radius
+    assert loc.zone_name == "home"
+
+
+def test_zone_accuracy_missing_radius_uses_default():
+    """Terminal path: an absent ``radius`` attribute falls back to the default."""
+    loc = _location_from_zone_state(_zone_state(), "home")
+    assert loc.accuracy == DEFAULT_HOME_ZONE_ACCURACY
+
+
+@pytest.mark.parametrize(
+    ("radius", "expected"),
+    [
+        (50.0, 50),  # HA stores zone radius as float; whole values map cleanly
+        (77.5, 77),  # fractional radius is truncated (int()), contract pinned
+        (99.9, 99),
+    ],
+)
+def test_zone_accuracy_float_radius_truncated(radius, expected):
+    """Contract: float radii (HA's native storage type) truncate via ``int()``.
+
+    Pins the intentional ``int()`` behaviour so a later ``round()`` change would
+    surface as a deliberate contract update rather than a silent drift.
+    """
+    loc = _location_from_zone_state(_zone_state(radius), "home")
+    assert loc.accuracy == expected
+
+
+def test_zone_accuracy_not_floored_to_100():
+    """H1 core: a sub-100 m zone is no longer inflated to 100 m."""
+    loc = _location_from_zone_state(_zone_state(50), "home")
+    # Regression guard against the reintroduction of the 100 m floor.
+    assert loc.accuracy == 50
+    assert loc.accuracy != 100
+
+
+@pytest.mark.asyncio
+async def test_zone_accuracy_improvement_branch_reachable(hass_mock):
+    """H1 coupling: with accuracy == radius, the improvement branch can fire.
+
+    Under the old floor both the previous and the new zone location reported
+    100 m, so ``new < last * 0.8`` was never true. With accuracy tracking the
+    radius, moving from a 100 m zone to a 50 m zone is a real improvement.
+    """
+    from custom_components.googlefindmy.fmdn_finder.location_uploader import (
+        DATA_FMDN_UPLOAD_CACHE,
+        UploadCacheEntry,
+    )
+
+    prev_loc = _location_from_zone_state(_zone_state(100), "work")
+    new_loc = _location_from_zone_state(_zone_state(50), "home")
+    assert prev_loc.accuracy == 100
+    assert new_loc.accuracy == 50
+
+    hass_mock.data[DATA_FMDN_UPLOAD_CACHE] = {
+        "device_h1": UploadCacheEntry(
+            eid_hex="device_h1",
+            location=prev_loc,
+            timestamp=time.time() - 400,
+        )
+    }
+
+    should_upload, reason = await _should_upload_location(
+        hass_mock, "device_h1", new_loc
+    )
+    assert should_upload is True
+    assert "accuracy_improved" in reason
