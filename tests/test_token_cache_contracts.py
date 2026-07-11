@@ -177,9 +177,7 @@ def test_default_cache_prefers_provider(monkeypatch: pytest.MonkeyPatch) -> None
     from custom_components.googlefindmy.NovaApi import nova_request
 
     provided = _fake_cache("provided")
-    monkeypatch.setattr(
-        nova_request, "resolve_cache_from_provider", lambda: provided, raising=False
-    )
+    monkeypatch.setattr(nova_request, "resolve_cache_from_provider", lambda: provided)
     tc._INSTANCES["registry"] = _fake_cache("registry")
     assert tc._get_default_cache() is provided
 

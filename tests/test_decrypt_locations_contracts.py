@@ -36,6 +36,21 @@ _PLAUSIBLE = 1_700_000_000.0  # slightly before _NOW
 _FAR_FUTURE = _NOW + 1_000_000_000.0  # ~31 years ahead -> exceeds drift window
 
 
+@pytest.fixture(autouse=True)
+def _isolate_eik_cache() -> object:
+    """Reset the module-global EIK cache/stats around each test.
+
+    The cache helpers below mutate module-global state; isolate it so a failing
+    assertion cannot leak an entry into later tests (parity with the token_cache
+    registry-isolation fixture).
+    """
+    d._eik_cache.clear()
+    d._eik_cache_stats.update(hits=0, misses=0)
+    yield
+    d._eik_cache.clear()
+    d._eik_cache_stats.update(hits=0, misses=0)
+
+
 # --------------------------------------------------------------------------- #
 # create_google_maps_link — 3 exits                                            #
 # --------------------------------------------------------------------------- #
@@ -327,7 +342,7 @@ def test_eik_cache_key_is_deterministic_and_flip_sensitive() -> None:
 def test_clear_and_stats_eik_cache() -> None:
     d._eik_cache["k"] = b"v"
     stats = d.get_eik_cache_stats()
-    assert stats["size"] >= 1
+    assert stats["size"] == 1  # isolated by the autouse fixture -> exactly one
     d.clear_eik_cache()
     assert d.get_eik_cache_stats()["size"] == 0
 
