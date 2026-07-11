@@ -52,7 +52,7 @@ if not _standalone:
         sys.path.insert(0, _repo_root)
 else:  # pragma: no cover - standalone CLI stub-injection shim, structurally
     # unreachable when imported as an installed HA integration (_standalone is
-    # False under the test suite / HA runtime). Not fachlich testable; excluded
+    # False under the test suite / HA runtime). Not meaningfully testable; excluded
     # from the coverage denominator per PLAN_GFMY_COV_W0_MESSSCOPE AP-W0.3 (E5).
     # Running standalone (files copied to a flat directory like GoogleFindMyTools/)
     # Create virtual package so `custom_components.googlefindmy.*` imports resolve here

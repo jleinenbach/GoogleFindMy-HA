@@ -41,10 +41,10 @@ MIN_UPLOAD_INTERVAL_BATTERY_SAVER = 900  # 15 minutes in battery saver mode
 DEFAULT_HOME_ZONE_ACCURACY = 50  # Fallback accuracy when a zone omits its radius
 
 # RSSI-based distance estimation thresholds (dBm)
-RSSI_THRESHOLD_VERY_CLOSE = -60  # < -60 dBm = very close (2m estimated)
-RSSI_THRESHOLD_CLOSE = -70  # < -70 dBm = close (5m estimated)
-RSSI_THRESHOLD_MEDIUM = -80  # < -80 dBm = medium (10m estimated)
-RSSI_THRESHOLD_FAR = -90  # < -90 dBm = far (20m estimated)
+RSSI_THRESHOLD_VERY_CLOSE = -60  # rssi > -60 dBm -> very close (2 m estimated)
+RSSI_THRESHOLD_CLOSE = -70  # rssi > -70 dBm -> close (5 m estimated)
+RSSI_THRESHOLD_MEDIUM = -80  # rssi > -80 dBm -> medium (10 m estimated)
+RSSI_THRESHOLD_FAR = -90  # rssi > -90 dBm -> far (20 m estimated)
 
 # Cache management
 UPLOAD_CACHE_MAX_ENTRIES = 100  # Maximum cached upload entries
@@ -147,8 +147,10 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
     # accuracy, which falsely passes accuracy_improved and re-uploads every throttle
     # window despite no real improvement.
     if rssi is not None:
-        rssi_accuracy = _calculate_accuracy_from_rssi(rssi, location.accuracy)
-        location.accuracy = max(location.accuracy, rssi_accuracy)
+        # _calculate_accuracy_from_rssi already folds the current accuracy in as a
+        # floor (it returns max(rssi_estimate, zone_accuracy)), so a second max()
+        # here would be redundant.
+        location.accuracy = _calculate_accuracy_from_rssi(rssi, location.accuracy)
 
     # 3. Check upload throttling (pass area for semantic upload handling)
     should_upload, reason = await _should_upload_location(hass, eid_hex, location, area)

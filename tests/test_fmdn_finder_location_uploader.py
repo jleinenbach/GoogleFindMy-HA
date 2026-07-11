@@ -557,3 +557,30 @@ async def test_rssi_adjustment_does_not_lower_accuracy(hass_mock):
     assert mock_upload.call_args.args[2].accuracy == 50
     cached: UploadCacheEntry = hass_mock.data[DATA_FMDN_UPLOAD_CACHE][eid_hex]
     assert cached.location.accuracy == 50
+
+
+@pytest.mark.parametrize(
+    ("rssi", "expected_distance"),
+    [
+        # Just inside each band (strictly greater than the threshold).
+        (-59, 2),  # > -60 -> very close
+        (-69, 5),  # > -70 -> close
+        (-79, 10),  # > -80 -> medium
+        (-89, 20),  # > -90 -> far
+        # Exactly on each threshold: the comparison is strict `>`, so the value
+        # falls into the NEXT (weaker) band. These edges lock the boundaries the
+        # terminal review flagged as untested.
+        (-60, 5),  # == -60 -> not very close, drops to close
+        (-70, 10),  # == -70 -> not close, drops to medium
+        (-80, 20),  # == -80 -> not medium, drops to far
+        (-90, 30),  # == -90 -> not far, drops to very far
+        (-120, 30),  # far below the last threshold -> very far
+    ],
+)
+def test_calculate_accuracy_from_rssi_band_boundaries(rssi, expected_distance):
+    """Lock the exact RSSI-band edges (strict `>` semantics).
+
+    zone_accuracy=1 keeps the zone floor below every RSSI estimate, so the
+    returned value is the pure band distance and the boundary is observable.
+    """
+    assert _calculate_accuracy_from_rssi(rssi, zone_accuracy=1) == expected_distance
