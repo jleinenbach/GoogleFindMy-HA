@@ -376,7 +376,10 @@ skip_covered = true
 # Raised to 73 per maintainer request to lock in the coverage from the typed
 # gpsoauth AuthError classification tests; measured CI total is 73.26 %, so the
 # jitter margin is intentionally tightened to 0.26 Pp headroom here.
-fail_under = 73
+# Raised to 74 per maintainer request to lock in the Coverage W1 follow-up
+# contract tests (token_refresh, google_uploader and the remaining W1 modules);
+# measured total is 74.47 %, so ~0.47 Pp headroom here.
+fail_under = 74
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
