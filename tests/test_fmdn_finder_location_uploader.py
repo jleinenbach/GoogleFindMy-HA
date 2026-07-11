@@ -263,7 +263,9 @@ async def test_process_fmdn_beacon_no_location(hass_mock):
 _NO_RADIUS = object()
 
 
-def _zone_state(radius: object = _NO_RADIUS, *, lat: float = 52.52, lon: float = 13.405):
+def _zone_state(
+    radius: object = _NO_RADIUS, *, lat: float = 52.52, lon: float = 13.405
+):
     """Build a minimal zone State stub for ``_location_from_zone_state``.
 
     Passing ``radius=_NO_RADIUS`` omits the ``radius`` attribute entirely so the

@@ -340,11 +340,11 @@ source = [
 ]
 omit = [
     "custom_components/googlefindmy/ProtoDecoders/*",
-    # Vendored 1:1 from sdb9696/firebase-messaging (MIT). Coverage measures our
-    # own logic, not the upstream transport layer; tests on vendored code break
-    # on every upstream re-vendor. proto/* already omitted below; this line adds
-    # the top-level vendored modules (fcmpushclient, fcmregister, const, etc.).
-    "custom_components/googlefindmy/Auth/firebase_messaging/*.py",
+    # Only generated protobuf bindings are omitted. The FCM transport modules
+    # (fcmpushclient.py, fcmregister.py) originate from sdb9696/firebase-messaging
+    # (MIT) but are forked and maintained in-repo with integration-specific
+    # behavior (fatal HTTP classification, credential/decryption recovery) and
+    # dedicated regressions in tests/test_fcm*.py, so they stay under coverage.
     "custom_components/googlefindmy/Auth/firebase_messaging/proto/*",
 ]
 
