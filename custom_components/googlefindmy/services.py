@@ -675,6 +675,7 @@ async def async_register_services(hass: HomeAssistant, ctx: dict[str, Any]) -> N
         - "soft_migrate_entry": Callable[[HomeAssistant, Any], Any]  # awaited per entry
         - "migrate_unique_ids": Callable[[HomeAssistant, Any], Any]
         - "relink_button_devices": Callable[[HomeAssistant, Any], Any]
+        - "relink_subentry_entities": Callable[[HomeAssistant, Any], Any]
         - "coalesce_account_entries": Callable[[HomeAssistant, ConfigEntry], Awaitable[ConfigEntry]]
         - "extract_normalized_email": Callable[[ConfigEntry], str | None]
     """

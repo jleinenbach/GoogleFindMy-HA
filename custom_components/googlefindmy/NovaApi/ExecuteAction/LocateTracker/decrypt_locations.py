@@ -940,6 +940,14 @@ def _parse_epoch_seconds(value: Any, now_s: float) -> float | None:  # noqa: PLR
         The timestamp as a float, or None if invalid or implausible.
     """
     v: float
+    # bool is an int subclass; reject it explicitly for type parity with the
+    # numeric normalizers (normalize_pair_date_value /
+    # normalize_creation_timestamp_value), which both guard with
+    # ``not isinstance(raw, bool)`` before numeric handling. Without this a
+    # bool would fall through to ``float(raw)`` and be treated as a number
+    # instead of a type-foreign value (H5 parity).
+    if isinstance(value, bool):
+        return None
     # Protobuf Timestamp: seconds (+ optional nanos)
     if hasattr(value, "seconds"):
         try:
