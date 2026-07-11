@@ -353,3 +353,207 @@ async def test_zone_accuracy_improvement_branch_reachable(hass_mock):
     )
     assert should_upload is True
     assert "accuracy_improved" in reason
+
+
+# ---------------------------------------------------------------------------
+# H8: RSSI accuracy must be applied BEFORE the throttling decision so the value
+# evaluated for accuracy_improved is the exact value cached and uploaded.
+# Latent/regression-prevention (P2): the only production caller currently passes
+# rssi=None, so the loop is dormant today; it becomes active as soon as a GPS-only
+# detection path supplies a real RSSI. The H1 fix (removal of the 100 m floor)
+# demasked it. See async_process_fmdn_beacon_detection step 2.
+# ---------------------------------------------------------------------------
+
+
+def _resolved_location(accuracy: int, *, zone_name: str = "home") -> LocationData:
+    """A resolved scanner location with the given accuracy (zone radius)."""
+    return LocationData(
+        latitude=52.52,
+        longitude=13.405,
+        accuracy=accuracy,
+        zone_name=zone_name,
+        timestamp=time.time(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_rssi_adjustment_before_throttle_no_phantom_upload(hass_mock):
+    """H8 regression: a weak-RSSI detection must not phantom-upload every window.
+
+    Sequence: a prior identical detection cached the RSSI-raised accuracy (20 m).
+    The next identical detection resolves the raw zone radius (5 m). If the RSSI
+    adjustment ran AFTER the throttle decision (the bug), the decision would see
+    5 m vs. the cached 20 m, wrongly pass ``accuracy_improved`` (5 < 20*0.8=16)
+    and re-upload. With the adjustment applied BEFORE the decision, it sees the
+    same 20 m that was cached (max(5, RSSI-floor 20)) -> no improvement -> no
+    upload. This test is mutation-sharp: reverting the fix turns it red.
+    """
+    from custom_components.googlefindmy.fmdn_finder.location_uploader import (
+        DATA_FMDN_UPLOAD_CACHE,
+        UploadCacheEntry,
+    )
+
+    eid = b"\\xab" * 20
+    eid_hex = eid.hex()
+
+    # Prior upload cached the RSSI-raised accuracy (20 m) at the same position.
+    hass_mock.data[DATA_FMDN_UPLOAD_CACHE] = {
+        eid_hex: UploadCacheEntry(
+            eid_hex=eid_hex,
+            location=_resolved_location(20),
+            timestamp=time.time() - 400,
+            semantic_area=None,
+        )
+    }
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._encrypt_and_upload_location",
+            return_value=True,
+        ) as mock_upload,
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=eid,
+            area=None,  # GPS-only path (the affected branch)
+            rssi=-85,  # FAR band -> RSSI floor 20 m
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is False
+    mock_upload.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rssi_adjustment_cached_value_equals_uploaded_value(hass_mock):
+    """H8 invariant: the uploaded accuracy and the cached accuracy are identical.
+
+    First upload (cache empty) with a 5 m zone and a weak RSSI (floor 20 m): the
+    value handed to the encrypt/upload call and the value written to the cache
+    must both be the RSSI-adjusted 20 m, not the raw 5 m.
+    """
+    from custom_components.googlefindmy.fmdn_finder.location_uploader import (
+        DATA_FMDN_UPLOAD_CACHE,
+        UploadCacheEntry,
+    )
+
+    eid = b"\\xcd" * 20
+    eid_hex = eid.hex()
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(5),
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._encrypt_and_upload_location",
+            return_value=True,
+        ) as mock_upload,
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=eid,
+            area=None,
+            rssi=-85,  # FAR band -> RSSI floor 20 m
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    # location is the 3rd positional arg of _encrypt_and_upload_location(hass, eid, location, area)
+    uploaded_location = mock_upload.call_args.args[2]
+    assert uploaded_location.accuracy == 20
+
+    cached: UploadCacheEntry = hass_mock.data[DATA_FMDN_UPLOAD_CACHE][eid_hex]
+    assert cached.location.accuracy == 20
+
+
+@pytest.mark.asyncio
+async def test_rssi_none_leaves_accuracy_unchanged(hass_mock):
+    """H8 branch: the current production path (rssi=None) applies no adjustment.
+
+    Covers the ``if rssi is not None`` false branch after the move: the uploaded
+    and cached accuracy stay at the resolved zone accuracy (50 m).
+    """
+    from custom_components.googlefindmy.fmdn_finder.location_uploader import (
+        DATA_FMDN_UPLOAD_CACHE,
+        UploadCacheEntry,
+    )
+
+    eid = b"\\xef" * 20
+    eid_hex = eid.hex()
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(50),
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._encrypt_and_upload_location",
+            return_value=True,
+        ) as mock_upload,
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=eid,
+            area=None,
+            rssi=None,  # production caller passes None today
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    assert mock_upload.call_args.args[2].accuracy == 50
+    cached: UploadCacheEntry = hass_mock.data[DATA_FMDN_UPLOAD_CACHE][eid_hex]
+    assert cached.location.accuracy == 50
+
+
+@pytest.mark.asyncio
+async def test_rssi_adjustment_does_not_lower_accuracy(hass_mock):
+    """H8 boundary: when the zone radius already exceeds the RSSI floor, ``max``
+    keeps the larger zone value (a strong signal never fabricates precision).
+    """
+    from custom_components.googlefindmy.fmdn_finder.location_uploader import (
+        DATA_FMDN_UPLOAD_CACHE,
+        UploadCacheEntry,
+    )
+
+    eid = b"\\x11" * 20
+    eid_hex = eid.hex()
+
+    with (
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._resolve_scanner_location",
+            return_value=_resolved_location(50),
+        ),
+        patch(
+            "custom_components.googlefindmy.fmdn_finder.location_uploader._encrypt_and_upload_location",
+            return_value=True,
+        ) as mock_upload,
+    ):
+        result = await async_process_fmdn_beacon_detection(
+            hass=hass_mock,
+            eid=eid,
+            area=None,
+            rssi=-55,  # VERY_CLOSE band -> RSSI floor 2 m, below the 50 m zone
+            scanner_address="AA:BB:CC:DD:EE:FF",
+            scanner_device_id="scanner_123",
+            fmdn_device_id="device_456",
+            entity_id="sensor.bermuda_fmdn_test",
+        )
+
+    assert result is True
+    assert mock_upload.call_args.args[2].accuracy == 50
+    cached: UploadCacheEntry = hass_mock.data[DATA_FMDN_UPLOAD_CACHE][eid_hex]
+    assert cached.location.accuracy == 50

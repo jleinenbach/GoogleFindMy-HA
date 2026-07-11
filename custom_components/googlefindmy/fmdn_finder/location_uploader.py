@@ -140,7 +140,17 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         location.zone_name,
     )
 
-    # 2. Check upload throttling (pass area for semantic upload handling)
+    # 2. Adjust accuracy from RSSI (if available) BEFORE the throttling decision, so
+    # the value evaluated for accuracy_improved is the exact same value that gets
+    # cached and uploaded. Otherwise a weak-RSSI upload caches the raised accuracy
+    # while the next identical detection is still evaluated at the raw (lower) zone
+    # accuracy, which falsely passes accuracy_improved and re-uploads every throttle
+    # window despite no real improvement.
+    if rssi is not None:
+        rssi_accuracy = _calculate_accuracy_from_rssi(rssi, location.accuracy)
+        location.accuracy = max(location.accuracy, rssi_accuracy)
+
+    # 3. Check upload throttling (pass area for semantic upload handling)
     should_upload, reason = await _should_upload_location(hass, eid_hex, location, area)
 
     if not should_upload:
@@ -161,11 +171,6 @@ async def async_process_fmdn_beacon_detection(  # noqa: PLR0913
         location.zone_name,
         location.accuracy,
     )
-
-    # 3. Calculate accuracy from RSSI (if available)
-    if rssi is not None:
-        rssi_accuracy = _calculate_accuracy_from_rssi(rssi, location.accuracy)
-        location.accuracy = max(location.accuracy, rssi_accuracy)
 
     # 4. Encrypt and upload
     try:
