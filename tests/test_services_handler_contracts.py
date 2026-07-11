@@ -323,11 +323,15 @@ class TestResolverDispatch:
 class TestRefreshUrlRedaction:
     @pytest.mark.asyncio
     async def test_redactor_receives_raw_token_url(
-        self, full_ctx: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+        self,
+        full_ctx: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """The refresh handler hands the *raw* token-bearing URL to
         ``ctx["redact_url_token"]``; the persisted configuration_url carries the
-        token, the redactor is what keeps it out of logs."""
+        token, and only the redactor's masked output reaches the log (the raw
+        token never appears in the emitted DEBUG record)."""
         entry = make_config_entry(entry_id="e1", title="Account")
         hass = _make_hass([entry])
 
@@ -350,14 +354,20 @@ class TestRefreshUrlRedaction:
         full_ctx["redact_url_token"] = redactor
         handlers = _register(hass, full_ctx)
 
-        await handlers[services.SERVICE_REFRESH_DEVICE_URLS](_FakeCall({}))
+        with caplog.at_level("DEBUG", logger=services._LOGGER.name):
+            await handlers[services.SERVICE_REFRESH_DEVICE_URLS](_FakeCall({}))
 
         # The device URL was updated with a token-bearing URL...
         update_mock.assert_called_once()
         written_url = update_mock.call_args.kwargs["configuration_url"]
         assert "/api/googlefindmy/map/CANON123?token=" in written_url
-        # ...and that exact raw URL is what the redactor was asked to mask.
+        # ...that exact raw URL is what the redactor was asked to mask...
         redactor.assert_called_once_with(written_url)
+        # ...and the raw token must not leak into the emitted log record; only
+        # the redactor's masked output is logged.
+        raw_token = written_url.split("token=", 1)[1]
+        assert raw_token not in caplog.text
+        assert "token=***" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -367,30 +377,39 @@ class TestRefreshUrlRedaction:
 
 class TestRebuildRegistryGuards:
     @pytest.mark.asyncio
-    async def test_invalid_entry_id_payload_returns_without_reload(
-        self, full_ctx: dict[str, Any]
+    async def test_non_iterable_entry_id_payload_hits_type_guard(
+        self, full_ctx: dict[str, Any], caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A structurally invalid ``entry_id`` payload is refused (early return,
-        no reload attempted)."""
+        """A non-iterable ``entry_id`` payload (e.g. an int) trips the payload
+        *type* guard specifically and returns without a reload.
+
+        A ``dict`` would be iterable and slip past the type guard into the
+        unresolvable-id branch, so an int is used to pin the type guard itself.
+        """
         reload_mock = mock.AsyncMock()
         hass = _make_hass()
         hass.config_entries.async_reload = reload_mock  # type: ignore[attr-defined]
         handlers = _register(hass, full_ctx)
-        await handlers[services.SERVICE_REBUILD_REGISTRY](
-            _FakeCall({"entry_id": {"nested": "dict"}})
-        )
+        with caplog.at_level("WARNING"):
+            await handlers[services.SERVICE_REBUILD_REGISTRY](
+                _FakeCall({"entry_id": 123})
+            )
         reload_mock.assert_not_awaited()
+        assert "Invalid entry_id payload type" in caplog.text
 
     @pytest.mark.asyncio
     async def test_invalid_device_ids_payload_returns_without_reload(
-        self, full_ctx: dict[str, Any]
+        self, full_ctx: dict[str, Any], caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A non-iterable ``device_ids`` payload is refused (early return)."""
+        """A non-iterable ``device_ids`` payload trips its type guard and returns
+        without a reload."""
         reload_mock = mock.AsyncMock()
         hass = _make_hass()
         hass.config_entries.async_reload = reload_mock  # type: ignore[attr-defined]
         handlers = _register(hass, full_ctx)
-        await handlers[services.SERVICE_REBUILD_REGISTRY](
-            _FakeCall({"device_ids": 123})
-        )
+        with caplog.at_level("WARNING"):
+            await handlers[services.SERVICE_REBUILD_REGISTRY](
+                _FakeCall({"device_ids": 123})
+            )
         reload_mock.assert_not_awaited()
+        assert "Invalid device_ids payload type" in caplog.text
