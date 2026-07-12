@@ -135,3 +135,25 @@ def test_rtl_languages_constant_is_a_frozenset() -> None:
     """RTL set is an immutable frozenset containing Hebrew."""
     assert isinstance(map_i18n.RTL_LANGUAGES, frozenset)
     assert "he" in map_i18n.RTL_LANGUAGES
+
+
+def test_filters_summary_key_present_and_localized() -> None:
+    """The collapsible-filters summary label exists and is localized.
+
+    The generic completeness guard already forces the key into every locale
+    (all must mirror ``en``); this pins the concrete reference values so a
+    silent English-only or empty translation cannot slip through.
+    """
+    for locale in _EXPECTED_LOCALES:
+        assert "filters_summary" in MAP_LABELS[locale], (
+            f"locale {locale!r} is missing 'filters_summary'"
+        )
+    assert MAP_LABELS["en"]["filters_summary"] == "Filters"
+    assert MAP_LABELS["de"]["filters_summary"] == "Filter"
+
+
+def test_filters_summary_resolves_via_language_lookup() -> None:
+    """The new key flows through the standard three-stage resolver."""
+    assert resolve_map_labels("de")["filters_summary"] == "Filter"
+    assert resolve_map_labels("de-DE")["filters_summary"] == "Filter"
+    assert resolve_map_labels("xx")["filters_summary"] == "Filters"

@@ -722,6 +722,7 @@ class GoogleFindMyMapView(HomeAssistantView):
             border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
             max-width: 300px; backdrop-filter: blur(5px);
         }}
+        .controls h3 {{ margin: 0 0 10px; font-size: 16px; line-height: 1.2; }}
         .control-group {{ margin-bottom: 10px; }}
         label {{ display: block; font-size: 12px; font-weight: bold; color: #333; margin-bottom: 4px; }}
         input[type="datetime-local"], input[type="range"] {{ width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px; }}
@@ -734,24 +735,35 @@ class GoogleFindMyMapView(HomeAssistantView):
         .gfmy-copy {{ cursor: pointer; color: #007bff; display: inline-flex; vertical-align: middle; margin-left: 3px; }}
         .gfmy-copy:hover {{ color: #0056b3; }}
         .gfmy-copy.gfmy-copied {{ color: #28a745; }}
+        .controls details {{ margin: 0; }}
+        .controls details > summary {{
+            cursor: pointer; font-size: 14px; font-weight: bold; color: #333;
+            padding: 12px 0; min-height: 20px; user-select: none;
+        }}
+        .controls details > summary:hover {{ color: #0056b3; }}
+        .controls details[open] > summary {{ margin-bottom: 6px; }}
+        .controls details > summary:focus-visible {{ outline: 2px solid #007bff; outline-offset: 2px; }}
     </style>
 </head>
 <body>
     <div class="controls">
         <h3>{escape(device_name)}</h3>
-        <div class="control-group">
-            <label>{escape(labels["start_time"])}</label>
-            <input type="datetime-local" id="start" value="{start_local}">
-        </div>
-        <div class="control-group">
-            <label>{escape(labels["end_time"])}</label>
-            <input type="datetime-local" id="end" value="{end_local}">
-        </div>
-        <div class="control-group">
-            <label>{escape(labels["min_accuracy"])}: <span id="acc-val">{accuracy_filter}</span></label>
-            <input type="range" id="accuracy" min="0" max="500" step="10" value="{accuracy_filter}" oninput="document.getElementById('acc-val').innerText = this.value">
-        </div>
-        <button onclick="applyFilters()">{escape(labels["apply_filters"])}</button>
+        <details open>
+            <summary>{escape(labels["filters_summary"])}</summary>
+            <div class="control-group">
+                <label>{escape(labels["start_time"])}</label>
+                <input type="datetime-local" id="start" value="{start_local}">
+            </div>
+            <div class="control-group">
+                <label>{escape(labels["end_time"])}</label>
+                <input type="datetime-local" id="end" value="{end_local}">
+            </div>
+            <div class="control-group">
+                <label>{escape(labels["min_accuracy"])}: <span id="acc-val">{accuracy_filter}</span></label>
+                <input type="range" id="accuracy" min="0" max="500" step="10" value="{accuracy_filter}" oninput="document.getElementById('acc-val').innerText = this.value">
+            </div>
+            <button onclick="applyFilters()">{escape(labels["apply_filters"])}</button>
+        </details>
         <div class="stats">
             {escape(format_showing(labels, len(locations)))}
         </div>
