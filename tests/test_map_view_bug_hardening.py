@@ -136,7 +136,9 @@ async def test_history_survives_recorder_get_instance_raising(
 
     monkeypatch.setattr(recorder_mod, "get_instance", _raise, raising=False)
 
-    _install_history(monkeypatch, [_state("10.0", "20.0", when=datetime(2024, 7, 1, tzinfo=UTC))])
+    _install_history(
+        monkeypatch, [_state("10.0", "20.0", when=datetime(2024, 7, 1, tzinfo=UTC))]
+    )
 
     response = await _run_get(map_view, entry, device_id)
 
