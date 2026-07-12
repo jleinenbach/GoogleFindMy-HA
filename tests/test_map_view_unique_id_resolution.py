@@ -565,8 +565,14 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
     )
     html_empty = view._generate_map_html("Device", [], "device-1", start, end, 0)
 
-    assert "parsed.toISOString()" in html_with_locations
-    assert "parsed.toISOString()" in html_empty
+    # Date inputs are still converted via toISOString, now behind an isNaN
+    # validity guard so a cleared datetime-local field no longer throws a
+    # RangeError (see test_map_view_bug_hardening BUG 3).
+    assert "startParsed.toISOString()" in html_with_locations
+    assert "endParsed.toISOString()" in html_with_locations
+    assert "startParsed.toISOString()" in html_empty
+    assert "endParsed.toISOString()" in html_empty
+    assert "isNaN(startParsed.getTime())" in html_with_locations
     assert "getFullYear()" in html_with_locations
     assert "getFullYear()" in html_empty
 

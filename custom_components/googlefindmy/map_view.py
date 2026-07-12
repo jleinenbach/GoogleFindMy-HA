@@ -530,7 +530,17 @@ class GoogleFindMyMapView(HomeAssistantView):
                 get_instance = None
             from homeassistant.components.recorder.history import get_significant_states
 
-            recorder = get_instance(self.hass) if get_instance else None
+            # get_instance() raises (KeyError/RuntimeError) when the recorder
+            # integration is not set up -- a valid, if rare, configuration. The
+            # except ImportError above only covers a missing module, not a
+            # disabled instance, so guard the lookup and fall back to the HASS
+            # executor. A missing recorder then yields an empty history (the
+            # get_significant_states call fails inside the try below and is
+            # logged), i.e. a map without the track instead of an HTTP 500.
+            try:
+                recorder = get_instance(self.hass) if get_instance else None
+            except Exception:  # recorder integration disabled/not ready
+                recorder = None
             async_add_executor_job = getattr(
                 recorder, "async_add_executor_job", self.hass.async_add_executor_job
             )
@@ -559,6 +569,15 @@ class GoogleFindMyMapView(HomeAssistantView):
                                     "longitude", state.attributes.get("last_longitude")
                                 )
                             )
+                            # float() accepts "nan"/"inf" without raising, so a
+                            # corrupted recorder attribute would slip through here
+                            # and later poison the map center (center_lat/center_lon
+                            # are interpolated raw into the Leaflet setView call and
+                            # a bare ``nan`` token is a JS ReferenceError that kills
+                            # the whole script). Drop non-finite fixes at the source,
+                            # mirroring the live-point guard in ``_plus_code_for``.
+                            if not (math.isfinite(lat) and math.isfinite(lon)):
+                                continue
                             # Read the accuracy value AND its estimated-provenance
                             # flag from the same authoritative source. ``accuracy_m``
                             # is the stable producer attribute; it survives Home
@@ -947,16 +966,21 @@ class GoogleFindMyMapView(HomeAssistantView):
         }}
 
         function applyFilters() {{
-            var parsed = new Date(document.getElementById('start').value);
-            var endParsed = new Date(document.getElementById('end').value);
-            var start = parsed.toISOString();
-            var end = endParsed.toISOString();
-            var acc = document.getElementById('accuracy').value;
-
             var url = new URL(window.location);
-            url.searchParams.set('start', start);
-            url.searchParams.set('end', end);
-            url.searchParams.set('accuracy', acc);
+            // datetime-local inputs can be cleared to an empty string in every
+            // browser; new Date('') is an Invalid Date and .toISOString() then
+            // throws a RangeError, so the button would silently do nothing.
+            // Guard each field and only overwrite the query parameter when the
+            // value parses, otherwise keep the existing one already on the URL.
+            var startParsed = new Date(document.getElementById('start').value);
+            if (!isNaN(startParsed.getTime())) {{
+                url.searchParams.set('start', startParsed.toISOString());
+            }}
+            var endParsed = new Date(document.getElementById('end').value);
+            if (!isNaN(endParsed.getTime())) {{
+                url.searchParams.set('end', endParsed.toISOString());
+            }}
+            url.searchParams.set('accuracy', document.getElementById('accuracy').value);
             window.location = url;
         }}
 
