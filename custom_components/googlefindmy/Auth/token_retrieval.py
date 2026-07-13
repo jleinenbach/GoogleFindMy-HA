@@ -83,12 +83,6 @@ def _is_invalid_aas_error_text(text: str, *, allow_http_generic: bool = False) -
 _CLIENT_SIG: str = "38918a453d07199354f8b19af05ec6562ced5788"
 
 
-def _format_android_id(android_id: int) -> str:
-    """Return a canonical hex string for an Android ID."""
-
-    return f"0x{android_id:016x}"
-
-
 def _extract_android_id_from_credentials(fcm_creds: Any) -> int | None:
     """Parse the android_id from an FCM credential bundle."""
 
