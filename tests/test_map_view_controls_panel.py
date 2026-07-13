@@ -179,8 +179,26 @@ def test_full_width_controls_use_border_box_sizing() -> None:
     assertion goes red — it pins the fix, not merely the presence of a string.
     """
     html = _render()
-    assert ".controls *, .controls *::before, .controls *::after {" in html
+    assert ".controls input, .controls button {" in html
     assert "box-sizing: border-box;" in html
+
+
+def test_border_box_reset_does_not_touch_the_summary_tap_target() -> None:
+    """The border-box reset must stay off the summary (regression guard).
+
+    The summary's 44px tap target is computed on ``content-box`` geometry
+    (20px min-height + 2x12px padding). A broad ``.controls *`` descendant
+    reset would silently re-measure that min-height on the border box and
+    shrink the handle to ~41px, below the documented WCAG 2.5.5 target. The
+    reset is therefore restricted to the full-width form controls and must not
+    reach the summary via a universal descendant selector.
+
+    Mutation check: widening the selector back to ``.controls *`` makes this
+    assertion red — it pins the *scope* of the reset, not just its presence.
+    """
+    html = _render()
+    assert ".controls *, .controls *::before" not in html
+    assert "box-sizing: border-box;" in html  # reset still present, just scoped
 
 
 def test_style_and_details_tags_are_balanced_and_ordered() -> None:
