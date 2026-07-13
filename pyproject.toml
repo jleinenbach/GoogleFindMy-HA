@@ -379,7 +379,11 @@ skip_covered = true
 # Raised to 74 per maintainer request to lock in the Coverage W1 follow-up
 # contract tests (token_refresh, google_uploader and the remaining W1 modules);
 # measured total is 74.47 %, so ~0.47 Pp headroom here.
-fail_under = 74
+# Raised to 75 per maintainer request to lock in the coverage gained from the
+# map_view hardening series (non-finite coordinate skip, recorder fallback,
+# date-filter clearing and the _plus_code_for defensive-branch tests);
+# measured CI total is 75.40 %, so ~0.40 Pp headroom here.
+fail_under = 75
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",
