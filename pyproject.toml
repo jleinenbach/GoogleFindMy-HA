@@ -75,9 +75,11 @@ hypothesis = ">=6.100.0"
 
 # Home Assistant testing - ALWAYS use latest version (no upper bound)
 # This ensures we test against the latest HA compatibility
-# NOTE: This integration requires HA 2025.8+ for ConfigSubentryFlow support
+# NOTE: Minimum supported HA core is 2025.9.1, the empirical dependency floor
+# (see script/check_ha_compatibility.py --find-minimum). ConfigSubentryFlow first
+# shipped in 2025.8, but bundled dependencies raise the effective minimum to 2025.9.1.
 pytest-homeassistant-custom-component = ">=0.13"
-homeassistant = ">=2025.8.0"
+homeassistant = ">=2025.9.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
