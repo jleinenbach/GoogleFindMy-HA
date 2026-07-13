@@ -148,10 +148,16 @@ def test_details_is_open_by_default_across_languages() -> None:
 
 
 def test_input_ids_are_unchanged_so_apply_filters_still_binds() -> None:
-    """DOM was re-nested, not renamed: applyFilters() still finds its inputs."""
+    """DOM was re-nested, not renamed: applyFilters() still finds its inputs.
+
+    ``start``/``end`` are now resolved through the shared ``setDateParam`` helper
+    (which reads ``getElementById(id)``); ``accuracy`` is still read directly.
+    """
     html = _render()
-    for element_id in ("start", "end", "accuracy"):
-        assert f"getElementById('{element_id}')" in html
+    assert "setDateParam(url, 'start')" in html
+    assert "setDateParam(url, 'end')" in html
+    assert "getElementById(id)" in html
+    assert "getElementById('accuracy')" in html
 
 
 def test_style_and_details_tags_are_balanced_and_ordered() -> None:

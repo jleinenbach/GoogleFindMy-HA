@@ -965,21 +965,27 @@ class GoogleFindMyMapView(HomeAssistantView):
             if (autoFocusMarker) {{ autoFocusMarker.openPopup(); }}
         }}
 
+        function setDateParam(url, id) {{
+            // Project a datetime-local field's state totally onto the URL.
+            // A valid value is written as an ISO instant. An empty or invalid
+            // value (the field was cleared) DELETES any stale parameter, so the
+            // filter actually resets to the server default on reload instead of
+            // re-applying the previous bound. new Date('') is an Invalid Date
+            // whose .toISOString() throws a RangeError, hence the guard: without
+            // the delete branch a cleared field would leave the old query
+            // parameter in place and appear impossible to clear.
+            var parsed = new Date(document.getElementById(id).value);
+            if (isNaN(parsed.getTime())) {{
+                url.searchParams.delete(id);
+            }} else {{
+                url.searchParams.set(id, parsed.toISOString());
+            }}
+        }}
+
         function applyFilters() {{
             var url = new URL(window.location);
-            // datetime-local inputs can be cleared to an empty string in every
-            // browser; new Date('') is an Invalid Date and .toISOString() then
-            // throws a RangeError, so the button would silently do nothing.
-            // Guard each field and only overwrite the query parameter when the
-            // value parses, otherwise keep the existing one already on the URL.
-            var startParsed = new Date(document.getElementById('start').value);
-            if (!isNaN(startParsed.getTime())) {{
-                url.searchParams.set('start', startParsed.toISOString());
-            }}
-            var endParsed = new Date(document.getElementById('end').value);
-            if (!isNaN(endParsed.getTime())) {{
-                url.searchParams.set('end', endParsed.toISOString());
-            }}
+            setDateParam(url, 'start');
+            setDateParam(url, 'end');
             url.searchParams.set('accuracy', document.getElementById('accuracy').value);
             window.location = url;
         }}

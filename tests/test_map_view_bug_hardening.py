@@ -21,9 +21,16 @@ latent hardening gaps in the history/render path:
 
 3. **Cleared datetime-local filter fields (BUG 3).** ``new Date("")`` is an
    Invalid Date and ``.toISOString()`` then throws a ``RangeError``, so the
-   "apply filters" button silently did nothing when a field was cleared. The fix
-   guards each field with ``isNaN(parsed.getTime())`` and only overwrites the
-   query parameter when the value parses.
+   "apply filters" button silently did nothing when a field was cleared. The
+   first fix guarded each field with ``isNaN(parsed.getTime())`` and only
+   overwrote the query parameter when the value parsed. Codex then flagged a
+   follow-up defect: because the invalid branch did *nothing*, a stale ``start``/
+   ``end`` parameter already on the URL survived, so a cleared field re-applied
+   the previous bound on reload and appeared impossible to clear. The final fix
+   extracts ``setDateParam(url, id)`` as a total projection of the field state
+   onto the URL: valid value -> ``set``, empty/invalid value -> ``delete``. The
+   helper is shared by ``start`` and ``end`` so the two cannot drift apart (the
+   sibling ``end`` field carried the identical latent defect Codex did not name).
 """
 
 from __future__ import annotations
@@ -180,16 +187,39 @@ def _render_html(monkeypatch: pytest.MonkeyPatch) -> str:
     )
 
 
-def test_apply_filters_guards_both_datetime_fields(
+def test_apply_filters_uses_shared_date_param_helper(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both filter fields are validity-checked before ``toISOString``."""
+    """Both filter fields go through the single ``setDateParam`` helper.
+
+    Extracting one helper is what keeps ``start`` and ``end`` from drifting:
+    Codex flagged only ``start``, but ``end`` carried the identical defect. A
+    shared function makes the two provably identical.
+    """
 
     html = _render_html(monkeypatch)
-    assert "isNaN(startParsed.getTime())" in html
-    assert "isNaN(endParsed.getTime())" in html
-    assert "startParsed.toISOString()" in html
-    assert "endParsed.toISOString()" in html
+    assert "function setDateParam(url, id)" in html
+    assert "setDateParam(url, 'start')" in html
+    assert "setDateParam(url, 'end')" in html
+    # The valid branch still emits a guarded ISO instant.
+    assert "isNaN(parsed.getTime())" in html
+    assert "url.searchParams.set(id, parsed.toISOString())" in html
+
+
+def test_apply_filters_deletes_cleared_date_params(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the Codex follow-up: a cleared field DELETES its param.
+
+    Previously the invalid-date branch did nothing, so a stale ``start``/``end``
+    already on the URL survived and re-applied the old bound on reload (the
+    field appeared impossible to clear). The invalid branch must now remove the
+    parameter. Mutation check: reverting ``delete(id)`` back to a no-op turns
+    this assertion red.
+    """
+
+    html = _render_html(monkeypatch)
+    assert "url.searchParams.delete(id)" in html
 
 
 def test_apply_filters_has_no_unguarded_toisostring(
@@ -198,15 +228,18 @@ def test_apply_filters_has_no_unguarded_toisostring(
     """The old crash pattern (parse then immediately ``toISOString``) is gone.
 
     Locks the regression: previously ``var start = parsed.toISOString();`` ran
-    unconditionally and threw on a cleared field. The only ``toISOString`` calls
-    left must be the two guarded ones inside the ``isNaN`` branches.
+    unconditionally and threw on a cleared field. The only ``toISOString`` call
+    left must be the single guarded one inside ``setDateParam``.
     """
 
     html = _render_html(monkeypatch)
-    stripped = html.replace("startParsed.toISOString()", "").replace(
-        "endParsed.toISOString()", ""
+    # Ignore ``//`` comment lines (they legitimately mention ``.toISOString()``);
+    # only executable JS is under test here.
+    code = "\n".join(
+        line for line in html.splitlines() if not line.lstrip().startswith("//")
     )
-    assert "parsed.toISOString()" not in stripped
-    # The apply handler now sets each param only inside its isNaN guard.
-    assert "url.searchParams.set('start', startParsed.toISOString())" in html
-    assert "url.searchParams.set('end', endParsed.toISOString())" in html
+    stripped = code.replace("url.searchParams.set(id, parsed.toISOString())", "")
+    assert "toISOString()" not in stripped
+    # No per-field set survives outside the shared helper (would resurrect drift).
+    assert "searchParams.set('start'" not in html
+    assert "searchParams.set('end'" not in html
