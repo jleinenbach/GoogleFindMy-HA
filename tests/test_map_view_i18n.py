@@ -28,6 +28,7 @@ _ENGLISH_EXACT_FORMS = (
     ">End Time<",
     "Min Accuracy (meters)",
     ">Apply Filters<",
+    "<summary>Filters</summary>",
     "<b>Time:</b>",
     "<b>Accuracy:</b>",
     "<b>Source:</b>",

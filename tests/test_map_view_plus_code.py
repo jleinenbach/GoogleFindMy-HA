@@ -78,3 +78,28 @@ def test_plus_code_for_valid_coordinate() -> None:
     """A finite coordinate returns an 11-character code with the separator."""
     code = map_view._plus_code_for(47.365590, 8.524997)
     assert code == "8FVC9G8F+6X"
+
+
+def test_plus_code_for_swallows_encoder_value_error(monkeypatch) -> None:
+    """A ValueError from the encoder yields None instead of propagating.
+
+    The coordinates are finite (so the ``math.isfinite`` guard passes) and the
+    failure is injected in the encoder itself, exercising the defensive
+    ``except (ValueError, TypeError)`` contract rather than any real bad input.
+    """
+
+    def _raise_value_error(*_args, **_kwargs):
+        raise ValueError("simulated encoder failure")
+
+    monkeypatch.setattr(map_view, "_encode_plus_code", _raise_value_error)
+    assert map_view._plus_code_for(47.365590, 8.524997) is None
+
+
+def test_plus_code_for_swallows_encoder_type_error(monkeypatch) -> None:
+    """A TypeError from the encoder yields None instead of propagating."""
+
+    def _raise_type_error(*_args, **_kwargs):
+        raise TypeError("simulated encoder type failure")
+
+    monkeypatch.setattr(map_view, "_encode_plus_code", _raise_type_error)
+    assert map_view._plus_code_for(47.365590, 8.524997) is None

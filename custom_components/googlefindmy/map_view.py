@@ -530,7 +530,17 @@ class GoogleFindMyMapView(HomeAssistantView):
                 get_instance = None
             from homeassistant.components.recorder.history import get_significant_states
 
-            recorder = get_instance(self.hass) if get_instance else None
+            # get_instance() raises (KeyError/RuntimeError) when the recorder
+            # integration is not set up -- a valid, if rare, configuration. The
+            # except ImportError above only covers a missing module, not a
+            # disabled instance, so guard the lookup and fall back to the HASS
+            # executor. A missing recorder then yields an empty history (the
+            # get_significant_states call fails inside the try below and is
+            # logged), i.e. a map without the track instead of an HTTP 500.
+            try:
+                recorder = get_instance(self.hass) if get_instance else None
+            except Exception:  # recorder integration disabled/not ready
+                recorder = None
             async_add_executor_job = getattr(
                 recorder, "async_add_executor_job", self.hass.async_add_executor_job
             )
@@ -559,6 +569,15 @@ class GoogleFindMyMapView(HomeAssistantView):
                                     "longitude", state.attributes.get("last_longitude")
                                 )
                             )
+                            # float() accepts "nan"/"inf" without raising, so a
+                            # corrupted recorder attribute would slip through here
+                            # and later poison the map center (center_lat/center_lon
+                            # are interpolated raw into the Leaflet setView call and
+                            # a bare ``nan`` token is a JS ReferenceError that kills
+                            # the whole script). Drop non-finite fixes at the source,
+                            # mirroring the live-point guard in ``_plus_code_for``.
+                            if not (math.isfinite(lat) and math.isfinite(lon)):
+                                continue
                             # Read the accuracy value AND its estimated-provenance
                             # flag from the same authoritative source. ``accuracy_m``
                             # is the stable producer attribute; it survives Home
@@ -722,6 +741,7 @@ class GoogleFindMyMapView(HomeAssistantView):
             border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
             max-width: 300px; backdrop-filter: blur(5px);
         }}
+        .controls h3 {{ margin: 0 0 10px; font-size: 16px; line-height: 1.2; }}
         .control-group {{ margin-bottom: 10px; }}
         label {{ display: block; font-size: 12px; font-weight: bold; color: #333; margin-bottom: 4px; }}
         input[type="datetime-local"], input[type="range"] {{ width: 100%; padding: 5px; border: 1px solid #ddd; border-radius: 4px; }}
@@ -734,24 +754,35 @@ class GoogleFindMyMapView(HomeAssistantView):
         .gfmy-copy {{ cursor: pointer; color: #007bff; display: inline-flex; vertical-align: middle; margin-left: 3px; }}
         .gfmy-copy:hover {{ color: #0056b3; }}
         .gfmy-copy.gfmy-copied {{ color: #28a745; }}
+        .controls details {{ margin: 0; }}
+        .controls details > summary {{
+            cursor: pointer; font-size: 14px; font-weight: bold; color: #333;
+            padding: 12px 0; min-height: 20px; user-select: none;
+        }}
+        .controls details > summary:hover {{ color: #0056b3; }}
+        .controls details[open] > summary {{ margin-bottom: 6px; }}
+        .controls details > summary:focus-visible {{ outline: 2px solid #007bff; outline-offset: 2px; }}
     </style>
 </head>
 <body>
     <div class="controls">
         <h3>{escape(device_name)}</h3>
-        <div class="control-group">
-            <label>{escape(labels["start_time"])}</label>
-            <input type="datetime-local" id="start" value="{start_local}">
-        </div>
-        <div class="control-group">
-            <label>{escape(labels["end_time"])}</label>
-            <input type="datetime-local" id="end" value="{end_local}">
-        </div>
-        <div class="control-group">
-            <label>{escape(labels["min_accuracy"])}: <span id="acc-val">{accuracy_filter}</span></label>
-            <input type="range" id="accuracy" min="0" max="500" step="10" value="{accuracy_filter}" oninput="document.getElementById('acc-val').innerText = this.value">
-        </div>
-        <button onclick="applyFilters()">{escape(labels["apply_filters"])}</button>
+        <details open>
+            <summary>{escape(labels["filters_summary"])}</summary>
+            <div class="control-group">
+                <label>{escape(labels["start_time"])}</label>
+                <input type="datetime-local" id="start" value="{start_local}">
+            </div>
+            <div class="control-group">
+                <label>{escape(labels["end_time"])}</label>
+                <input type="datetime-local" id="end" value="{end_local}">
+            </div>
+            <div class="control-group">
+                <label>{escape(labels["min_accuracy"])}: <span id="acc-val">{accuracy_filter}</span></label>
+                <input type="range" id="accuracy" min="0" max="500" step="10" value="{accuracy_filter}" oninput="document.getElementById('acc-val').innerText = this.value">
+            </div>
+            <button onclick="applyFilters()">{escape(labels["apply_filters"])}</button>
+        </details>
         <div class="stats">
             {escape(format_showing(labels, len(locations)))}
         </div>
@@ -934,17 +965,28 @@ class GoogleFindMyMapView(HomeAssistantView):
             if (autoFocusMarker) {{ autoFocusMarker.openPopup(); }}
         }}
 
-        function applyFilters() {{
-            var parsed = new Date(document.getElementById('start').value);
-            var endParsed = new Date(document.getElementById('end').value);
-            var start = parsed.toISOString();
-            var end = endParsed.toISOString();
-            var acc = document.getElementById('accuracy').value;
+        function setDateParam(url, id) {{
+            // Project a datetime-local field's state totally onto the URL.
+            // A valid value is written as an ISO instant. An empty or invalid
+            // value (the field was cleared) DELETES any stale parameter, so the
+            // filter actually resets to the server default on reload instead of
+            // re-applying the previous bound. new Date('') is an Invalid Date
+            // whose .toISOString() throws a RangeError, hence the guard: without
+            // the delete branch a cleared field would leave the old query
+            // parameter in place and appear impossible to clear.
+            var parsed = new Date(document.getElementById(id).value);
+            if (isNaN(parsed.getTime())) {{
+                url.searchParams.delete(id);
+            }} else {{
+                url.searchParams.set(id, parsed.toISOString());
+            }}
+        }}
 
+        function applyFilters() {{
             var url = new URL(window.location);
-            url.searchParams.set('start', start);
-            url.searchParams.set('end', end);
-            url.searchParams.set('accuracy', acc);
+            setDateParam(url, 'start');
+            setDateParam(url, 'end');
+            url.searchParams.set('accuracy', document.getElementById('accuracy').value);
             window.location = url;
         }}
 
