@@ -741,6 +741,11 @@ class GoogleFindMyMapView(HomeAssistantView):
             border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
             max-width: 300px; backdrop-filter: blur(5px);
         }}
+        /* Scoped border-box reset: the full-width inputs/button carry their own
+           padding+border, so without this they overflow the panel's 15px right
+           padding (content-box adds padding+border ON TOP of width:100%), which
+           made the right gap collapse to ~3px while the left stayed at 15px. */
+        .controls *, .controls *::before, .controls *::after {{ box-sizing: border-box; }}
         .controls h3 {{ margin: 0 0 10px; font-size: 16px; line-height: 1.2; }}
         .control-group {{ margin-bottom: 10px; }}
         label {{ display: block; font-size: 12px; font-weight: bold; color: #333; margin-bottom: 4px; }}

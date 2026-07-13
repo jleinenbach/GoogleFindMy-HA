@@ -160,6 +160,29 @@ def test_input_ids_are_unchanged_so_apply_filters_still_binds() -> None:
     assert "getElementById('accuracy')" in html
 
 
+# ------------------- Defect 3: right-edge padding symmetry ------------------
+
+
+def test_full_width_controls_use_border_box_sizing() -> None:
+    """Full-width inputs/button must not overflow the panel's right padding.
+
+    The date inputs, the range slider and the apply button all carry
+    ``width: 100%`` together with their own ``padding`` and a ``1px`` border.
+    Under the default ``content-box`` model that padding+border is added ON TOP
+    of the 100% content width, so the elements grew ~12px past the panel's 15px
+    right padding: the right gap collapsed to a few pixels while the left gap
+    stayed at 15px (visible asymmetry reported on the rendered map). A scoped
+    ``box-sizing: border-box`` reset folds padding+border back INTO the 100%,
+    restoring the symmetric 15px gutter on both sides.
+
+    Mutation check: dropping the reset re-introduces the overflow, so this
+    assertion goes red — it pins the fix, not merely the presence of a string.
+    """
+    html = _render()
+    assert ".controls *, .controls *::before, .controls *::after {" in html
+    assert "box-sizing: border-box;" in html
+
+
 def test_style_and_details_tags_are_balanced_and_ordered() -> None:
     """Guard against unclosed tags after the CSS/HTML rewrite.
 
