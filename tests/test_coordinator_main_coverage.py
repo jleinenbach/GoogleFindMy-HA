@@ -962,8 +962,8 @@ async def test_snapshot_fallback_registry_miss() -> None:
         "name": dev["name"],
     }
     c._update_entry_from_cache = lambda entry, wall_now: False
-    c._find_tracker_entity_entry = (
-        lambda dev_id: None
+    c._find_tracker_entity_entry = lambda dev_id: (
+        None
     )  # registry miss -> append+continue
     snap = await c._async_build_device_snapshot_with_fallbacks(
         [{"id": "d1", "name": "One"}]
