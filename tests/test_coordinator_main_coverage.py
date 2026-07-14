@@ -806,14 +806,14 @@ def _push_ready(c: Any) -> dict[str, list[Any]]:
     c._set_fcm_status = lambda status: None
     c._last_poll_mono = 0.0
     c._device_location_data = {}
-    c._get_ignored_set = lambda: set()
+    c._get_ignored_set = set
     c._present_last_seen = {}
     c._build_snapshot_from_cache = lambda devices, wall_now: [
         {"device_id": d["id"], "name": d["name"]} for d in devices
     ]
-    c._refresh_subentry_index = lambda snap: sink["index"].append(snap)
-    c._store_subentry_snapshots = lambda snap: sink["store"].append(snap)
-    c.async_set_updated_data = lambda snap: sink["set"].append(snap)
+    c._refresh_subentry_index = sink["index"].append
+    c._store_subentry_snapshots = sink["store"].append
+    c.async_set_updated_data = sink["set"].append
     return sink
 
 
@@ -893,7 +893,7 @@ def _purge_ready(c: Any) -> dict[str, list[Any]]:
     c.data = [{"device_id": "dev", "name": "Name"}, {"device_id": "other"}]
     c._refresh_subentry_index = lambda stub: None
     c._store_subentry_snapshots = lambda snap: None
-    c.async_set_updated_data = lambda snap: sink["set"].append(snap)
+    c.async_set_updated_data = sink["set"].append
     return sink
 
 
@@ -1080,7 +1080,7 @@ def test_schedule_stats_persist_off_loop_redispatch() -> None:
     c = _bare()
     c._is_on_hass_loop = lambda: False
     calls: list[Any] = []
-    c._run_on_hass_loop = lambda fn: calls.append(fn)
+    c._run_on_hass_loop = calls.append
     c._schedule_stats_persist()
     assert calls  # marshalled onto the loop
 
@@ -1106,7 +1106,7 @@ async def test_snapshot_fallback_history_used(monkeypatch: Any) -> None:
     c.hass = SimpleNamespace(states=SimpleNamespace(get=lambda eid: None))
     c.allow_history_fallback = True
     incremented: list[str] = []
-    c.increment_stat = lambda name: incremented.append(name)
+    c.increment_stat = incremented.append
 
     class _Recorder:
         async def async_add_executor_job(self, fn: Any, *args: Any) -> Any:
