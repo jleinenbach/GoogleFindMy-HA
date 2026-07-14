@@ -7,7 +7,7 @@ name = "googlefindmy-ha"
 # [tool.semantic_release] version_toml below); on release branches it MUST be
 # bumped by hand alongside the other two. Canonical anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
-version = "1.7.12"
+version = "1.7.13"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
@@ -75,9 +75,11 @@ hypothesis = ">=6.100.0"
 
 # Home Assistant testing - ALWAYS use latest version (no upper bound)
 # This ensures we test against the latest HA compatibility
-# NOTE: This integration requires HA 2025.8+ for ConfigSubentryFlow support
+# NOTE: Minimum supported HA core is 2025.9.1, the empirical dependency floor
+# (see script/check_ha_compatibility.py --find-minimum). ConfigSubentryFlow first
+# shipped in 2025.8, but bundled dependencies raise the effective minimum to 2025.9.1.
 pytest-homeassistant-custom-component = ">=0.13"
-homeassistant = ">=2025.8.0"
+homeassistant = ">=2025.9.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -340,6 +342,11 @@ source = [
 ]
 omit = [
     "custom_components/googlefindmy/ProtoDecoders/*",
+    # Only generated protobuf bindings are omitted. The FCM transport modules
+    # (fcmpushclient.py, fcmregister.py) originate from sdb9696/firebase-messaging
+    # (MIT) but are forked and maintained in-repo with integration-specific
+    # behavior (fatal HTTP classification, credential/decryption recovery) and
+    # dedicated regressions in tests/test_fcm*.py, so they stay under coverage.
     "custom_components/googlefindmy/Auth/firebase_messaging/proto/*",
 ]
 
@@ -371,7 +378,14 @@ skip_covered = true
 # Raised to 73 per maintainer request to lock in the coverage from the typed
 # gpsoauth AuthError classification tests; measured CI total is 73.26 %, so the
 # jitter margin is intentionally tightened to 0.26 Pp headroom here.
-fail_under = 73
+# Raised to 74 per maintainer request to lock in the Coverage W1 follow-up
+# contract tests (token_refresh, google_uploader and the remaining W1 modules);
+# measured total is 74.47 %, so ~0.47 Pp headroom here.
+# Raised to 75 per maintainer request to lock in the coverage gained from the
+# map_view hardening series (non-finite coordinate skip, recorder fallback,
+# date-filter clearing and the _plus_code_for defensive-branch tests);
+# measured CI total is 75.40 %, so ~0.40 Pp headroom here.
+fail_under = 75
 exclude_lines = [
     "if __name__ == \"__main__\":",
     "pragma: no cover",

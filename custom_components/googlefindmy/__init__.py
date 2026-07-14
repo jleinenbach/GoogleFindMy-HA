@@ -5128,8 +5128,10 @@ def _determine_subentry_unique_id(
     identifier = subentry_map.get(feature, _DEFAULT_SUBENTRY_IDENTIFIER)
 
     if feature == "device_tracker":
-        if uid.count(":") >= 2 and uid.startswith(f"{entry_id}:{identifier}:"):
-            return uid
+        # Already fully scoped (``{entry_id}:{identifier}:...``): keep as-is. The
+        # prefix itself contains two colons, so a former ``uid.count(":") >= 2``
+        # pre-check was strictly implied by this ``startswith`` and has been
+        # removed as dead code (no input satisfied it without also matching here).
         if uid.startswith(f"{entry_id}:{identifier}:"):
             return uid
         if uid.startswith(f"{entry_id}:"):

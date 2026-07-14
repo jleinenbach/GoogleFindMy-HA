@@ -139,8 +139,6 @@ from homeassistant.helpers.device_registry import EVENT_DEVICE_REGISTRY_UPDATED
 # call-time to respect package-level monkeypatches from tests.
 from ..api import GoogleFindMyAPI
 from ..const import (
-    CACHE_KEY_CONTRIBUTOR_MODE,
-    CACHE_KEY_LAST_MODE_SWITCH,
     # Credential meta for Repairs placeholders
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
@@ -716,7 +714,7 @@ class GoogleFindMyCoordinator(
             contributor_mode_switch_epoch=self._contributor_mode_switch_epoch,
         )
 
-        # Configuration (user options; updated via update_settings())
+        # Configuration (user options; applied at setup/reload from the config entry)
         self.location_poll_interval = int(location_poll_interval)
         self.device_poll_delay = int(device_poll_delay)
         self.min_poll_interval = int(
@@ -815,7 +813,7 @@ class GoogleFindMyCoordinator(
         self._service_device_id: str | None = None
         self._service_device_identifier: tuple[str, str] | None = None
 
-        # User-configured ignored devices (updated via update_settings)
+        # User-configured ignored devices (options-first; empty attribute fallback)
         self.ignored_devices: list[str] = []
 
         # Subentry awareness (feature groups / platform scoping)
@@ -1030,25 +1028,6 @@ class GoogleFindMyCoordinator(
             ):
                 return normalized
         return DEFAULT_CONTRIBUTOR_MODE
-
-    def _async_persist_contributor_mode(self) -> None:
-        """Persist the contributor mode preferences asynchronously."""
-
-        async def _persist() -> None:
-            try:
-                await self._cache.async_set_cached_value(
-                    CACHE_KEY_CONTRIBUTOR_MODE, self._contributor_mode
-                )
-                await self._cache.async_set_cached_value(
-                    CACHE_KEY_LAST_MODE_SWITCH,
-                    self._contributor_mode_switch_epoch,
-                )
-            except Exception as err:  # pragma: no cover - defensive persistence
-                _LOGGER.debug("Failed to persist contributor mode state: %s", err)
-
-        self.hass.async_create_task(
-            _persist(), name=f"{DOMAIN}.persist_contributor_mode"
-        )
 
     async def async_setup(self) -> None:
         """One-time async setup called from __init__.py (entry setup).
@@ -1438,8 +1417,8 @@ class GoogleFindMyCoordinator(
         """Return the set of device IDs the user chose to ignore (options-first).
 
         Notes:
-            - Uses config_entry.options if available; falls back to an attribute
-              'ignored_devices' when set through update_settings().
+            - Uses config_entry.options if available; falls back to the
+              'ignored_devices' attribute (an empty default; options are the source of truth).
             - Intentionally simple equality (no normalization) to avoid surprises.
         """
         try:
@@ -2290,82 +2269,3 @@ class GoogleFindMyCoordinator(
             self._push_ready_memo = ready
 
         return ready
-
-    def update_settings(
-        self,
-        *,
-        ignored_devices: list[str] | None = None,
-        location_poll_interval: int | None = None,
-        device_poll_delay: int | None = None,
-        min_poll_interval: int | None = None,
-        allow_history_fallback: bool | None = None,
-        contributor_mode: str | None = None,
-        contributor_mode_switch_epoch: int | None = None,
-    ) -> None:
-        """Apply updated user settings provided by the config entry (options-first).
-
-        This method deliberately enforces basic typing/limits to keep the coordinator sane
-        regardless of where the values came from.
-
-        Args:
-            ignored_devices: A list of device IDs to hide from snapshots/polling.
-            location_poll_interval: The interval in seconds for location polling.
-            device_poll_delay: The delay in seconds between polling devices.
-            min_poll_interval: The minimum polling interval in seconds.
-            allow_history_fallback: Whether to allow falling back to Recorder history.
-            contributor_mode: Updated contributor mode ("high_traffic" or "in_all_areas").
-            contributor_mode_switch_epoch: Epoch timestamp when the mode last changed.
-        """
-        if ignored_devices is not None:
-            # This attribute is only used as a fallback when config_entry is not available.
-            self.ignored_devices = list(ignored_devices)
-
-        if location_poll_interval is not None:
-            try:
-                self.location_poll_interval = max(1, int(location_poll_interval))
-            except (TypeError, ValueError):
-                _LOGGER.warning(
-                    "Ignoring invalid location_poll_interval=%r", location_poll_interval
-                )
-
-        if device_poll_delay is not None:
-            try:
-                self.device_poll_delay = max(0, int(device_poll_delay))
-            except (TypeError, ValueError):
-                _LOGGER.warning(
-                    "Ignoring invalid device_poll_delay=%r", device_poll_delay
-                )
-
-        if min_poll_interval is not None:
-            try:
-                self.min_poll_interval = max(1, int(min_poll_interval))
-            except (TypeError, ValueError):
-                _LOGGER.warning(
-                    "Ignoring invalid min_poll_interval=%r", min_poll_interval
-                )
-
-        if allow_history_fallback is not None:
-            self.allow_history_fallback = bool(allow_history_fallback)
-
-        if contributor_mode is not None:
-            normalized_mode = self._sanitize_contributor_mode(contributor_mode)
-            if (
-                contributor_mode_switch_epoch is None
-                or contributor_mode_switch_epoch <= 0
-            ):
-                contributor_mode_switch_epoch = int(time.time())
-            epoch = int(contributor_mode_switch_epoch)
-            if (
-                normalized_mode != self._contributor_mode
-                or epoch != self._contributor_mode_switch_epoch
-            ):
-                self._contributor_mode = normalized_mode
-                self._contributor_mode_switch_epoch = epoch
-                self.api.set_contributor_mode(
-                    normalized_mode, switch_epoch=self._contributor_mode_switch_epoch
-                )
-                self._async_persist_contributor_mode()
-
-        # Settings adjustments may change per-subentry views
-        self._refresh_subentry_index()
-        self._schedule_eid_resolver_refresh()

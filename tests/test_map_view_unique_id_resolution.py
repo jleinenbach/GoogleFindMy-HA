@@ -565,8 +565,16 @@ def test_map_view_html_uses_iso_conversion(monkeypatch: pytest.MonkeyPatch) -> N
     )
     html_empty = view._generate_map_html("Device", [], "device-1", start, end, 0)
 
+    # Date inputs are still converted via toISOString, now inside the shared
+    # setDateParam helper behind an isNaN validity guard, so a cleared
+    # datetime-local field no longer throws a RangeError and its stale query
+    # parameter is deleted rather than preserved (see
+    # test_map_view_bug_hardening BUG 3).
     assert "parsed.toISOString()" in html_with_locations
     assert "parsed.toISOString()" in html_empty
+    assert "isNaN(parsed.getTime())" in html_with_locations
+    assert "setDateParam(url, 'start')" in html_with_locations
+    assert "setDateParam(url, 'end')" in html_with_locations
     assert "getFullYear()" in html_with_locations
     assert "getFullYear()" in html_empty
 

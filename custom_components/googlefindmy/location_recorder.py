@@ -138,7 +138,7 @@ class LocationRecorder:
                 ts_rank = ts if ts is not None else float("-inf")
                 ranked.append((ts_rank, -score, -idx, loc, ts))
 
-            if not ranked:
+            if not ranked:  # pragma: no cover - unreachable: empty handled above
                 return {}
 
             ranked.sort(reverse=True)

@@ -22,7 +22,7 @@ A comprehensive Home Assistant custom integration for Google's FindMy Device net
 <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30"> [![GitHub Repo stars](https://img.shields.io/github/stars/BSkando/GoogleFindMy-HA?style=for-the-badge&logo=github)](https://github.com/BSkando/GoogleFindMy-HA) [![Home Assistant Community Forum](https://img.shields.io/badge/Home%20Assistant-Community%20Forum-blue?style=for-the-badge&logo=home-assistant)](https://community.home-assistant.io/t/google-findmy-find-hub-integration/931136) [![Continuous integration status](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml/badge.svg)](https://github.com/BSkando/GoogleFindMy-HA/actions/workflows/ci.yml) [![Buy me a coffee](https://img.shields.io/badge/Coffee-Addiction!-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://www.buymeacoffee.com/bskando) <img src="https://github.com/BSkando/GoogleFindMy-HA/blob/main/icon.png" width="30">
 
 >[!TIP]
->**Home Assistant Core 2025.10 or newer is recommended.** The functional minimum is **2025.8.0** (enforced in `hacs.json` and `pyproject.toml`): that release provides the config subentry flow maturity and the `async_added_to_hass` behavior the tracker/service subentries depend on. The Core-managed config subentry model itself has been available since the 2025.3 cycle. Running 2025.10 or newer is recommended for the bug fixes and stability improvements made since 2025.8, not because of a hard API requirement.
+>**Home Assistant Core 2025.10 or newer is recommended.** The functional minimum is **2025.9.1** (enforced in `hacs.json` and `pyproject.toml`), the empirically determined floor at which all bundled integration dependencies resolve (verified with `script/check_ha_compatibility.py --find-minimum`). The config subentry flow maturity and the `async_added_to_hass` behavior the tracker/service subentries depend on landed earlier, in 2025.8, and the Core-managed config subentry model itself has been available since the 2025.3 cycle. Running 2025.10 or newer is recommended for the bug fixes and stability improvements made since 2025.9.1, not because of a hard API requirement.
 
 ### Continuous integration checks
 
@@ -218,7 +218,7 @@ Accessible via the ⚙️ cogwheel button on the main Google Find My Device Inte
 | `semantic_locations` | none | - | User-defined semantic location zones (managed via a dedicated options flow step). |
 | `delete_caches_on_remove` | true | toggle | Removes stored authentication caches when the integration is deleted. |
 | `contributor_mode` | in_all_areas | selection | Chooses whether Google shares aggregated network-only data (`high_traffic`) or participates in full crowdsourced reporting (`in_all_areas`). |
-| `stale_threshold` | 1800 | seconds | After this many seconds (default: 30 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
+| `stale_threshold` | 3900 | seconds | After this many seconds (default: 65 minutes) without a location update, the tracker state becomes `unknown`. Use the "Last Location" entity to always see the last known position. |
 | `show_location_age` | true | toggle | Adds a `location_age` attribute (in seconds, rounded to 60s) to each tracker entity. Excluded from Recorder history to keep DB size predictable. |
 
 ### Google Home filter behavior
@@ -291,7 +291,7 @@ The integration provides a couple of Home Assistant Actions for use with automat
 ## Supported devices and functions
 
 - **Device coverage:** Phones, tablets, Wear OS devices, earbuds, and compatible Bluetooth trackers surfaced in the Google Find My Device network.  Any device that appears in the official Google Find My interface is eligible to be imported.
-- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, and optional helper entities (statistics, sound trigger button) depending on device capabilities.
+- **Entities created:** Each tracked device exposes a `device_tracker` entity for live location, a binary sensor for connection state, a "last seen" timestamp sensor, and a Plus Code (Open Location Code) sensor. Optional helper entities (statistics, sound trigger button) are added depending on options and device capabilities, and a BLE battery sensor is added when the device is matched to a local Bermuda BLE tracker that reports battery.
 - **Action support:** Sound playback is available on hardware that exposes the native "Play sound" action within Google's ecosystem.  The integration hides the button on devices that do not advertise support, aligning with [Home Assistant action documentation](https://developers.home-assistant.io/docs/core/integration-quality-scale/rules/docs-supported-functions/).
 
 ## Data updates and background behavior
