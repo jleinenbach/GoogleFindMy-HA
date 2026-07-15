@@ -298,11 +298,13 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                 decrypt_module = _import_decrypt_locations_module()
                 eid_info_module = _import_eid_info_module()
             except ImportError as import_error:
+                # R6 (AGENTS.md Section 5): keep the raw device name out of the
+                # user-facing ERROR; expose it at DEBUG only.
                 _LOGGER.error(
-                    "Failed to import decoder/decrypt functions in callback for %s: %s",
-                    name,
+                    "Failed to import decoder/decrypt functions in callback: %s",
                     import_error,
                 )
+                _LOGGER.debug("Decoder/decrypt import failed in callback for %s", name)
                 ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
                 return
@@ -334,10 +336,13 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     getattr(eid_info_module, "SpotApiEmptyResponseError"),
                 )
             except AttributeError as import_error:
+                # R6 (AGENTS.md Section 5): device name to DEBUG only.
                 _LOGGER.error(
-                    "Failed to load decoder/decrypt attributes in callback for %s: %s",
-                    name,
+                    "Failed to load decoder/decrypt attributes in callback: %s",
                     import_error,
+                )
+                _LOGGER.debug(
+                    "Decoder/decrypt attribute load failed in callback for %s", name
                 )
                 ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
@@ -347,9 +352,9 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
             try:
                 device_update = parse_device_update_protobuf(hex_response)
             except Exception as parse_exc:
-                _LOGGER.error(
-                    "Failed to parse device update for %s: %s", name, parse_exc
-                )
+                # R6 (AGENTS.md Section 5): device name to DEBUG only.
+                _LOGGER.error("Failed to parse device update: %s", parse_exc)
+                _LOGGER.debug("Device update parse failed for %s", name)
                 ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
                 return
@@ -411,16 +416,15 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     # (SpotApiEmptyResponseError, SpotAuthPermanentError) keep ERROR
                     # severity because they themselves drive reauth. ctx.error and
                     # the propagation are unchanged in every case.
+                    # R6 (AGENTS.md Section 5): device name to DEBUG only; the
+                    # visible record carries the failure and its cause.
                     if isinstance(
                         err, (SpotApiEmptyResponseError, SpotAuthPermanentError)
                     ):
-                        _LOGGER.error(
-                            "Failed to process location data for %s: %s", name, err
-                        )
+                        _LOGGER.error("Failed to process location data: %s", err)
                     else:
-                        _LOGGER.warning(
-                            "Failed to process location data for %s: %s", name, err
-                        )
+                        _LOGGER.warning("Failed to process location data: %s", err)
+                    _LOGGER.debug("Location data processing failed for %s", name)
                     ctx.error = err
                     ctx.event.set()
                     return
@@ -443,12 +447,13 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     ctx.event.set()
                     return
                 except Exception as err:
+                    # R6 (AGENTS.md Section 5): device name to DEBUG only.
                     _LOGGER.error(
-                        "Unexpected error during async decryption for %s (%s): %s",
-                        name,
+                        "Unexpected error during async decryption (%s): %s",
                         type(err).__name__,
                         err,
                     )
+                    _LOGGER.debug("Async decryption error for %s", name)
                     _LOGGER.debug("Traceback: %s", traceback.format_exc())
                     ctx.data = cast(list[dict[str, Any]], [])
                     ctx.event.set()
@@ -474,9 +479,9 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
                     location_data[0]["canonic_id"] = response_canonic_id.lower()
                     ctx.data = location_data
                 else:
-                    _LOGGER.warning(
-                        "No location data found after decryption for %s", name
-                    )
+                    # R6 (AGENTS.md Section 5): device name to DEBUG only.
+                    _LOGGER.warning("No location data found after decryption")
+                    _LOGGER.debug("No decrypted location data for %s", name)
                     ctx.data = cast(list[dict[str, Any]], [])
                 ctx.event.set()
 
@@ -484,9 +489,9 @@ def _make_location_callback(  # noqa: PLR0915, PLR0913
             asyncio.run_coroutine_threadsafe(_decrypt_and_store(), loop)
 
         except Exception as callback_error:
-            _LOGGER.error(
-                "Error processing FCM callback for %s: %s", name, callback_error
-            )
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.error("Error processing FCM callback: %s", callback_error)
+            _LOGGER.debug("FCM callback processing error for %s", name)
             _LOGGER.debug("FCM callback traceback: %s", traceback.format_exc())
             ctx.data = cast(list[dict[str, Any]], [])
             ctx.event.set()
@@ -727,7 +732,9 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
             registered = True
             _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))
         except Exception as fcm_error:
-            _LOGGER.error("FCM registration failed for %s: %s", name, fcm_error)
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.error("FCM registration failed: %s", fcm_error)
+            _LOGGER.debug("FCM registration failed for %s", name)
             _LOGGER.debug("FCM registration traceback: %s", traceback.format_exc())
             return []
 
@@ -758,33 +765,34 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         except asyncio.CancelledError:
             raise
         except NovaRateLimitError as e:
-            _LOGGER.warning(
-                "Rate limited while requesting location for %s: %s", name, e
-            )
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.warning("Rate limited while requesting location: %s", e)
+            _LOGGER.debug("Rate limited while requesting location for %s", name)
             return []
         except NovaHTTPError as e:
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.warning(
-                "Server error (%s) while requesting location for %s: %s",
-                e.status,
-                name,
-                e,
+                "Server error (%s) while requesting location: %s", e.status, e
             )
+            _LOGGER.debug("Server error while requesting location for %s", name)
             return []
         except NovaAuthError as e:
             # Re-raise auth errors so api.py can convert to ConfigEntryAuthFailed
             # and trigger re-authentication flow. Previously this was swallowed,
             # causing users to see only "No location data" without re-auth prompt.
-            _LOGGER.warning(
-                "Authentication error while requesting location for %s: %s", name, e
-            )
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.warning("Authentication error while requesting location: %s", e)
+            _LOGGER.debug("Authentication error while requesting location for %s", name)
             raise
         except aiohttp.ClientError as e:
-            _LOGGER.warning(
-                "Network/client error while requesting location for %s: %s", name, e
-            )
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.warning("Network/client error while requesting location: %s", e)
+            _LOGGER.debug("Network/client error while requesting location for %s", name)
             return []
         except Exception as e:
-            _LOGGER.error("Nova API request failed for %s: %s", name, e)
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.error("Nova API request failed: %s", e)
+            _LOGGER.debug("Nova API request failed for %s", name)
             return []
 
         # For this RPC the server often returns HTTP 200 with empty body (FCM delivers the data).
@@ -834,10 +842,11 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
         if not data:
             _LOGGER.debug("No location data found for %s after decryption", name)
         else:
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
             _LOGGER.warning(
-                "Received location data for unexpected device in %s flow; ignoring.",
-                name,
+                "Received location data for an unexpected device; ignoring."
             )
+            _LOGGER.debug("Unexpected-device mismatch in locate flow for %s", name)
         return []
 
     except asyncio.CancelledError:
@@ -891,9 +900,9 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                     canonic_device_id
                 )
         except Exception as cleanup_error:
-            _LOGGER.warning(
-                "Error during FCM unregister for %s: %s", name, cleanup_error
-            )
+            # R6 (AGENTS.md Section 5): device name to DEBUG only.
+            _LOGGER.warning("Error during FCM unregister: %s", cleanup_error)
+            _LOGGER.debug("FCM unregister failed for %s", name)
 
 
 if __name__ == "__main__":
