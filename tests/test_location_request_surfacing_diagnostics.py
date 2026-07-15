@@ -356,9 +356,7 @@ async def test_missing_fcm_token_surfacing_redacts_name_and_defers_to_warning(
         location_request, "_make_location_callback", _fake_make_callback
     )
     receiver = _NoTokenFcmReceiver()
-    monkeypatch.setattr(
-        location_request, "_FCM_ReceiverGetter", lambda *_a: receiver
-    )
+    monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda *_a: receiver)
 
     caplog.set_level(logging.DEBUG, logger=location_request.__name__)
 
