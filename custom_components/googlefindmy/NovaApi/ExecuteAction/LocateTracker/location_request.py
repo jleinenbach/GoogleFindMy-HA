@@ -707,11 +707,22 @@ async def get_location_data_for_device(  # noqa: PLR0911, PLR0912, PLR0913, PLR0
                 canonic_device_id, callback
             )
             if not fcm_token:
-                _LOGGER.error(
-                    "Failed to get FCM token for %s: "
-                    "see previous warnings for details (client/token unavailable or no coordinator)",
-                    name,
+                # ``async_register_for_location_updates`` has already logged a
+                # specific WARNING naming the exact cause (missing canonical id,
+                # no coordinator, unavailable client/token, or a fail-closed
+                # reconnect that never reached STARTED). Re-stating a hard-coded
+                # closed set of causes here was misleading: the list was
+                # incomplete and, when the real cause was the reconnect/STARTED
+                # timeout, actively pointed at the wrong thing. A second ERROR
+                # also overstated a self-healing, fail-closed outcome that the
+                # next poll recovers from. Defer to that authoritative record and
+                # keep the raw device name at DEBUG only (R6, AGENTS.md Section 5
+                # redaction; mirrors the outer surfacing handler below).
+                _LOGGER.warning(
+                    "Manual locate skipped: no FCM token available "
+                    "(see the preceding warning for the specific cause)",
                 )
+                _LOGGER.debug("No FCM token for %s; skipping this locate", name)
                 return []
             registered = True
             _LOGGER.debug("FCM token obtained for %s (len=%d)", name, len(fcm_token))
