@@ -306,3 +306,86 @@ async def test_format_cause_chain_breaks_on_cyclic_cause() -> None:
     rendered = location_request._format_cause_chain(first)
 
     assert rendered == "RuntimeError: first -> ValueError: second"
+
+
+class _NoTokenFcmReceiver:
+    """Receiver whose registration yields no token (returns a falsy string).
+
+    In production every falsy return from ``async_register_for_location_updates``
+    is preceded by its own specific WARNING (missing coordinator, unavailable
+    client/token, or a fail-closed reconnect that never reached STARTED), so the
+    caller must defer to that record instead of re-guessing the cause.
+    """
+
+    async def async_register_for_location_updates(
+        self, device_id: str, callback: Callable[[str, str], None]
+    ) -> str:
+        return ""
+
+    async def async_unregister_for_location_updates(self, device_id: str) -> None:
+        return None
+
+
+async def test_missing_fcm_token_surfacing_redacts_name_and_defers_to_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R6 + honest diagnostics for the ``not fcm_token`` branch.
+
+    When ``async_register_for_location_updates`` yields no token, the caller must
+    (1) keep the raw device name out of any user-facing (>= WARNING) record and
+    expose it only at DEBUG (R6, AGENTS.md Section 5), and (2) NOT re-guess the
+    cause with the old misleading closed set (``client/token unavailable or no
+    coordinator``) -- the specific cause is already logged by the receiver
+    immediately before. The duplicate report is a WARNING, not a second ERROR,
+    because the outcome is fail-closed and self-heals on the next poll.
+
+    RED before the fix: the branch logged ``"Failed to get FCM token for %s: ...
+    (client/token unavailable or no coordinator)"`` with the raw name at ERROR.
+    """
+
+    def _fake_make_callback(
+        *, ctx: Any, canonic_device_id: str, **_: Any
+    ) -> Callable[[str, str], None]:
+        def _callback(_response_canonic_id: str, _hex: str) -> None:
+            return None
+
+        return _callback
+
+    monkeypatch.setattr(
+        location_request, "_make_location_callback", _fake_make_callback
+    )
+    receiver = _NoTokenFcmReceiver()
+    monkeypatch.setattr(location_request, "_FCM_ReceiverGetter", lambda *_a: receiver)
+
+    caplog.set_level(logging.DEBUG, logger=location_request.__name__)
+
+    result = await location_request.get_location_data_for_device(
+        canonic_device_id="device-xyz",
+        name=_SENTINEL_NAME,
+        session=None,
+        username="user@example.com",
+        cache=_FakeTokenCache(),
+    )
+    assert result == []
+
+    user_facing = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+    assert user_facing, "expected a user-facing record for the skipped locate"
+    for rec in user_facing:
+        message = rec.getMessage()
+        # R6: no raw device name in a WARNING/ERROR record.
+        assert _SENTINEL_NAME not in message
+        # D1: the misleading hard-coded cause enumeration must be gone.
+        assert "no coordinator" not in message
+        assert "client/token unavailable" not in message
+
+    # The skipped-locate record is surfaced and defers to the preceding warning.
+    assert any("no FCM token available" in rec.getMessage() for rec in user_facing)
+    # Severity: the duplicate report is a WARNING, not a second ERROR.
+    assert all(rec.levelno == logging.WARNING for rec in user_facing)
+
+    # The name stays available for debugging -- at DEBUG only.
+    debug_text = " ".join(
+        rec.getMessage() for rec in caplog.records if rec.levelno == logging.DEBUG
+    )
+    assert _SENTINEL_NAME in debug_text
