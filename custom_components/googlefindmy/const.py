@@ -117,6 +117,7 @@ OPT_IGNORED_DEVICES: str = "ignored_devices"
 OPT_DELETE_CACHES_ON_REMOVE: str = "delete_caches_on_remove"
 OPT_STALE_THRESHOLD: str = "stale_threshold"
 OPT_SHOW_LOCATION_AGE: str = "show_location_age"
+OPT_SPEED_GATE_ENABLED: str = "speed_gate_enabled"
 # Legacy option key - kept for reading old configurations, no longer used
 OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 
@@ -136,6 +137,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_CONTRIBUTOR_MODE,
     OPT_STALE_THRESHOLD,
     OPT_SHOW_LOCATION_AGE,
+    OPT_SPEED_GATE_ENABLED,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -254,6 +256,14 @@ DEFAULT_DELETE_CACHES_ON_REMOVE: bool = True
 DEFAULT_STALE_THRESHOLD: int = 3900
 DEFAULT_SHOW_LOCATION_AGE: bool = True
 
+DEFAULT_SPEED_GATE_ENABLED: bool = True
+# Kinematic plausibility cap (m/s). ~1440 km/h: above the record jetstream
+# airliner ground speed (~369 m/s, BA Feb-2020) and far above cruise/ICE/car,
+# so even a strong-tailwind flight passes; blocks the physically impossible
+# FMDN crowd-report "teleport" (Discussion #177). Own-report GPS fixes bypass
+# the gate entirely (crowd-awareness), so this cap only bounds crowd reports.
+DEFAULT_MAX_PLAUSIBLE_SPEED_MPS: float = 400.0
+
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
 DEFAULT_CONTRIBUTOR_MODE: str = CONTRIBUTOR_MODE_IN_ALL_AREAS
@@ -279,6 +289,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_CONTRIBUTOR_MODE: DEFAULT_CONTRIBUTOR_MODE,
     OPT_STALE_THRESHOLD: DEFAULT_STALE_THRESHOLD,
     OPT_SHOW_LOCATION_AGE: DEFAULT_SHOW_LOCATION_AGE,
+    OPT_SPEED_GATE_ENABLED: DEFAULT_SPEED_GATE_ENABLED,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------
@@ -457,6 +468,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "min": 300,  # 5 minutes - allows ~2-3 typical FMDN update cycles
         "max": 86400,  # max 24 hours
         "step": 60,
+    },
+    OPT_SPEED_GATE_ENABLED: {
+        "type": "bool",
     },
     # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
     # visibility flow and not edited as a raw field (list of ids).
@@ -705,9 +719,12 @@ __all__ = [
     "OPT_DELETE_CACHES_ON_REMOVE",
     "OPT_STALE_THRESHOLD",
     "OPT_SHOW_LOCATION_AGE",
+    "OPT_SPEED_GATE_ENABLED",
     "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
+    "DEFAULT_SPEED_GATE_ENABLED",
+    "DEFAULT_MAX_PLAUSIBLE_SPEED_MPS",
     "DEFAULT_LOCATION_POLL_INTERVAL",
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",

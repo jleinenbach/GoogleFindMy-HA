@@ -249,6 +249,7 @@
           "device_poll_delay": "Intervalo entre pesquisas do dispositivo",
           "stale_threshold": "Limite de obsolescência (s)",
           "show_location_age": "Mostrar atributo de idade da localização",
+          "speed_gate_enabled": "Reject impossible location jumps",
           "google_home_filter_enabled": "Filtrar dispositivos Google Home",
           "google_home_filter_keywords": "Filtrar palavras-chave (separadas por vírgula)",
           "enable_stats_entities": "Criar entidades estatísticas",
@@ -260,6 +261,7 @@
         "data_description": {
           "stale_threshold": "Após este número de segundos sem atualização de localização, o status do rastreador muda para desconhecido. Use a entidade 'Última localização' para ver sempre a última posição conhecida. Padrão: 1800 (30 minutos).",
           "show_location_age": "Quando ativado (padrão), um atributo 'location_age' (arredondado para 1 minuto) é adicionado a cada entidade rastreadora. Desative para eliminar todas as gravações de banco de dados para dispositivos estacionários. O atributo absoluto 'last_seen' e as entidades sensor.*_last_seen estão sempre disponíveis.",
+          "speed_gate_enabled": "When enabled (default), a location fix that would require physically impossible speed (for example a crowd-sourced report placing the tracker hundreds of km away within seconds) is rejected instead of teleporting the tracker. Own GPS reports always pass. Disable only if legitimate fast movements are being dropped.",
           "delete_caches_on_remove": "Remova os tokens armazenados em cache e os metadados do dispositivo quando esta entrada for excluída.",
           "map_view_token_expiration": "Quando ativado, os tokens de visualização do mapa expiram após 1 semana. ",
           "contributor_mode": "Escolha como seu dispositivo contribui para a rede do Google (todas as áreas por padrão para relatórios de crowdsourcing ou apenas áreas de alto tráfego).",

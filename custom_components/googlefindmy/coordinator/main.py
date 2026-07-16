@@ -839,6 +839,7 @@ class GoogleFindMyCoordinator(
             "invalid_ts_drop_benign": 0,  # regressed/out-of-order timestamps (expected sub-bucket of invalid_ts_drop_count)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
+            "speed_gate_rejects": 0,  # fixes rejected as physically implausible (#177)
             # Canonicless drops on the last main poll (transition-independent
             # diagnostics aggregate). Absolute per-poll values, not increments;
             # listed here so the restore path (iterates self.stats.keys()) and the

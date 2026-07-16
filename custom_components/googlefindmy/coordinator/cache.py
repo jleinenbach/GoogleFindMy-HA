@@ -23,7 +23,14 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
-from ..const import _EID_REFRESH_DEBOUNCE_S, DATA_EID_RESOLVER, DOMAIN
+from ..const import (
+    _EID_REFRESH_DEBOUNCE_S,
+    DATA_EID_RESOLVER,
+    DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+    DEFAULT_SPEED_GATE_ENABLED,
+    DOMAIN,
+    OPT_SPEED_GATE_ENABLED,
+)
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
@@ -849,6 +856,15 @@ class CacheOperations(_MixinBase):
         """Calculate the great-circle distance between two points (meters)."""
         return _haversine_distance_impl(lat1, lon1, lat2, lon2)
 
+    def _speed_gate_enabled(self) -> bool:
+        """Return whether the kinematic speed gate is active (Discussion #177)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_SPEED_GATE_ENABLED
+        return bool(
+            entry.options.get(OPT_SPEED_GATE_ENABLED, DEFAULT_SPEED_GATE_ENABLED)
+        )
+
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -948,8 +964,70 @@ class CacheOperations(_MixinBase):
         ):
             return True
 
-        # Clear jump - no overlap, accept as-is
+        # Clear jump - no overlap. Before accepting, apply the kinematic
+        # plausibility gate (Discussion #177): a single FMDN crowd report can
+        # land far away with huge uncertainty ("teleport"). Reject a far jump
+        # whose implied speed is physically impossible. Falls through to accept
+        # when speed is not computable (missing/degenerate timestamps) so no
+        # regression occurs. Own-report GPS fixes bypass the gate entirely: they
+        # are cryptographically trusted device positions that do not teleport,
+        # so gating them would only risk false-blocking genuine fast travel.
+        # Placement rationale (F3): the gate sits AFTER the trusted-anchor and
+        # #155 double-fallback branches on purpose - those return earlier because
+        # a semantic anchor has no kinematics and two 200m fallback circles give
+        # radii too unreliable to gate on (would risk false-blocks, F4-a).
+        # dt limit (F5): after a long offline gap dt is huge, implied_speed tiny,
+        # so the gate never fires - intended (slow travel over long time is
+        # plausible); a post-offline teleport passing ungated is the inherent
+        # limit of a forward speed gate (Q2 round-trip gate would catch it).
         if dist > radius_sum:
+            # Own-report bypass keyed off CRYPTOGRAPHIC provenance, not the raw
+            # server flag: a network/foreign report can carry a spurious
+            # server-supplied is_own_report=True (this integration's own uploader
+            # stamps network reports that way, decrypt_locations.py:1991-1998).
+            # The decrypt layer already hardens is_own_report = is_own_report and
+            # not is_network_report (decrypted_location.py:39); mirror that
+            # invariant here so a spoofed own-flag on a network teleport cannot
+            # skip the gate on any path. Absent is_network_report is treated as
+            # not-network (genuine own reports never carry the network flag).
+            incoming_is_own = bool(new_data.get("is_own_report")) and not bool(
+                new_data.get("is_network_report")
+            )
+            # Only gate a fix that carries a REAL measured accuracy. A crowd
+            # report is "accuracy-less" not only when the key is missing
+            # (new_acc_raw is None) but also when it carries Android's
+            # no-accuracy sentinel (0.0) or any sub-physical/non-finite value
+            # (< MIN_PHYSICAL_ACCURACY_M) - the same error-code set that
+            # _safe_accuracy() maps to the 200m fallback. Such a fix is not a
+            # clean teleport discriminant and must fall through so the
+            # downstream sanitization in _is_significant_update can flag it
+            # estimated (accuracy_estimated=True). Hard-dropping it here would
+            # regress the #1181 last-good protection; that path is already
+            # guarded by is_reliable_fix, not by this gate.
+            new_acc_measured = (
+                new_acc_raw is not None
+                and math.isfinite(new_acc_raw)
+                and new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
+            )
+            if self._speed_gate_enabled() and not incoming_is_own and new_acc_measured:
+                existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
+                new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
+                if existing_ts is not None and new_ts is not None:
+                    delta_t = new_ts - existing_ts
+                    if delta_t > 0:
+                        implied_speed = dist / delta_t
+                        if implied_speed > DEFAULT_MAX_PLAUSIBLE_SPEED_MPS:
+                            self.increment_stat("speed_gate_rejects")
+                            _LOGGER.debug(
+                                "Speed gate rejected crowd fix %s: %.0fm in "
+                                "%.0fs = %.1fm/s > %.1fm/s cap",
+                                device_id,
+                                dist,
+                                delta_t,
+                                implied_speed,
+                                DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+                            )
+                            return False
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting

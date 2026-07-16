@@ -249,6 +249,7 @@
           "device_poll_delay": "עיכוב בין סריקות מכשירים (שניות)",
           "stale_threshold": "סף מיושנות (שניות)",
           "show_location_age": "הצגת תכונת גיל מיקום",
+          "speed_gate_enabled": "Reject impossible location jumps",
           "google_home_filter_enabled": "סינון התקני Google Home",
           "google_home_filter_keywords": "מילות מפתח לסינון (מופרדות בפסיקים)",
           "enable_stats_entities": "יצירת ישויות סטטיסטיקה",
@@ -260,6 +261,7 @@
         "data_description": {
           "stale_threshold": "לאחר מספר שניות זה ללא עדכון מיקום, מצב הגשש הופך ל'לא ידוע'. ניתן להשתמש בישות 'מיקום אחרון' כדי לראות תמיד את המיקום הידוע האחרון. ברירת מחדל: 1800 (30 דקות).",
           "show_location_age": "כאשר מופעל (ברירת מחדל), תכונת 'location_age' (מעוגלת לדקה אחת) מתווספת לכל ישות גשש. השבתה מבטלת את כל הכתיבות למסד הנתונים עבור התקנים נייחים. תכונת 'last_seen' המוחלטת וישויות sensor.*_last_seen תמיד זמינות.",
+          "speed_gate_enabled": "When enabled (default), a location fix that would require physically impossible speed (for example a crowd-sourced report placing the tracker hundreds of km away within seconds) is rejected instead of teleporting the tracker. Own GPS reports always pass. Disable only if legitimate fast movements are being dropped.",
           "delete_caches_on_remove": "הסרת טוקנים מאוחסנים ומטא-נתונים של התקנים בעת מחיקת רשומה זו.",
           "map_view_token_expiration": "כאשר מופעל, טוקני תצוגת מפה פגים לאחר שבוע. כאשר מושבת (ברירת מחדל), הטוקנים לא פגים.",
           "contributor_mode": "יש לבחור כיצד ההתקן שלך תורם לרשת של Google (כל האזורים כברירת מחדל לדיווח מקור-קהל, או רק אזורים בעלי תנועה גבוהה).",
