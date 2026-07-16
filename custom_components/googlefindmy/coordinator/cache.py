@@ -1020,15 +1020,6 @@ class CacheOperations(_MixinBase):
                 and math.isfinite(new_acc_raw)
                 and new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
             )
-            # Anchor lifecycle invariant (F-FABLE-2): an anchor must never
-            # outlive the device's next accepted clear jump. The gated accept
-            # path below (re)seeds it from this jump; every OTHER accepted clear
-            # jump - an own-report or accuracy-less/degenerate-timestamp bypass
-            # that skips the gate - drops it (see the tail below). Otherwise a
-            # stale anchor A could survive a trusted move A->B->C and let a later
-            # stale crowd echo near A roll the tracker back off the current
-            # position C (same rollback class as F-CODEX-6, via stale state).
-            anchor_seeded = False
             if self._speed_gate_enabled() and not incoming_is_own and new_acc_measured:
                 existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
                 new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
@@ -1145,14 +1136,6 @@ class CacheOperations(_MixinBase):
                                 "lon": existing_lon,
                                 "ts": new_ts,
                             }
-                            anchor_seeded = True
-            if not anchor_seeded:
-                # Bypass/degenerate accept path: this clear jump did not (re)seed
-                # an anchor, so drop any stale one so it cannot outlive the move
-                # (F-FABLE-2). Read defensively (getattr) like the seed above.
-                anchors = getattr(self, "_round_trip_anchors", None)
-                if anchors:
-                    anchors.pop(device_id, None)
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting
