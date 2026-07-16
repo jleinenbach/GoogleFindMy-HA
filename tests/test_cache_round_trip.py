@@ -151,11 +151,145 @@ def test_anchor_not_set_when_incoming_has_no_last_seen() -> None:
     reliable fix. (A's own last_seen is irrelevant to the anchor ts now.)
     """
     coord = _coord(_fix(HOME, last_seen=BASE_TS))
-    # Incoming timestamp missing: the speed gate falls through to accept, and
-    # the anchor ts (sourced from B) is None -> no anchor is remembered.
+    # Incoming timestamp missing: the speed gate's forward-check guard
+    # (existing_ts and new_ts present) is not satisfied, so the gate never
+    # evaluates the jump and the anchor-set inside the gated block is never
+    # reached -> no anchor is remembered.
     result = _fuse(coord, _fix(FAR, last_seen=None, acc=50.0))
     assert result is True
     assert "dev" not in coord._round_trip_anchors
+
+
+def test_own_report_jump_sets_no_anchor() -> None:
+    """An own-report A->B jump must NOT seed a return anchor (F-CODEX-6).
+
+    Own reports bypass the speed gate (``not incoming_is_own``), so the jump is
+    never evaluated as a plausible crowd move. Seeding an anchor from it would
+    let a later stale crowd report near A ride the recovery branch back onto A,
+    rolling the tracker off a trusted current B. Anchor seeding therefore lives
+    inside the gated block and an own-report jump seeds nothing.
+
+    Mutation guard: on the pre-fix code (anchor-set outside the gate) this
+    own-report jump seeded an anchor at HOME, so ``"dev" in anchors`` held.
+    """
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
+    result = _fuse(
+        coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0, is_own=True)
+    )
+    assert result is True
+    assert "dev" not in coord._round_trip_anchors
+
+
+def test_accuracy_less_jump_sets_no_anchor() -> None:
+    """An accuracy-less B jump must NOT seed a return anchor (F-CODEX-6).
+
+    A crowd report carrying Android's no-accuracy sentinel (0.0) fails
+    ``new_acc_measured`` and bypasses the speed gate (it is meant to fall
+    through so downstream sanitization flags it estimated, #1181). It was never
+    gate-evaluated, so - like the own-report case - it must not seed an anchor.
+
+    Mutation guard: on the pre-fix code the accuracy-less jump seeded an anchor.
+    """
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
+    # acc=0.0 is the no-accuracy sentinel: finite but < MIN_PHYSICAL_ACCURACY_M.
+    result = _fuse(coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=0.0))
+    assert result is True
+    assert "dev" not in coord._round_trip_anchors
+
+
+def test_own_report_bypass_then_stale_crowd_near_a_rejected() -> None:
+    """End-to-end: an own-report jump must not open a stale-crowd rollback.
+
+    Exploit the fix closes (F-CODEX-6): an own-report GPS jump A->B bypasses the
+    gate; if it seeded anchor A, a stale crowd report near A within the TTL would
+    be *recovered* (accepted) instead of rejected, rolling the tracker from the
+    trusted current B back onto old A. With seeding confined to the gated path,
+    no anchor exists and the stale crowd fix is rejected as a teleport.
+
+    Mutation guard: on the pre-fix code step 1 seeds anchor A=HOME, so step 2's
+    crowd fix near HOME is recovered and ``result is True`` (the wrong rollback).
+    """
+    # Step 1: own-report jump HOME->FAR is accepted and seeds NO anchor.
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
+    assert (
+        _fuse(coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0, is_own=True))
+        is True
+    )
+    assert "dev" not in coord._round_trip_anchors
+    # Step 2: the device is now at FAR; a stale crowd report lands near HOME
+    # quickly (implied speed >> cap). Without an anchor it must be rejected.
+    coord._device_location_data["dev"] = _fix(FAR, last_seen=BASE_TS + 3 * 3600)
+    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 3 * 3600 + 300, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
+
+
+def test_anchor_dropped_when_bypass_jump_supersedes_it() -> None:
+    """A trusted move past an anchor must invalidate it (F-FABLE-2).
+
+    Sequence: a gated crowd jump A->B seeds anchor A; then an own-report jump
+    B->C (device really at C) supersedes it. The stale anchor A must be dropped
+    so a later stale crowd echo near A cannot roll the tracker back off the
+    trusted current position C. The gated seed path is the only reseed; every
+    other accepted clear jump drops the anchor.
+
+    Mutation guard: without the drop on the bypass path, step 3's echo near A is
+    recovered (result True) instead of rejected - the exact rollback F-CODEX-6
+    closes for fresh seeds, here via stale anchor state.
+    """
+    # Step 1: gated crowd jump A(HOME)->B(FAR) seeds anchor A (ts = B.last_seen).
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
+    assert _fuse(coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0)) is True
+    assert coord._round_trip_anchors["dev"]["lat"] == HOME[0]  # anchor A present
+    # Step 2: own-report jump B(FAR)->C supersedes it; anchor A must be dropped.
+    c_point = _point_north(HOME, 500_000.0)  # C: ~500 km N of A, ~250 km N of B
+    coord._device_location_data["dev"] = _fix(FAR, last_seen=BASE_TS + 3 * 3600)
+    assert (
+        _fuse(
+            coord,
+            _fix(c_point, last_seen=BASE_TS + 3 * 3600 + 60, acc=50.0, is_own=True),
+        )
+        is True
+    )
+    assert "dev" not in coord._round_trip_anchors  # stale anchor invalidated
+    # Step 3: a stale crowd echo near A is now rejected (no anchor to recover on).
+    coord._device_location_data["dev"] = _fix(
+        c_point, last_seen=BASE_TS + 3 * 3600 + 60
+    )
+    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 3 * 3600 + 120, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
+
+
+def test_anchor_dropped_when_accuracy_less_jump_supersedes_it() -> None:
+    """The bypass drop also fires for an accuracy-less supersede (F-FABLE-2).
+
+    Second leg of the drop path (sibling of the own-report case): a gated crowd
+    jump A->B seeds anchor A, then an accuracy-less clear jump B->C (bypasses the
+    gate via ``not new_acc_measured``) supersedes it. The anchor must be dropped
+    so a later stale echo near A cannot roll the tracker back off C. Guards the
+    bottom-pop over the second bypass channel, not only the own-report one.
+
+    Mutation guard: without the drop, step 3's echo near A is recovered.
+    """
+    # Step 1: gated crowd jump A(HOME)->B(FAR) seeds anchor A.
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
+    assert _fuse(coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0)) is True
+    assert coord._round_trip_anchors["dev"]["lat"] == HOME[0]
+    # Step 2: accuracy-less clear jump B->C (acc=0.0 sentinel) supersedes it.
+    c_point = _point_north(HOME, 500_000.0)
+    coord._device_location_data["dev"] = _fix(FAR, last_seen=BASE_TS + 3 * 3600)
+    assert (
+        _fuse(coord, _fix(c_point, last_seen=BASE_TS + 3 * 3600 + 60, acc=0.0)) is True
+    )
+    assert "dev" not in coord._round_trip_anchors  # stale anchor invalidated
+    # Step 3: a stale crowd echo near A is rejected (no anchor to recover on).
+    coord._device_location_data["dev"] = _fix(
+        c_point, last_seen=BASE_TS + 3 * 3600 + 60
+    )
+    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 3 * 3600 + 120, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
 
 
 # ------------------------------------------------------------------ recovery (3,4,7,8)
