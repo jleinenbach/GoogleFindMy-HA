@@ -879,6 +879,7 @@ def _purge_ready(c: Any) -> dict[str, list[Any]]:
     c._is_on_hass_loop = lambda: True
     c._device_location_data = {"dev": {"x": 1}}
     c._device_last_good_location = {"dev": {}}
+    c._round_trip_anchors = {"dev": {"lat": 1.0, "lon": 2.0, "ts": 3.0}}
     c._device_update_history = {"dev": []}
     c._device_interval_history = {"dev": []}
     c._ensure_device_name_cache = lambda: {"dev": "Name"}
