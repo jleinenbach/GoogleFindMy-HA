@@ -982,19 +982,23 @@ class CacheOperations(_MixinBase):
         # limit of a forward speed gate (Q2 round-trip gate would catch it).
         if dist > radius_sum:
             incoming_is_own = bool(new_data.get("is_own_report"))
-            # Only gate a fix that carries a real measured accuracy. An
-            # accuracy-less crowd report (new_acc_raw is None) is not a clean
-            # teleport discriminant - the decoder strips the accuracy number
-            # (acc_rank=-inf) - and must fall through so the downstream
-            # sanitization in _is_significant_update can flag it estimated
-            # (accuracy_estimated=True). Hard-dropping it here would regress the
-            # #1181 last-good protection; that path is already guarded by
-            # is_reliable_fix, not by this gate.
-            if (
-                self._speed_gate_enabled()
-                and not incoming_is_own
-                and new_acc_raw is not None
-            ):
+            # Only gate a fix that carries a REAL measured accuracy. A crowd
+            # report is "accuracy-less" not only when the key is missing
+            # (new_acc_raw is None) but also when it carries Android's
+            # no-accuracy sentinel (0.0) or any sub-physical/non-finite value
+            # (< MIN_PHYSICAL_ACCURACY_M) - the same error-code set that
+            # _safe_accuracy() maps to the 200m fallback. Such a fix is not a
+            # clean teleport discriminant and must fall through so the
+            # downstream sanitization in _is_significant_update can flag it
+            # estimated (accuracy_estimated=True). Hard-dropping it here would
+            # regress the #1181 last-good protection; that path is already
+            # guarded by is_reliable_fix, not by this gate.
+            new_acc_measured = (
+                new_acc_raw is not None
+                and math.isfinite(new_acc_raw)
+                and new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
+            )
+            if self._speed_gate_enabled() and not incoming_is_own and new_acc_measured:
                 existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
                 new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
                 if existing_ts is not None and new_ts is not None:

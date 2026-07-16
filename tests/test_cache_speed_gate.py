@@ -336,3 +336,35 @@ def test_accuracy_less_crowd_fix_bypasses_gate() -> None:
     result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, acc=None, is_own=False))
     assert result is True
     coord.increment_stat.assert_not_called()
+
+
+# ------------------------------------ invalid-accuracy sentinel bypass (21-22)
+
+
+def test_sentinel_zero_accuracy_crowd_fix_bypasses_gate() -> None:
+    """A crowd fix with Android's no-accuracy sentinel (0.0) falls through.
+
+    Codex review of 5bfeafd: ``accuracy=0.0`` coerces to a non-None float, so a
+    guard testing only ``new_acc_raw is not None`` would still hard-drop the fix
+    before _is_significant_update can sanitize it into accuracy_estimated=True.
+    The sentinel belongs to the same error-code set that _safe_accuracy() maps
+    to the 200m fallback, so it must be treated as accuracy-less and pass
+    through (result True), leaving the counter untouched.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, acc=0.0, is_own=False))
+    assert result is True
+    coord.increment_stat.assert_not_called()
+
+
+def test_subphysical_accuracy_crowd_fix_bypasses_gate() -> None:
+    """A crowd fix with a sub-physical accuracy (< MIN_PHYSICAL_ACCURACY_M).
+
+    A finite value below the 0.001 m physical floor is also an error code (same
+    branch in _safe_accuracy). It must be treated as accuracy-less and bypass
+    the gate rather than being hard-dropped.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, acc=0.0005, is_own=False))
+    assert result is True
+    coord.increment_stat.assert_not_called()
