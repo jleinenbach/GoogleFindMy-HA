@@ -230,3 +230,30 @@ def test_disabled_toggle_no_recovery_and_no_anchor() -> None:
     result2 = _fuse(coord2, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0))
     assert result2 is True
     assert coord2._round_trip_anchors == {}
+
+
+def test_no_anchor_when_speed_gate_disabled() -> None:
+    """Anchor-set is gated on the speed gate: gate off -> no anchor accumulates.
+
+    The recovery path only runs inside the gate's reject branch, so an anchor set
+    while the gate is off could never be consumed. It must therefore not be set.
+    """
+    coord = _coord(_fix(HOME, last_seen=BASE_TS), gate_enabled=False, rt_enabled=True)
+    result = _fuse(coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0))
+    assert result is True
+    assert coord._round_trip_anchors == {}
+
+
+def test_out_of_order_return_not_recovered() -> None:
+    """A return whose timestamp precedes the anchor (delta < 0) is not recovered.
+
+    Guards against a rewound/out-of-order timestamp being read as an instant
+    round trip; the anchor is dropped and the gate rejects as usual.
+    """
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS + 600)}}
+    coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
+    # new_ts (BASE_TS + 300) < anchor ts (BASE_TS + 600) -> delta_anchor < 0.
+    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 300, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
+    assert "dev" not in coord._round_trip_anchors  # housekeeping pop

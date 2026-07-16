@@ -1099,8 +1099,16 @@ class CacheOperations(_MixinBase):
             # bollwerk. DF-2: the incoming fix is intentionally NOT re-checked
             # against is_reliable_fix here; is_reliable_fix guards only the anchor
             # source A, not the returning fix (that one already cleared the
-            # new_acc_measured precondition above).
-            if self._round_trip_confirm_enabled() and is_reliable_fix(existing):
+            # new_acc_measured precondition above). Gated on _speed_gate_enabled()
+            # too: the anchor can only ever be consumed inside the gate's reject
+            # branch, so setting one while the gate is off would just accumulate
+            # dead state that is never recovered - symmetric with the recovery
+            # path, which also sits behind _speed_gate_enabled().
+            if (
+                self._speed_gate_enabled()
+                and self._round_trip_confirm_enabled()
+                and is_reliable_fix(existing)
+            ):
                 anchor_ts = _normalize_epoch_seconds(existing.get("last_seen"))
                 if anchor_ts is not None:
                     # Lazy-init mirroring _record_last_good_location so a
