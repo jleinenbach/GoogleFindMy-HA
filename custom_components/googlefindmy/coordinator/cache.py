@@ -982,7 +982,19 @@ class CacheOperations(_MixinBase):
         # limit of a forward speed gate (Q2 round-trip gate would catch it).
         if dist > radius_sum:
             incoming_is_own = bool(new_data.get("is_own_report"))
-            if self._speed_gate_enabled() and not incoming_is_own:
+            # Only gate a fix that carries a real measured accuracy. An
+            # accuracy-less crowd report (new_acc_raw is None) is not a clean
+            # teleport discriminant - the decoder strips the accuracy number
+            # (acc_rank=-inf) - and must fall through so the downstream
+            # sanitization in _is_significant_update can flag it estimated
+            # (accuracy_estimated=True). Hard-dropping it here would regress the
+            # #1181 last-good protection; that path is already guarded by
+            # is_reliable_fix, not by this gate.
+            if (
+                self._speed_gate_enabled()
+                and not incoming_is_own
+                and new_acc_raw is not None
+            ):
                 existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
                 new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
                 if existing_ts is not None and new_ts is not None:

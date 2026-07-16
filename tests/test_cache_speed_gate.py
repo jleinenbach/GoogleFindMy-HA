@@ -72,7 +72,7 @@ def _existing(*, last_seen: Any = BASE_TS, acc: float = 20.0) -> dict[str, Any]:
 def _incoming(
     *,
     last_seen: Any = BASE_TS,
-    acc: float = 50.0,
+    acc: float | None = 50.0,
     is_own: Any = False,
     lat: float = FAR[0],
     lon: float = FAR[1],
@@ -313,3 +313,26 @@ def test_basic_list_seed_carries_no_coordinates() -> None:
             entry.get("latitude") is not None and entry.get("longitude") is not None
         )
         assert not (bool(entry.get("is_own_report")) and has_coords)
+
+
+# ----------------------------------------- accuracy-less bypass guard (20, #1181)
+
+
+def test_accuracy_less_crowd_fix_bypasses_gate() -> None:
+    """An accuracy-less crowd fix falls through the gate (regression #1181).
+
+    A far crowd fix without a measured accuracy (accuracy=None) is not a clean
+    teleport discriminant: the decoder strips the accuracy number (acc_rank
+    = -inf) and the downstream _is_significant_update sanitization flags it
+    ``accuracy_estimated=True``. Hard-dropping it here via ``return False`` would
+    skip that sanitization and break the last-good protection asserted by
+    tests/test_plus_code_last_known.py. The reliable last-good stays protected by
+    is_reliable_fix, independent of this gate, so the fix must pass through
+    (result True) and the reject counter must NOT fire. This is the mutation
+    guard for the ``new_acc_raw is not None`` clause: without it the result would
+    be False.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, acc=None, is_own=False))
+    assert result is True
+    coord.increment_stat.assert_not_called()
