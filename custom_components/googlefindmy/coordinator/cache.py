@@ -981,7 +981,18 @@ class CacheOperations(_MixinBase):
         # plausible); a post-offline teleport passing ungated is the inherent
         # limit of a forward speed gate (Q2 round-trip gate would catch it).
         if dist > radius_sum:
-            incoming_is_own = bool(new_data.get("is_own_report"))
+            # Own-report bypass keyed off CRYPTOGRAPHIC provenance, not the raw
+            # server flag: a network/foreign report can carry a spurious
+            # server-supplied is_own_report=True (this integration's own uploader
+            # stamps network reports that way, decrypt_locations.py:1991-1998).
+            # The decrypt layer already hardens is_own_report = is_own_report and
+            # not is_network_report (decrypted_location.py:39); mirror that
+            # invariant here so a spoofed own-flag on a network teleport cannot
+            # skip the gate on any path. Absent is_network_report is treated as
+            # not-network (genuine own reports never carry the network flag).
+            incoming_is_own = bool(new_data.get("is_own_report")) and not bool(
+                new_data.get("is_network_report")
+            )
             # Only gate a fix that carries a REAL measured accuracy. A crowd
             # report is "accuracy-less" not only when the key is missing
             # (new_acc_raw is None) but also when it carries Android's

@@ -368,3 +368,39 @@ def test_subphysical_accuracy_crowd_fix_bypasses_gate() -> None:
     result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, acc=0.0005, is_own=False))
     assert result is True
     coord.increment_stat.assert_not_called()
+
+
+# ------------------------------ cryptographic own-report provenance (23-24)
+
+
+def test_spoofed_network_own_flag_is_gated() -> None:
+    """A network report with a spoofed is_own_report=True is still gated.
+
+    Codex review of 74600c2: this integration's crowdsourced uploader stamps
+    network reports with is_own_report=True while they carry a non-empty
+    publicKeyRandom (decrypt_locations.py:1991-1998). The decrypt layer hardens
+    is_own_report = is_own_report and not is_network_report
+    (decrypted_location.py:39); the gate mirrors that invariant so a spoofed
+    own-flag on an impossible teleport cannot skip the gate. With both flags set
+    the fix is treated as a crowd report and the teleport is rejected.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS))
+    fix = _incoming(last_seen=BASE_TS + 300, is_own=True)
+    fix["is_network_report"] = True
+    result = _fuse(coord, fix)
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
+
+
+def test_genuine_own_report_without_network_flag_bypasses() -> None:
+    """A genuine own report (is_own_report=True, no network flag) bypasses.
+
+    Mutation guard for the ``not bool(new_data.get("is_network_report"))``
+    clause: a real own GPS fix never carries the network flag, so an absent
+    is_network_report must be treated as not-network and keep the bypass intact
+    (result True, counter untouched) even at teleport speed.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, is_own=True))
+    assert result is True
+    coord.increment_stat.assert_not_called()
