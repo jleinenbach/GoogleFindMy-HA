@@ -94,16 +94,45 @@ def _fuse(coord: MagicMock, new_data: dict[str, Any]) -> bool:
 
 
 def test_far_jump_accept_sets_anchor() -> None:
-    """An accepted wide jump A->B remembers A as a return anchor (R1)."""
+    """An accepted wide jump A->B remembers A as a return anchor (R1).
+
+    The anchor ``ts`` is the ACCEPTED B update's time (F-CODEX-5), not A's
+    last_seen, so the TTL clock starts at the jump, not in the past.
+    """
     coord = _coord(_fix(HOME, last_seen=BASE_TS))
     # dt = 3 h -> implied speed ~23 m/s -> plausible -> accepted (not gated).
-    result = _fuse(coord, _fix(FAR, last_seen=BASE_TS + 3 * 3600, acc=50.0))
+    b_ts = BASE_TS + 3 * 3600
+    result = _fuse(coord, _fix(FAR, last_seen=b_ts, acc=50.0))
     assert result is True
     assert coord._round_trip_anchors["dev"] == {
         "lat": HOME[0],
         "lon": HOME[1],
-        "ts": float(BASE_TS),
+        "ts": float(b_ts),
     }
+
+
+def test_stale_offline_jump_then_return_recovers() -> None:
+    """F-CODEX-5 end-to-end: a device offline for 3 h jumps to B, then returns
+    near A 300 s later. The anchor TTL must run from B (accept time), not from
+    A's stale last_seen; otherwise the anchor is born ~3 h expired and this
+    motivating stale-offline return is stranded.
+
+    Mutation guard: on the pre-fix code (anchor ts = A.last_seen) both the ts
+    assertion and the recovery ``result is True`` fail (delta_anchor would be
+    3 h + 300 s = 11100 s, well past the 900 s TTL).
+    """
+    b_ts = BASE_TS + 3 * 3600  # B seen 3 h after A's (stale) last_seen
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
+    # A->B accepted (low implied speed over 3 h) -> A remembered as anchor.
+    assert _fuse(coord, _fix(FAR, last_seen=b_ts, acc=50.0)) is True
+    # Anchor ts is the accept time (B), not A's stale last_seen.
+    assert coord._round_trip_anchors["dev"]["ts"] == float(b_ts)
+    # The device now sits at B; a correction back near A arrives 300 s after B
+    # (well within the 900 s TTL) but is a kinematic teleport B->A -> recover.
+    coord._device_location_data["dev"] = _fix(FAR, last_seen=b_ts)
+    result = _fuse(coord, _fix(HOME, last_seen=b_ts + 300, acc=50.0))
+    assert result is True
+    assert "dev" not in coord._round_trip_anchors  # one-shot consumed
 
 
 def test_anchor_not_set_for_estimated_existing() -> None:
@@ -114,11 +143,17 @@ def test_anchor_not_set_for_estimated_existing() -> None:
     assert "dev" not in coord._round_trip_anchors
 
 
-def test_anchor_not_set_when_existing_has_no_last_seen() -> None:
-    """Existing without last_seen -> anchor_ts is None -> no anchor (Fall 10)."""
-    coord = _coord(_fix(HOME, last_seen=None))
-    # Missing existing timestamp: the speed gate falls through to accept.
-    result = _fuse(coord, _fix(FAR, last_seen=BASE_TS + 300, acc=50.0))
+def test_anchor_not_set_when_incoming_has_no_last_seen() -> None:
+    """Incoming B without last_seen -> anchor_ts is None -> no anchor (Fall 10).
+
+    The anchor TTL clock derives from the accepted B fix (F-CODEX-5), so a B
+    without a timestamp cannot seed a timestamped anchor even though A is a
+    reliable fix. (A's own last_seen is irrelevant to the anchor ts now.)
+    """
+    coord = _coord(_fix(HOME, last_seen=BASE_TS))
+    # Incoming timestamp missing: the speed gate falls through to accept, and
+    # the anchor ts (sourced from B) is None -> no anchor is remembered.
+    result = _fuse(coord, _fix(FAR, last_seen=None, acc=50.0))
     assert result is True
     assert "dev" not in coord._round_trip_anchors
 

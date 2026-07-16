@@ -1104,12 +1104,24 @@ class CacheOperations(_MixinBase):
             # branch, so setting one while the gate is off would just accumulate
             # dead state that is never recovered - symmetric with the recovery
             # path, which also sits behind _speed_gate_enabled().
+            #
+            # Anchor TTL clock (F-CODEX-5): the anchor's ``ts`` is the time this
+            # A->B jump is ACCEPTED, i.e. the incoming B fix's last_seen, NOT A's
+            # last_seen. The recovery check compares the return fix's new_ts
+            # against this ts (both in report-timestamp space), so anchoring on
+            # A's last_seen would start the TTL in the past: exactly the wide
+            # jumps this hatch targets are accepted because delta_t = new_ts(B) -
+            # last_seen(A) is large, and when that delta already exceeds the TTL
+            # (the stale/offline device coming back online) the anchor would be
+            # born expired and never recover. B's last_seen keeps the units
+            # consistent with the recovery delta and starts the window at the
+            # false report. The anchored COORDINATES stay A's (the return target).
             if (
                 self._speed_gate_enabled()
                 and self._round_trip_confirm_enabled()
                 and is_reliable_fix(existing)
             ):
-                anchor_ts = _normalize_epoch_seconds(existing.get("last_seen"))
+                anchor_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
                 if anchor_ts is not None:
                     # Lazy-init mirroring _record_last_good_location so a
                     # __new__-built coordinator needs no extra wiring.
