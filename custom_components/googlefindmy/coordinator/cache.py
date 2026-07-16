@@ -23,7 +23,14 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
-from ..const import _EID_REFRESH_DEBOUNCE_S, DATA_EID_RESOLVER, DOMAIN
+from ..const import (
+    _EID_REFRESH_DEBOUNCE_S,
+    DATA_EID_RESOLVER,
+    DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+    DEFAULT_SPEED_GATE_ENABLED,
+    DOMAIN,
+    OPT_SPEED_GATE_ENABLED,
+)
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
@@ -849,6 +856,15 @@ class CacheOperations(_MixinBase):
         """Calculate the great-circle distance between two points (meters)."""
         return _haversine_distance_impl(lat1, lon1, lat2, lon2)
 
+    def _speed_gate_enabled(self) -> bool:
+        """Return whether the kinematic speed gate is active (Discussion #177)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_SPEED_GATE_ENABLED
+        return bool(
+            entry.options.get(OPT_SPEED_GATE_ENABLED, DEFAULT_SPEED_GATE_ENABLED)
+        )
+
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -948,8 +964,43 @@ class CacheOperations(_MixinBase):
         ):
             return True
 
-        # Clear jump - no overlap, accept as-is
+        # Clear jump - no overlap. Before accepting, apply the kinematic
+        # plausibility gate (Discussion #177): a single FMDN crowd report can
+        # land far away with huge uncertainty ("teleport"). Reject a far jump
+        # whose implied speed is physically impossible. Falls through to accept
+        # when speed is not computable (missing/degenerate timestamps) so no
+        # regression occurs. Own-report GPS fixes bypass the gate entirely: they
+        # are cryptographically trusted device positions that do not teleport,
+        # so gating them would only risk false-blocking genuine fast travel.
+        # Placement rationale (F3): the gate sits AFTER the trusted-anchor and
+        # #155 double-fallback branches on purpose - those return earlier because
+        # a semantic anchor has no kinematics and two 200m fallback circles give
+        # radii too unreliable to gate on (would risk false-blocks, F4-a).
+        # dt limit (F5): after a long offline gap dt is huge, implied_speed tiny,
+        # so the gate never fires - intended (slow travel over long time is
+        # plausible); a post-offline teleport passing ungated is the inherent
+        # limit of a forward speed gate (Q2 round-trip gate would catch it).
         if dist > radius_sum:
+            incoming_is_own = bool(new_data.get("is_own_report"))
+            if self._speed_gate_enabled() and not incoming_is_own:
+                existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
+                new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
+                if existing_ts is not None and new_ts is not None:
+                    delta_t = new_ts - existing_ts
+                    if delta_t > 0:
+                        implied_speed = dist / delta_t
+                        if implied_speed > DEFAULT_MAX_PLAUSIBLE_SPEED_MPS:
+                            self.increment_stat("speed_gate_rejects")
+                            _LOGGER.debug(
+                                "Speed gate rejected crowd fix %s: %.0fm in "
+                                "%.0fs = %.1fm/s > %.1fm/s cap",
+                                device_id,
+                                dist,
+                                delta_t,
+                                implied_speed,
+                                DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+                            )
+                            return False
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting
