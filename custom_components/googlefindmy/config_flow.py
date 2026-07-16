@@ -94,6 +94,7 @@ from .const import (
     DEFAULT_LOCATION_POLL_INTERVAL,
     DEFAULT_MAP_VIEW_TOKEN_EXPIRATION,
     DEFAULT_OPTIONS,
+    DEFAULT_ROUNDTRIP_CONFIRM,
     DEFAULT_SEMANTIC_DETECTION_RADIUS,
     DEFAULT_SHOW_LOCATION_AGE,
     DEFAULT_SPEED_GATE_ENABLED,
@@ -109,6 +110,7 @@ from .const import (
     OPT_LOCATION_POLL_INTERVAL,
     OPT_MAP_VIEW_TOKEN_EXPIRATION,
     OPT_OPTIONS_SCHEMA_VERSION,
+    OPT_ROUNDTRIP_CONFIRM,
     OPT_SEMANTIC_LOCATIONS,
     OPT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED,
@@ -5448,6 +5450,9 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             OPT_SPEED_GATE_ENABLED: _get(
                 OPT_SPEED_GATE_ENABLED, DEFAULT_SPEED_GATE_ENABLED
             ),
+            OPT_ROUNDTRIP_CONFIRM: _get(
+                OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM
+            ),
         }
         if (
             OPT_GOOGLE_HOME_FILTER_ENABLED is not None
@@ -5572,6 +5577,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         )
         _register(vol.Optional(OPT_SHOW_LOCATION_AGE), bool)
         _register(vol.Optional(OPT_SPEED_GATE_ENABLED), bool)
+        _register(vol.Optional(OPT_ROUNDTRIP_CONFIRM), bool)
 
         base_schema = vol.Schema(fields)
         schema_with_defaults = self.add_suggested_values_to_schema(base_schema, current)
