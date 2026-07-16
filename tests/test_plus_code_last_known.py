@@ -494,6 +494,7 @@ async def test_purge_device_drops_last_good() -> None:
     old Plus Code/coordinates (Codex PR #1181)."""
     coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coord._device_location_data = {}
+    coord._round_trip_anchors = {"dev-1": {"lat": 1.0, "lon": 2.0, "ts": 3.0}}
     coord._device_update_history = {"dev-1": None}
     coord._device_interval_history = {"dev-1": [1.0]}
     coord._device_caps = {}
@@ -520,5 +521,6 @@ async def test_purge_device_drops_last_good() -> None:
     # Last-good, current row and the device-id-keyed timing caches are gone.
     assert coord.get_display_location_data("dev-1") is None
     assert "dev-1" not in coord._device_last_good_location
+    assert "dev-1" not in coord._round_trip_anchors
     assert "dev-1" not in coord._device_update_history
     assert "dev-1" not in coord._device_interval_history
