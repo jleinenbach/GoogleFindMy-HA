@@ -209,3 +209,12 @@ def test_workflow_checks_out_published_tag() -> None:
         "stamp push must resolve the owning branch from the tag commit, "
         "not trust the stale target_commitish"
     )
+    # The resolution must NOT fall back to the stale event hint as a tiebreaker:
+    # when the tag sits on several branches (e.g. main + 1.7 on a non-diverged
+    # maintenance line) the stale target_commitish could steer the stamp to the
+    # wrong branch. Only an unambiguous single owner is stamped; zero or several
+    # owners skip safely (CA-WORKFLOW-EVENT-PAYLOAD-CONTRACT-001).
+    assert "TARGET_BRANCH" not in wf, (
+        "branch resolution must not use the stale target_commitish hint at all; "
+        "the tiebreaker could pick the wrong branch when the tag has several owners"
+    )

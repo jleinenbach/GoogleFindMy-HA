@@ -47,7 +47,6 @@ jobs:
 
     env:
       TAG_NAME: ${{ github.event.release.tag_name }}
-      TARGET_BRANCH: ${{ github.event.release.target_commitish }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -111,7 +110,9 @@ jobs:
           # target_commitish is an unreliable hint: GitHub documents it as unused
           # once the git tag already exists, defaulting to the repo default branch
           # (which only coincidentally equals the maintenance line on some forks).
-          # So resolve the branch from the tag commit itself, and fast-forward only.
+          # So resolve the branch solely from the tag commit itself and never trust
+          # the event hint as a tiebreaker: stamp only when exactly one branch owns
+          # the tag, and fast-forward only.
           git fetch origin '+refs/heads/*:refs/remotes/origin/*' --quiet
           TAG_SHA="$(git rev-list -n1 "refs/tags/${TAG_NAME}")"
           mapfile -t CANDIDATES < <(
@@ -121,8 +122,6 @@ jobs:
           )
           if [ "${#CANDIDATES[@]}" -eq 0 ]; then
             STAMP_BRANCH=""
-          elif printf '%s\n' "${CANDIDATES[@]}" | grep -qxF "$TARGET_BRANCH"; then
-            STAMP_BRANCH="$TARGET_BRANCH"          # event hint is a real owning branch; honor it
           elif [ "${#CANDIDATES[@]}" -eq 1 ]; then
             STAMP_BRANCH="${CANDIDATES[0]}"        # unambiguous single owner
           else
