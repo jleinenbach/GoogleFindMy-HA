@@ -22,10 +22,13 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from custom_components.googlefindmy.const import (
     ROUND_TRIP_ANCHOR_RADIUS_M,
     ROUND_TRIP_TTL_S,
 )
+from custom_components.googlefindmy.coordinator import GoogleFindMyCoordinator
 from custom_components.googlefindmy.coordinator.cache import (
     CacheOperations,
     _haversine_distance_impl,
@@ -345,11 +348,17 @@ def test_no_anchor_when_speed_gate_disabled() -> None:
     assert coord._round_trip_anchors == {}
 
 
-def test_out_of_order_return_not_recovered() -> None:
-    """A return whose timestamp precedes the anchor (delta < 0) is not recovered.
+def test_out_of_order_echo_preserves_anchor() -> None:
+    """An out-of-order echo (delta_anchor < 0) must NOT drop the anchor (F-FABLE-1).
 
-    Guards against a rewound/out-of-order timestamp being read as an instant
-    round trip; the anchor is dropped and the gate rejects as usual.
+    A delayed/out-of-order report near A can carry a last_seen BETWEEN A and B,
+    so its new_ts precedes the anchor ts (delta_anchor < 0). That is not an
+    expiry: popping the anchor here would destroy it and strand a later genuine
+    return. The echo is still gated (rejected as a teleport), but the anchor
+    survives for a later legitimate forward return.
+
+    Mutation guard: on the pre-fix code the housekeeping pop was unconditional,
+    so the anchor was dropped here and this ``"dev" in anchors`` assertion failed.
     """
     anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS + 600)}}
     coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
@@ -357,4 +366,284 @@ def test_out_of_order_return_not_recovered() -> None:
     result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 300, acc=50.0))
     assert result is False
     coord.increment_stat.assert_called_once_with("speed_gate_rejects")
-    assert "dev" not in coord._round_trip_anchors  # housekeeping pop
+    # The anchor is preserved (forward-only housekeeping); still keyed on "dev".
+    assert coord._round_trip_anchors["dev"] == {
+        "lat": HOME[0],
+        "lon": HOME[1],
+        "ts": float(BASE_TS + 600),
+    }
+
+
+def test_out_of_order_echo_then_forward_return_recovers() -> None:
+    """A genuine forward return recovers after an out-of-order echo preserved the
+    anchor (F-FABLE-1 end-to-end).
+
+    The speed gate only evaluates a jump when the incoming fix is forward of the
+    cached endpoint (``new_ts > existing_ts``). To exercise a gated out-of-order
+    echo whose new_ts still precedes the anchor ts (delta_anchor < 0), the anchor
+    ts must sit AFTER the cached endpoint's last_seen - the realistic case where
+    the cached row is an older B fix while the anchor was seeded at the later
+    accept time. Both echo and forward return are gated (teleport B->A); the echo
+    (delta_anchor < 0) must LEAVE the anchor alive, and the later forward return
+    (delta_anchor >= 0, within TTL + radius) then recovers and consumes it.
+
+    Mutation guard: on the pre-fix code the out-of-order echo popped the anchor
+    unconditionally, so the later forward return finds no anchor, is gated, and
+    ``result is False`` (the stranded-return bug this guard closes).
+    """
+    anchor_ts = BASE_TS + 60
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(anchor_ts)}}
+    # Cached endpoint B carries an OLDER last_seen than the anchor ts, so a fix
+    # between the two is forward of B (gate fires) yet before the anchor.
+    coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
+
+    # Step 1: an out-of-order echo near A at BASE_TS + 30: forward of B
+    # (delta_t = 30 s -> ~8333 m/s, gated) but before the anchor ts
+    # (delta_anchor = 30 - 60 = -30 < 0). It must be rejected AND preserve the
+    # anchor.
+    assert _fuse(coord, _fix(HOME, last_seen=BASE_TS + 30, acc=50.0)) is False
+    assert coord._round_trip_anchors["dev"]["ts"] == float(anchor_ts)  # alive
+
+    # Step 2: a legitimate forward return near A at BASE_TS + 300: still forward
+    # of B (delta_t = 300 s -> ~833 m/s, gated) and now after the anchor ts
+    # (delta_anchor = 240 s, within the 900 s TTL, on the anchor) -> recovered
+    # and consumed one-shot.
+    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 300, acc=50.0))
+    assert result is True
+    coord.increment_stat.assert_called_with("round_trip_recoveries")
+    assert "dev" not in coord._round_trip_anchors  # one-shot consumed
+
+
+# ------------------------------------------- supersede detection (F-FABLE-2, AP-2)
+
+
+def test_own_report_clear_jump_marks_supersede_with_anchor() -> None:
+    """An own-report clear jump with a surviving anchor marks the slot (F-FABLE-2).
+
+    A trusted own-report that is itself a clear jump (dist > radius_sum) away
+    from the previous position is a genuine relocation B->C. A pre-existing
+    anchor A (from an earlier gated crowd jump) is now stale, so fusion marks
+    ``_supersede_round_trip_anchor`` on ``new_data`` for update_device_cache to
+    consume post-commit. The own-report itself still bypasses the speed gate and
+    is accepted (result True), never seeding or consuming the anchor here.
+    """
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS)}}
+    coord = _coord(_fix(FAR, last_seen=BASE_TS, acc=50.0), anchors=anchors)
+    new_data = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0, is_own=True)
+    # HOME vs cached FAR is a clear jump; own-report -> gate bypassed.
+    result = _fuse(coord, new_data)
+    assert result is True
+    assert new_data.get("_supersede_round_trip_anchor") is True
+    # Fusion neither consumes nor seeds the anchor: the action is deferred.
+    assert coord._round_trip_anchors == anchors
+
+
+def test_own_report_clear_jump_without_anchor_sets_no_marker() -> None:
+    """Without a surviving anchor an own-report clear jump sets no marker."""
+    coord = _coord(_fix(FAR, last_seen=BASE_TS, acc=50.0))  # no anchors
+    new_data = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0, is_own=True)
+    result = _fuse(coord, new_data)
+    assert result is True
+    assert "_supersede_round_trip_anchor" not in new_data
+
+
+def test_crowd_clear_jump_sets_no_supersede_marker() -> None:
+    """A crowd (non-own) clear jump never marks supersede, even with an anchor.
+
+    The marker is keyed on ``incoming_is_own``: a crowd report is not a trusted
+    relocation, so it must not invalidate the anchor. (This particular crowd fix
+    lands on the anchor and is recovered, which is the anchor's whole purpose.)
+    """
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS)}}
+    coord = _coord(_fix(FAR, last_seen=BASE_TS, acc=50.0), anchors=anchors)
+    new_data = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0)  # is_own absent
+    _fuse(coord, new_data)
+    assert "_supersede_round_trip_anchor" not in new_data
+
+
+def test_own_report_clear_jump_disabled_toggle_sets_no_marker() -> None:
+    """With the round-trip toggle off, no supersede marker is set."""
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS)}}
+    coord = _coord(
+        _fix(FAR, last_seen=BASE_TS, acc=50.0), rt_enabled=False, anchors=anchors
+    )
+    new_data = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0, is_own=True)
+    result = _fuse(coord, new_data)
+    assert result is True
+    assert "_supersede_round_trip_anchor" not in new_data
+
+
+# ------------------------------- supersede action via update_device_cache (AP-2)
+
+
+def _make_update_coordinator(
+    existing: dict[str, Any],
+    *,
+    anchors: dict[str, dict[str, Any]] | None = None,
+    gate_enabled: bool = True,
+    rt_enabled: bool = True,
+) -> Any:
+    """A coordinator wired for the real ``update_device_cache`` path.
+
+    Mirrors ``tests/test_plus_code_last_known.py::_make_update_coordinator`` but
+    also wires the round-trip anchor store and the two feature toggles the
+    supersede handling reads, so the F-FABLE-2 post-commit action runs through
+    the production commit sequence.
+    """
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {"dev": dict(existing)}
+    coord._device_names = {}
+    coord._device_update_history = {}
+    coord._round_trip_anchors = {} if anchors is None else anchors
+    coord.increment_stat = lambda *_a, **_k: None
+    coord._apply_report_type_cooldown = lambda *_a, **_k: None
+    coord._is_on_hass_loop = lambda: True
+    coord._run_on_hass_loop = lambda *_a, **_k: None
+    coord._speed_gate_enabled = lambda: gate_enabled
+    coord._round_trip_confirm_enabled = lambda: rt_enabled
+    # Seed the reliable fix as the current last-good.
+    coord._record_last_good_location("dev", existing)
+    return coord
+
+
+def test_supersede_action_invalidates_anchor_after_commit() -> None:
+    """F-FABLE-2 action end-to-end: an own-report clear jump B->C invalidates a
+    stale anchor A after committing, so a later stale crowd echo near A cannot
+    roll the tracker back.
+
+    Sequence over the real ``update_device_cache`` commit path:
+    1. A crowd jump A->B is accepted and seeds anchor A (ts = accept time of B).
+    2. An own-report clear jump B->C commits and the post-commit supersede action
+       pops anchor A (device no longer in ``_round_trip_anchors``).
+    3. A later stale crowd echo near A is gated (no anchor to recover on) and is
+       dropped by fusion, so the cached position stays at C.
+
+    Mutation guard: neutralizing the post-commit pop leaves anchor A alive, so
+    step 3's crowd echo recovers onto A and the ``device not in anchors``
+    assertion (and the position-stays-at-C assertion) fail.
+    """
+    # C is a third location, a clear jump north of both HOME (A) and FAR (B).
+    C = (46.000000, 11.400000)
+    t0 = BASE_TS
+    # Step 1: crowd jump A(HOME) -> B(FAR) over 3 h (plausible) seeds anchor A.
+    coord = _make_update_coordinator(_fix(HOME, last_seen=t0, acc=20.0))
+    b_ts = t0 + 3 * 3600
+    coord.update_device_cache("dev", _fix(FAR, last_seen=b_ts, acc=20.0))
+    assert coord._round_trip_anchors["dev"]["lat"] == HOME[0]
+    assert coord._device_location_data["dev"]["latitude"] == FAR[0]
+
+    # Step 2: own-report clear jump B(FAR) -> C over 3 h (own bypasses the gate,
+    # commits) -> post-commit supersede pops anchor A.
+    c_ts = b_ts + 3 * 3600
+    coord.update_device_cache("dev", _fix(C, last_seen=c_ts, acc=20.0, is_own=True))
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(C[0])
+    assert "dev" not in coord._round_trip_anchors  # anchor invalidated
+
+    # Step 3: a stale crowd echo near A arrives quickly after C (teleport speed).
+    # With the anchor gone it cannot recover; fusion rejects it and the cached
+    # position stays at C.
+    coord.update_device_cache("dev", _fix(HOME, last_seen=c_ts + 300, acc=20.0))
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(C[0])
+
+
+def test_supersede_not_triggered_when_significance_rejects() -> None:
+    """F-CODEX-7 non-recurrence: an own-report clear jump that is REJECTED by the
+    significance gate (timestamp regression) must NOT invalidate the anchor.
+
+    The supersede marker is popped early (pre-commit) but the action runs only
+    AFTER the significance gate and the commit. A rejected payload (early return
+    @512) therefore never reaches the pop, so a discarded own-report leaves the
+    anchor intact.
+
+    Mutation guard: moving the pop BEFORE the significance gate (pre-commit)
+    would invalidate the anchor even though the payload is discarded, so this
+    ``anchor survives`` assertion fails.
+    """
+    t0 = BASE_TS
+    # Seed anchor A and place the device at B via a plausible crowd jump.
+    coord = _make_update_coordinator(_fix(HOME, last_seen=t0, acc=20.0))
+    b_ts = t0 + 3 * 3600
+    coord.update_device_cache("dev", _fix(FAR, last_seen=b_ts, acc=20.0))
+    assert coord._round_trip_anchors["dev"]["lat"] == HOME[0]
+
+    # An own-report clear jump to C but with a REGRESSED timestamp (before B):
+    # fusion marks supersede (own clear jump + surviving anchor), yet the
+    # significance gate rejects the payload (new_ts < cached B ts) -> early
+    # return, so the post-commit supersede action never runs.
+    C = (46.000000, 11.400000)
+    regressed_ts = b_ts - 1000  # < cached B last_seen -> significance rejects
+    coord.update_device_cache(
+        "dev", _fix(C, last_seen=regressed_ts, acc=20.0, is_own=True)
+    )
+    # The payload was dropped: cached position stays at B, anchor A survives.
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(FAR[0])
+    assert coord._round_trip_anchors["dev"]["lat"] == HOME[0]
+
+
+# ---------------------- anchor survival across estimated-existing skip (F2, AP-3)
+
+
+def test_anchor_surviving_estimated_skip_expires_by_ttl() -> None:
+    """An anchor that survives an estimated-``existing`` gate skip stays bounded
+    by the existing TTL/radius; it does not become permanently consumable (F2).
+
+    F-CODEX-1 makes the whole gate block fall through when ``existing`` is an
+    estimated fallback (is_reliable_fix False). No consume and no housekeeping pop
+    run on that path, so a pre-existing anchor simply survives UNTOUCHED - it must
+    not thereby gain an extended life. This test pins that the surviving anchor is
+    still only recoverable within ROUND_TRIP_TTL_S: a later return that lands on
+    the anchor coordinates but arrives past the TTL is NOT recovered (it is gated
+    as a normal teleport), proving the survival does not widen the TTL window.
+
+    Mutation guard: none of the AP-3 production edits are asserted positively here
+    (this is a bounding/regression guard); it documents that the estimated-skip
+    path leaves the anchor's TTL semantics unchanged.
+    """
+    anchor_ts = BASE_TS
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(anchor_ts)}}
+
+    # Step 1: a fast crowd fix against an ESTIMATED cached endpoint. F-CODEX-1
+    # makes the gate block fall through entirely (no consume, no pop), so the
+    # anchor survives untouched. existing is FAR/estimated; incoming lands far
+    # from the anchor (at FAR) so even if the gate ran it would not recover.
+    coord = _coord(
+        _fix(FAR, last_seen=BASE_TS, acc=200.0, estimated=True), anchors=anchors
+    )
+    assert _fuse(coord, _fix(FAR, last_seen=BASE_TS + 300, acc=50.0)) is True
+    assert coord._round_trip_anchors["dev"]["ts"] == float(anchor_ts)  # untouched
+
+    # Step 2: the device is now at a RELIABLE B; a return lands exactly on the
+    # anchor coordinates but PAST the TTL (delta_anchor > ROUND_TRIP_TTL_S). The
+    # surviving anchor must not recover it: it is gated as a normal teleport.
+    expired_return_ts = anchor_ts + ROUND_TRIP_TTL_S + 120
+    gated_b_seen = expired_return_ts - 300  # keeps ~833 m/s > cap on the return
+    coord._device_location_data["dev"] = _fix(FAR, last_seen=gated_b_seen, acc=20.0)
+    result = _fuse(coord, _fix(HOME, last_seen=expired_return_ts, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_with("speed_gate_rejects")
+
+
+def test_anchor_surviving_estimated_skip_radius_bounded() -> None:
+    """The anchor that survived an estimated-existing skip is also still
+    radius-bounded: a within-TTL return OUTSIDE the anchor radius does NOT recover
+    (companion to the TTL bound, F2).
+    """
+    anchor_ts = BASE_TS
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(anchor_ts)}}
+    coord = _coord(
+        _fix(FAR, last_seen=BASE_TS, acc=200.0, estimated=True), anchors=anchors
+    )
+    # Estimated-existing skip leaves the anchor untouched.
+    assert _fuse(coord, _fix(FAR, last_seen=BASE_TS + 300, acc=50.0)) is True
+
+    # Device now at a reliable B; a within-TTL return that lands just OUTSIDE the
+    # 200 m radius of the anchor is not recovered.
+    outside = _point_north(HOME, 260.0)
+    assert (
+        _haversine_distance_impl(HOME[0], HOME[1], *outside)
+        > ROUND_TRIP_ANCHOR_RADIUS_M
+    )
+    coord._device_location_data["dev"] = _fix(FAR, last_seen=BASE_TS, acc=20.0)
+    result = _fuse(coord, _fix(outside, last_seen=BASE_TS + 300, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_with("speed_gate_rejects")

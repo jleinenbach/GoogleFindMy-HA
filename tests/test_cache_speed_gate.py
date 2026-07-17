@@ -57,7 +57,9 @@ def _coord(existing: dict[str, Any], *, gate_enabled: bool = True) -> MagicMock:
     return coord
 
 
-def _existing(*, last_seen: Any = BASE_TS, acc: float = 20.0) -> dict[str, Any]:
+def _existing(
+    *, last_seen: Any = BASE_TS, acc: float = 20.0, estimated: bool = False
+) -> dict[str, Any]:
     fix: dict[str, Any] = {
         "latitude": HOME[0],
         "longitude": HOME[1],
@@ -66,6 +68,10 @@ def _existing(*, last_seen: Any = BASE_TS, acc: float = 20.0) -> dict[str, Any]:
     }
     if last_seen is not None:
         fix["last_seen"] = last_seen
+    if estimated:
+        # Mark the cached endpoint as the 200 m estimated fallback (is_reliable_fix
+        # False), the reference F-CODEX-1 protects the incoming report against.
+        fix["accuracy_estimated"] = True
     return fix
 
 
@@ -404,3 +410,38 @@ def test_genuine_own_report_without_network_flag_bypasses() -> None:
     result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, is_own=True))
     assert result is True
     coord.increment_stat.assert_not_called()
+
+
+# ----------------------------- symmetric cached-endpoint guard (F-CODEX-1, AP-3)
+
+
+def test_fast_report_against_estimated_existing_not_gated() -> None:
+    """F-CODEX-1 symmetry: a fast crowd fix against an ESTIMATED cached endpoint
+    is NOT gated (the gate requires BOTH endpoints to be reliable).
+
+    If ``existing`` is the 200 m estimated fallback (accuracy_estimated=True,
+    is_reliable_fix False), the implied speed would be measured against an
+    unreliable phantom reference and strand the tracker on the estimate. The
+    symmetric guard makes the gate fall through, so the incoming report is
+    accepted (result True) and the reject counter stays untouched.
+
+    Mutation guard: removing the ``and is_reliable_fix(existing)`` clause gates
+    this jump again, so ``result is False`` and the counter fires.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS, acc=200.0, estimated=True))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, is_own=False))
+    assert result is True
+    coord.increment_stat.assert_not_called()
+
+
+def test_fast_report_against_reliable_existing_still_gated() -> None:
+    """Regression guard for F-CODEX-1: the SAME fast crowd fix against a reliable
+    (measured, non-estimated) cached endpoint is still gated and rejected.
+
+    Proves the symmetric guard narrows the gate only for estimated references and
+    does not weaken the core speed gate when both endpoints carry real accuracy.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS, acc=20.0, estimated=False))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, is_own=False))
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
