@@ -1,29 +1,36 @@
 name: Release
 
 on:
-  # Release is triggered manually via the Actions UI ("Run workflow"), which lets you
-  # pick the branch (main or any X.Y maintenance line) at run time -- no branch name
-  # is hard-wired here. semantic-release derives the version from git tags plus the
-  # Conventional Commits since the last tag, never from the branch name
-  # (see pyproject.toml [tool.semantic_release]).
+  # Workflow A of the "manual release -> code stamp" handshake.
+  #
+  # Triggered manually via the Actions UI ("Run workflow"), which lets you pick
+  # the branch (main or any X.Y maintenance line) at run time -- no branch name
+  # is hard-wired here. It only PROPOSES the next version and opens a DRAFT
+  # release; it never stamps code, tags, or publishes. semantic-release derives
+  # the proposed version from git tags plus the Conventional Commits since the
+  # last tag, never from the branch name (see pyproject.toml [tool.semantic_release]).
+  #
+  # The maintainer then edits the draft (tag and/or body) and publishes it. That
+  # publish fires release-stamp.yml (Workflow B), which writes the exact chosen
+  # tag into the three version literals. Nothing releases automatically.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (no actual release)"
+        description: "Dry run (preview only, do not create a draft)"
         required: false
         default: "false"
         type: boolean
 
+# Least-privilege: contents:write is all that "gh release create --draft" and
+# the dry-run preview need. Publishing / PR work happens in release-stamp.yml.
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
 
 jobs:
   release:
-    name: Semantic Release
+    name: Propose version and open draft release
     runs-on: ubuntu-latest
-    # Only run on main repo, not forks
+    # Only run on the maintainer forks, not on downstream forks.
     if: github.repository_owner == 'jleinenbach' || github.repository_owner == 'BSkando'
     concurrency:
       group: release
@@ -56,34 +63,43 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Semantic Release (dry run)
+      - name: Preview (dry run)
         if: github.event.inputs.dry_run == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          poetry run semantic-release version --noop
-          poetry run semantic-release changelog --noop
+          set -euo pipefail
+          # Global --noop MUST precede the subcommand in python-semantic-release
+          # v10 (`version --noop` / `changelog --noop` are not valid options).
+          poetry run semantic-release --noop version
+          poetry run semantic-release --noop changelog
 
-      - name: Semantic Release
+      - name: Propose next version and open a draft release
         if: github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The branch this workflow was dispatched on (main or an X.Y line).
+          # Passed via env indirection and used as the draft's --target so the
+          # eventual tag lands on THIS line, not on the repo default branch.
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          poetry run semantic-release version
-          poetry run semantic-release publish
-
-      - name: Create HACS ZIP asset
-        if: github.event.inputs.dry_run != 'true'
-        run: |
-          # Get the latest tag
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$LATEST_TAG" ]; then
-            echo "Creating ZIP for release $LATEST_TAG"
-            cd custom_components
-            zip -r ../googlefindmy.zip googlefindmy
-            cd ..
-            # Upload to the release if it exists
-            gh release upload "$LATEST_TAG" googlefindmy.zip --clobber || true
+          set -euo pipefail
+          # --print only computes and prints the next version; it does not touch
+          # the working tree, tag, or publish (proposal only).
+          PROPOSED="$(poetry run semantic-release version --print)"
+          if [ -z "$PROPOSED" ]; then
+            echo "::error::semantic-release produced no version (is this a release branch matching branches.release?); no draft created"
+            exit 1
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "Proposed next version: $PROPOSED (target branch: $REF_NAME)"
+          # Open a DRAFT release the maintainer can edit (tag and/or notes) before
+          # publishing. --target pins the draft to the dispatched branch so the tag
+          # is created there (not on the default branch). GitHub generates starter
+          # notes; the maintainer refines them. Publishing the draft triggers
+          # release-stamp.yml to stamp the code.
+          if ! gh release create "$PROPOSED" --draft --target "$REF_NAME" \
+              --generate-notes --title "$PROPOSED"; then
+            echo "::error::gh release create failed (does a draft/tag '$PROPOSED' already exist?)"
+            exit 1
+          fi
+          echo "Draft release created for proposed version $PROPOSED on $REF_NAME. Edit and publish it to stamp the code."

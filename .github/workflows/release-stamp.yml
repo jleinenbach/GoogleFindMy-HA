@@ -1,0 +1,134 @@
+name: Release Stamp
+
+# Workflow B of the "manual release -> code stamp" handshake.
+#
+# Fires AFTER a GitHub release is published (whether from the Release workflow's
+# draft or a hand-made releases/new release). It writes the exact published tag
+# into the three version literals (script/stamp_version.py), commits the result
+# with [skip ci], and pushes it protection-aware. The delivered HACS ZIP is
+# rebuilt from the stamped tree so the installed artifact always carries the
+# right number, independent of the (older) tree the git tag points at.
+#
+# Security: values derived from the release event (tag_name, target branch) are
+# passed to shell exclusively via env: indirection and quoted "$VARS" -- never
+# interpolated as ${{ ... }} inside run: blocks (shell-injection hardening).
+#
+# Loop safety: the stamp commit carries [skip ci], and this workflow triggers
+# only on `release: published`, never on `push`. A push made with GITHUB_TOKEN
+# does not, by GitHub design, trigger further workflow runs either.
+
+on:
+  release:
+    types: [published]
+
+# Least-privilege: contents for the stamp push + ZIP upload; pull-requests only
+# for the dormant protected-branch fallback leg (see "Protection-aware push").
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  stamp:
+    name: Stamp published version into code
+    runs-on: ubuntu-latest
+    # Only run on the maintainer forks, not on downstream forks.
+    if: github.repository_owner == 'jleinenbach' || github.repository_owner == 'BSkando'
+    concurrency:
+      group: release-stamp
+      cancel-in-progress: false
+
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name }}
+      TARGET_BRANCH: ${{ github.event.release.target_commitish }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out the release target branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.target_commitish }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate published tag
+        # Early, human-readable abort. The canonical regex (SSOT) lives in
+        # script/stamp_version.py (VERSION_RE); this guard mirrors it so a
+        # malformed tag never reaches the stamp/commit steps. Keep both in sync.
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([ab][0-9]+)?(\.[0-9]+)?$'; then
+            echo "::error::tag_name '$TAG_NAME' violates tag_format='{version}'; expected X.Y.Z[bN][.N], no 'v' prefix"
+            exit 1
+          fi
+          # target_commitish may be a raw commit SHA (release made from a tag
+          # rather than a branch); we must not create a SHA-named branch.
+          if printf '%s' "$TARGET_BRANCH" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "::error::release target_commitish '$TARGET_BRANCH' is a commit SHA, not a branch; cannot stamp-and-push. Publish releases from a branch."
+            exit 1
+          fi
+          echo "tag=$TAG_NAME target=$TARGET_BRANCH"
+
+      - name: Stamp version into the three literals
+        run: |
+          set -euo pipefail
+          python script/stamp_version.py --version "$TAG_NAME"
+
+      - name: Commit the stamp
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "nothing to stamp (version already current); skipping commit"
+            echo "STAMP_COMMITTED=false" >> "$GITHUB_ENV"
+          else
+            git add -A
+            git commit -m "chore(release): ${TAG_NAME} [skip ci]"
+            echo "STAMP_COMMITTED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Protection-aware push
+        if: env.STAMP_COMMITTED == 'true'
+        run: |
+          set -euo pipefail
+          # Preferred path: direct push. Works today because 1.7 / BSkando are
+          # unprotected. If a future branch protection rejects the direct push
+          # (only then), fall back to a short-lived PR + auto-merge.
+          #
+          # Dormant fallback caveats:
+          #   * Auto-merge needs the repo switch allow_auto_merge=true.
+          #   * If the future protection requires a REVIEW, GITHUB_TOKEN cannot
+          #     approve its own PR -> the stamp PR waits for one maintainer
+          #     click per release. If it requires only status checks, auto-merge
+          #     lands it after CI.
+          if git push origin "HEAD:${TARGET_BRANCH}" 2> push_err.log; then
+            echo "direct push to ${TARGET_BRANCH} succeeded"
+          else
+            if grep -qiE 'protected branch|\b403\b|GH006' push_err.log; then
+              echo "direct push blocked by branch protection; using PR fallback"
+              FB_BRANCH="release-stamp/${TAG_NAME}"
+              git push origin "HEAD:${FB_BRANCH}"
+              gh pr create --base "${TARGET_BRANCH}" --head "${FB_BRANCH}" \
+                --title "chore(release): ${TAG_NAME}" \
+                --body "Automated version stamp for release ${TAG_NAME}. [skip ci]"
+              gh pr merge --auto --squash "${FB_BRANCH}" \
+                || echo "::warning::auto-merge unavailable (allow_auto_merge=false?); PR left open for manual merge"
+            else
+              echo "::error::push failed for a non-protection reason:"
+              cat push_err.log
+              exit 1
+            fi
+          fi
+
+      - name: Rebuild and upload the HACS ZIP from the stamped tree
+        run: |
+          set -euo pipefail
+          cd custom_components
+          zip -r ../googlefindmy.zip googlefindmy
+          cd ..
+          gh release upload "$TAG_NAME" googlefindmy.zip --clobber
