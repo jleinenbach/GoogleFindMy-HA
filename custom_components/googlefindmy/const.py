@@ -118,6 +118,7 @@ OPT_DELETE_CACHES_ON_REMOVE: str = "delete_caches_on_remove"
 OPT_STALE_THRESHOLD: str = "stale_threshold"
 OPT_SHOW_LOCATION_AGE: str = "show_location_age"
 OPT_SPEED_GATE_ENABLED: str = "speed_gate_enabled"
+OPT_ROUNDTRIP_CONFIRM: str = "roundtrip_confirm_enabled"
 # Legacy option key - kept for reading old configurations, no longer used
 OPT_STALE_THRESHOLD_ENABLED: str = "stale_threshold_enabled"
 
@@ -138,6 +139,7 @@ OPTION_KEYS: tuple[str, ...] = (
     OPT_STALE_THRESHOLD,
     OPT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED,
+    OPT_ROUNDTRIP_CONFIRM,
 )
 
 # Keys which may exist historically in entry.data and should be soft-copied to entry.options
@@ -264,6 +266,23 @@ DEFAULT_SPEED_GATE_ENABLED: bool = True
 # the gate entirely (crowd-awareness), so this cap only bounds crowd reports.
 DEFAULT_MAX_PLAUSIBLE_SPEED_MPS: float = 400.0
 
+# Round-trip escape hatch (Q2-A, Discussion #177 F-CODEX-4). When the speed gate
+# accepts a wide jump A->B (device seen far away), it remembers A as a return
+# anchor. A later crowd fix that the forward gate would otherwise reject as a
+# "teleport" is accepted instead if it lands back near A within the TTL, which
+# recovers a legitimate return trip without stranding the tracker. Anchor is set
+# only from a reliable A (never an estimated/accuracy-less fix), one-shot, RAM-only.
+DEFAULT_ROUNDTRIP_CONFIRM: bool = True
+# Anchor lifetime (s). 250 km/400 m/s general recovery ~10.4 min < 15 min, so the
+# window bounds A<->B ping-pong from stale echo reports without rejecting a real
+# slow move as a round trip.
+ROUND_TRIP_TTL_S: int = 900
+# Fixed return radius (m). Deliberately NOT radius_sum (which inflates to ~400 m on
+# a double fallback and couples tolerance to unreliable crowd accuracy). Value equals
+# the established BT-tracker fallback DEFAULT_ACCURACY_FALLBACK_M (200.0); kept as an
+# own constant (not an alias) so it stays one-line adjustable.
+ROUND_TRIP_ANCHOR_RADIUS_M: float = 200.0
+
 CONTRIBUTOR_MODE_HIGH_TRAFFIC: str = "high_traffic"
 CONTRIBUTOR_MODE_IN_ALL_AREAS: str = "in_all_areas"
 DEFAULT_CONTRIBUTOR_MODE: str = CONTRIBUTOR_MODE_IN_ALL_AREAS
@@ -290,6 +309,7 @@ DEFAULT_OPTIONS: dict[str, object] = {
     OPT_STALE_THRESHOLD: DEFAULT_STALE_THRESHOLD,
     OPT_SHOW_LOCATION_AGE: DEFAULT_SHOW_LOCATION_AGE,
     OPT_SPEED_GATE_ENABLED: DEFAULT_SPEED_GATE_ENABLED,
+    OPT_ROUNDTRIP_CONFIRM: DEFAULT_ROUNDTRIP_CONFIRM,
 }
 
 # -------------------- Options schema versioning (lightweight) --------------------
@@ -470,6 +490,9 @@ CONFIG_FIELDS: dict[str, dict[str, object]] = {
         "step": 60,
     },
     OPT_SPEED_GATE_ENABLED: {
+        "type": "bool",
+    },
+    OPT_ROUNDTRIP_CONFIRM: {
         "type": "bool",
     },
     # OPT_IGNORED_DEVICES is intentionally omitted: it is managed by a dedicated
@@ -720,11 +743,15 @@ __all__ = [
     "OPT_STALE_THRESHOLD",
     "OPT_SHOW_LOCATION_AGE",
     "OPT_SPEED_GATE_ENABLED",
+    "OPT_ROUNDTRIP_CONFIRM",
     "OPT_STALE_THRESHOLD_ENABLED",
     "MIGRATE_DATA_KEYS_TO_OPTIONS",
     "UPDATE_INTERVAL",
     "DEFAULT_SPEED_GATE_ENABLED",
     "DEFAULT_MAX_PLAUSIBLE_SPEED_MPS",
+    "DEFAULT_ROUNDTRIP_CONFIRM",
+    "ROUND_TRIP_TTL_S",
+    "ROUND_TRIP_ANCHOR_RADIUS_M",
     "DEFAULT_LOCATION_POLL_INTERVAL",
     "DEFAULT_DEVICE_POLL_DELAY",
     "DEFAULT_MIN_POLL_INTERVAL",
