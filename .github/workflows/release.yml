@@ -1,9 +1,11 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  # Release is triggered manually via the Actions UI ("Run workflow"), which lets you
+  # pick the branch (main or any X.Y maintenance line) at run time -- no branch name
+  # is hard-wired here. semantic-release derives the version from git tags plus the
+  # Conventional Commits since the last tag, never from the branch name
+  # (see pyproject.toml [tool.semantic_release]).
   workflow_dispatch:
     inputs:
       dry_run:

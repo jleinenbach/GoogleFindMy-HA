@@ -306,8 +306,10 @@ def test_integration_version_matches_manifest() -> None:
 
     # Extract version from const.py
     const_content = const_path.read_text()
+    # No type annotation on purpose: semantic-release's version_variables regex only
+    # matches `NAME = "x"`, not `NAME: str = "x"` (see const.py / AGENTS.md).
     const_match = re.search(
-        r'INTEGRATION_VERSION:\s*str\s*=\s*["\']([^"\']+)["\']', const_content
+        r'INTEGRATION_VERSION\s*=\s*["\']([^"\']+)["\']', const_content
     )
     assert const_match, "INTEGRATION_VERSION not found in const.py"
     const_version = const_match.group(1)

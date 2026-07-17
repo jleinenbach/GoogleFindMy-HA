@@ -43,8 +43,11 @@ def test_hacs_metadata_matches_manifest(
     assert hacs_metadata["name"] == manifest["name"]
 
     const_text = (integration_root / "const.py").read_text(encoding="utf-8")
-    match = re.search(r'INTEGRATION_VERSION: str = "([^"]+)"', const_text)
-    assert match, "INTEGRATION_VERSION constant missing"
+    # No type annotation: semantic-release's version_variables regex only matches
+    # `NAME = "x"`, not `NAME: str = "x"` (see const.py / AGENTS.md). This pattern
+    # therefore doubles as a guard against re-introducing the annotation.
+    match = re.search(r'INTEGRATION_VERSION = "([^"]+)"', const_text)
+    assert match, "INTEGRATION_VERSION constant missing (or has a type annotation)"
     assert manifest["version"] == INTEGRATION_VERSION == match.group(1)
     assert "homeassistant" not in manifest
 

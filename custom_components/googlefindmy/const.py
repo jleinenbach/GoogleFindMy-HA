@@ -23,11 +23,15 @@ DATA_EID_RESOLVER: Final[Literal["eid_resolver"]] = "eid_resolver"
 CONFIG_ENTRY_VERSION: int = 2
 # Integration version. MUST be bumped together with manifest.json "version" and
 # pyproject.toml [tool.poetry] version on every release; the three are a coupled
-# triple. manifest.json is strict JSON (hassfest-validated) and cannot carry this
-# cross-reference, so the manifest side is anchored in this directory's AGENTS.md
-# ("Version bump touches three files"). pyproject.toml carries the reverse reference
-# in a TOML comment.
-INTEGRATION_VERSION: str = "1.7.13"
+# triple, kept in sync automatically by semantic-release (pyproject.toml
+# [tool.semantic_release] version_variables). manifest.json is strict JSON
+# (hassfest-validated) and cannot carry this cross-reference, so the manifest side is
+# anchored in this directory's AGENTS.md ("Version bump touches three files").
+# pyproject.toml carries the reverse reference in a TOML comment.
+# NOTE: no ": str" annotation on purpose -- semantic-release's version_variables
+# regex only matches `NAME = "x"`, not `NAME: str = "x"`. Re-adding the annotation
+# would silently skip this file on the automated version bump.
+INTEGRATION_VERSION = "1.7.13"
 
 # --------------------------------------------------------------------------------------
 # Shared textual constants

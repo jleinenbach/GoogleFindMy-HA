@@ -3,9 +3,10 @@ name = "googlefindmy-ha"
 # Integration version: coupled triple. MUST be bumped together with
 # custom_components/googlefindmy/const.py INTEGRATION_VERSION and
 # custom_components/googlefindmy/manifest.json "version" on every release.
-# semantic-release manages this value on the `main` branch (see
-# [tool.semantic_release] version_toml below); on release branches it MUST be
-# bumped by hand alongside the other two. Canonical anchor:
+# semantic-release keeps all three in sync automatically on any release line
+# (main and every X.Y maintenance branch) via [tool.semantic_release] version_toml
+# + version_variables below; a manual three-file bump is only a fallback. Canonical
+# anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
 version = "1.7.13"
 description = "Home Assistant integration for Google's Find My Device network."
@@ -517,10 +518,26 @@ confidence = "low"
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:tool.poetry.version"]
-branch = "main"
+# const.py and manifest.json are stamped via version_variables. NOTE: const.py's
+# INTEGRATION_VERSION carries NO type annotation on purpose -- the version_variables
+# regex only matches `NAME = "x"`, not `NAME: str = "x"` (a word token between the
+# name and `=` breaks the match). Do not re-add the annotation.
+version_variables = [
+    "custom_components/googlefindmy/const.py:INTEGRATION_VERSION",
+    "custom_components/googlefindmy/manifest.json:version",
+]
+# Release from any X.Y maintenance line (or main); no hard-wired branch name. The
+# version comes from the last matching git tag (tag_format) plus the Conventional
+# Commits since it, never from the branch name. tag_format has no `v` prefix, matching
+# the recent no-prefix tag convention rather than the ancient `v1.0.x` tags.
+tag_format = "{version}"
 upload_to_pypi = false
 upload_to_release = true
 build_command = "poetry build"
+
+[tool.semantic_release.branches.release]
+# Matches `main` AND any X.Y maintenance line (1.7, 1.8, ...) without naming one.
+match = "^(main|[0-9]+\\.[0-9]+)$"
 
 [tool.semantic_release.commit_parser_options]
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"]
