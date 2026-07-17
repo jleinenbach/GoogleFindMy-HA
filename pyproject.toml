@@ -8,7 +8,7 @@ name = "googlefindmy-ha"
 # + version_variables below; a manual three-file bump is only a fallback. Canonical
 # anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
-version = "1.7.13"
+version = "1.7.14.0"
 description = "Home Assistant integration for Google's Find My Device network."
 readme = "README.md"
 license = "MIT"
