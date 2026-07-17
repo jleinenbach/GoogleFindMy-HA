@@ -98,6 +98,17 @@ jobs:
           # (safe). Real PSR errors still surface loudly in the dry-run preview
           # step above (`--noop version`), which is the diagnostic path.
           REAL_TIP="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+          # Gate REAL_TIP against the canonical PEP 440 version shape (SSOT:
+          # script/stamp_version.py VERSION_RE, byte-mirrored in release-stamp.yml).
+          # A foreign, non-version tag (e.g. `set-release-tag`, `nightly`, `v2`)
+          # is not a valid line tip: it must NOT poison the PSR_LAST != REAL_TIP
+          # comparison below and spuriously route to the hand-tag draft. PEP 440
+          # beta/four-segment tags DO match VERSION_RE, so they are kept and still
+          # trigger MODE=hand on a real stale-base mismatch -- the intended guard.
+          if [ -n "$REAL_TIP" ] && ! printf '%s' "$REAL_TIP" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?([ab][0-9]+)?$'; then
+            echo "::notice::ignoring non-PEP-440 line tip '${REAL_TIP}' for PSR routing (not a version tag)."
+            REAL_TIP=""
+          fi
           PSR_LAST="$(poetry run semantic-release version --print-last-released 2>/dev/null || true)"
 
           MODE=propose
