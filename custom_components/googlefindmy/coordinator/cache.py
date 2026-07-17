@@ -27,9 +27,13 @@ from ..const import (
     _EID_REFRESH_DEBOUNCE_S,
     DATA_EID_RESOLVER,
     DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+    DEFAULT_ROUNDTRIP_CONFIRM,
     DEFAULT_SPEED_GATE_ENABLED,
     DOMAIN,
+    OPT_ROUNDTRIP_CONFIRM,
     OPT_SPEED_GATE_ENABLED,
+    ROUND_TRIP_ANCHOR_RADIUS_M,
+    ROUND_TRIP_TTL_S,
 )
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
@@ -865,6 +869,13 @@ class CacheOperations(_MixinBase):
             entry.options.get(OPT_SPEED_GATE_ENABLED, DEFAULT_SPEED_GATE_ENABLED)
         )
 
+    def _round_trip_confirm_enabled(self) -> bool:
+        """Return whether the round-trip escape hatch is active (Q2-A, #177)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_ROUNDTRIP_CONFIRM
+        return bool(entry.options.get(OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM))
+
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -1017,6 +1028,55 @@ class CacheOperations(_MixinBase):
                     if delta_t > 0:
                         implied_speed = dist / delta_t
                         if implied_speed > DEFAULT_MAX_PLAUSIBLE_SPEED_MPS:
+                            # Round-trip escape hatch (Q2-A, F-CODEX-4): the gate
+                            # is about to reject this jump. If the device is
+                            # returning near a remembered anchor A within the TTL,
+                            # accept it instead - this is a legitimate return trip
+                            # after an earlier accepted wide jump, not a teleport,
+                            # and rejecting it would strand the tracker at the
+                            # stale position. new_ts is guaranteed non-None here
+                            # (the enclosing guard requires it).
+                            # Anchor store is read defensively (getattr) mirroring
+                            # the _record_last_good_location idiom, so coordinators
+                            # built via __new__ (or partial test doubles) need no
+                            # extra wiring; a real coordinator always has it (init).
+                            if self._round_trip_confirm_enabled():
+                                anchors = getattr(self, "_round_trip_anchors", None)
+                                anchor = anchors.get(device_id) if anchors else None
+                                if anchors and anchor is not None:
+                                    delta_anchor = new_ts - anchor["ts"]
+                                    return_dist = _haversine_distance_impl(
+                                        anchor["lat"],
+                                        anchor["lon"],
+                                        new_lat,
+                                        new_lon,
+                                    )
+                                    if (
+                                        0 <= delta_anchor <= ROUND_TRIP_TTL_S
+                                        and return_dist <= ROUND_TRIP_ANCHOR_RADIUS_M
+                                    ):
+                                        # One-shot: consume the anchor so a stale
+                                        # echo near A cannot re-trigger recovery
+                                        # (A<->B ping-pong bollwerk, DF-1). The
+                                        # recovered fix leaves via THIS return, not
+                                        # the accept-path return below, so it never
+                                        # sets a new anchor of its own.
+                                        anchors.pop(device_id, None)
+                                        self.increment_stat("round_trip_recoveries")
+                                        _LOGGER.debug(
+                                            "Round-trip recovery %s: returned "
+                                            "%.0fm from anchor within %.0fs "
+                                            "(<= %.0fs TTL), speed gate bypassed",
+                                            device_id,
+                                            return_dist,
+                                            delta_anchor,
+                                            ROUND_TRIP_TTL_S,
+                                        )
+                                        return True
+                                    # Anchor expired or the fix landed too far
+                                    # from A: drop it (housekeeping) and let the
+                                    # gate reject as usual.
+                                    anchors.pop(device_id, None)
                             self.increment_stat("speed_gate_rejects")
                             _LOGGER.debug(
                                 "Speed gate rejected crowd fix %s: %.0fm in "
@@ -1028,6 +1088,54 @@ class CacheOperations(_MixinBase):
                                 DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
                             )
                             return False
+                        # Accept path: this jump is non-own, carries a real
+                        # measured accuracy, is timestamped and forward
+                        # (delta_t > 0), and the speed gate evaluated it as
+                        # plausible (implied_speed <= cap). Only such a
+                        # gate-vetted jump may seed a return anchor (F-CODEX-6):
+                        # seeding lives INSIDE the gated block so it shares the
+                        # consume branch's exact provenance. An own-report or
+                        # accuracy-less jump bypasses the gate entirely and must
+                        # never seed an anchor that a later stale crowd report
+                        # near A could ride back to (that would roll the tracker
+                        # off a trusted, current B position). The anchor is set
+                        # ONLY from a reliable A: an estimated/accuracy-less A
+                        # carries the 200 m fallback with accuracy_estimated=True
+                        # and must never become a phantom return target (R2, same
+                        # poisoning class _record_last_good already guards).
+                        # RAM-only (R7). DF-1: this is the sole anchor-set site
+                        # and a recovered return fix exits earlier (return True
+                        # above), so it can never seed - the ping-pong bollwerk.
+                        # DF-2: the incoming fix is intentionally NOT re-checked
+                        # against is_reliable_fix here; is_reliable_fix guards
+                        # only the anchor source A, not the returning fix.
+                        #
+                        # Anchor TTL clock (F-CODEX-5): the anchor's ``ts`` is
+                        # ``new_ts`` - the incoming B fix's last_seen, i.e. the
+                        # time this A->B jump is accepted, NOT A's last_seen. The
+                        # recovery check compares the return fix's new_ts against
+                        # this ts (both in report-timestamp space), so anchoring
+                        # on A's last_seen would start the TTL in the past:
+                        # exactly the wide jumps this hatch targets are accepted
+                        # because delta_t = new_ts(B) - last_seen(A) is large,
+                        # and once that delta exceeds the TTL (the stale/offline
+                        # device coming back online) the anchor would be born
+                        # expired and never recover. The anchored COORDINATES
+                        # stay A's (the return target).
+                        if self._round_trip_confirm_enabled() and is_reliable_fix(
+                            existing
+                        ):
+                            # Lazy-init mirroring _record_last_good_location so a
+                            # __new__-built coordinator needs no extra wiring.
+                            anchors = getattr(self, "_round_trip_anchors", None)
+                            if anchors is None:
+                                anchors = {}
+                                self._round_trip_anchors = anchors
+                            anchors[device_id] = {
+                                "lat": existing_lat,
+                                "lon": existing_lon,
+                                "ts": new_ts,
+                            }
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting

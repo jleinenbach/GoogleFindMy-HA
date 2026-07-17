@@ -72,6 +72,7 @@ class _MixinBase:
     # Internal caches
     _device_location_data: dict[str, dict[str, Any]]
     _device_last_good_location: dict[str, dict[str, Any]]
+    _round_trip_anchors: dict[str, dict[str, Any]]
     _device_caps: dict[str, dict[str, Any]]
     _present_last_seen: dict[str, float]
     _poll_lock: asyncio.Lock
