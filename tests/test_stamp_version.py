@@ -166,7 +166,8 @@ def test_workflow_guard_regex_matches_version_re() -> None:
     wf = (_REPO_ROOT / ".github/workflows/release-stamp.yml").read_text(
         encoding="utf-8"
     )
-    # The workflow also carries a 40-hex SHA guard; pick the version-shaped one.
+    # The push step also greps to classify errors, but only with ``-qiE``/``-qxF``;
+    # pick the sole ``grep -qE`` carrying a ``^[0-9]`` version-shaped pattern.
     patterns = re.findall(r"grep -qE '([^']+)'", wf)
     tag_patterns = [p for p in patterns if p.startswith(r"^[0-9]+\.")]
     assert len(tag_patterns) == 1, (
@@ -174,4 +175,37 @@ def test_workflow_guard_regex_matches_version_re() -> None:
     )
     assert tag_patterns[0] == VERSION_RE.pattern, (
         f"guard drift: workflow {tag_patterns[0]!r} != VERSION_RE {VERSION_RE.pattern!r}"
+    )
+
+
+# --- Tag-vs-branch: checkout must pin the published tag ---------------------
+
+
+def test_workflow_checks_out_published_tag() -> None:
+    """The stamp workflow must check out the published TAG, not target_commitish.
+
+    GitHub documents ``release.target_commitish`` as unused once the git tag
+    already exists -- it then defaults to the repo default branch, which only
+    coincidentally equals the maintenance line on some forks. Checking that out
+    would stamp and package the wrong branch. Pinning ``tag_name`` guarantees the
+    stamped tree and the uploaded HACS ZIP always match the exact published
+    commit. Regression guard for the tag-vs-branch confusion
+    (CA-WORKFLOW-EVENT-PAYLOAD-CONTRACT-001).
+    """
+    wf = (_REPO_ROOT / ".github/workflows/release-stamp.yml").read_text(
+        encoding="utf-8"
+    )
+    # The checkout ref must reference the published tag ...
+    assert "ref: ${{ github.event.release.tag_name }}" in wf, (
+        "checkout step must pin the published tag as ref"
+    )
+    # ... and never the stale target_commitish.
+    assert "ref: ${{ github.event.release.target_commitish }}" not in wf, (
+        "checkout must not use target_commitish (stale for pre-existing tags)"
+    )
+    # The stamp push must resolve the owning branch from the tag commit, so a
+    # stale/wrong target_commitish cannot send the stamp to the wrong branch.
+    assert "git branch -r --contains" in wf, (
+        "stamp push must resolve the owning branch from the tag commit, "
+        "not trust the stale target_commitish"
     )
