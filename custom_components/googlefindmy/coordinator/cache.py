@@ -633,7 +633,10 @@ class CacheOperations(_MixinBase):
             if callable(register_fn):
                 register_fn(device_id, effective_identity_key)
             self._propagate_location_to_shared_devices(
-                device_id, slot, supersede_anchors=supersede_anchor
+                device_id,
+                slot,
+                supersede_anchors=supersede_anchor,
+                seed_anchors=anchor_seed,
             )
 
         # Trigger resolver refresh if identity changed
@@ -650,6 +653,7 @@ class CacheOperations(_MixinBase):
         source_device_id: str,
         location: dict[str, Any],
         supersede_anchors: bool = False,
+        seed_anchors: dict[str, Any] | None = None,
     ) -> None:
         """Propagate location updates to devices sharing the same tracker.
 
@@ -664,6 +668,10 @@ class CacheOperations(_MixinBase):
                 stale round-trip anchor (F-CODEX-9), symmetric to the
                 source-device pop, so a later crowd echo near the old anchor
                 cannot roll a shared target back to the stale position.
+            seed_anchors: When not None, also seed each adopting target's
+                round-trip anchor with this (source-A) anchor as an independent
+                copy, so a B-to-A return under a sibling device_id finds an
+                anchor and recovers, symmetric to the source-device seed (@622).
         """
         if not location:
             return
@@ -738,6 +746,25 @@ class CacheOperations(_MixinBase):
                 _anchors = getattr(self, "_round_trip_anchors", None)
                 if _anchors:
                     _anchors.pop(target_id, None)
+
+            # SA-8: seed and supersede are propagation-symmetric (one physical
+            # tracker, one home A), so both ride this loop. The recovery CONSUME
+            # pop (@611-614) is deliberately NOT propagated: a B-to-A return on
+            # one sibling would otherwise delete another sibling's still-legitimate
+            # A-anchor, which that sibling needs for its own return. Only seed +
+            # supersede propagate. Seed and supersede are mutually exclusive per
+            # report (accept-path seed vs own-report supersede), so this never
+            # double-mutates a target.
+            if seed_anchors is not None and self._round_trip_confirm_enabled():
+                # No lazy-init needed here: a non-None seed_anchors means the
+                # source post-commit seed block (@615-622, same confirm guard)
+                # already ran and initialized the store before this propagation
+                # call. Mirror the supersede sibling's getattr guard above; use
+                # ``is not None`` (not truthiness) so an initialized-but-empty
+                # store still seeds the adopting target.
+                _anchors = getattr(self, "_round_trip_anchors", None)
+                if _anchors is not None:
+                    _anchors[target_id] = dict(seed_anchors)
 
             _LOGGER.debug(
                 "Propagated location from %s to %s (shared tracker, source=%s)",

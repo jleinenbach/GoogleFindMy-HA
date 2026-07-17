@@ -997,3 +997,113 @@ def test_supersede_clears_shared_anchor_when_source_has_no_anchor() -> None:
     assert echo_ts - BASE_TS <= ROUND_TRIP_TTL_S
     coord.update_device_cache("dev_b", _fix(HOME, last_seen=echo_ts, acc=20.0))
     assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(C[0])
+
+
+# ------------- shared-device anchor SEED propagation (SA-8, Fund A shared sweep)
+
+
+def test_seed_propagates_to_shared_target_enables_sibling_return() -> None:
+    """SA-8: an accepted A->B clear jump on ``dev_a`` seeds the round-trip anchor
+    of every ADOPTING shared sibling with A's coordinates, so a later B->A return
+    that arrives under a sibling device id finds an anchor and recovers instead of
+    stranding at B.
+
+    Sequence over the real ``update_device_cache`` commit path:
+    1. Both siblings start cached near A (HOME) with ``dev_b`` OLDER than the
+       incoming A->B report, and the anchor store is emptied so the seed is born
+       fresh. A crowd clear jump A(HOME)->B(FAR) over 3 h (plausible, under cap)
+       is accepted on ``dev_a``: fusion sets the accept-path seed marker with A's
+       coordinates, and the post-commit apply seeds ``dev_a``'s anchor.
+    2. That fresh B location propagates to the older ``dev_b`` (freshness gate
+       passes), and the SA-8 seed block copies A's anchor onto ``dev_b`` too.
+    3. A B->A return arriving ONLY on ``dev_b`` within TTL+radius rides the seeded
+       anchor and recovers ``dev_b`` back onto A rather than being gated as a
+       teleport.
+
+    Mutation guard: removing the AP-1 seed-propagation block (the ``seed_anchors``
+    branch in ``_propagate_location_to_shared_devices``) leaves ``dev_b`` without
+    an anchor, so (a) the ``dev_b`` anchor-coordinate assertions fail and (b) the
+    step-3 B->A return finds no anchor, is gated as a teleport, and ``dev_b``
+    strands at FAR instead of recovering to HOME -> this test goes red.
+    """
+    ik = b"\x44" * 32
+    coord = _make_shared_update_coordinator(ik=ik)
+    # Empty the anchor store so the propagated seed is born fresh (not inherited
+    # from the harness pre-seed), exercising the SA-8 lazy-init + copy path.
+    coord._round_trip_anchors = {}
+    # Both siblings start near A (HOME) so the accept-path seed anchors A's
+    # coordinates; dev_b is OLDER than the coming A->B report so it adopts it.
+    b_ts = BASE_TS + 3 * 3600  # dt = 3 h -> implied ~23 m/s < cap -> accept path
+    coord._device_location_data["dev_a"] = {
+        **_fix(HOME, last_seen=BASE_TS, acc=20.0),
+        "identity_key": ik,
+    }
+    coord._device_location_data["dev_b"] = {
+        **_fix(HOME, last_seen=BASE_TS - 10, acc=20.0),
+        "identity_key": ik,
+    }
+
+    # Step 1+2: accepted A->B clear jump on dev_a (non-own, measured accuracy).
+    # Seeds dev_a at A post-commit and propagates the seed to the adopting dev_b.
+    coord.update_device_cache(
+        "dev_a",
+        {**_fix(FAR, last_seen=b_ts, acc=20.0), "identity_key": ik},
+    )
+
+    # The seed carries A's coordinates (HOME), NOT the FAR target-cache position,
+    # on BOTH the source and the propagated sibling.
+    assert coord._round_trip_anchors["dev_a"]["lat"] == pytest.approx(HOME[0])
+    assert coord._round_trip_anchors["dev_b"]["lat"] == pytest.approx(HOME[0])
+    assert coord._round_trip_anchors["dev_b"]["lon"] == pytest.approx(HOME[1])
+    # dev_b adopted the fresh B location.
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(FAR[0])
+
+    # Step 3: a B->A return arriving ONLY on dev_b within TTL+radius rides the
+    # seeded anchor and recovers dev_b onto A (structural TTL guard live).
+    anchor_ts = b_ts  # accept-time ts of the seeded anchor
+    return_ts = b_ts + 300
+    assert (return_ts) - anchor_ts <= ROUND_TRIP_TTL_S
+    coord.update_device_cache("dev_b", _fix(HOME, last_seen=return_ts, acc=20.0))
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(HOME[0])
+
+
+def test_seed_not_propagated_to_fresher_shared_target() -> None:
+    """SA-8 scoping: a shared target that is FRESHER than the A->B report (its
+    propagation skipped by the freshness gate) receives NEITHER the location NOR
+    the anchor seed.
+
+    The seed rides the propagation data-flow, so a target that never adopts the
+    superseding location must not inherit the anchor either - the seed block sits
+    AFTER the freshness-gate ``continue``, so only adopting siblings are seeded.
+
+    Mutation guard: hoisting the seed BEFORE the freshness gate (Option A) would
+    seed the fresher ``dev_b`` with A even though it skipped the location update,
+    so the ``dev_b not in anchors`` assertion fails -> this test goes red.
+    """
+    ik = b"\x55" * 32
+    coord = _make_shared_update_coordinator(ik=ik)
+    coord._round_trip_anchors = {}
+    # Both siblings start near A (HOME); make dev_b FRESHER than the coming report
+    # so the freshness gate skips its propagation (and thus its seed).
+    coord._device_location_data["dev_a"] = {
+        **_fix(HOME, last_seen=BASE_TS, acc=20.0),
+        "identity_key": ik,
+    }
+    coord._device_location_data["dev_b"] = {
+        **_fix(HOME, last_seen=BASE_TS + 10 * 3600, acc=20.0),
+        "identity_key": ik,
+    }
+
+    b_ts = BASE_TS + 3 * 3600  # OLDER than dev_b's fresh_ts -> propagation skipped
+    coord.update_device_cache(
+        "dev_a",
+        {**_fix(FAR, last_seen=b_ts, acc=20.0), "identity_key": ik},
+    )
+
+    # dev_b did NOT adopt the fresh location (still at HOME, its own value)...
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(HOME[0])
+    assert coord._device_location_data["dev_b"]["latitude"] != pytest.approx(FAR[0])
+    # ...and received NO seed (the seed rides the propagation data-flow only).
+    assert "dev_b" not in coord._round_trip_anchors
+    # The source itself was still seeded (positive control).
+    assert coord._round_trip_anchors["dev_a"]["lat"] == pytest.approx(HOME[0])
