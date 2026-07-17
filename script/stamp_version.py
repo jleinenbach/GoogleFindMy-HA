@@ -24,8 +24,10 @@ Usage (preview the effect on a clean worktree, then inspect ``git diff``)::
     python script/stamp_version.py --version 1.7.14b1 --repo-root /path/to/repo
 
 The tag is validated against the ``tag_format = "{version}"`` convention
-(no ``v`` prefix): ``X.Y.Z`` with an optional ``bN``/``aN`` prerelease and an
-optional ``.N`` fourth segment (covers 1.7.14, 1.7.14b1, 1.7.9b1, 1.7.13.1).
+(no ``v`` prefix): ``X.Y.Z`` with an optional ``.N`` fourth segment followed by
+an optional ``bN``/``aN`` prerelease (covers 1.7.14, 1.7.14b1, 1.7.13.1,
+1.7.13.1b1). The segment order is PEP 440: the numeric release tuple precedes
+the prerelease, so ``1.7.14.1b1`` is valid but ``1.7.14b1.1`` is not.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ from pathlib import Path
 # of proposing a stale number; the stamp path here still honours the exact chosen
 # tag verbatim. The shell guard in release-stamp.yml MUST stay byte-equal to this
 # pattern (locked by tests/test_stamp_version.py).
-VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([ab][0-9]+)?(\.[0-9]+)?$")
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?([ab][0-9]+)?$")
 
 CONST_REL = "custom_components/googlefindmy/const.py"
 MANIFEST_REL = "custom_components/googlefindmy/manifest.json"
@@ -183,7 +185,8 @@ def main() -> int:
     if not VERSION_RE.match(version):
         parser.error(
             f"version {version!r} violates tag_format='{{version}}'; expected "
-            "X.Y.Z with optional bN/aN and optional .N (no 'v' prefix)"
+            "X.Y.Z[.N][bN] (optional .N fourth segment then optional bN/aN, "
+            "no 'v' prefix)"
         )
 
     try:

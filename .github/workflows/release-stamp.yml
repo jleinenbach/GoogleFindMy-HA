@@ -65,8 +65,8 @@ jobs:
         # step stamps the exact published tag regardless. Keep both regexes in sync.
         run: |
           set -euo pipefail
-          if ! printf '%s' "$TAG_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([ab][0-9]+)?(\.[0-9]+)?$'; then
-            echo "::error::tag_name '$TAG_NAME' violates tag_format='{version}'; expected X.Y.Z[bN][.N], no 'v' prefix"
+          if ! printf '%s' "$TAG_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?([ab][0-9]+)?$'; then
+            echo "::error::tag_name '$TAG_NAME' violates tag_format='{version}'; expected X.Y.Z[.N][bN], no 'v' prefix"
             exit 1
           fi
           # target_commitish may be a raw commit SHA (release made from a tag
@@ -132,7 +132,14 @@ jobs:
       - name: Rebuild and upload the HACS ZIP from the stamped tree
         run: |
           set -euo pipefail
-          cd custom_components
-          zip -r ../googlefindmy.zip googlefindmy
-          cd ..
+          # hacs.json sets zip_release=true + filename=googlefindmy.zip, so HACS
+          # installs THIS asset and extracts it directly into
+          # custom_components/googlefindmy/. manifest.json MUST therefore sit at
+          # the ZIP root -- zip the domain *contents* (`.` from inside the domain
+          # dir), never the googlefindmy/ directory from its parent (that would
+          # nest one level too deep and hide the integration -> broken installs).
+          # Locked by tests/test_hacs_validation.py (ZIP-structure guard).
+          cd custom_components/googlefindmy
+          zip -r ../../googlefindmy.zip .
+          cd ../..
           gh release upload "$TAG_NAME" googlefindmy.zip --clobber

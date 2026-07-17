@@ -63,3 +63,52 @@ def test_no_micro_sign_in_integration_files(
         if "\u00b5" in text:
             offenders.append(str(path.relative_to(integration_root)))
     assert not offenders, f"micro sign detected in: {offenders}"
+
+
+def test_hacs_zip_release_declares_filename(
+    hacs_metadata: dict[str, object],
+) -> None:
+    """When zip_release is enabled, a ``.zip`` release asset must be declared.
+
+    HACS then installs that asset instead of the git source archive, so the
+    version-stamped ZIP built by release-stamp.yml actually reaches users. The
+    two only line up if hacs.json names the asset; guard that here.
+    """
+
+    if hacs_metadata.get("zip_release"):
+        filename = hacs_metadata.get("filename")
+        assert isinstance(filename, str) and filename.endswith(".zip"), (
+            "zip_release=true requires a '.zip' 'filename' entry in hacs.json"
+        )
+
+
+def test_release_zip_places_manifest_at_root() -> None:
+    """release-stamp.yml must zip the domain *contents*, not the domain dir.
+
+    With zip_release=true HACS extracts the asset straight into
+    ``custom_components/googlefindmy/`` (verified against HACS ``extractall``
+    semantics), so ``manifest.json`` has to sit at the ZIP root. Building the ZIP
+    from the parent (``zip -r ../googlefindmy.zip googlefindmy``) nests it one
+    level too deep and hides the integration -- a broken install for everyone.
+    This guard locks the fixed ``cd <domain> && zip . `` form so the regression
+    cannot silently return.
+    """
+
+    workflow = Path(".github/workflows/release-stamp.yml").read_text(encoding="utf-8")
+    filename = json.loads(Path("hacs.json").read_text(encoding="utf-8")).get("filename")
+    assert filename, "hacs.json must declare the release asset filename"
+    assert "cd custom_components/googlefindmy" in workflow, (
+        "ZIP must be built from inside the integration domain directory"
+    )
+    assert f"zip -r ../../{filename} ." in workflow, (
+        f"ZIP step must run 'zip -r ../../{filename} .' from the domain dir "
+        "so the asset root is the domain root"
+    )
+    # Regression guard: the pre-fix form nested the domain dir inside the asset.
+    assert "zip -r ../googlefindmy.zip googlefindmy" not in workflow, (
+        "found the pre-fix ZIP form that nests custom_components/googlefindmy/ "
+        "inside the asset (breaks the HACS install)"
+    )
+    assert f'gh release upload "$TAG_NAME" {filename} --clobber' in workflow, (
+        f"workflow must upload the declared hacs.json asset name {filename!r}"
+    )

@@ -51,6 +51,7 @@ VALID_TAGS = [
     "1.7.14a1",  # PEP 440 alpha
     "1.7.13.1",  # four-segment maintenance tag, real tag on 1.7
     "1.7.13.0",  # four-segment maintenance tag
+    "1.7.14.1b1",  # PEP 440 order: four-segment release THEN prerelease
 ]
 
 INVALID_TAGS = [
@@ -59,6 +60,7 @@ INVALID_TAGS = [
     "1.7.14-rc1",  # SemVer-style prerelease, not this scheme
     "1.7.14rc1",  # rc is not in the [ab] prerelease set
     "1.7.14.1.2",  # five segments
+    "1.7.14b1.1",  # prerelease before the fourth segment (not PEP 440 order)
     "1.7.14 ",  # trailing whitespace
     " 1.7.14",  # leading whitespace
     "",  # empty
