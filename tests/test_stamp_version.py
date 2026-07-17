@@ -157,25 +157,58 @@ def test_stamp_manifest_no_version_key_raises() -> None:
 
 
 def test_workflow_guard_regex_matches_version_re() -> None:
-    """release-stamp.yml's tag guard must mirror VERSION_RE byte-for-byte.
+    """Both release workflows' tag guards must mirror VERSION_RE byte-for-byte.
 
-    The two live in different languages (Python ``re`` vs POSIX ERE via
-    ``grep -qE``) but are kept textually identical so a change to one without
-    the other is caught here instead of at release time.
+    The guards live in different languages (Python ``re`` vs POSIX ERE via
+    ``grep -qE``) but are kept textually identical across ``release-stamp.yml``
+    (the tag guard) and ``release.yml`` (the REAL_TIP line-tip gate) so a change
+    to one without the others is caught here instead of at release time.
     """
-    wf = (_REPO_ROOT / ".github/workflows/release-stamp.yml").read_text(
-        encoding="utf-8"
-    )
-    # The push step also greps to classify errors, but only with ``-qiE``/``-qxF``;
-    # pick the sole ``grep -qE`` carrying a ``^[0-9]`` version-shaped pattern.
-    patterns = re.findall(r"grep -qE '([^']+)'", wf)
-    tag_patterns = [p for p in patterns if p.startswith(r"^[0-9]+\.")]
-    assert len(tag_patterns) == 1, (
-        f"expected exactly one tag guard, found {tag_patterns}"
-    )
-    assert tag_patterns[0] == VERSION_RE.pattern, (
-        f"guard drift: workflow {tag_patterns[0]!r} != VERSION_RE {VERSION_RE.pattern!r}"
-    )
+    for wf_name in (
+        ".github/workflows/release-stamp.yml",
+        ".github/workflows/release.yml",
+    ):
+        wf = (_REPO_ROOT / wf_name).read_text(encoding="utf-8")
+        # Other steps also grep to classify errors, but only with ``-qiE``/``-qxF``;
+        # pick the sole ``grep -qE`` carrying a ``^[0-9]`` version-shaped pattern.
+        patterns = re.findall(r"grep -qE '([^']+)'", wf)
+        tag_patterns = [p for p in patterns if p.startswith(r"^[0-9]+\.")]
+        assert len(tag_patterns) == 1, (
+            f"expected exactly one tag guard in {wf_name}, found {tag_patterns}"
+        )
+        assert tag_patterns[0] == VERSION_RE.pattern, (
+            f"guard drift in {wf_name}: {tag_patterns[0]!r} != "
+            f"VERSION_RE {VERSION_RE.pattern!r}"
+        )
+
+
+def test_real_tip_gate_blanks_foreign_tag_keeps_pep440() -> None:
+    """release.yml REAL_TIP gate: foreign tips blanked, PEP 440 tips kept.
+
+    The gate re-uses VERSION_RE (the SSOT) to decide whether the topological
+    line tip is a valid version. A foreign, non-version tag (Workflow-A hand-tag
+    placeholder, ``nightly``, ``v2``) must be blanked so it cannot spuriously
+    route PSR to the hand-tag draft; a genuine PEP 440 beta/four-segment tag must
+    be kept so a real stale-base mismatch still fires ``MODE=hand``. This mirrors
+    the shell condition
+    ``[ -n "$REAL_TIP" ] && ! printf '%s' "$REAL_TIP" | grep -qE '<VERSION_RE>'``.
+
+    Mutation cross-check (re-runnable): replace ``gate``'s body with a bare
+    ``return real_tip`` (no gating) and the three foreign-tag assertions turn red.
+    """
+
+    def gate(real_tip: str) -> str:
+        # Faithful Python mirror of the release.yml shell gate.
+        return real_tip if VERSION_RE.match(real_tip) else ""
+
+    # foreign / non-version tips are blanked -> no spurious MODE=hand
+    assert gate("set-release-tag") == ""
+    assert gate("nightly") == ""
+    assert gate("v2") == ""
+    # genuine PEP 440 line tips are kept -> MODE=hand still fires on a mismatch
+    assert gate("1.7.14b1") == "1.7.14b1"
+    assert gate("1.7.14.0") == "1.7.14.0"
+    assert gate("1.7.13") == "1.7.13"
 
 
 # --- Tag-vs-branch: checkout must pin the published tag ---------------------
