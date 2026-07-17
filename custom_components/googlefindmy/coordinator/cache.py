@@ -606,7 +606,9 @@ class CacheOperations(_MixinBase):
             register_fn = getattr(self, "_register_identity_key", None)
             if callable(register_fn):
                 register_fn(device_id, effective_identity_key)
-            self._propagate_location_to_shared_devices(device_id, slot)
+            self._propagate_location_to_shared_devices(
+                device_id, slot, supersede_anchors=supersede_anchor
+            )
 
         # Trigger resolver refresh if identity changed
         if resolver_refresh_needed:
@@ -621,6 +623,7 @@ class CacheOperations(_MixinBase):
         self,
         source_device_id: str,
         location: dict[str, Any],
+        supersede_anchors: bool = False,
     ) -> None:
         """Propagate location updates to devices sharing the same tracker.
 
@@ -631,6 +634,10 @@ class CacheOperations(_MixinBase):
         Args:
             source_device_id: The device that received the update.
             location: The location data to propagate.
+            supersede_anchors: When True, also drop each propagated target's
+                stale round-trip anchor (F-CODEX-9), symmetric to the
+                source-device pop, so a later crowd echo near the old anchor
+                cannot roll a shared target back to the stale position.
         """
         if not location:
             return
@@ -690,6 +697,21 @@ class CacheOperations(_MixinBase):
             self._device_location_data[target_id] = merged
             # Coordinator last-good for the shared target, same non-poison gate.
             self._record_last_good_location(target_id, merged)
+
+            # F-CODEX-9: the superseding clear-jump was propagated to this
+            # shared target, so invalidate its stale round-trip anchor too -
+            # symmetric to the source-device pop after the commit. Otherwise a
+            # later crowd echo near the old anchor could take the round-trip
+            # recovery path and roll this propagated target back to the stale
+            # position, even though the trusted location was already propagated
+            # here (SA-8d data-flow breadth). Rides the exact propagation
+            # data-flow: only targets that actually adopted the fresh location
+            # (past the freshness gate above) are cleared; a fresher target
+            # that skipped propagation keeps its own anchor.
+            if supersede_anchors and self._round_trip_confirm_enabled():
+                _anchors = getattr(self, "_round_trip_anchors", None)
+                if _anchors:
+                    _anchors.pop(target_id, None)
 
             _LOGGER.debug(
                 "Propagated location from %s to %s (shared tracker, source=%s)",
@@ -1038,10 +1060,16 @@ class CacheOperations(_MixinBase):
             # a stale anchor can survive on those paths too. Deferred, not fixed
             # here (scope discipline at this iterated locus); a later crowd echo
             # is still TTL- and radius-bounded.
+            # F-CODEX-9: the marker is set unconditionally for an own clear-jump,
+            # NOT only when THIS source device holds an anchor. A shared tracker
+            # propagates this fresh trusted position to sibling device ids (same
+            # identity_key) post-commit, and a sibling may hold a stale anchor
+            # even when the source does not. The post-commit handling pops the
+            # source anchor AND every propagated target's anchor; all pops are
+            # idempotent (pop(key, None)), so marking without a source anchor is a
+            # harmless no-op on the source side while still clearing the siblings.
             if incoming_is_own and self._round_trip_confirm_enabled():
-                _anchors = getattr(self, "_round_trip_anchors", None)
-                if _anchors and _anchors.get(device_id) is not None:
-                    new_data["_supersede_round_trip_anchor"] = True
+                new_data["_supersede_round_trip_anchor"] = True
             # Only gate a fix that carries a REAL measured accuracy. A crowd
             # report is "accuracy-less" not only when the key is missing
             # (new_acc_raw is None) but also when it carries Android's

@@ -438,13 +438,27 @@ def test_own_report_clear_jump_marks_supersede_with_anchor() -> None:
     assert coord._round_trip_anchors == anchors
 
 
-def test_own_report_clear_jump_without_anchor_sets_no_marker() -> None:
-    """Without a surviving anchor an own-report clear jump sets no marker."""
-    coord = _coord(_fix(FAR, last_seen=BASE_TS, acc=50.0))  # no anchors
+def test_own_report_clear_jump_marks_supersede_even_without_source_anchor() -> None:
+    """An own-report clear jump marks supersede even when THIS device holds no
+    anchor (F-CODEX-9).
+
+    The marker no longer keys on the source device's own anchor: a shared tracker
+    propagates this fresh trusted position to sibling device ids post-commit, and
+    a sibling may hold a stale anchor even when the source does not. Marking
+    unconditionally lets the post-commit handling clear those propagated siblings;
+    the source-side pop stays a harmless idempotent no-op when the source has no
+    anchor.
+
+    Mutation guard: re-gating the marker on ``_anchors.get(device_id)`` (the old
+    source-anchor condition) leaves the marker unset here, so this assertion
+    fails - and, via update_device_cache, a propagated sibling's stale anchor
+    would survive.
+    """
+    coord = _coord(_fix(FAR, last_seen=BASE_TS, acc=50.0))  # no source anchor
     new_data = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0, is_own=True)
     result = _fuse(coord, new_data)
     assert result is True
-    assert "_supersede_round_trip_anchor" not in new_data
+    assert new_data.get("_supersede_round_trip_anchor") is True
 
 
 def test_crowd_clear_jump_sets_no_supersede_marker() -> None:
@@ -647,3 +661,156 @@ def test_anchor_surviving_estimated_skip_radius_bounded() -> None:
     result = _fuse(coord, _fix(outside, last_seen=BASE_TS + 300, acc=50.0))
     assert result is False
     coord.increment_stat.assert_called_with("speed_gate_rejects")
+
+
+# ---------------- shared-device anchor propagation (F-CODEX-9, AP-3 sweep)
+
+
+def _make_shared_update_coordinator(
+    *,
+    ik: bytes,
+    rt_enabled: bool = True,
+) -> Any:
+    """A coordinator wired for ``update_device_cache`` with two devices sharing
+    one identity key, both carrying a stale round-trip anchor at HOME (A).
+
+    ``dev_a`` is the source that receives the own-report clear jump; ``dev_b``
+    shares the physical tracker via ``identity_key`` and holds an OLDER cached
+    position so the post-commit propagation adopts the fresh location.
+    """
+    coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
+    coord._device_location_data = {
+        "dev_a": {**_fix(FAR, last_seen=BASE_TS, acc=20.0), "identity_key": ik},
+        "dev_b": {**_fix(FAR, last_seen=BASE_TS - 10, acc=20.0), "identity_key": ik},
+    }
+    coord._device_names = {}
+    coord._device_update_history = {}
+    coord._identity_key_to_devices = {ik: {"dev_a", "dev_b"}}
+    coord._round_trip_anchors = {
+        "dev_a": {"lat": HOME[0], "lon": HOME[1], "ts": BASE_TS},
+        "dev_b": {"lat": HOME[0], "lon": HOME[1], "ts": BASE_TS},
+    }
+    coord.increment_stat = lambda *_a, **_k: None
+    coord._apply_report_type_cooldown = lambda *_a, **_k: None
+    coord._is_on_hass_loop = lambda: True
+    coord._run_on_hass_loop = lambda *_a, **_k: None
+    coord._speed_gate_enabled = lambda: True
+    coord._round_trip_confirm_enabled = lambda: rt_enabled
+    coord._record_last_good_location("dev_a", coord._device_location_data["dev_a"])
+    coord._record_last_good_location("dev_b", coord._device_location_data["dev_b"])
+    return coord
+
+
+def test_supersede_invalidates_propagated_shared_anchor() -> None:
+    """F-CODEX-9: a trusted own-report clear jump on a shared tracker invalidates
+    the round-trip anchor of every propagated shared target, not just the source.
+
+    Two device ids share one physical tracker (identity key). Both hold a stale
+    anchor at A. An own-report clear jump B->C on ``dev_a`` commits, pops its own
+    anchor, and propagates C to ``dev_b``. The post-commit supersede action must
+    ride that same propagation and drop ``dev_b``'s stale anchor too, otherwise a
+    later crowd echo near A on ``dev_b`` would take the round-trip recovery path
+    and roll the propagated target back to the stale A position.
+
+    Mutation guard: dropping ``supersede_anchors`` in the propagation loop leaves
+    ``dev_b``'s anchor alive, so (a) the ``dev_b not in anchors`` assertion fails
+    and (b) the step-3 crowd echo, still WITHIN the anchor TTL, recovers ``dev_b``
+    back onto A. The geometry keeps the echo inside ROUND_TRIP_TTL_S so (b) is a
+    live guard, not a vacuous TTL-expiry pass.
+    """
+    ik = b"\x11" * 32
+    coord = _make_shared_update_coordinator(ik=ik)
+
+    # Own-report clear jump B(FAR) -> C on dev_a. C is a clear jump far from both
+    # HOME (A) and FAR (B). c_ts is newer than dev_b's cached B ts (propagation
+    # adopts C) and close to the anchor ts (BASE_TS) so the step-3 echo lands
+    # within ROUND_TRIP_TTL_S of the anchor - the behavioral guard stays live.
+    C = (46.000000, 11.400000)
+    c_ts = BASE_TS + 300
+    coord.update_device_cache(
+        "dev_a",
+        {**_fix(C, last_seen=c_ts, acc=20.0, is_own=True), "identity_key": ik},
+    )
+
+    # Source anchor popped (existing F-FABLE-2 behavior).
+    assert "dev_a" not in coord._round_trip_anchors
+    # Fresh location propagated to the shared target...
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(C[0])
+    # ...and its stale anchor invalidated with it (F-CODEX-9, the fix).
+    assert "dev_b" not in coord._round_trip_anchors
+
+    # Behavioral proof: a later crowd echo near A on dev_b, arriving WITHIN the
+    # anchor TTL (delta_anchor = 600 s <= ROUND_TRIP_TTL_S), is now gated (no
+    # anchor to recover on) and dropped, so dev_b stays at C. With the anchor
+    # still alive (mutation) it would recover onto A.
+    echo_ts = c_ts + 300  # BASE_TS + 600, delta from anchor ts (BASE_TS) < 900
+    assert echo_ts - BASE_TS <= ROUND_TRIP_TTL_S
+    coord.update_device_cache("dev_b", _fix(HOME, last_seen=echo_ts, acc=20.0))
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(C[0])
+
+
+def test_supersede_preserves_fresher_shared_target_anchor() -> None:
+    """F-CODEX-9 precision: a shared target that is FRESHER than the superseding
+    location (propagation skipped by the freshness gate) keeps its own anchor.
+
+    The invalidation rides the propagation data-flow, so a target that never
+    adopts the superseding location must not lose its anchor - the fix clears
+    only what it actually propagated (SA-8d scoping).
+
+    Mutation guard: clearing anchors unconditionally (before the freshness gate,
+    Option A) would drop the fresher target's anchor, so this ``anchor survives``
+    assertion fails.
+    """
+    ik = b"\x22" * 32
+    coord = _make_shared_update_coordinator(ik=ik)
+    # Make dev_b FRESHER than the incoming own-report so propagation is skipped.
+    fresh_ts = BASE_TS + 10 * 3600
+    coord._device_location_data["dev_b"]["last_seen"] = fresh_ts
+
+    C = (46.000000, 11.400000)
+    c_ts = BASE_TS + 3 * 3600  # OLDER than dev_b's fresh_ts -> propagation skipped
+    coord.update_device_cache(
+        "dev_a",
+        {**_fix(C, last_seen=c_ts, acc=20.0, is_own=True), "identity_key": ik},
+    )
+
+    # dev_b did NOT adopt C (it is fresher) -> its anchor stays intact.
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(FAR[0])
+    assert coord._round_trip_anchors["dev_b"]["lat"] == pytest.approx(HOME[0])
+
+
+def test_supersede_clears_shared_anchor_when_source_has_no_anchor() -> None:
+    """F-CODEX-9 (R1): a shared target's stale anchor is cleared even when the
+    SOURCE device holds no anchor of its own.
+
+    The supersede marker is set on any trusted own clear-jump, not only when the
+    source holds an anchor, so a propagated sibling that still carries a stale
+    anchor is invalidated too. Without this, an own clear-jump on an anchorless
+    source would propagate the fresh position but leave the sibling's anchor
+    alive, keeping the F-CODEX-9 rollback reachable.
+
+    Mutation guard: re-gating the marker on the source anchor (the old condition)
+    leaves ``dev_b``'s anchor alive; (a) the ``dev_b not in anchors`` assertion
+    fails and (b) the within-TTL crowd echo recovers ``dev_b`` onto A.
+    """
+    ik = b"\x33" * 32
+    coord = _make_shared_update_coordinator(ik=ik)
+    # Source dev_a holds NO anchor; only the shared target dev_b does.
+    del coord._round_trip_anchors["dev_a"]
+    assert coord._round_trip_anchors["dev_b"]["lat"] == pytest.approx(HOME[0])
+
+    C = (46.000000, 11.400000)
+    c_ts = BASE_TS + 300
+    coord.update_device_cache(
+        "dev_a",
+        {**_fix(C, last_seen=c_ts, acc=20.0, is_own=True), "identity_key": ik},
+    )
+    # Fresh location propagated and the sibling's stale anchor cleared.
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(C[0])
+    assert "dev_b" not in coord._round_trip_anchors
+
+    # Behavioral proof: a within-TTL crowd echo near A on dev_b is now dropped.
+    echo_ts = c_ts + 300
+    assert echo_ts - BASE_TS <= ROUND_TRIP_TTL_S
+    coord.update_device_cache("dev_b", _fix(HOME, last_seen=echo_ts, acc=20.0))
+    assert coord._device_location_data["dev_b"]["latitude"] == pytest.approx(C[0])
