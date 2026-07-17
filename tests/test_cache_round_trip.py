@@ -439,6 +439,69 @@ def test_out_of_order_echo_then_forward_return_recovers() -> None:
     assert "dev" in coord._round_trip_anchors  # not popped by unbound fusion
 
 
+def test_within_ttl_far_reject_preserves_anchor() -> None:
+    """A within-TTL reject outside the return radius must NOT drop the anchor.
+
+    An active A->B anchor can receive an UNRELATED rejected crowd fix C that
+    lands within the TTL window (0 <= delta_anchor <= TTL) but outside the return
+    radius (return_dist > ROUND_TRIP_ANCHOR_RADIUS_M). That is not an expiry: the
+    anchor has not aged out and must survive, so a later genuine B->A return in
+    the original window still recovers. Only a genuine TTL expiry
+    (delta_anchor > TTL) house-keeps the anchor.
+
+    Mutation guard: revert the pop condition to ``if delta_anchor >= 0:``. Then
+    delta_anchor = 300 >= 0 pops the still-valid anchor here, and the
+    ``"dev" in coord._round_trip_anchors`` assertion below turns red.
+    """
+    far = _point_north(HOME, 5000.0)  # 5 km north of A, far outside the 200 m radius
+    assert _haversine_distance_impl(HOME[0], HOME[1], *far) > ROUND_TRIP_ANCHOR_RADIUS_M
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS)}}
+    coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
+    # delta_t = 300 > 0 (gated teleport), delta_anchor = 300 (0 <= 300 <= 900 TTL),
+    # return_dist = 5000 m > radius -> unrelated within-TTL far reject.
+    result = _fuse(coord, _fix(far, last_seen=BASE_TS + 300, acc=50.0))
+    assert result is False
+    coord.increment_stat.assert_called_once_with("speed_gate_rejects")
+    # The still-valid anchor survives the unrelated far reject (TTL-only expiry).
+    assert "dev" in coord._round_trip_anchors
+    assert coord._round_trip_anchors["dev"] == {
+        "lat": HOME[0],
+        "lon": HOME[1],
+        "ts": float(BASE_TS),
+    }
+
+
+def test_far_reject_then_genuine_return_recovers() -> None:
+    """A genuine return recovers after a within-TTL far reject preserved the anchor.
+
+    End-to-end for the housekeeping fix: an unrelated noisy crowd fix arriving
+    between the trip legs (within TTL, outside radius) must not burn the anchor,
+    so the subsequent genuine B->A return within TTL + radius still recovers and
+    consumes it one-shot.
+
+    Mutation guard: revert the pop condition to ``if delta_anchor >= 0:``. Then
+    step 1 pops the anchor, step 2 finds no anchor, is gated, and ``result is
+    False`` instead of True (the defeated-recovery bug this fix closes).
+    """
+    far = _point_north(HOME, 5000.0)
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS)}}
+    coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
+
+    # Step 1: an unrelated within-TTL far reject at BASE_TS + 120 (delta_anchor =
+    # 120 <= 900 TTL, return_dist = 5000 m > radius). Anchor must survive.
+    assert _fuse(coord, _fix(far, last_seen=BASE_TS + 120, acc=50.0)) is False
+    assert "dev" in coord._round_trip_anchors  # alive after the noisy reject
+
+    # Step 2: a genuine forward return near A at BASE_TS + 300 (delta_anchor =
+    # 300, within TTL; return_dist = 0 <= radius) -> recovered and consumed.
+    assert (BASE_TS + 300) - float(BASE_TS) <= ROUND_TRIP_TTL_S  # structural guard
+    return_nd = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0)
+    result = _fuse(coord, return_nd)
+    assert result is True
+    coord.increment_stat.assert_called_with("round_trip_recoveries")
+    assert return_nd["_round_trip_anchor_consume"] is True
+
+
 # ------------------------------------------- supersede detection (F-FABLE-2, AP-2)
 
 
