@@ -19,6 +19,7 @@ These tests mirror the harness of ``test_cache_speed_gate.py``: a
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -105,13 +106,16 @@ def test_far_jump_accept_sets_anchor() -> None:
     coord = _coord(_fix(HOME, last_seen=BASE_TS))
     # dt = 3 h -> implied speed ~23 m/s -> plausible -> accepted (not gated).
     b_ts = BASE_TS + 3 * 3600
-    result = _fuse(coord, _fix(FAR, last_seen=b_ts, acc=50.0))
+    nd = _fix(FAR, last_seen=b_ts, acc=50.0)
+    result = _fuse(coord, nd)
     assert result is True
-    assert coord._round_trip_anchors["dev"] == {
+    # Fund A: store mutation deferred to update_device_cache; assert the intent marker
+    assert nd["_round_trip_anchor_seed"] == {
         "lat": HOME[0],
         "lon": HOME[1],
         "ts": float(b_ts),
     }
+    assert "dev" not in coord._round_trip_anchors  # store untouched by unbound fusion
 
 
 def test_stale_offline_jump_then_return_recovers() -> None:
@@ -127,15 +131,24 @@ def test_stale_offline_jump_then_return_recovers() -> None:
     b_ts = BASE_TS + 3 * 3600  # B seen 3 h after A's (stale) last_seen
     coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=50.0))
     # A->B accepted (low implied speed over 3 h) -> A remembered as anchor.
-    assert _fuse(coord, _fix(FAR, last_seen=b_ts, acc=50.0)) is True
+    seed_nd = _fix(FAR, last_seen=b_ts, acc=50.0)
+    assert _fuse(coord, seed_nd) is True
+    # Fund A: store mutation deferred to update_device_cache; assert the intent marker.
     # Anchor ts is the accept time (B), not A's stale last_seen.
-    assert coord._round_trip_anchors["dev"]["ts"] == float(b_ts)
+    assert seed_nd["_round_trip_anchor_seed"]["ts"] == float(b_ts)
+    # The unbound fusion does not seed the store; for the recovery step to read the
+    # anchor, apply the deferred seed manually (stands in for update_device_cache).
+    coord._round_trip_anchors["dev"] = seed_nd["_round_trip_anchor_seed"]
     # The device now sits at B; a correction back near A arrives 300 s after B
     # (well within the 900 s TTL) but is a kinematic teleport B->A -> recover.
     coord._device_location_data["dev"] = _fix(FAR, last_seen=b_ts)
-    result = _fuse(coord, _fix(HOME, last_seen=b_ts + 300, acc=50.0))
+    return_nd = _fix(HOME, last_seen=b_ts + 300, acc=50.0)
+    result = _fuse(coord, return_nd)
     assert result is True
-    assert "dev" not in coord._round_trip_anchors  # one-shot consumed
+    # Fund A: consume is deferred; the intent marker is set and the anchor survives
+    # the unbound fusion (update_device_cache would pop it post-commit).
+    assert return_nd["_round_trip_anchor_consume"] is True
+    assert "dev" in coord._round_trip_anchors  # not popped by unbound fusion
 
 
 def test_anchor_not_set_for_estimated_existing() -> None:
@@ -236,10 +249,14 @@ def test_return_within_radius_recovers() -> None:
     coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
     # existing is B (FAR); a fix back at A (HOME) 5 min later would be gated
     # (~833 m/s) but lands on the anchor -> recovered.
-    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 300, acc=50.0))
+    nd = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0)
+    result = _fuse(coord, nd)
     assert result is True
     coord.increment_stat.assert_called_once_with("round_trip_recoveries")
-    assert "dev" not in coord._round_trip_anchors  # one-shot consumed
+    # Fund A: store mutation deferred to update_device_cache; assert the intent marker.
+    # The consume is deferred, so the anchor survives the unbound fusion.
+    assert nd["_round_trip_anchor_consume"] is True
+    assert "dev" in coord._round_trip_anchors  # not popped by unbound fusion
 
 
 def test_return_just_inside_200m_recovers() -> None:
@@ -273,10 +290,14 @@ def test_recovery_does_not_reset_anchor() -> None:
     """A recovered return fix sets no new anchor (DF-1 ping-pong bollwerk)."""
     anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(BASE_TS)}}
     coord = _coord(_fix(FAR, last_seen=BASE_TS), anchors=anchors)
-    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 300, acc=50.0))
+    nd = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0)
+    result = _fuse(coord, nd)
     assert result is True
-    # Anchor consumed and NOT replaced by a fresh one for the returning fix.
-    assert coord._round_trip_anchors == {}
+    # Fund A: store mutation deferred to update_device_cache; assert the intent marker.
+    # The returning fix marks a consume (one-shot) and NEVER a fresh seed for
+    # itself (DF-1 ping-pong bollwerk): the seed marker must be absent.
+    assert nd["_round_trip_anchor_consume"] is True
+    assert "_round_trip_anchor_seed" not in nd
 
 
 def test_recovery_ignores_incoming_reliability() -> None:
@@ -408,10 +429,14 @@ def test_out_of_order_echo_then_forward_return_recovers() -> None:
     # of B (delta_t = 300 s -> ~833 m/s, gated) and now after the anchor ts
     # (delta_anchor = 240 s, within the 900 s TTL, on the anchor) -> recovered
     # and consumed one-shot.
-    result = _fuse(coord, _fix(HOME, last_seen=BASE_TS + 300, acc=50.0))
+    return_nd = _fix(HOME, last_seen=BASE_TS + 300, acc=50.0)
+    result = _fuse(coord, return_nd)
     assert result is True
     coord.increment_stat.assert_called_with("round_trip_recoveries")
-    assert "dev" not in coord._round_trip_anchors  # one-shot consumed
+    # Fund A: store mutation deferred to update_device_cache; assert the intent marker.
+    # The consume is deferred, so the anchor survives the unbound fusion.
+    assert return_nd["_round_trip_anchor_consume"] is True
+    assert "dev" in coord._round_trip_anchors  # not popped by unbound fusion
 
 
 # ------------------------------------------- supersede detection (F-FABLE-2, AP-2)
@@ -592,6 +617,164 @@ def test_supersede_not_triggered_when_significance_rejects() -> None:
     # The payload was dropped: cached position stays at B, anchor A survives.
     assert coord._device_location_data["dev"]["latitude"] == pytest.approx(FAR[0])
     assert coord._round_trip_anchors["dev"]["lat"] == HOME[0]
+
+
+# ------------------- seed/consume ordering vs. significance gate (Fund A, AP-2)
+
+# Significance-reject axis choice (Fund A ordering tests). Both the anchor SEED
+# and CONSUME markers are set only INSIDE the speed gate's ``delta_t > 0`` block
+# (crowd, forward-of-cache). The timestamp-REGRESSION reject axis (``new_ts <
+# cached last_seen``) forces ``delta_t < 0``, so the gate never fires and NO
+# marker is ever set - a regression-based ordering test would be VACUOUS (it
+# would not exercise the deferred store mutation at all; verified empirically).
+# The only significance-reject axis compatible with ``delta_t > 0`` is the
+# FUTURE-DRIFT guard (``new_ts > time.time() + 7200`` in _is_significant_update):
+# a forward, plausible jump sets the marker in fusion, then the future-drift
+# check discards the payload before the post-commit apply. These two tests
+# therefore anchor everything to ``time.time()`` and add a STRUCTURAL guard
+# (implied_speed vs. cap / delta vs. TTL) so the behavioral premise stays pinned
+# regardless of wall-clock jitter.
+_FUTURE_DRIFT_S = 7200  # _is_significant_update's local MAX_ACCEPTED..._DRIFT_S
+_SPEED_CAP_MPS = 400.0  # DEFAULT_MAX_PLAUSIBLE_SPEED_MPS
+
+
+def test_seed_not_applied_when_significance_rejects() -> None:
+    """Fund A ordering: a seed marker set mid-fusion must NOT reach the store when
+    the significance gate rejects the payload (via ``update_device_cache``).
+
+    An anchorless coordinator takes a crowd clear-jump A->B whose implied speed is
+    plausible (accept path -> seed marker set), but whose ``last_seen`` sits past
+    the future-drift horizon so ``_is_significant_update`` discards it (early
+    return @520, before the post-commit seed apply). The deferred seed must never
+    land: no phantom anchor, cache position unchanged.
+
+    Axis note: the regression axis is unusable here (it forces ``delta_t < 0`` so
+    the gate never fires and no seed marker is set at all - a vacuous test); the
+    future-drift axis is the only significance-reject compatible with the
+    ``delta_t > 0`` accept path that seeds. A structural guard pins the accept
+    (``implied_speed < cap``) so the premise cannot silently rot.
+
+    Mutation cross-check: revert cache.py's seed to a direct
+    ``anchors[device_id]=...`` mid-fusion -> the anchor appears despite the
+    rejected payload -> this test goes red.
+    """
+    now = time.time()
+    a_ts = now  # cached A's last_seen
+    # B seen far in the future -> significance future-drift reject; delta_t huge
+    # but positive so the gate fires and the accept path seeds.
+    b_ts = now + _FUTURE_DRIFT_S + 800.0
+    coord = _make_update_coordinator(_fix(HOME, last_seen=a_ts, acc=20.0))
+    # Structural guard: the jump is a plausible ACCEPT (seed path), not a reject.
+    implied_speed = _haversine_distance_impl(*HOME, *FAR) / (b_ts - a_ts)
+    assert implied_speed < _SPEED_CAP_MPS
+
+    coord.update_device_cache("dev", _fix(FAR, last_seen=b_ts, acc=20.0))
+
+    # Significance rejected the payload: no seed reached the store, cache unchanged.
+    assert "dev" not in coord._round_trip_anchors  # no phantom anchor
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(HOME[0])
+
+
+def test_consume_not_applied_when_significance_rejects() -> None:
+    """Fund A ordering: a consume marker set mid-fusion must NOT pop the anchor when
+    the significance gate rejects the payload (via ``update_device_cache``).
+
+    A coordinator holds anchor A (seeded low, TTL-valid) with the device cached at
+    B. A crowd return lands on A: it is gated as a teleport (implied speed > cap)
+    but within TTL+radius of the anchor, so the recovery path fires and sets the
+    consume marker. Its ``last_seen`` is past the future-drift horizon, so
+    ``_is_significant_update`` discards the payload (early return @520) before the
+    post-commit consume apply. The anchor must SURVIVE and the cache stay at B.
+
+    Geometry: recovery requires ``delta_t > 0`` (gate fires), ``0 <= delta_anchor
+    <= TTL`` and ``return_dist <= radius``; the future-drift reject needs
+    ``new_ts > now + 7200``. Anchor ts is set 600 s below new_ts (TTL-valid,
+    delta_anchor >= 0) and cached B's last_seen 300 s below new_ts (delta_t > 0,
+    ~833 m/s > cap). A structural guard pins ``delta <= ROUND_TRIP_TTL_S``.
+
+    Axis note: the regression axis would force ``delta_t < 0`` so the recovery path
+    never fires and no consume marker is set (vacuous); future-drift is the only
+    reject axis compatible with the ``delta_t > 0`` recovery path.
+
+    Mutation cross-check: revert cache.py's consume to a direct
+    ``anchors.pop(device_id, None)`` mid-fusion -> the anchor is consumed despite
+    the rejected payload -> this test goes red.
+    """
+    now = time.time()
+    new_ts = now + _FUTURE_DRIFT_S + 800.0  # future-drift reject; forward of cache
+    cached_b_ts = new_ts - 300.0  # delta_t = 300 s -> ~833 m/s > cap (gate fires)
+    anchor_ts = new_ts - 600.0  # delta_anchor = 600 s: TTL-valid and >= 0
+    # Structural guard: the return sits inside the anchor TTL (recovery path live).
+    delta = new_ts - anchor_ts
+    assert delta <= ROUND_TRIP_TTL_S
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": anchor_ts}}
+    coord = _make_update_coordinator(
+        _fix(FAR, last_seen=cached_b_ts, acc=20.0), anchors=anchors
+    )
+
+    # A crowd return onto A: recovery-consume marker set in fusion, then the
+    # payload is future-drift rejected before the post-commit consume apply.
+    coord.update_device_cache("dev", _fix(HOME, last_seen=new_ts, acc=20.0))
+
+    # The anchor survives (consume never applied) and the cache stays at B.
+    assert coord._round_trip_anchors["dev"]["lat"] == pytest.approx(HOME[0])
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(FAR[0])
+
+
+def test_seed_applied_when_significance_accepts() -> None:
+    """Fund A ordering (positive control to test_seed_not_applied...): an ACCEPTED
+    crowd clear-jump seeds the anchor post-commit via ``update_device_cache``.
+
+    An anchorless coordinator takes a plausible A->B jump (dt = 3 h -> ~23 m/s <
+    cap, accept path -> seed marker) that the significance gate ACCEPTS (B is a
+    large, significant move from A). The post-commit apply then seeds the anchor
+    with A's coordinates and the accept-time (B's) ts. This exercises the
+    post-commit seed block including the lazy-init branch: ``_round_trip_anchors``
+    is forced to ``None`` beforehand (the harness would otherwise pre-init ``{}``
+    and the lazy-init would never fire), covering cache.py 615-622.
+    """
+    b_ts = BASE_TS + 3 * 3600  # dt = 3 h -> implied ~23 m/s < cap -> accept
+    coord = _make_update_coordinator(_fix(HOME, last_seen=BASE_TS, acc=20.0))
+    # Force the lazy-init branch of the post-commit seed apply (cache.py 619-621).
+    coord._round_trip_anchors = None
+
+    coord.update_device_cache("dev", _fix(FAR, last_seen=b_ts, acc=20.0))
+
+    # Seed applied post-commit through the lazy-init path; cache advanced to B.
+    assert coord._round_trip_anchors["dev"] == {
+        "lat": HOME[0],
+        "lon": HOME[1],
+        "ts": float(b_ts),
+    }
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(FAR[0])
+
+
+def test_consume_applied_when_significance_accepts() -> None:
+    """Fund A ordering (positive control to test_consume_not_applied...): an
+    ACCEPTED recovery return pops the anchor post-commit via ``update_device_cache``.
+
+    A coordinator holds anchor A (TTL-valid) with the device cached at B. A crowd
+    return lands on A within TTL+radius: it is gated as a teleport (implied speed >
+    cap) yet recovers on the anchor, so the recovery path sets the consume marker.
+    Its ``last_seen`` is forward of cached B (no regression) and near-present (no
+    future-drift), so the significance gate ACCEPTS the payload. The post-commit
+    apply then pops the one-shot anchor, covering cache.py 611-614.
+    """
+    cached_b_ts = BASE_TS  # cached B's last_seen
+    anchor_ts = BASE_TS  # delta_anchor = 300 s -> TTL-valid and >= 0
+    new_ts = BASE_TS + 300  # delta_t = 300 s -> ~833 m/s > cap; > cached B -> accept
+    # Structural guard: the return sits inside the anchor TTL (recovery path live).
+    assert new_ts - anchor_ts <= ROUND_TRIP_TTL_S
+    anchors = {"dev": {"lat": HOME[0], "lon": HOME[1], "ts": float(anchor_ts)}}
+    coord = _make_update_coordinator(
+        _fix(FAR, last_seen=cached_b_ts, acc=20.0), anchors=anchors
+    )
+
+    coord.update_device_cache("dev", _fix(HOME, last_seen=new_ts, acc=20.0))
+
+    # Consume applied post-commit: the one-shot anchor is popped; cache moved to A.
+    assert "dev" not in coord._round_trip_anchors
+    assert coord._device_location_data["dev"]["latitude"] == pytest.approx(HOME[0])
 
 
 # ---------------------- anchor survival across estimated-existing skip (F2, AP-3)

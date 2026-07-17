@@ -483,6 +483,13 @@ class CacheOperations(_MixinBase):
         # this payload (early return @512), the anchor is intentionally NOT
         # touched (F-CODEX-7): a discarded own-report must not invalidate it.
         supersede_anchor = bool(slot.pop("_supersede_round_trip_anchor", False))
+        # Same deferral discipline for the round-trip anchor consume/seed intents
+        # set mid-fusion: pop them HERE (before sanitize/merge/commit) so they never
+        # leak into the cached row, and apply them only AFTER the payload commits
+        # (post-@580). A payload the significance gate rejects (early return @512)
+        # thus never consumes or seeds an anchor - the ordering fix (Fund A).
+        anchor_seed = slot.pop("_round_trip_anchor_seed", None)
+        anchor_consume = bool(slot.pop("_round_trip_anchor_consume", False))
 
         status = slot.get("status")
 
@@ -594,6 +601,25 @@ class CacheOperations(_MixinBase):
             _anchors = getattr(self, "_round_trip_anchors", None)
             if _anchors:
                 _anchors.pop(device_id, None)
+
+        # Round-trip anchor consume/seed (Fund A, ordering-vs-commit): applied here
+        # POST-commit and POST-significance-gate, symmetric to the supersede pop
+        # above. Consume and seed are mutually exclusive per report: the recovery
+        # path leaves the fusion via ``return True`` (only sets consume), while the
+        # accept path seeds and leaves via its own ``return True`` (only sets seed).
+        # So at most one of the two markers is ever present on a committed payload.
+        if anchor_consume and self._round_trip_confirm_enabled():
+            _anchors = getattr(self, "_round_trip_anchors", None)
+            if _anchors:
+                _anchors.pop(device_id, None)
+        if anchor_seed is not None and self._round_trip_confirm_enabled():
+            # Lazy-init mirroring _record_last_good_location so a __new__-built
+            # coordinator needs no extra wiring (moved here from the fusion).
+            _anchors = getattr(self, "_round_trip_anchors", None)
+            if _anchors is None:
+                _anchors = {}
+                self._round_trip_anchors = _anchors
+            _anchors[device_id] = anchor_seed
 
         # FIX #155: Only count background_updates for non-poll sources
         # to avoid double-counting with polled_updates.
@@ -1147,7 +1173,15 @@ class CacheOperations(_MixinBase):
                                         # recovered fix leaves via THIS return, not
                                         # the accept-path return below, so it never
                                         # sets a new anchor of its own.
-                                        anchors.pop(device_id, None)
+                                        # F-CODEX-7/ordering: defer the store
+                                        # mutation. Mutating _round_trip_anchors here
+                                        # (mid-fusion) consumes the anchor BEFORE the
+                                        # significance gate/commit; a payload the
+                                        # gate later rejects (early return @512) would
+                                        # then have burnt the anchor. Mark the intent
+                                        # on new_data and pop the anchor only AFTER
+                                        # the commit (mirrors _supersede handling).
+                                        new_data["_round_trip_anchor_consume"] = True
                                         self.increment_stat("round_trip_recoveries")
                                         _LOGGER.debug(
                                             "Round-trip recovery %s: returned "
@@ -1219,13 +1253,16 @@ class CacheOperations(_MixinBase):
                         if self._round_trip_confirm_enabled() and is_reliable_fix(
                             existing
                         ):
-                            # Lazy-init mirroring _record_last_good_location so a
-                            # __new__-built coordinator needs no extra wiring.
-                            anchors = getattr(self, "_round_trip_anchors", None)
-                            if anchors is None:
-                                anchors = {}
-                                self._round_trip_anchors = anchors
-                            anchors[device_id] = {
+                            # F-CODEX-7/ordering: defer the store mutation. Seeding
+                            # the anchor here (mid-fusion) writes _round_trip_anchors
+                            # BEFORE the significance gate/commit; a payload the gate
+                            # later rejects (early return @512) would then leave a
+                            # phantom anchor behind. Mark the intent on new_data and
+                            # let update_device_cache lazy-init the store and seed the
+                            # anchor only AFTER the commit (mirrors _supersede). The
+                            # anchored COORDINATES stay A's (existing_lat/lon); ts is
+                            # new_ts per the F-CODEX-5 TTL-clock reasoning above.
+                            new_data["_round_trip_anchor_seed"] = {
                                 "lat": existing_lat,
                                 "lon": existing_lon,
                                 "ts": new_ts,
