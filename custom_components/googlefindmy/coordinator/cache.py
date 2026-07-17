@@ -477,6 +477,12 @@ class CacheOperations(_MixinBase):
             return
 
         fused_applied = slot.pop("_fused_applied", False)
+        # F-FABLE-2: pop the supersede marker early (before sanitize/merge/commit)
+        # so it never leaks into the cached row, but defer the action until AFTER
+        # the payload commits (post-@580). If the significance gate below rejects
+        # this payload (early return @512), the anchor is intentionally NOT
+        # touched (F-CODEX-7): a discarded own-report must not invalidate it.
+        supersede_anchor = bool(slot.pop("_supersede_round_trip_anchor", False))
 
         status = slot.get("status")
 
@@ -579,6 +585,16 @@ class CacheOperations(_MixinBase):
         # position the Plus Code display accessors fall back to (non-poison).
         self._record_last_good_location(device_id, slot)
 
+        # F-FABLE-2 (post-commit): now that the trusted own-report clear-jump has
+        # been committed, invalidate any stale round-trip anchor so a later crowd
+        # echo near the old anchor cannot roll the tracker back. Placed AFTER the
+        # commit and the significance gate (early return @512) so a rejected
+        # payload never triggers it - F-CODEX-7 semantics preserved automatically.
+        if supersede_anchor and self._round_trip_confirm_enabled():
+            _anchors = getattr(self, "_round_trip_anchors", None)
+            if _anchors:
+                _anchors.pop(device_id, None)
+
         # FIX #155: Only count background_updates for non-poll sources
         # to avoid double-counting with polled_updates.
         if source != "poll":
@@ -590,7 +606,9 @@ class CacheOperations(_MixinBase):
             register_fn = getattr(self, "_register_identity_key", None)
             if callable(register_fn):
                 register_fn(device_id, effective_identity_key)
-            self._propagate_location_to_shared_devices(device_id, slot)
+            self._propagate_location_to_shared_devices(
+                device_id, slot, supersede_anchors=supersede_anchor
+            )
 
         # Trigger resolver refresh if identity changed
         if resolver_refresh_needed:
@@ -605,6 +623,7 @@ class CacheOperations(_MixinBase):
         self,
         source_device_id: str,
         location: dict[str, Any],
+        supersede_anchors: bool = False,
     ) -> None:
         """Propagate location updates to devices sharing the same tracker.
 
@@ -615,6 +634,10 @@ class CacheOperations(_MixinBase):
         Args:
             source_device_id: The device that received the update.
             location: The location data to propagate.
+            supersede_anchors: When True, also drop each propagated target's
+                stale round-trip anchor (F-CODEX-9), symmetric to the
+                source-device pop, so a later crowd echo near the old anchor
+                cannot roll a shared target back to the stale position.
         """
         if not location:
             return
@@ -674,6 +697,21 @@ class CacheOperations(_MixinBase):
             self._device_location_data[target_id] = merged
             # Coordinator last-good for the shared target, same non-poison gate.
             self._record_last_good_location(target_id, merged)
+
+            # F-CODEX-9: the superseding clear-jump was propagated to this
+            # shared target, so invalidate its stale round-trip anchor too -
+            # symmetric to the source-device pop after the commit. Otherwise a
+            # later crowd echo near the old anchor could take the round-trip
+            # recovery path and roll this propagated target back to the stale
+            # position, even though the trusted location was already propagated
+            # here (SA-8d data-flow breadth). Rides the exact propagation
+            # data-flow: only targets that actually adopted the fresh location
+            # (past the freshness gate above) are cleared; a fresher target
+            # that skipped propagation keeps its own anchor.
+            if supersede_anchors and self._round_trip_confirm_enabled():
+                _anchors = getattr(self, "_round_trip_anchors", None)
+                if _anchors:
+                    _anchors.pop(target_id, None)
 
             _LOGGER.debug(
                 "Propagated location from %s to %s (shared tracker, source=%s)",
@@ -1004,6 +1042,34 @@ class CacheOperations(_MixinBase):
             incoming_is_own = bool(new_data.get("is_own_report")) and not bool(
                 new_data.get("is_network_report")
             )
+            # Round-trip anchor supersede (F-FABLE-2): a trusted own-report that
+            # is itself a clear jump (dist > radius_sum, this branch) away from
+            # the previous position is a genuine relocation B->C. An anchor A
+            # that survived from an earlier gated crowd jump A->B is now stale -
+            # a later crowd echo near A must not roll the tracker off the trusted
+            # current position back to A. Mark the slot so the anchor is
+            # invalidated AFTER this payload commits (see supersede handling in
+            # update_device_cache): an own-report bypasses the gate below
+            # (not incoming_is_own) and never seeds/consumes, so a surviving
+            # anchor is strictly pre-existing. DF-A4: keyed on the clear-jump
+            # own-report only - an own-report near B never reaches this branch,
+            # so the legitimate B->A return stays protected.
+            # Known gap (F-3, TTL/radius-bounded): the trusted-return accept
+            # paths above (trusted new_data, trusted existing, #155 dual 200m
+            # fallback) return before this branch and never set the marker, so
+            # a stale anchor can survive on those paths too. Deferred, not fixed
+            # here (scope discipline at this iterated locus); a later crowd echo
+            # is still TTL- and radius-bounded.
+            # F-CODEX-9: the marker is set unconditionally for an own clear-jump,
+            # NOT only when THIS source device holds an anchor. A shared tracker
+            # propagates this fresh trusted position to sibling device ids (same
+            # identity_key) post-commit, and a sibling may hold a stale anchor
+            # even when the source does not. The post-commit handling pops the
+            # source anchor AND every propagated target's anchor; all pops are
+            # idempotent (pop(key, None)), so marking without a source anchor is a
+            # harmless no-op on the source side while still clearing the siblings.
+            if incoming_is_own and self._round_trip_confirm_enabled():
+                new_data["_supersede_round_trip_anchor"] = True
             # Only gate a fix that carries a REAL measured accuracy. A crowd
             # report is "accuracy-less" not only when the key is missing
             # (new_acc_raw is None) but also when it carries Android's
@@ -1020,7 +1086,27 @@ class CacheOperations(_MixinBase):
                 and math.isfinite(new_acc_raw)
                 and new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
             )
-            if self._speed_gate_enabled() and not incoming_is_own and new_acc_measured:
+            # Symmetric cached-endpoint guard (F-CODEX-1): also require the
+            # cached point ``existing`` to be a reliable fix. If it is an
+            # estimated/accuracy-less row (the 200 m fallback carries
+            # accuracy_estimated=True), implied_speed would be measured against
+            # an unreliable reference and reject the incoming report against a
+            # phantom position, stranding the tracker on the estimate. Mirrors
+            # the incoming-side new_acc_measured check so the gate fires only when
+            # BOTH endpoints carry real measured accuracy; is_reliable_fix is the
+            # same predicate that guards anchor seeding below (@1125).
+            # Trade-off (F-2): when ``existing`` is estimated, the ENTIRE gate
+            # block below (incl. round-trip recovery, housekeeping and reject) is
+            # skipped, so a measured crowd teleport is accepted ungated for that
+            # one step. This is deliberate - gating against a phantom reference is
+            # the worse failure (F-CODEX-1 stranding). Follow-up candidate: gate
+            # against the last-good location instead of skipping entirely.
+            if (
+                self._speed_gate_enabled()
+                and not incoming_is_own
+                and new_acc_measured
+                and is_reliable_fix(existing)
+            ):
                 existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
                 new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
                 if existing_ts is not None and new_ts is not None:
@@ -1075,8 +1161,16 @@ class CacheOperations(_MixinBase):
                                         return True
                                     # Anchor expired or the fix landed too far
                                     # from A: drop it (housekeeping) and let the
-                                    # gate reject as usual.
-                                    anchors.pop(device_id, None)
+                                    # gate reject as usual. Guard on
+                                    # delta_anchor >= 0 (F-FABLE-1): a delayed
+                                    # out-of-order report near A can carry a
+                                    # last_seen between A and B, making
+                                    # delta_anchor < 0 (new_ts before the anchor
+                                    # ts). That is not an expiry - popping here
+                                    # would destroy the anchor and strand a later
+                                    # genuine return. Only house-keep forward.
+                                    if delta_anchor >= 0:
+                                        anchors.pop(device_id, None)
                             self.increment_stat("speed_gate_rejects")
                             _LOGGER.debug(
                                 "Speed gate rejected crowd fix %s: %.0fm in "
