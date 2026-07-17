@@ -57,8 +57,12 @@ jobs:
 
       - name: Validate published tag
         # Early, human-readable abort. The canonical regex (SSOT) lives in
-        # script/stamp_version.py (VERSION_RE); this guard mirrors it so a
-        # malformed tag never reaches the stamp/commit steps. Keep both in sync.
+        # script/stamp_version.py (VERSION_RE); this guard mirrors it byte-for-byte
+        # (locked by tests/test_stamp_version.py). The shape is deliberately PEP
+        # 440-broad (bN/aN betas, four-segment .N) so hand-picked maintenance tags
+        # stamp cleanly. semantic-release cannot *propose* for those lines (see
+        # release.yml Workflow A, which opens a hand-tag draft there instead); this
+        # step stamps the exact published tag regardless. Keep both regexes in sync.
         run: |
           set -euo pipefail
           if ! printf '%s' "$TAG_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([ab][0-9]+)?(\.[0-9]+)?$'; then

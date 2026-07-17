@@ -36,7 +36,14 @@ import re
 from pathlib import Path
 
 # Canonical tag/version shape (SSOT). tag_format = "{version}" means the git tag
-# IS the version, so a leading `v` is rejected. Mirrors the real tag set on 1.7.
+# IS the version, so a leading `v` is rejected. Mirrors the real tag set on 1.7,
+# which is PEP 440 (`bN`/`aN` betas, four-segment `.N`) -- deliberately broader
+# than SemVer so hand-picked maintenance tags stamp cleanly. Consequence:
+# semantic-release (SemVer-only) cannot compute a trustworthy *proposal* for such
+# lines, so release.yml (Workflow A) opens an empty hand-tag draft there instead
+# of proposing a stale number; the stamp path here still honours the exact chosen
+# tag verbatim. The shell guard in release-stamp.yml MUST stay byte-equal to this
+# pattern (locked by tests/test_stamp_version.py).
 VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([ab][0-9]+)?(\.[0-9]+)?$")
 
 CONST_REL = "custom_components/googlefindmy/const.py"
@@ -93,9 +100,14 @@ def stamp_const(text: str, version: str) -> str:
     written form is always the canonical ``INTEGRATION_VERSION = "x"`` (single
     spaces, double quotes) that test_hacs_validation.py requires -- so stamping
     also normalises the literal and never re-introduces a type annotation.
+
+    The trailing match is ``[ \\t]*$`` (horizontal whitespace only), not
+    ``\\s*$``: a greedy ``\\s*$`` would also swallow the newline(s) after the
+    literal and delete the blank line that follows it in const.py on every
+    stamp. Restricting to spaces/tabs keeps the surrounding layout intact.
     """
     pattern = re.compile(
-        r"""^INTEGRATION_VERSION\s*=\s*["'][^"']*["']\s*$""", re.MULTILINE
+        r"""^INTEGRATION_VERSION\s*=\s*["'][^"']*["'][ \t]*$""", re.MULTILINE
     )
     new_text, hits = pattern.subn(f'INTEGRATION_VERSION = "{version}"', text)
     if hits != 1:
