@@ -37,13 +37,17 @@ updates like the subentry unload reminder easy to place without scrolling throug
 The integration version lives in **three** places that MUST be bumped together on every release:
 `manifest.json` `"version"`, `const.py` `INTEGRATION_VERSION` (the latter feeds diagnostics,
 device `sw_version`, and logs), and `pyproject.toml` `[tool.poetry] version` (the distribution
-version; `semantic-release` rewrites it automatically on the `main` branch via
-`[tool.semantic_release] version_toml`, but on release branches such as `1.7` it must be bumped by
-hand alongside the other two — this is exactly how `pyproject.toml` silently drifted to `1.7.1`
-while the integration shipped `1.7.4`). `manifest.json` is strict JSON validated by hassfest, so it
-cannot carry an inline cross-reference comment or an extra key; this note is the canonical anchor for
-the manifest side. `const.py` and `pyproject.toml` carry reciprocal cross-reference comments naming
-the other two files. A release that bumps only some files ships an inconsistent version string.
+version). `semantic-release` now rewrites **all three** automatically on any release line
+(`main` and every `X.Y` maintenance branch, e.g. `1.7`) via `[tool.semantic_release] version_toml`
+(pyproject) plus `version_variables` (`const.py` + `manifest.json`); a manual three-file bump is
+only a fallback for out-of-band edits. Historically, before `version_variables` was wired up,
+`pyproject.toml` silently drifted to `1.7.1` while the integration shipped `1.7.4`. `manifest.json`
+is strict JSON validated by hassfest, so it cannot carry an inline cross-reference comment or an
+extra key; this note is the canonical anchor for the manifest side. `const.py` and `pyproject.toml`
+carry reciprocal cross-reference comments naming the other two files. Note: `const.py`'s
+`INTEGRATION_VERSION` deliberately has **no** `: str` annotation, because the `version_variables`
+regex matches `NAME = "x"` but not `NAME: str = "x"`; do not re-add the annotation.
+A release that bumps only some files ships an inconsistent version string.
 Before tagging a release, grep all three:
 `git grep -nE '"version"|INTEGRATION_VERSION|^version = ' custom_components/googlefindmy/manifest.json custom_components/googlefindmy/const.py pyproject.toml`.
 

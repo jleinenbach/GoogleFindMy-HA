@@ -1,27 +1,36 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  # Workflow A of the "manual release -> code stamp" handshake.
+  #
+  # Triggered manually via the Actions UI ("Run workflow"), which lets you pick
+  # the branch (main or any X.Y maintenance line) at run time -- no branch name
+  # is hard-wired here. It only PROPOSES the next version and opens a DRAFT
+  # release; it never stamps code, tags, or publishes. semantic-release derives
+  # the proposed version from git tags plus the Conventional Commits since the
+  # last tag, never from the branch name (see pyproject.toml [tool.semantic_release]).
+  #
+  # The maintainer then edits the draft (tag and/or body) and publishes it. That
+  # publish fires release-stamp.yml (Workflow B), which writes the exact chosen
+  # tag into the three version literals. Nothing releases automatically.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (no actual release)"
+        description: "Dry run (preview only, do not create a draft)"
         required: false
         default: "false"
         type: boolean
 
+# Least-privilege: contents:write is all that "gh release create --draft" and
+# the dry-run preview need. Publishing / PR work happens in release-stamp.yml.
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
 
 jobs:
   release:
-    name: Semantic Release
+    name: Propose version and open draft release
     runs-on: ubuntu-latest
-    # Only run on main repo, not forks
+    # Only run on the maintainer forks, not on downstream forks.
     if: github.repository_owner == 'jleinenbach' || github.repository_owner == 'BSkando'
     concurrency:
       group: release
@@ -54,34 +63,89 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Semantic Release (dry run)
+      - name: Preview (dry run)
         if: github.event.inputs.dry_run == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          poetry run semantic-release version --noop
-          poetry run semantic-release changelog --noop
+          set -euo pipefail
+          # Global --noop MUST precede the subcommand in python-semantic-release
+          # v10 (`version --noop` / `changelog --noop` are not valid options).
+          poetry run semantic-release --noop version
+          poetry run semantic-release --noop changelog
 
-      - name: Semantic Release
+      - name: Propose a version and open a draft release
         if: github.event.inputs.dry_run != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The branch this workflow was dispatched on (main or an X.Y line).
+          # Passed via env indirection and used only as the draft's --target so
+          # the eventual tag lands on THIS line, never as a hard-wired decision.
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          poetry run semantic-release version
-          poetry run semantic-release publish
+          set -euo pipefail
 
-      - name: Create HACS ZIP asset
-        if: github.event.inputs.dry_run != 'true'
-        run: |
-          # Get the latest tag
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$LATEST_TAG" ]; then
-            echo "Creating ZIP for release $LATEST_TAG"
-            cd custom_components
-            zip -r ../googlefindmy.zip googlefindmy
-            cd ..
-            # Upload to the release if it exists
-            gh release upload "$LATEST_TAG" googlefindmy.zip --clobber || true
+          # --- Can semantic-release propose for THIS line? --------------------
+          # semantic-release only understands SemVer. This project's maintenance
+          # lines are tagged PEP 440 (beta `bN`, four-segment `.N`), which PSR
+          # silently skips -- so on those lines its "last release" view drifts
+          # from the real newest tag and any proposal derives from a stale base.
+          # Detect that branch-name-agnostically by comparing PSR's view with the
+          # real topological line tip. Fail-safe: on a false mismatch the
+          # maintainer just hand-tags; no wrong number is ever proposed/stamped.
+          # `|| true` keeps a semantic-release crash (e.g. a bad pyproject) from
+          # aborting here: an empty PSR_LAST just routes to the hand-tag draft
+          # (safe). Real PSR errors still surface loudly in the dry-run preview
+          # step above (`--noop version`), which is the diagnostic path.
+          REAL_TIP="$(git describe --tags --abbrev=0 HEAD 2>/dev/null || true)"
+          PSR_LAST="$(poetry run semantic-release version --print-last-released 2>/dev/null || true)"
+
+          MODE=propose
+          if [ -n "$REAL_TIP" ] && [ "$REAL_TIP" != "$PSR_LAST" ]; then
+            # PSR is blind to this line's tag scheme -> hand-tag draft.
+            MODE=hand
+            echo "::notice::semantic-release cannot propose for ${REF_NAME}: last-release view (${PSR_LAST:-none}) != real tip (${REAL_TIP}). Opening an empty hand-tag draft."
+          else
+            # --print prints the CURRENT version (not a new one) when no releasing
+            # commit exists since the last tag; guard against drafting a stale
+            # release for an already-released version.
+            PROPOSED="$(poetry run semantic-release version --print 2>/dev/null || true)"
+            if [ -z "$PROPOSED" ] || [ "$PROPOSED" = "$PSR_LAST" ]; then
+              echo "::notice::No release due on ${REF_NAME}: no releasing commits since ${PSR_LAST:-the last tag}. Nothing to draft."
+              exit 0
+            fi
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # --- Open the draft --------------------------------------------------
+          # A DRAFT release's tag is editable in the UI before publishing; the tag
+          # is only created when the draft is published, which fires
+          # release-stamp.yml (Workflow B) to stamp the code.
+          if [ "$MODE" = "propose" ]; then
+            echo "Proposed next version: $PROPOSED (target: $REF_NAME)"
+            if ! gh release create "$PROPOSED" --draft --target "$REF_NAME" \
+                --generate-notes --title "$PROPOSED"; then
+              echo "::error::gh release create failed (does a draft/release '$PROPOSED' already exist?)"
+              exit 1
+            fi
+            echo "Draft created for $PROPOSED on $REF_NAME. Edit and publish it to stamp the code."
+          else
+            # Hand-tag draft: a placeholder tag the maintainer replaces with the
+            # intended version (e.g. 1.7.14b1) before publishing. If published
+            # unchanged, release-stamp.yml's VERSION_RE guard rejects the
+            # placeholder, so a bad stamp can never land.
+            PLACEHOLDER="set-release-tag"
+            # Collision guard. A transient view error (auth/API) is treated as
+            # "absent" and falls through to `gh release create` below, which then
+            # surfaces its own error -- safe, never a silent wrong action.
+            if gh release view "$PLACEHOLDER" >/dev/null 2>&1; then
+              echo "::error::a '$PLACEHOLDER' draft already exists; publish or delete it, then re-run."
+              exit 1
+            fi
+            if ! gh release create "$PLACEHOLDER" --draft --target "$REF_NAME" \
+                --generate-notes \
+                --title "DRAFT - replace tag with your version (e.g. 1.7.14 or 1.7.14b1) before publishing"; then
+              echo "::error::gh release create failed for the hand-tag draft"
+              exit 1
+            fi
+            echo "Empty hand-tag draft created on $REF_NAME. Set the tag to your version and publish to stamp the code."
+          fi

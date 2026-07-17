@@ -1,0 +1,178 @@
+name: Release Stamp
+
+# Workflow B of the "manual release -> code stamp" handshake.
+#
+# Fires AFTER a GitHub release is published (whether from the Release workflow's
+# draft or a hand-made releases/new release). It checks out the *published tag*,
+# writes that exact tag into the three version literals (script/stamp_version.py),
+# commits with [skip ci], and pushes the stamp to the branch that owns the tag.
+# The delivered HACS ZIP is rebuilt from this stamped tag tree, so the installed
+# artifact always matches the released commit.
+#
+# Tag vs. branch: we check out github.event.release.tag_name, NOT target_commitish.
+# GitHub documents target_commitish as unused once the git tag already exists (it
+# then defaults to the repo default branch), so trusting it would stamp and package
+# the wrong branch on a maintenance line. The branch that receives the stamp push
+# is resolved from the tag commit itself (git branch -r --contains) and pushed
+# fast-forward only; if the tag is behind the branch tip, the branch stamp is
+# skipped -- the ZIP asset already carries the correct version.
+#
+# Security: values derived from the release event (tag_name, target branch) reach
+# shell exclusively via env: indirection and quoted "$VARS" -- never interpolated
+# as ${{ ... }} inside run: blocks (shell-injection hardening).
+#
+# Loop safety: the stamp commit carries [skip ci], and this workflow triggers only
+# on `release: published`, never on `push`. A push made with GITHUB_TOKEN does not,
+# by GitHub design, trigger further workflow runs either.
+
+on:
+  release:
+    types: [published]
+
+# Least-privilege: contents for the stamp push + ZIP upload; pull-requests only
+# for the dormant protected-branch fallback leg (see "Resolve the owning branch").
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  stamp:
+    name: Stamp published version into code
+    runs-on: ubuntu-latest
+    # Only run on the maintainer forks, not on downstream forks.
+    if: github.repository_owner == 'jleinenbach' || github.repository_owner == 'BSkando'
+    concurrency:
+      group: release-stamp
+      cancel-in-progress: false
+
+    env:
+      TAG_NAME: ${{ github.event.release.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out the published tag
+        uses: actions/checkout@v5
+        with:
+          # Pin the exact published commit. target_commitish is unreliable once
+          # the tag already exists (see header); the tag ref always points at the
+          # released commit, so the stamped tree and the HACS ZIP match the release.
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Validate published tag
+        # Early, human-readable abort. The canonical regex (SSOT) lives in
+        # script/stamp_version.py (VERSION_RE); this guard mirrors it byte-for-byte
+        # (locked by tests/test_stamp_version.py). The shape is deliberately PEP
+        # 440-broad (bN/aN betas, four-segment .N) so hand-picked maintenance tags
+        # stamp cleanly. semantic-release cannot *propose* for those lines (see
+        # release.yml Workflow A, which opens a hand-tag draft there instead); this
+        # step stamps the exact published tag regardless. Keep both regexes in sync.
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?([ab][0-9]+)?$'; then
+            echo "::error::tag_name '$TAG_NAME' violates tag_format='{version}'; expected X.Y.Z[.N][bN], no 'v' prefix"
+            exit 1
+          fi
+          echo "validated tag=$TAG_NAME"
+
+      - name: Stamp version into the three literals
+        run: |
+          set -euo pipefail
+          python script/stamp_version.py --version "$TAG_NAME"
+
+      - name: Commit the stamp
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "nothing to stamp (version already current); skipping commit"
+            echo "STAMP_COMMITTED=false" >> "$GITHUB_ENV"
+          else
+            git add -A
+            git commit -m "chore(release): ${TAG_NAME} [skip ci]"
+            echo "STAMP_COMMITTED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Resolve the owning branch and push the stamp
+        if: env.STAMP_COMMITTED == 'true'
+        run: |
+          set -euo pipefail
+          # The stamp commit sits on top of the *published tag* (we checked the tag
+          # out, not a branch). It is pushed to the branch that owns the tag.
+          #
+          # target_commitish is an unreliable hint: GitHub documents it as unused
+          # once the git tag already exists, defaulting to the repo default branch
+          # (which only coincidentally equals the maintenance line on some forks).
+          # So resolve the branch solely from the tag commit itself and never trust
+          # the event hint as a tiebreaker: stamp only when exactly one branch owns
+          # the tag, and fast-forward only.
+          git fetch origin '+refs/heads/*:refs/remotes/origin/*' --quiet
+          TAG_SHA="$(git rev-list -n1 "refs/tags/${TAG_NAME}")"
+          mapfile -t CANDIDATES < <(
+            git branch -r --contains "$TAG_SHA" --format='%(refname:short)' \
+              | grep -vE '(^|/)HEAD$' \
+              | sed 's#^origin/##'
+          )
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
+            STAMP_BRANCH=""
+          elif [ "${#CANDIDATES[@]}" -eq 1 ]; then
+            STAMP_BRANCH="${CANDIDATES[0]}"        # unambiguous single owner
+          else
+            STAMP_BRANCH=""                        # multiple owners; do not guess
+          fi
+          if [ -z "$STAMP_BRANCH" ]; then
+            echo "::notice::could not unambiguously resolve the branch owning tag ${TAG_NAME} (candidates: ${CANDIDATES[*]:-none}); the HACS ZIP asset is already stamped and uploaded, so the branch stamp is skipped"
+            exit 0
+          fi
+          echo "stamping onto branch: ${STAMP_BRANCH}"
+          # Push order of the error classification matters: protection rejections
+          # ("remote rejected", GH006) also contain the word "rejected", so the
+          # protected-branch check MUST precede the non-fast-forward check.
+          if git push origin "HEAD:${STAMP_BRANCH}" 2> push_err.log; then
+            echo "direct push to ${STAMP_BRANCH} succeeded"
+          elif grep -qiE 'protected branch|\b403\b|GH006' push_err.log; then
+            # Dormant fallback for a future branch protection: a short-lived PR +
+            # auto-merge. Needs the repo switch allow_auto_merge=true. If the future
+            # protection requires a REVIEW, GITHUB_TOKEN cannot approve its own PR
+            # -> the stamp PR waits for one maintainer click. If it requires only
+            # status checks, auto-merge lands it after CI.
+            echo "direct push blocked by branch protection; using PR fallback"
+            FB_BRANCH="release-stamp/${TAG_NAME}"
+            git push origin "HEAD:${FB_BRANCH}"
+            gh pr create --base "${STAMP_BRANCH}" --head "${FB_BRANCH}" \
+              --title "chore(release): ${TAG_NAME}" \
+              --body "Automated version stamp for release ${TAG_NAME}. [skip ci]"
+            gh pr merge --auto --squash "${FB_BRANCH}" \
+              || echo "::warning::auto-merge unavailable (allow_auto_merge=false?); PR left open for manual merge"
+          elif grep -qiE 'non-fast-forward|fetch first|tip of your current branch is behind' push_err.log; then
+            # The tag is behind the branch tip; the stamp would rewrite history.
+            # Skip it -- the HACS asset already carries the version, and we never
+            # force-push a maintenance branch.
+            echo "::notice::tag ${TAG_NAME} is behind ${STAMP_BRANCH}; branch stamp skipped (HACS asset already carries the version)"
+          else
+            echo "::error::push failed for a non-protection reason:"
+            cat push_err.log
+            exit 1
+          fi
+
+      - name: Rebuild and upload the HACS ZIP from the stamped tree
+        run: |
+          set -euo pipefail
+          # hacs.json sets zip_release=true + filename=googlefindmy.zip, so HACS
+          # installs THIS asset and extracts it directly into
+          # custom_components/googlefindmy/. manifest.json MUST therefore sit at
+          # the ZIP root -- zip the domain *contents* (`.` from inside the domain
+          # dir), never the googlefindmy/ directory from its parent (that would
+          # nest one level too deep and hide the integration -> broken installs).
+          # Locked by tests/test_hacs_validation.py (ZIP-structure guard).
+          cd custom_components/googlefindmy
+          zip -r ../../googlefindmy.zip .
+          cd ../..
+          gh release upload "$TAG_NAME" googlefindmy.zip --clobber
