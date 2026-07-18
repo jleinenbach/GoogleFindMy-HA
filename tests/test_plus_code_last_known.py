@@ -432,6 +432,29 @@ async def test_estimated_fix_does_not_poison_last_good_direct() -> None:
     assert coord.get_display_location_data("dev-1") == good
 
 
+async def test_zero_sentinel_fix_does_not_poison_last_good_direct() -> None:
+    """Codex #205: a fix carrying the 0.0 no-accuracy sentinel (NOT flagged
+    estimated) must not overwrite a reliable last-good either.
+
+    is_reliable_fix now rejects a sub-physical accuracy even without the
+    accuracy_estimated flag, so a restored/legacy row with ``accuracy=0.0`` is
+    treated as accuracy-less in substance (same #1179 poisoning class as the
+    estimated fallback) and does not advance the retention cache.
+
+    Mutation guard: reverting is_reliable_fix makes ``{"accuracy": 0.0}``
+    reliable again, so it overwrites the reliable last-good and this assertion
+    fails.
+    """
+    coord = _bare_coordinator()
+    good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    coord._record_last_good_location("dev-1", good)
+
+    zero_sentinel = {"latitude": 48.0, "longitude": 11.0, "accuracy": 0.0}
+    coord._record_last_good_location("dev-1", zero_sentinel)
+    # The retention cache is untouched: it still holds the reliable fix.
+    assert coord._device_last_good_location["dev-1"] == good
+
+
 async def test_estimated_fix_does_not_poison_last_good_via_update_cache() -> None:
     """Production path: an accuracy-less update sanitized to estimated 200 m must
     not poison the coordinator last-good (Codex PR #1181, previously uncovered)."""

@@ -118,6 +118,29 @@ def test_far_jump_accept_sets_anchor() -> None:
     assert "dev" not in coord._round_trip_anchors  # store untouched by unbound fusion
 
 
+def test_zero_sentinel_source_a_sets_no_anchor() -> None:
+    """Codex #205: an anchor source A carrying the 0.0 no-accuracy sentinel
+    (NOT flagged estimated) must NOT seed a return anchor.
+
+    The anchor is seeded only from a reliable A (cache.py is_reliable_fix(existing)).
+    After the fix, a restored/legacy A with ``accuracy=0.0`` is no longer reliable,
+    so the speed gate falls through (unreliable reference, F-2) and the anchor-seed
+    site is never reached: no ``_round_trip_anchor_seed`` intent marker is set, so a
+    later stale crowd report near A cannot ride a phantom anchor back.
+
+    Mutation guard: reverting is_reliable_fix makes ``{"accuracy": 0.0}`` reliable
+    again, so the wide jump is gate-evaluated as a clear jump and seeds the anchor
+    (``_round_trip_anchor_seed`` present), failing this assertion.
+    """
+    coord = _coord(_fix(HOME, last_seen=BASE_TS, acc=0.0))  # A = 0.0 sentinel
+    b_ts = BASE_TS + 3 * 3600
+    nd = _fix(FAR, last_seen=b_ts, acc=50.0)
+    result = _fuse(coord, nd)
+    assert result is True
+    assert "_round_trip_anchor_seed" not in nd
+    assert "dev" not in coord._round_trip_anchors
+
+
 def test_stale_offline_jump_then_return_recovers() -> None:
     """F-CODEX-5 end-to-end: a device offline for 3 h jumps to B, then returns
     near A 300 s later. The anchor TTL must run from B (accept time), not from

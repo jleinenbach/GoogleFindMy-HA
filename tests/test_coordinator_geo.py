@@ -29,6 +29,7 @@ from custom_components.googlefindmy.coordinator.helpers.geo import (
     coerce_float,
     has_usable_accuracy,
     haversine_distance,
+    is_reliable_fix,
     location_age_seconds,
     resolve_seeded_accuracy,
     resolve_stale_threshold,
@@ -506,6 +507,45 @@ class TestHasUsableAccuracy:
         # ``has_usable_accuracy`` only checks presence; ``safe_accuracy`` owns
         # the "0.0 means no accuracy" policy downstream.
         assert has_usable_accuracy({"accuracy": 0.0}) is True
+
+
+class TestIsReliableFix:
+    """is_reliable_fix - retention gate: only a real, finite, physical accuracy.
+
+    Stricter than has_usable_accuracy (the display gate, which stays lenient so
+    a 0.0/estimated fix is still shown). is_reliable_fix additionally rejects a
+    numerically present but non-physical accuracy (Android's 0.0 sentinel,
+    negative, sub-MIN_PHYSICAL_ACCURACY_M or non-finite) even without the
+    accuracy_estimated flag, mirroring the incoming-side new_acc_measured check
+    (Codex #205). Retaining/anchoring/gating against such a phantom reference
+    would strand a genuine measured fix (#1179 poisoning class).
+    """
+
+    def test_real_accuracy_is_reliable(self) -> None:
+        assert is_reliable_fix({"accuracy": 12.0}) is True
+        assert is_reliable_fix({"accuracy": 12.0, "accuracy_estimated": False}) is True
+
+    def test_zero_sentinel_is_not_reliable(self) -> None:
+        # Android's no-accuracy sentinel: finite but < MIN_PHYSICAL_ACCURACY_M.
+        assert is_reliable_fix({"accuracy": 0.0}) is False
+
+    def test_negative_accuracy_is_not_reliable(self) -> None:
+        assert is_reliable_fix({"accuracy": -1.0}) is False
+
+    def test_non_finite_accuracy_is_not_reliable(self) -> None:
+        assert is_reliable_fix({"accuracy": float("inf")}) is False
+        assert is_reliable_fix({"accuracy": float("nan")}) is False
+
+    def test_bool_accuracy_is_not_reliable(self) -> None:
+        # bool is an int subclass; True must not slip through as 1.0 m.
+        assert is_reliable_fix({"accuracy": True}) is False
+
+    def test_estimated_is_not_reliable(self) -> None:
+        assert is_reliable_fix({"accuracy": 200.0, "accuracy_estimated": True}) is False
+
+    def test_none_and_missing_are_not_reliable(self) -> None:
+        assert is_reliable_fix({"accuracy": None}) is False
+        assert is_reliable_fix(None) is False
 
 
 class TestSelectDisplayRow:

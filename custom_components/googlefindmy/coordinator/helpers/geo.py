@@ -312,11 +312,28 @@ def is_reliable_fix(row: Mapping[str, Any] | None) -> bool:
     *display* gate (:func:`select_display_row`) so a fresh estimated fix is
     still shown; ``is_reliable_fix`` is the retention gate so only a real
     measurement overwrites the last reliable position.
+
+    Also rejects a numerically *present* but non-physical accuracy even when
+    ``accuracy_estimated`` is absent: Android's no-accuracy sentinel (``0.0``),
+    a negative value, a sub-``MIN_PHYSICAL_ACCURACY_M`` value, or a non-finite
+    one (``NaN``/``inf``). Such a row is accuracy-less in substance, so it must
+    not be retained as last-good, seed a round-trip anchor, or serve as a
+    speed-gate reference. This mirrors the incoming-side ``new_acc_measured``
+    check in ``cache.py`` (``math.isfinite`` + ``>= MIN_PHYSICAL_ACCURACY_M``),
+    closing the asymmetry where the cached/reference endpoint was gated only on
+    presence. ``has_usable_accuracy`` deliberately stays lenient here (a ``0.0``
+    is still "present" for display), so only ``is_reliable_fix`` tightens.
     """
+    if not has_usable_accuracy(row) or row is None:
+        return False
+    if bool(row.get("accuracy_estimated")):
+        return False
+    acc = row.get("accuracy")
     return (
-        has_usable_accuracy(row)
-        and row is not None
-        and not bool(row.get("accuracy_estimated"))
+        isinstance(acc, (int, float))
+        and not isinstance(acc, bool)
+        and math.isfinite(acc)
+        and acc >= MIN_PHYSICAL_ACCURACY_M
     )
 
 
