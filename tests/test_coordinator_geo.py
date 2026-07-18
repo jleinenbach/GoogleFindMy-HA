@@ -25,6 +25,7 @@ from custom_components.googlefindmy.const import (
 )
 from custom_components.googlefindmy.coordinator.helpers.geo import (
     DEFAULT_ACCURACY_FALLBACK_M,
+    MIN_PHYSICAL_ACCURACY_M,
     clamp,
     coerce_float,
     has_usable_accuracy,
@@ -528,6 +529,12 @@ class TestIsReliableFix:
     def test_zero_sentinel_is_not_reliable(self) -> None:
         # Android's no-accuracy sentinel: finite but < MIN_PHYSICAL_ACCURACY_M.
         assert is_reliable_fix({"accuracy": 0.0}) is False
+
+    def test_boundary_at_min_physical_accuracy(self) -> None:
+        # Pins the >= operator: exactly MIN_PHYSICAL_ACCURACY_M is reliable, a
+        # hair below is not. Guards against a >=/> mutation on the floor check.
+        assert is_reliable_fix({"accuracy": MIN_PHYSICAL_ACCURACY_M}) is True
+        assert is_reliable_fix({"accuracy": MIN_PHYSICAL_ACCURACY_M / 2}) is False
 
     def test_negative_accuracy_is_not_reliable(self) -> None:
         assert is_reliable_fix({"accuracy": -1.0}) is False
