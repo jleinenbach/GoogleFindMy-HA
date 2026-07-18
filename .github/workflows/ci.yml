@@ -131,10 +131,51 @@ jobs:
       - name: Run HACS validation
         if: steps.brands_probe.outputs.available == 'true'
         id: hacs
+        continue-on-error: true
         uses: hacs/action@main
         with:
           category: integration
           ignore: topics issues
+
+      # Transient HACS regression guard (hacs/integration#5252): the action
+      # intermittently fetches the raw hacs.json / manifest.json as None from
+      # the GitHub contents API and reports "invalid 'hacs.json' file" and
+      # "integration_manifest ... Got None" on byte-identical, valid files.
+      # If the first run fails, re-run with exactly those two transient-prone
+      # validators isolated. If everything else passes, the failure was the
+      # known transient signature and is tolerated (job stays green with a
+      # warning). The isolation is NOT permanent: it only runs on failure, so a
+      # healthy HACS still exercises all checks. The real validity of both files
+      # is still enforced independently at the ci-success level: manifest.json by
+      # the hassfest job (this job needs: hassfest) and hacs.json by the test job
+      # (tests/test_hacs_validation.py). Any other failing check keeps this red.
+      - name: Re-run HACS validation (isolate transient checks)
+        if: steps.brands_probe.outputs.available == 'true' && steps.hacs.outcome == 'failure'
+        id: hacs_surgical
+        continue-on-error: true
+        uses: hacs/action@main
+        with:
+          category: integration
+          ignore: topics issues hacsjson integration_manifest
+
+      - name: Classify HACS result
+        if: steps.brands_probe.outputs.available == 'true'
+        id: hacs_verdict
+        env:
+          FIRST: ${{ steps.hacs.outcome }}
+          RETRY: ${{ steps.hacs_surgical.outcome }}
+        run: |
+          set -u
+          if [ "$FIRST" = "success" ]; then
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+          elif [ "$RETRY" = "success" ]; then
+            echo "::warning ::HACS validation failed only on the transient-prone checks (hacsjson, integration_manifest) and passed once they were isolated; treating as the known transient upstream regression (hacs/integration#5252). File validity is still enforced by the hassfest and test jobs."
+            echo "status=transient" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error ::HACS validation failed on a check beyond the known transient signature; treating as a real defect."
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
 
       - name: Write HACS summary
         if: always()
@@ -144,10 +185,14 @@ jobs:
             echo ""
             if [ "${{ steps.brands_probe.outputs.available }}" != "true" ]; then
               echo "⚠️ **Skipped** - brands.home-assistant.io unavailable"
-            elif [ "${{ steps.hacs.outcome }}" = "success" ]; then
+            elif [ "${{ steps.hacs_verdict.outputs.status }}" = "passed" ]; then
               echo "✅ **HACS validation passed**"
               echo ""
               echo "The integration meets HACS requirements."
+            elif [ "${{ steps.hacs_verdict.outputs.status }}" = "transient" ]; then
+              echo "⚠️ **HACS validation passed after isolating transient checks** - tolerated upstream regression (hacs/integration#5252)."
+              echo ""
+              echo "Only hacsjson/integration_manifest failed; file validity is enforced by the hassfest and test jobs."
             else
               echo "❌ **HACS validation failed**"
               echo ""
