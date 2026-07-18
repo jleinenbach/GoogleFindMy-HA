@@ -66,25 +66,35 @@ jobs:
           python-version: "3.13"
 
       - name: Validate published tag
-        # Early, human-readable abort. The canonical regex (SSOT) lives in
-        # script/stamp_version.py (VERSION_RE); this guard mirrors it byte-for-byte
-        # (locked by tests/test_stamp_version.py). The shape is deliberately PEP
+        # Early, human-readable abort. The published git tag may carry a leading
+        # `v` (BSkando tags `vX.Y.Z`) or not (jleinenbach tags `X.Y.Z[.N]`) -- the
+        # shared release tooling must honour both fork conventions. The code
+        # literals, however, are ALWAYS PEP 440 versions with no `v`, so we strip
+        # an optional single leading `v` here and validate/stamp that VERSION.
+        # The canonical regex (SSOT) lives in script/stamp_version.py (VERSION_RE);
+        # this guard mirrors it byte-for-byte (locked by tests/test_stamp_version.py)
+        # and is applied to the stripped VERSION. The shape is deliberately PEP
         # 440-broad (bN/aN betas, four-segment .N) so hand-picked maintenance tags
         # stamp cleanly. semantic-release cannot *propose* for those lines (see
         # release.yml Workflow A, which opens a hand-tag draft there instead); this
         # step stamps the exact published tag regardless. Keep both regexes in sync.
         run: |
           set -euo pipefail
-          if ! printf '%s' "$TAG_NAME" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?([ab][0-9]+)?$'; then
-            echo "::error::tag_name '$TAG_NAME' violates tag_format='{version}'; expected X.Y.Z[.N][bN], no 'v' prefix"
+          # Strip at most one leading `v` (POSIX ${VAR#v}); a no-op for v-less
+          # tags. VERSION is the v-less value written into the code literals; the
+          # full TAG_NAME (with any `v`) still addresses the git tag / release asset.
+          VERSION="${TAG_NAME#v}"
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?([ab][0-9]+)?$'; then
+            echo "::error::tag_name '$TAG_NAME' (version '$VERSION') violates tag_format; expected X.Y.Z[.N][bN] with an optional leading 'v'"
             exit 1
           fi
-          echo "validated tag=$TAG_NAME"
+          echo "validated tag=$TAG_NAME version=$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Stamp version into the three literals
         run: |
           set -euo pipefail
-          python script/stamp_version.py --version "$TAG_NAME"
+          python script/stamp_version.py --version "$VERSION"
 
       - name: Commit the stamp
         run: |

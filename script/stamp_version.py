@@ -23,11 +23,14 @@ Usage (preview the effect on a clean worktree, then inspect ``git diff``)::
     python script/stamp_version.py --version 1.7.14
     python script/stamp_version.py --version 1.7.14b1 --repo-root /path/to/repo
 
-The tag is validated against the ``tag_format = "{version}"`` convention
-(no ``v`` prefix): ``X.Y.Z`` with an optional ``.N`` fourth segment followed by
-an optional ``bN``/``aN`` prerelease (covers 1.7.14, 1.7.14b1, 1.7.13.1,
-1.7.13.1b1). The segment order is PEP 440: the numeric release tuple precedes
-the prerelease, so ``1.7.14.1b1`` is valid but ``1.7.14b1.1`` is not.
+The ``--version`` argument is a *version* and never carries a ``v`` prefix:
+``X.Y.Z`` with an optional ``.N`` fourth segment followed by an optional
+``bN``/``aN`` prerelease (covers 1.7.14, 1.7.14b1, 1.7.13.1, 1.7.13.1b1). The
+segment order is PEP 440: the numeric release tuple precedes the prerelease, so
+``1.7.14.1b1`` is valid but ``1.7.14b1.1`` is not. The *published git tag* may
+carry a leading ``v`` (BSkando tags ``vX.Y.Z``, jleinenbach ``X.Y.Z[.N]``);
+release-stamp.yml strips that optional ``v`` before calling this script, so both
+fork tag conventions produce the same v-less version literals.
 """
 
 from __future__ import annotations
@@ -37,10 +40,13 @@ import json
 import re
 from pathlib import Path
 
-# Canonical tag/version shape (SSOT). tag_format = "{version}" means the git tag
-# IS the version, so a leading `v` is rejected. Mirrors the real tag set on 1.7,
-# which is PEP 440 (`bN`/`aN` betas, four-segment `.N`) -- deliberately broader
-# than SemVer so hand-picked maintenance tags stamp cleanly. Consequence:
+# Canonical VERSION shape (SSOT). This matches a *version* (what goes into the
+# code literals), which never carries a `v`. A `v`-prefixed git tag (BSkando
+# `vX.Y.Z`) is normalised by release-stamp.yml -- it strips the optional leading
+# `v` before validating/stamping -- so this regex stays strictly v-less. Mirrors
+# the real tag set on 1.7, which is PEP 440 (`bN`/`aN` betas, four-segment `.N`)
+# -- deliberately broader than SemVer so hand-picked maintenance tags stamp
+# cleanly. Consequence:
 # semantic-release (SemVer-only) cannot compute a trustworthy *proposal* for such
 # lines, so release.yml (Workflow A) opens an empty hand-tag draft there instead
 # of proposing a stale number; the stamp path here still honours the exact chosen

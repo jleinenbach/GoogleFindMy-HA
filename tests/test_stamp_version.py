@@ -55,7 +55,8 @@ VALID_TAGS = [
 ]
 
 INVALID_TAGS = [
-    "v1.7.14",  # leading v prefix violates tag_format = "{version}"
+    "v1.7.14",  # a v-prefix is not a VERSION; release-stamp.yml strips it off
+    #             the TAG first (see test_tag_to_version_v_strip_semantics)
     "1.7",  # too few segments
     "1.7.14-rc1",  # SemVer-style prerelease, not this scheme
     "1.7.14rc1",  # rc is not in the [ab] prerelease set
@@ -185,30 +186,102 @@ def test_workflow_guard_regex_matches_version_re() -> None:
 def test_real_tip_gate_blanks_foreign_tag_keeps_pep440() -> None:
     """release.yml REAL_TIP gate: foreign tips blanked, PEP 440 tips kept.
 
-    The gate re-uses VERSION_RE (the SSOT) to decide whether the topological
-    line tip is a valid version. A foreign, non-version tag (Workflow-A hand-tag
-    placeholder, ``nightly``, ``v2``) must be blanked so it cannot spuriously
-    route PSR to the hand-tag draft; a genuine PEP 440 beta/four-segment tag must
-    be kept so a real stale-base mismatch still fires ``MODE=hand``. This mirrors
-    the shell condition
+    The gate first strips an optional leading ``v`` (BSkando tags ``vX.Y.Z``),
+    then re-uses VERSION_RE (the SSOT) to decide whether the topological line tip
+    is a valid version. A foreign, non-version tag (Workflow-A hand-tag
+    placeholder, ``nightly``, ``v2`` -> ``2`` after the strip) must be blanked so
+    it cannot spuriously route PSR to the hand-tag draft; a genuine PEP 440
+    beta/four-segment tag -- and a genuine ``v``-prefixed release tag -- must be
+    kept so a real stale-base mismatch still fires ``MODE=hand``. This mirrors the
+    shell steps
+    ``REAL_TIP="${REAL_TIP#v}"`` then
     ``[ -n "$REAL_TIP" ] && ! printf '%s' "$REAL_TIP" | grep -qE '<VERSION_RE>'``.
 
-    Mutation cross-check (re-runnable): replace ``gate``'s body with a bare
-    ``return real_tip`` (no gating) and the three foreign-tag assertions turn red.
+    Mutation cross-check (re-runnable): (1) replace ``gate``'s tail with a bare
+    ``return stripped`` (no gating) and the three foreign-tag assertions turn red;
+    (2) drop the ``#v`` strip line and ``gate("v1.7.14")`` turns red.
     """
 
     def gate(real_tip: str) -> str:
-        # Faithful Python mirror of the release.yml shell gate.
-        return real_tip if VERSION_RE.match(real_tip) else ""
+        # Faithful Python mirror of the release.yml shell gate, incl. the
+        # ``REAL_TIP="${REAL_TIP#v}"`` strip that precedes the VERSION_RE check.
+        stripped = real_tip[1:] if real_tip.startswith("v") else real_tip
+        return stripped if VERSION_RE.match(stripped) else ""
 
     # foreign / non-version tips are blanked -> no spurious MODE=hand
     assert gate("set-release-tag") == ""
     assert gate("nightly") == ""
-    assert gate("v2") == ""
+    assert gate("v2") == ""  # v-strip -> "2", still not a full version
     # genuine PEP 440 line tips are kept -> MODE=hand still fires on a mismatch
     assert gate("1.7.14b1") == "1.7.14b1"
     assert gate("1.7.14.0") == "1.7.14.0"
     assert gate("1.7.13") == "1.7.13"
+    # a genuine v-prefixed release tag (BSkando) is kept as its v-less version
+    assert gate("v1.7.14") == "1.7.14"
+
+    # Lock the strip into release.yml itself: the mirror above only models the
+    # intended behaviour, so without this the strip could be dropped from the
+    # workflow with no red test.
+    wf = (_REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert 'REAL_TIP="${REAL_TIP#v}"' in wf, (
+        "release.yml must strip an optional leading v from REAL_TIP"
+    )
+
+
+# --- v-prefix tag -> v-less version mapping (both fork conventions) ---------
+
+
+def test_release_stamp_strips_v_for_version_keeps_tag_for_release() -> None:
+    """release-stamp.yml maps a (possibly v-prefixed) TAG to a v-less VERSION.
+
+    The version stamped into the code literals is the v-less value
+    (``VERSION="${TAG_NAME#v}"``), while git/release object addressing keeps the
+    full published tag (checkout ref, ``rev-list refs/tags``, ``gh release
+    upload``). Guards against a mutation that strips the wrong variable, which the
+    byte-parity test above cannot catch (it only checks the regex pattern).
+    """
+    wf = (_REPO_ROOT / ".github/workflows/release-stamp.yml").read_text(
+        encoding="utf-8"
+    )
+    # The version passed to the stamp script is the v-stripped value.
+    assert 'VERSION="${TAG_NAME#v}"' in wf, "must derive a v-less VERSION"
+    assert '--version "$VERSION"' in wf, "stamp must use the v-less VERSION"
+    # The guard validates the stripped VERSION, not the raw TAG_NAME.
+    assert 'printf \'%s\' "$VERSION" | grep -qE' in wf, (
+        "guard must validate the stripped VERSION"
+    )
+    # Git/release object addressing keeps the full published tag (with any `v`).
+    assert "ref: ${{ github.event.release.tag_name }}" in wf
+    assert 'git rev-list -n1 "refs/tags/${TAG_NAME}"' in wf
+    assert 'gh release upload "$TAG_NAME"' in wf, (
+        "release upload must address the real tag, not the stripped version "
+        "(locked by test_hacs_validation.py)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tag", "version"),
+    [
+        ("v1.7.14", "1.7.14"),  # BSkando v-prefix -> v-less version
+        ("1.7.14", "1.7.14"),  # jleinenbach no-prefix -> unchanged (no-op)
+        ("v1.7.14b1", "1.7.14b1"),  # v-prefix beta
+        ("1.7.13.1", "1.7.13.1"),  # four-segment, no prefix
+        ("vv1", "v1"),  # POSIX ${VAR#v} strips exactly ONE leading v
+    ],
+)
+def test_tag_to_version_v_strip_semantics(tag: str, version: str) -> None:
+    """POSIX ``${TAG_NAME#v}`` strips at most one leading ``v``.
+
+    ``vv1 -> v1`` (not ``1``) proves a single-strip, so the guard would still
+    reject a malformed double-v tag. A real ``v``-prefixed tag maps to a version
+    that VERSION_RE accepts; the raw ``v``-tag itself does not.
+    """
+    stripped = tag[1:] if tag.startswith("v") else tag
+    assert stripped == version
+    if version in {"1.7.14", "1.7.14b1", "1.7.13.1"}:
+        assert VERSION_RE.match(stripped), f"{stripped!r} must be a valid version"
+        if tag.startswith("v"):
+            assert not VERSION_RE.match(tag), f"raw tag {tag!r} must not match"
 
 
 # --- Tag-vs-branch: checkout must pin the published tag ---------------------
