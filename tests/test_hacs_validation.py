@@ -87,6 +87,55 @@ def test_hacs_metadata_field_types(hacs_metadata: dict[str, object]) -> None:
             )
 
 
+def test_hacs_metadata_requires_name(hacs_metadata: dict[str, object]) -> None:
+    """hacs.json must declare a non-empty ``name`` (HACS's ``hacsjson`` validator).
+
+    The ci.yml transient guard (see test_ci_tolerates_transient_hacs_regression)
+    tolerates a HACS run when only ``hacsjson`` + ``integration_manifest`` fail, on the
+    premise that a *genuine* metadata regression is caught locally instead.
+    ``test_hacs_metadata_field_types`` covers a wrong field *type*; this covers a
+    *missing* required key -- which HACS also rejects, but the fallback would otherwise
+    wave through green. Source: hacs.xyz/docs/publish/integration.
+    """
+
+    name = hacs_metadata.get("name")
+    assert isinstance(name, str) and name.strip(), (
+        "hacs.json must declare a non-empty 'name' string; HACS's hacsjson validator "
+        "requires it"
+    )
+
+
+def test_manifest_satisfies_hacs_integration_contract(
+    manifest: dict[str, object],
+) -> None:
+    """manifest.json must carry the keys HACS's ``integration_manifest`` validator needs.
+
+    HACS requires an integration manifest to declare ``domain``, ``documentation``,
+    ``issue_tracker``, ``codeowners``, ``name`` and ``version``
+    (hacs.xyz/docs/publish/integration). The ci.yml transient guard ignores
+    ``integration_manifest`` in its fallback and marks the job ``transient`` when the
+    remaining checks pass; that is only safe if a *genuine* manifest regression is
+    caught locally. hassfest overlaps but does not mirror HACS's exact set, so
+    reproduce the HACS contract here: a missing or wrongly-typed required key fails
+    this job deterministically, independent of the HACS tolerance.
+    """
+
+    for field in ("domain", "documentation", "issue_tracker", "name", "version"):
+        value = manifest.get(field)
+        assert isinstance(value, str) and value.strip(), (
+            f"manifest.json must declare a non-empty '{field}' string "
+            "(HACS integration_manifest requirement)"
+        )
+    codeowners = manifest.get("codeowners")
+    assert isinstance(codeowners, list) and codeowners, (
+        "manifest.json 'codeowners' must be a non-empty list "
+        "(HACS integration_manifest requirement)"
+    )
+    assert all(isinstance(owner, str) and owner.strip() for owner in codeowners), (
+        "manifest.json 'codeowners' entries must all be non-empty strings"
+    )
+
+
 def test_no_micro_sign_in_integration_files(
     integration_python_files: list[Path], integration_root: Path
 ) -> None:
