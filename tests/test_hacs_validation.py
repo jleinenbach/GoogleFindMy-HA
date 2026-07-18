@@ -1,5 +1,4 @@
 # tests/test_hacs_validation.py
-# tests/test_hacs_validation.py
 """Validate HACS metadata alignment and guard against unsupported characters."""
 
 from __future__ import annotations
@@ -9,6 +8,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
@@ -50,6 +50,41 @@ def test_hacs_metadata_matches_manifest(
     assert match, "INTEGRATION_VERSION constant missing (or has a type annotation)"
     assert manifest["version"] == INTEGRATION_VERSION == match.group(1)
     assert "homeassistant" not in manifest
+
+
+def test_hacs_metadata_field_types(hacs_metadata: dict[str, object]) -> None:
+    """hacs.json fields must carry the types HACS's ``hacsjson`` validator requires.
+
+    The ci.yml transient guard (see test_ci_tolerates_transient_hacs_regression)
+    may classify a HACS run ``transient`` when only ``hacsjson`` +
+    ``integration_manifest`` fail, on the premise that a *genuine* hacs.json schema
+    error is caught locally instead. That premise only holds if this job rejects the
+    same class HACS would: HACS documents ``content_in_root``/``zip_release`` and the
+    other switches as booleans, so a non-boolean value (e.g. the string ``"true"``)
+    fails HACS ``hacsjson`` but would otherwise slip through the fallback green.
+    ``test_hacs_metadata_matches_manifest`` only checks the allowed *keys*, not their
+    types; validate the types here so the fallback tolerance stays safe.
+    """
+
+    # ``isinstance(5, bool)`` is False and ``isinstance("true", bool)`` is False, so
+    # this rejects exactly the non-boolean values HACS's hacsjson validator rejects.
+    for field in (
+        "content_in_root",
+        "zip_release",
+        "render_readme",
+        "hide_default_branch",
+    ):
+        if field in hacs_metadata:
+            assert isinstance(hacs_metadata[field], bool), (
+                f"hacs.json '{field}' must be a boolean; HACS rejects other types "
+                f"(got {type(hacs_metadata[field]).__name__})"
+            )
+    for field in ("name", "filename", "homeassistant"):
+        if field in hacs_metadata:
+            assert isinstance(hacs_metadata[field], str), (
+                f"hacs.json '{field}' must be a string "
+                f"(got {type(hacs_metadata[field]).__name__})"
+            )
 
 
 def test_no_micro_sign_in_integration_files(
@@ -111,4 +146,61 @@ def test_release_zip_places_manifest_at_root() -> None:
     )
     assert f'gh release upload "$TAG_NAME" {filename} --clobber' in workflow, (
         f"workflow must upload the declared hacs.json asset name {filename!r}"
+    )
+
+
+def test_ci_tolerates_transient_hacs_regression() -> None:
+    """ci.yml must guard the HACS job against the transient hacs/integration#5252
+    regression without permanently disabling the two affected validators.
+
+    The upstream action intermittently fetches the raw hacs.json / manifest.json
+    as None and reports them invalid on byte-identical, valid files. The guard
+    runs HACS first (continue-on-error), and only on failure re-runs it with
+    exactly ``hacsjson`` and ``integration_manifest`` isolated. If everything
+    else passes the failure was the known transient signature (tolerated); a
+    failure of any other check still exits non-zero (real defect). The isolation
+    must NOT leak into the primary run, otherwise those two checks would be off
+    permanently. This guard locks the shape so the resilience cannot silently
+    regress into either a blanket-ignore or a hard block.
+    """
+
+    ci = yaml.safe_load(Path(".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = ci["jobs"]["hacs"]["steps"]
+    by_id = {step["id"]: step for step in steps if "id" in step}
+
+    primary = by_id["hacs"]
+    surgical = by_id["hacs_surgical"]
+    verdict = by_id["hacs_verdict"]
+
+    # Primary run tolerates failure (so the classifier can decide) and keeps the
+    # original, narrower ignore list: the isolation must not be permanent.
+    assert primary.get("continue-on-error") is True, (
+        "primary HACS run must set continue-on-error so the guard can classify"
+    )
+    assert primary["with"]["ignore"].split() == ["topics", "issues"], (
+        "primary HACS run must keep the narrow ignore (isolation not permanent)"
+    )
+
+    # Fallback isolates exactly the two transient-prone validators and only runs
+    # when the primary run failed (never when HACS is healthy).
+    assert surgical.get("continue-on-error") is True, (
+        "fallback HACS run must set continue-on-error"
+    )
+    assert set(surgical["with"]["ignore"].split()) == {
+        "topics",
+        "issues",
+        "hacsjson",
+        "integration_manifest",
+    }, "fallback HACS run must isolate exactly hacsjson + integration_manifest"
+    assert "steps.hacs.outcome == 'failure'" in surgical["if"], (
+        "fallback HACS run must be gated on the primary run failing"
+    )
+
+    # The classifier must be able to fail the job on a real defect: it must NOT
+    # be continue-on-error, and must exit non-zero outside the tolerated paths.
+    assert not verdict.get("continue-on-error", False), (
+        "classifier must not be continue-on-error, or a real defect passes silently"
+    )
+    assert "exit 1" in verdict["run"], (
+        "classifier must exit non-zero when the failure is not the transient one"
     )
