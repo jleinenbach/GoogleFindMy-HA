@@ -3,10 +3,13 @@ name = "googlefindmy-ha"
 # Integration version: coupled triple. MUST be bumped together with
 # custom_components/googlefindmy/const.py INTEGRATION_VERSION and
 # custom_components/googlefindmy/manifest.json "version" on every release.
-# semantic-release keeps all three in sync automatically on any release line
-# (main and every X.Y maintenance branch) via [tool.semantic_release] version_toml
-# + version_variables below; a manual three-file bump is only a fallback. Canonical
-# anchor:
+# semantic-release keeps all three in sync automatically only on SemVer release
+# lines (main), via [tool.semantic_release] version_toml + version_variables
+# below. On PEP 440 maintenance lines (X.Y, tagged four-segment `.N` or beta
+# `bN`), PSR silently skips the tag scheme (see .github/workflows/release.yml);
+# there the maintainer hand-tags and release-stamp.yml stamps the triple via
+# script/stamp_version.py, so on those lines the hand-tag/stamp path is primary,
+# not a fallback. Canonical anchor:
 # custom_components/googlefindmy/AGENTS.md ("Version bump touches three files").
 version = "1.7.14.0"
 description = "Home Assistant integration for Google's Find My Device network."
