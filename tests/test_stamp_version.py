@@ -247,7 +247,7 @@ def test_release_stamp_strips_v_for_version_keeps_tag_for_release() -> None:
     assert 'VERSION="${TAG_NAME#v}"' in wf, "must derive a v-less VERSION"
     assert '--version "$VERSION"' in wf, "stamp must use the v-less VERSION"
     # The guard validates the stripped VERSION, not the raw TAG_NAME.
-    assert 'printf \'%s\' "$VERSION" | grep -qE' in wf, (
+    assert "printf '%s' \"$VERSION\" | grep -qE" in wf, (
         "guard must validate the stripped VERSION"
     )
     # Git/release object addressing keeps the full published tag (with any `v`).
