@@ -112,3 +112,43 @@ def test_release_zip_places_manifest_at_root() -> None:
     assert f'gh release upload "$TAG_NAME" {filename} --clobber' in workflow, (
         f"workflow must upload the declared hacs.json asset name {filename!r}"
     )
+
+
+def test_ci_tolerates_transient_hacs_regression() -> None:
+    """ci.yml must guard the HACS job against the transient hacs/integration#5252
+    regression without permanently disabling the two affected validators.
+
+    The upstream action intermittently fetches the raw hacs.json / manifest.json
+    as None and reports them invalid on byte-identical, valid files. The guard
+    runs HACS first (continue-on-error), and only on failure re-runs it with
+    exactly ``hacsjson`` and ``integration_manifest`` isolated. If everything
+    else passes the failure was the known transient signature (tolerated); a
+    failure of any other check still exits non-zero (real defect). The isolation
+    must NOT leak into the primary run, otherwise those two checks would be off
+    permanently. This guard locks the shape so the resilience cannot silently
+    regress into either a blanket-ignore or a hard block.
+    """
+
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    # Primary HACS run tolerates failure so the classifier can decide.
+    assert "continue-on-error: true" in workflow, (
+        "primary HACS run must set continue-on-error so the guard can classify"
+    )
+    # Fallback run isolates exactly the two transient-prone validators, gated on
+    # the primary run having failed (so it never runs when HACS is healthy).
+    assert "ignore: topics issues hacsjson integration_manifest" in workflow, (
+        "fallback HACS run must isolate hacsjson + integration_manifest"
+    )
+    assert "steps.hacs.outcome == 'failure'" in workflow, (
+        "fallback HACS run must be gated on the primary run failing"
+    )
+    # A defect beyond the transient signature must still fail the job.
+    assert "exit 1" in workflow, (
+        "classifier must exit non-zero when the failure is not the transient one"
+    )
+    # The isolation must be scoped to the fallback only: the primary run keeps
+    # the original, narrower ignore list (not the extended one).
+    assert "ignore: topics issues\n" in workflow, (
+        "primary HACS run must keep 'ignore: topics issues' (isolation not permanent)"
+    )
