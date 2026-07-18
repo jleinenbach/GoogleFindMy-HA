@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from custom_components.googlefindmy.const import INTEGRATION_VERSION
 
@@ -129,26 +130,43 @@ def test_ci_tolerates_transient_hacs_regression() -> None:
     regress into either a blanket-ignore or a hard block.
     """
 
-    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    ci = yaml.safe_load(Path(".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = ci["jobs"]["hacs"]["steps"]
+    by_id = {step["id"]: step for step in steps if "id" in step}
 
-    # Primary HACS run tolerates failure so the classifier can decide.
-    assert "continue-on-error: true" in workflow, (
+    primary = by_id["hacs"]
+    surgical = by_id["hacs_surgical"]
+    verdict = by_id["hacs_verdict"]
+
+    # Primary run tolerates failure (so the classifier can decide) and keeps the
+    # original, narrower ignore list: the isolation must not be permanent.
+    assert primary.get("continue-on-error") is True, (
         "primary HACS run must set continue-on-error so the guard can classify"
     )
-    # Fallback run isolates exactly the two transient-prone validators, gated on
-    # the primary run having failed (so it never runs when HACS is healthy).
-    assert "ignore: topics issues hacsjson integration_manifest" in workflow, (
-        "fallback HACS run must isolate hacsjson + integration_manifest"
+    assert primary["with"]["ignore"].split() == ["topics", "issues"], (
+        "primary HACS run must keep the narrow ignore (isolation not permanent)"
     )
-    assert "steps.hacs.outcome == 'failure'" in workflow, (
+
+    # Fallback isolates exactly the two transient-prone validators and only runs
+    # when the primary run failed (never when HACS is healthy).
+    assert surgical.get("continue-on-error") is True, (
+        "fallback HACS run must set continue-on-error"
+    )
+    assert set(surgical["with"]["ignore"].split()) == {
+        "topics",
+        "issues",
+        "hacsjson",
+        "integration_manifest",
+    }, "fallback HACS run must isolate exactly hacsjson + integration_manifest"
+    assert "steps.hacs.outcome == 'failure'" in surgical["if"], (
         "fallback HACS run must be gated on the primary run failing"
     )
-    # A defect beyond the transient signature must still fail the job.
-    assert "exit 1" in workflow, (
-        "classifier must exit non-zero when the failure is not the transient one"
+
+    # The classifier must be able to fail the job on a real defect: it must NOT
+    # be continue-on-error, and must exit non-zero outside the tolerated paths.
+    assert not verdict.get("continue-on-error", False), (
+        "classifier must not be continue-on-error, or a real defect passes silently"
     )
-    # The isolation must be scoped to the fallback only: the primary run keeps
-    # the original, narrower ignore list (not the extended one).
-    assert "ignore: topics issues\n" in workflow, (
-        "primary HACS run must keep 'ignore: topics issues' (isolation not permanent)"
+    assert "exit 1" in verdict["run"], (
+        "classifier must exit non-zero when the failure is not the transient one"
     )
