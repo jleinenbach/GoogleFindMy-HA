@@ -23,7 +23,18 @@ from collections import deque
 from collections.abc import Mapping
 from typing import Any
 
-from ..const import _EID_REFRESH_DEBOUNCE_S, DATA_EID_RESOLVER, DOMAIN
+from ..const import (
+    _EID_REFRESH_DEBOUNCE_S,
+    DATA_EID_RESOLVER,
+    DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+    DEFAULT_ROUNDTRIP_CONFIRM,
+    DEFAULT_SPEED_GATE_ENABLED,
+    DOMAIN,
+    OPT_ROUNDTRIP_CONFIRM,
+    OPT_SPEED_GATE_ENABLED,
+    ROUND_TRIP_ANCHOR_RADIUS_M,
+    ROUND_TRIP_TTL_S,
+)
 from ._mixin_typing import _MixinBase
 from .helpers.cache import (
     merge_cache_row as _merge_cache_row_impl,
@@ -466,6 +477,19 @@ class CacheOperations(_MixinBase):
             return
 
         fused_applied = slot.pop("_fused_applied", False)
+        # F-FABLE-2: pop the supersede marker early (before sanitize/merge/commit)
+        # so it never leaks into the cached row, but defer the action until AFTER
+        # the payload commits (post-@580). If the significance gate below rejects
+        # this payload (early return @512), the anchor is intentionally NOT
+        # touched (F-CODEX-7): a discarded own-report must not invalidate it.
+        supersede_anchor = bool(slot.pop("_supersede_round_trip_anchor", False))
+        # Same deferral discipline for the round-trip anchor consume/seed intents
+        # set mid-fusion: pop them HERE (before sanitize/merge/commit) so they never
+        # leak into the cached row, and apply them only AFTER the payload commits
+        # (post-@580). A payload the significance gate rejects (early return @512)
+        # thus never consumes or seeds an anchor - the ordering fix (Fund A).
+        anchor_seed = slot.pop("_round_trip_anchor_seed", None)
+        anchor_consume = bool(slot.pop("_round_trip_anchor_consume", False))
 
         status = slot.get("status")
 
@@ -568,6 +592,35 @@ class CacheOperations(_MixinBase):
         # position the Plus Code display accessors fall back to (non-poison).
         self._record_last_good_location(device_id, slot)
 
+        # F-FABLE-2 (post-commit): now that the trusted own-report clear-jump has
+        # been committed, invalidate any stale round-trip anchor so a later crowd
+        # echo near the old anchor cannot roll the tracker back. Placed AFTER the
+        # commit and the significance gate (early return @512) so a rejected
+        # payload never triggers it - F-CODEX-7 semantics preserved automatically.
+        if supersede_anchor and self._round_trip_confirm_enabled():
+            _anchors = getattr(self, "_round_trip_anchors", None)
+            if _anchors:
+                _anchors.pop(device_id, None)
+
+        # Round-trip anchor consume/seed (Fund A, ordering-vs-commit): applied here
+        # POST-commit and POST-significance-gate, symmetric to the supersede pop
+        # above. Consume and seed are mutually exclusive per report: the recovery
+        # path leaves the fusion via ``return True`` (only sets consume), while the
+        # accept path seeds and leaves via its own ``return True`` (only sets seed).
+        # So at most one of the two markers is ever present on a committed payload.
+        if anchor_consume and self._round_trip_confirm_enabled():
+            _anchors = getattr(self, "_round_trip_anchors", None)
+            if _anchors:
+                _anchors.pop(device_id, None)
+        if anchor_seed is not None and self._round_trip_confirm_enabled():
+            # Lazy-init mirroring _record_last_good_location so a __new__-built
+            # coordinator needs no extra wiring (moved here from the fusion).
+            _anchors = getattr(self, "_round_trip_anchors", None)
+            if _anchors is None:
+                _anchors = {}
+                self._round_trip_anchors = _anchors
+            _anchors[device_id] = anchor_seed
+
         # FIX #155: Only count background_updates for non-poll sources
         # to avoid double-counting with polled_updates.
         if source != "poll":
@@ -579,7 +632,12 @@ class CacheOperations(_MixinBase):
             register_fn = getattr(self, "_register_identity_key", None)
             if callable(register_fn):
                 register_fn(device_id, effective_identity_key)
-            self._propagate_location_to_shared_devices(device_id, slot)
+            self._propagate_location_to_shared_devices(
+                device_id,
+                slot,
+                supersede_anchors=supersede_anchor,
+                seed_anchors=anchor_seed,
+            )
 
         # Trigger resolver refresh if identity changed
         if resolver_refresh_needed:
@@ -594,6 +652,8 @@ class CacheOperations(_MixinBase):
         self,
         source_device_id: str,
         location: dict[str, Any],
+        supersede_anchors: bool = False,
+        seed_anchors: dict[str, Any] | None = None,
     ) -> None:
         """Propagate location updates to devices sharing the same tracker.
 
@@ -604,6 +664,14 @@ class CacheOperations(_MixinBase):
         Args:
             source_device_id: The device that received the update.
             location: The location data to propagate.
+            supersede_anchors: When True, also drop each propagated target's
+                stale round-trip anchor (F-CODEX-9), symmetric to the
+                source-device pop, so a later crowd echo near the old anchor
+                cannot roll a shared target back to the stale position.
+            seed_anchors: When not None, also seed each adopting target's
+                round-trip anchor with this (source-A) anchor as an independent
+                copy, so a B-to-A return under a sibling device_id finds an
+                anchor and recovers, symmetric to the source-device seed (@622).
         """
         if not location:
             return
@@ -663,6 +731,40 @@ class CacheOperations(_MixinBase):
             self._device_location_data[target_id] = merged
             # Coordinator last-good for the shared target, same non-poison gate.
             self._record_last_good_location(target_id, merged)
+
+            # F-CODEX-9: the superseding clear-jump was propagated to this
+            # shared target, so invalidate its stale round-trip anchor too -
+            # symmetric to the source-device pop after the commit. Otherwise a
+            # later crowd echo near the old anchor could take the round-trip
+            # recovery path and roll this propagated target back to the stale
+            # position, even though the trusted location was already propagated
+            # here (SA-8d data-flow breadth). Rides the exact propagation
+            # data-flow: only targets that actually adopted the fresh location
+            # (past the freshness gate above) are cleared; a fresher target
+            # that skipped propagation keeps its own anchor.
+            if supersede_anchors and self._round_trip_confirm_enabled():
+                _anchors = getattr(self, "_round_trip_anchors", None)
+                if _anchors:
+                    _anchors.pop(target_id, None)
+
+            # SA-8: seed and supersede are propagation-symmetric (one physical
+            # tracker, one home A), so both ride this loop. The recovery CONSUME
+            # pop (@611-614) is deliberately NOT propagated: a B-to-A return on
+            # one sibling would otherwise delete another sibling's still-legitimate
+            # A-anchor, which that sibling needs for its own return. Only seed +
+            # supersede propagate. Seed and supersede are mutually exclusive per
+            # report (accept-path seed vs own-report supersede), so this never
+            # double-mutates a target.
+            if seed_anchors is not None and self._round_trip_confirm_enabled():
+                # No lazy-init needed here: a non-None seed_anchors means the
+                # source post-commit seed block (@615-622, same confirm guard)
+                # already ran and initialized the store before this propagation
+                # call. Mirror the supersede sibling's getattr guard above; use
+                # ``is not None`` (not truthiness) so an initialized-but-empty
+                # store still seeds the adopting target.
+                _anchors = getattr(self, "_round_trip_anchors", None)
+                if _anchors is not None:
+                    _anchors[target_id] = dict(seed_anchors)
 
             _LOGGER.debug(
                 "Propagated location from %s to %s (shared tracker, source=%s)",
@@ -849,6 +951,22 @@ class CacheOperations(_MixinBase):
         """Calculate the great-circle distance between two points (meters)."""
         return _haversine_distance_impl(lat1, lon1, lat2, lon2)
 
+    def _speed_gate_enabled(self) -> bool:
+        """Return whether the kinematic speed gate is active (Discussion #177)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_SPEED_GATE_ENABLED
+        return bool(
+            entry.options.get(OPT_SPEED_GATE_ENABLED, DEFAULT_SPEED_GATE_ENABLED)
+        )
+
+    def _round_trip_confirm_enabled(self) -> bool:
+        """Return whether the round-trip escape hatch is active (Q2-A, #177)."""
+        entry = getattr(self, "config_entry", None)
+        if entry is None or getattr(entry, "options", None) is None:
+            return DEFAULT_ROUNDTRIP_CONFIRM
+        return bool(entry.options.get(OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM))
+
     def _apply_weighted_location_fusion(
         self,
         device_id: str,
@@ -948,8 +1066,240 @@ class CacheOperations(_MixinBase):
         ):
             return True
 
-        # Clear jump - no overlap, accept as-is
+        # Clear jump - no overlap. Before accepting, apply the kinematic
+        # plausibility gate (Discussion #177): a single FMDN crowd report can
+        # land far away with huge uncertainty ("teleport"). Reject a far jump
+        # whose implied speed is physically impossible. Falls through to accept
+        # when speed is not computable (missing/degenerate timestamps) so no
+        # regression occurs. Own-report GPS fixes bypass the gate entirely: they
+        # are cryptographically trusted device positions that do not teleport,
+        # so gating them would only risk false-blocking genuine fast travel.
+        # Placement rationale (F3): the gate sits AFTER the trusted-anchor and
+        # #155 double-fallback branches on purpose - those return earlier because
+        # a semantic anchor has no kinematics and two 200m fallback circles give
+        # radii too unreliable to gate on (would risk false-blocks, F4-a).
+        # dt limit (F5): after a long offline gap dt is huge, implied_speed tiny,
+        # so the gate never fires - intended (slow travel over long time is
+        # plausible); a post-offline teleport passing ungated is the inherent
+        # limit of a forward speed gate (Q2 round-trip gate would catch it).
         if dist > radius_sum:
+            # Own-report bypass keyed off CRYPTOGRAPHIC provenance, not the raw
+            # server flag: a network/foreign report can carry a spurious
+            # server-supplied is_own_report=True (this integration's own uploader
+            # stamps network reports that way, decrypt_locations.py:1991-1998).
+            # The decrypt layer already hardens is_own_report = is_own_report and
+            # not is_network_report (decrypted_location.py:39); mirror that
+            # invariant here so a spoofed own-flag on a network teleport cannot
+            # skip the gate on any path. Absent is_network_report is treated as
+            # not-network (genuine own reports never carry the network flag).
+            incoming_is_own = bool(new_data.get("is_own_report")) and not bool(
+                new_data.get("is_network_report")
+            )
+            # Round-trip anchor supersede (F-FABLE-2): a trusted own-report that
+            # is itself a clear jump (dist > radius_sum, this branch) away from
+            # the previous position is a genuine relocation B->C. An anchor A
+            # that survived from an earlier gated crowd jump A->B is now stale -
+            # a later crowd echo near A must not roll the tracker off the trusted
+            # current position back to A. Mark the slot so the anchor is
+            # invalidated AFTER this payload commits (see supersede handling in
+            # update_device_cache): an own-report bypasses the gate below
+            # (not incoming_is_own) and never seeds/consumes, so a surviving
+            # anchor is strictly pre-existing. DF-A4: keyed on the clear-jump
+            # own-report only - an own-report near B never reaches this branch,
+            # so the legitimate B->A return stays protected.
+            # Known gap (F-3, TTL/radius-bounded): the trusted-return accept
+            # paths above (trusted new_data, trusted existing, #155 dual 200m
+            # fallback) return before this branch and never set the marker, so
+            # a stale anchor can survive on those paths too. Deferred, not fixed
+            # here (scope discipline at this iterated locus); a later crowd echo
+            # is still TTL- and radius-bounded.
+            # F-CODEX-9: the marker is set unconditionally for an own clear-jump,
+            # NOT only when THIS source device holds an anchor. A shared tracker
+            # propagates this fresh trusted position to sibling device ids (same
+            # identity_key) post-commit, and a sibling may hold a stale anchor
+            # even when the source does not. The post-commit handling pops the
+            # source anchor AND every propagated target's anchor; all pops are
+            # idempotent (pop(key, None)), so marking without a source anchor is a
+            # harmless no-op on the source side while still clearing the siblings.
+            if incoming_is_own and self._round_trip_confirm_enabled():
+                new_data["_supersede_round_trip_anchor"] = True
+            # Only gate a fix that carries a REAL measured accuracy. A crowd
+            # report is "accuracy-less" not only when the key is missing
+            # (new_acc_raw is None) but also when it carries Android's
+            # no-accuracy sentinel (0.0) or any sub-physical/non-finite value
+            # (< MIN_PHYSICAL_ACCURACY_M) - the same error-code set that
+            # _safe_accuracy() maps to the 200m fallback. Such a fix is not a
+            # clean teleport discriminant and must fall through so the
+            # downstream sanitization in _is_significant_update can flag it
+            # estimated (accuracy_estimated=True). Hard-dropping it here would
+            # regress the #1181 last-good protection; that path is already
+            # guarded by is_reliable_fix, not by this gate.
+            new_acc_measured = (
+                new_acc_raw is not None
+                and math.isfinite(new_acc_raw)
+                and new_acc_raw >= MIN_PHYSICAL_ACCURACY_M
+            )
+            # Symmetric cached-endpoint guard (F-CODEX-1): also require the
+            # cached point ``existing`` to be a reliable fix. If it is an
+            # estimated/accuracy-less row (the 200 m fallback carries
+            # accuracy_estimated=True), implied_speed would be measured against
+            # an unreliable reference and reject the incoming report against a
+            # phantom position, stranding the tracker on the estimate. Mirrors
+            # the incoming-side new_acc_measured check so the gate fires only when
+            # BOTH endpoints carry real measured accuracy; is_reliable_fix is the
+            # same predicate that guards anchor seeding below (@1125).
+            # Trade-off (F-2): when ``existing`` is estimated, the ENTIRE gate
+            # block below (incl. round-trip recovery, housekeeping and reject) is
+            # skipped, so a measured crowd teleport is accepted ungated for that
+            # one step. This is deliberate - gating against a phantom reference is
+            # the worse failure (F-CODEX-1 stranding). Follow-up candidate: gate
+            # against the last-good location instead of skipping entirely.
+            if (
+                self._speed_gate_enabled()
+                and not incoming_is_own
+                and new_acc_measured
+                and is_reliable_fix(existing)
+            ):
+                existing_ts = _normalize_epoch_seconds(existing.get("last_seen"))
+                new_ts = _normalize_epoch_seconds(new_data.get("last_seen"))
+                if existing_ts is not None and new_ts is not None:
+                    delta_t = new_ts - existing_ts
+                    if delta_t > 0:
+                        implied_speed = dist / delta_t
+                        if implied_speed > DEFAULT_MAX_PLAUSIBLE_SPEED_MPS:
+                            # Round-trip escape hatch (Q2-A, F-CODEX-4): the gate
+                            # is about to reject this jump. If the device is
+                            # returning near a remembered anchor A within the TTL,
+                            # accept it instead - this is a legitimate return trip
+                            # after an earlier accepted wide jump, not a teleport,
+                            # and rejecting it would strand the tracker at the
+                            # stale position. new_ts is guaranteed non-None here
+                            # (the enclosing guard requires it).
+                            # Anchor store is read defensively (getattr) mirroring
+                            # the _record_last_good_location idiom, so coordinators
+                            # built via __new__ (or partial test doubles) need no
+                            # extra wiring; a real coordinator always has it (init).
+                            if self._round_trip_confirm_enabled():
+                                anchors = getattr(self, "_round_trip_anchors", None)
+                                anchor = anchors.get(device_id) if anchors else None
+                                if anchors and anchor is not None:
+                                    delta_anchor = new_ts - anchor["ts"]
+                                    return_dist = _haversine_distance_impl(
+                                        anchor["lat"],
+                                        anchor["lon"],
+                                        new_lat,
+                                        new_lon,
+                                    )
+                                    if (
+                                        0 <= delta_anchor <= ROUND_TRIP_TTL_S
+                                        and return_dist <= ROUND_TRIP_ANCHOR_RADIUS_M
+                                    ):
+                                        # One-shot: consume the anchor so a stale
+                                        # echo near A cannot re-trigger recovery
+                                        # (A<->B ping-pong bollwerk, DF-1). The
+                                        # recovered fix leaves via THIS return, not
+                                        # the accept-path return below, so it never
+                                        # sets a new anchor of its own.
+                                        # F-CODEX-7/ordering: defer the store
+                                        # mutation. Mutating _round_trip_anchors here
+                                        # (mid-fusion) consumes the anchor BEFORE the
+                                        # significance gate/commit; a payload the
+                                        # gate later rejects (early return @512) would
+                                        # then have burnt the anchor. Mark the intent
+                                        # on new_data and pop the anchor only AFTER
+                                        # the commit (mirrors _supersede handling).
+                                        new_data["_round_trip_anchor_consume"] = True
+                                        self.increment_stat("round_trip_recoveries")
+                                        _LOGGER.debug(
+                                            "Round-trip recovery %s: returned "
+                                            "%.0fm from anchor within %.0fs "
+                                            "(<= %.0fs TTL), speed gate bypassed",
+                                            device_id,
+                                            return_dist,
+                                            delta_anchor,
+                                            ROUND_TRIP_TTL_S,
+                                        )
+                                        return True
+                                    # House-keep the anchor ONLY on a genuine TTL
+                                    # expiry (delta_anchor > ROUND_TRIP_TTL_S); the
+                                    # gate rejects as usual. Two non-expiry cases
+                                    # deliberately LEAVE the anchor in place so a
+                                    # later genuine B->A return within the original
+                                    # window still recovers:
+                                    #  - a within-TTL far reject (return_dist >
+                                    #    ROUND_TRIP_ANCHOR_RADIUS_M): an unrelated
+                                    #    noisy crowd fix between the trip legs must
+                                    #    not burn the still-valid anchor.
+                                    #  - an out-of-order report (delta_anchor < 0):
+                                    #    a delayed fix near A whose last_seen sits
+                                    #    between A and B is not an expiry.
+                                    # The single "> TTL" test subsumes the old
+                                    # F-FABLE-1 ">= 0" guard: every negative
+                                    # delta_anchor is <= TTL, so it never pops.
+                                    if delta_anchor > ROUND_TRIP_TTL_S:
+                                        anchors.pop(device_id, None)
+                            self.increment_stat("speed_gate_rejects")
+                            _LOGGER.debug(
+                                "Speed gate rejected crowd fix %s: %.0fm in "
+                                "%.0fs = %.1fm/s > %.1fm/s cap",
+                                device_id,
+                                dist,
+                                delta_t,
+                                implied_speed,
+                                DEFAULT_MAX_PLAUSIBLE_SPEED_MPS,
+                            )
+                            return False
+                        # Accept path: this jump is non-own, carries a real
+                        # measured accuracy, is timestamped and forward
+                        # (delta_t > 0), and the speed gate evaluated it as
+                        # plausible (implied_speed <= cap). Only such a
+                        # gate-vetted jump may seed a return anchor (F-CODEX-6):
+                        # seeding lives INSIDE the gated block so it shares the
+                        # consume branch's exact provenance. An own-report or
+                        # accuracy-less jump bypasses the gate entirely and must
+                        # never seed an anchor that a later stale crowd report
+                        # near A could ride back to (that would roll the tracker
+                        # off a trusted, current B position). The anchor is set
+                        # ONLY from a reliable A: an estimated/accuracy-less A
+                        # carries the 200 m fallback with accuracy_estimated=True
+                        # and must never become a phantom return target (R2, same
+                        # poisoning class _record_last_good already guards).
+                        # RAM-only (R7). DF-1: this is the sole anchor-set site
+                        # and a recovered return fix exits earlier (return True
+                        # above), so it can never seed - the ping-pong bollwerk.
+                        # DF-2: the incoming fix is intentionally NOT re-checked
+                        # against is_reliable_fix here; is_reliable_fix guards
+                        # only the anchor source A, not the returning fix.
+                        #
+                        # Anchor TTL clock (F-CODEX-5): the anchor's ``ts`` is
+                        # ``new_ts`` - the incoming B fix's last_seen, i.e. the
+                        # time this A->B jump is accepted, NOT A's last_seen. The
+                        # recovery check compares the return fix's new_ts against
+                        # this ts (both in report-timestamp space), so anchoring
+                        # on A's last_seen would start the TTL in the past:
+                        # exactly the wide jumps this hatch targets are accepted
+                        # because delta_t = new_ts(B) - last_seen(A) is large,
+                        # and once that delta exceeds the TTL (the stale/offline
+                        # device coming back online) the anchor would be born
+                        # expired and never recover. The anchored COORDINATES
+                        # stay A's (the return target).
+                        if self._round_trip_confirm_enabled() and is_reliable_fix(
+                            existing
+                        ):
+                            # F-CODEX-7/ordering: defer the store mutation. Seeding
+                            # the anchor here (mid-fusion) writes _round_trip_anchors
+                            # BEFORE the significance gate/commit; a payload the gate
+                            # later rejects (early return @512) would then leave a
+                            # phantom anchor behind. Mark the intent on new_data and
+                            # let update_device_cache lazy-init the store and seed the
+                            # anchor only AFTER the commit (mirrors _supersede). The
+                            # anchored COORDINATES stay A's (existing_lat/lon); ts is
+                            # new_ts per the F-CODEX-5 TTL-clock reasoning above.
+                            new_data["_round_trip_anchor_seed"] = {
+                                "lat": existing_lat,
+                                "lon": existing_lon,
+                                "ts": new_ts,
+                            }
             return True
 
         # Overlapping accuracy circles: fuse with inverse-square weighting

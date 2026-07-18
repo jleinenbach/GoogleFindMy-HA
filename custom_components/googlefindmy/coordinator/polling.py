@@ -1960,6 +1960,21 @@ class PollingOperations(_MixinBase):
                             self.update_device_cache(dev_id, location, source="poll")
                         else:
                             location.pop("_fusion_preapplied", None)
+                            # F-1: strip the supersede marker so it can never leak
+                            # into the cached row. This test-double fallback commits
+                            # directly and does NOT run the post-commit supersede
+                            # action; production always routes through
+                            # update_device_cache, which does.
+                            location.pop("_supersede_round_trip_anchor", None)
+                            # Fund A: same hygiene for the deferred round-trip anchor
+                            # consume/seed markers. Semantic divergence vs. the real
+                            # update_device_cache path: production pops AND applies
+                            # these post-commit (consume/seed the anchor); this
+                            # test-double fallback only strips them so they cannot
+                            # leak into the cached row, and intentionally performs no
+                            # anchor mutation.
+                            location.pop("_round_trip_anchor_seed", None)
+                            location.pop("_round_trip_anchor_consume", None)
                             location.pop("_report_hint", None)
                             location.setdefault("last_updated", wall_now)
                             merged_location = self._merge_with_existing_cache_row(

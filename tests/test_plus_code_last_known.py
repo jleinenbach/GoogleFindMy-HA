@@ -432,6 +432,29 @@ async def test_estimated_fix_does_not_poison_last_good_direct() -> None:
     assert coord.get_display_location_data("dev-1") == good
 
 
+async def test_zero_sentinel_fix_does_not_poison_last_good_direct() -> None:
+    """Codex #205: a fix carrying the 0.0 no-accuracy sentinel (NOT flagged
+    estimated) must not overwrite a reliable last-good either.
+
+    is_reliable_fix now rejects a sub-physical accuracy even without the
+    accuracy_estimated flag, so a restored/legacy row with ``accuracy=0.0`` is
+    treated as accuracy-less in substance (same #1179 poisoning class as the
+    estimated fallback) and does not advance the retention cache.
+
+    Mutation guard: reverting is_reliable_fix makes ``{"accuracy": 0.0}``
+    reliable again, so it overwrites the reliable last-good and this assertion
+    fails.
+    """
+    coord = _bare_coordinator()
+    good = {"latitude": 52.52, "longitude": 13.405, "accuracy": 12.0}
+    coord._record_last_good_location("dev-1", good)
+
+    zero_sentinel = {"latitude": 48.0, "longitude": 11.0, "accuracy": 0.0}
+    coord._record_last_good_location("dev-1", zero_sentinel)
+    # The retention cache is untouched: it still holds the reliable fix.
+    assert coord._device_last_good_location["dev-1"] == good
+
+
 async def test_estimated_fix_does_not_poison_last_good_via_update_cache() -> None:
     """Production path: an accuracy-less update sanitized to estimated 200 m must
     not poison the coordinator last-good (Codex PR #1181, previously uncovered)."""
@@ -494,6 +517,7 @@ async def test_purge_device_drops_last_good() -> None:
     old Plus Code/coordinates (Codex PR #1181)."""
     coord = GoogleFindMyCoordinator.__new__(GoogleFindMyCoordinator)
     coord._device_location_data = {}
+    coord._round_trip_anchors = {"dev-1": {"lat": 1.0, "lon": 2.0, "ts": 3.0}}
     coord._device_update_history = {"dev-1": None}
     coord._device_interval_history = {"dev-1": [1.0]}
     coord._device_caps = {}
@@ -520,5 +544,6 @@ async def test_purge_device_drops_last_good() -> None:
     # Last-good, current row and the device-id-keyed timing caches are gone.
     assert coord.get_display_location_data("dev-1") is None
     assert "dev-1" not in coord._device_last_good_location
+    assert "dev-1" not in coord._round_trip_anchors
     assert "dev-1" not in coord._device_update_history
     assert "dev-1" not in coord._device_interval_history

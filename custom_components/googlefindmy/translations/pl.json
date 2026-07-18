@@ -249,6 +249,8 @@
           "device_poll_delay": "Opóźnienie między odpytywaniem urządzeń (s)",
           "stale_threshold": "Próg nieaktualności (s)",
           "show_location_age": "Pokaż atrybut wieku lokalizacji",
+          "speed_gate_enabled": "Reject impossible location jumps",
+          "roundtrip_confirm_enabled": "Recover legitimate return trips",
           "google_home_filter_enabled": "Filtruj urządzenia Google Home",
           "google_home_filter_keywords": "Słowa kluczowe filtra (oddzielone przecinkami)",
           "enable_stats_entities": "Twórz encje statystyczne",
@@ -260,6 +262,8 @@
         "data_description": {
           "stale_threshold": "Po upływie tej liczby sekund bez aktualizacji lokalizacji, status trackera zmienia się na nieznany. Użyj encji 'Ostatnia lokalizacja', aby zawsze widzieć ostatnią znaną pozycję. Domyślnie: 1800 (30 minut).",
           "show_location_age": "Gdy jest włączony (domyślnie), atrybut 'location_age' (zaokrąglony do 1 minuty) jest dodawany do każdej encji lokalizatora. Wyłącz, aby wyeliminować wszystkie zapisy do bazy danych dla urządzeń stacjonarnych. Atrybut bezwzględny 'last_seen' i encje sensor.*_last_seen są zawsze dostępne.",
+          "speed_gate_enabled": "When enabled (default), a location fix that would require physically impossible speed (for example a crowd-sourced report placing the tracker hundreds of km away within seconds) is rejected instead of teleporting the tracker. Own GPS reports always pass. Disable only if legitimate fast movements are being dropped.",
+          "roundtrip_confirm_enabled": "When enabled (default), a crowd fix that the speed gate would reject as a teleport is accepted instead if it lands back near the position from just before an earlier accepted long jump, within about 15 minutes. This recovers a legitimate return trip rather than leaving the tracker stranded at the far position. It only ever applies where the speed gate would otherwise reject. Disable if you see the tracker flapping between two places.",
           "delete_caches_on_remove": "Usuwa buforowane tokeny i metadane urządzeń podczas usuwania tego wpisu.",
           "map_view_token_expiration": "Po włączeniu tokeny widoku mapy wygasają po 1 tygodniu. Po wyłączeniu (domyślnie) nie wygasają.",
           "contributor_mode": "Wybierz, jak urządzenie współpracuje z siecią Google (domyślnie Wszystkie obszary w trybie crowdsourcingu lub tylko obszary o dużym ruchu).",

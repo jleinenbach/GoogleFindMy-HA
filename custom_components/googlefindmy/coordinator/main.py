@@ -739,6 +739,14 @@ class GoogleFindMyCoordinator(
         self._device_last_good_location: dict[
             str, dict[str, Any]
         ] = {}  # device_id -> last reliable (non-estimated) location dict
+        # Round-trip return anchors (Q2-A). RAM-only, one-shot: when the speed
+        # gate accepts a wide jump A->B, A is remembered here so a later fix
+        # returning near A within the TTL recovers instead of being gated.
+        # Not persisted (restart in the TTL window falls back cleanly to the
+        # device_tracker restore); dropped in purge_device.
+        self._round_trip_anchors: dict[
+            str, dict[str, Any]
+        ] = {}  # device_id -> {"lat": float, "lon": float, "ts": float}
         self._device_names: dict[str, str] = {}  # device_id -> human name
         self._device_caps: dict[
             str, dict[str, Any]
@@ -839,6 +847,8 @@ class GoogleFindMyCoordinator(
             "invalid_ts_drop_benign": 0,  # regressed/out-of-order timestamps (expected sub-bucket of invalid_ts_drop_count)
             "fused_updates": 0,  # overlapping fixes fused to stabilize coordinates
             "accuracy_sanitized_count": 0,  # accuracy values clamped to valid range
+            "speed_gate_rejects": 0,  # fixes rejected as physically implausible (#177)
+            "round_trip_recoveries": 0,  # gated fixes recovered as legitimate returns (Q2-A)
             # Canonicless drops on the last main poll (transition-independent
             # diagnostics aggregate). Absolute per-poll values, not increments;
             # listed here so the restore path (iterates self.stats.keys()) and the
@@ -2081,6 +2091,8 @@ class GoogleFindMyCoordinator(
         # restart or re-add (the current-row cache above is cleared, so the
         # display accessors fall straight through to this map).
         self._device_last_good_location.pop(device_id, None)
+        # Round-trip anchor shares the same lifecycle as the location caches above.
+        self._round_trip_anchors.pop(device_id, None)
         # Device-id-keyed timing caches follow the same lifecycle; drop them so a
         # re-added device with the same id starts with clean poll-interval state.
         self._device_update_history.pop(device_id, None)
