@@ -1220,17 +1220,23 @@ class CacheOperations(_MixinBase):
                                             ROUND_TRIP_TTL_S,
                                         )
                                         return True
-                                    # Anchor expired or the fix landed too far
-                                    # from A: drop it (housekeeping) and let the
-                                    # gate reject as usual. Guard on
-                                    # delta_anchor >= 0 (F-FABLE-1): a delayed
-                                    # out-of-order report near A can carry a
-                                    # last_seen between A and B, making
-                                    # delta_anchor < 0 (new_ts before the anchor
-                                    # ts). That is not an expiry - popping here
-                                    # would destroy the anchor and strand a later
-                                    # genuine return. Only house-keep forward.
-                                    if delta_anchor >= 0:
+                                    # House-keep the anchor ONLY on a genuine TTL
+                                    # expiry (delta_anchor > ROUND_TRIP_TTL_S); the
+                                    # gate rejects as usual. Two non-expiry cases
+                                    # deliberately LEAVE the anchor in place so a
+                                    # later genuine B->A return within the original
+                                    # window still recovers:
+                                    #  - a within-TTL far reject (return_dist >
+                                    #    ROUND_TRIP_ANCHOR_RADIUS_M): an unrelated
+                                    #    noisy crowd fix between the trip legs must
+                                    #    not burn the still-valid anchor.
+                                    #  - an out-of-order report (delta_anchor < 0):
+                                    #    a delayed fix near A whose last_seen sits
+                                    #    between A and B is not an expiry.
+                                    # The single "> TTL" test subsumes the old
+                                    # F-FABLE-1 ">= 0" guard: every negative
+                                    # delta_anchor is <= TTL, so it never pops.
+                                    if delta_anchor > ROUND_TRIP_TTL_S:
                                         anchors.pop(device_id, None)
                             self.increment_stat("speed_gate_rejects")
                             _LOGGER.debug(
