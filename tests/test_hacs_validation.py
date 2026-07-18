@@ -1,5 +1,4 @@
 # tests/test_hacs_validation.py
-# tests/test_hacs_validation.py
 """Validate HACS metadata alignment and guard against unsupported characters."""
 
 from __future__ import annotations
@@ -51,6 +50,41 @@ def test_hacs_metadata_matches_manifest(
     assert match, "INTEGRATION_VERSION constant missing (or has a type annotation)"
     assert manifest["version"] == INTEGRATION_VERSION == match.group(1)
     assert "homeassistant" not in manifest
+
+
+def test_hacs_metadata_field_types(hacs_metadata: dict[str, object]) -> None:
+    """hacs.json fields must carry the types HACS's ``hacsjson`` validator requires.
+
+    The ci.yml transient guard (see test_ci_tolerates_transient_hacs_regression)
+    may classify a HACS run ``transient`` when only ``hacsjson`` +
+    ``integration_manifest`` fail, on the premise that a *genuine* hacs.json schema
+    error is caught locally instead. That premise only holds if this job rejects the
+    same class HACS would: HACS documents ``content_in_root``/``zip_release`` and the
+    other switches as booleans, so a non-boolean value (e.g. the string ``"true"``)
+    fails HACS ``hacsjson`` but would otherwise slip through the fallback green.
+    ``test_hacs_metadata_matches_manifest`` only checks the allowed *keys*, not their
+    types; validate the types here so the fallback tolerance stays safe.
+    """
+
+    # ``isinstance(5, bool)`` is False and ``isinstance("true", bool)`` is False, so
+    # this rejects exactly the non-boolean values HACS's hacsjson validator rejects.
+    for field in (
+        "content_in_root",
+        "zip_release",
+        "render_readme",
+        "hide_default_branch",
+    ):
+        if field in hacs_metadata:
+            assert isinstance(hacs_metadata[field], bool), (
+                f"hacs.json '{field}' must be a boolean; HACS rejects other types "
+                f"(got {type(hacs_metadata[field]).__name__})"
+            )
+    for field in ("name", "filename", "homeassistant"):
+        if field in hacs_metadata:
+            assert isinstance(hacs_metadata[field], str), (
+                f"hacs.json '{field}' must be a string "
+                f"(got {type(hacs_metadata[field]).__name__})"
+            )
 
 
 def test_no_micro_sign_in_integration_files(
