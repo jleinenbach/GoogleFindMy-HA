@@ -445,3 +445,24 @@ def test_fast_report_against_reliable_existing_still_gated() -> None:
     result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, is_own=False))
     assert result is False
     coord.increment_stat.assert_called_once_with("speed_gate_rejects")
+
+
+def test_fast_report_against_zero_sentinel_existing_not_gated() -> None:
+    """Codex #205: a fast crowd fix against a cached endpoint carrying the 0.0
+    no-accuracy sentinel (NOT flagged estimated) must NOT be gated.
+
+    is_reliable_fix now rejects a sub-physical/non-finite accuracy even without
+    the accuracy_estimated flag, so a restored/legacy ``existing`` with
+    ``accuracy=0.0`` is treated as an unreliable reference (like the estimated
+    fallback): the symmetric guard makes the gate fall through and the incoming
+    measured report is accepted (result True), rather than being rejected
+    against a 0 m phantom reference.
+
+    Mutation guard: reverting is_reliable_fix (dropping the finite/floor check)
+    makes ``{"accuracy": 0.0}`` reliable again, so this jump is gated and
+    ``result is False`` with the reject counter firing.
+    """
+    coord = _coord(_existing(last_seen=BASE_TS, acc=0.0, estimated=False))
+    result = _fuse(coord, _incoming(last_seen=BASE_TS + 300, is_own=False))
+    assert result is True
+    coord.increment_stat.assert_not_called()
