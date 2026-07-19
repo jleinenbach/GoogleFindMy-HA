@@ -19,6 +19,10 @@ regress. Each guard maps to a concrete Codex review finding on PR #1208:
   ``--build`` context, not just the one path a denylist happens to name.
 * The ownership handoff must run from an ``EXIT`` trap, so a nonzero/interrupted
   ``main.py`` run still returns the produced secrets.json to the host user.
+* The CLI must run as a BACKGROUND child that the entrypoint waits on, and the
+  signal traps must FORWARD SIGTERM/SIGINT to it. A foreground child makes bash
+  defer the trap until the child exits, so ``docker stop`` escalates to SIGKILL and
+  the EXIT cleanup never runs (finding: forward termination signals to the child).
 """
 
 from __future__ import annotations
@@ -187,4 +191,49 @@ def test_entrypoint_runs_handoff_from_exit_trap() -> None:
     assert 0 <= cleanup_def < handoff < trap_exit, (
         "the ownership handoff (GFMY_HOST_UID chown) must sit inside the cleanup() "
         "function that is trapped on EXIT."
+    )
+
+
+def test_entrypoint_forwards_signals_to_cli_child() -> None:
+    """SIGTERM/SIGINT must be forwarded to the CLI, which must run in the background.
+
+    If ``python3 main.py`` runs in the FOREGROUND, bash defers the TERM/INT trap
+    until the child exits on its own; a ``docker stop`` therefore never reaches the
+    login process, Docker escalates to SIGKILL after its grace period, and the EXIT
+    cleanup (ownership handoff + supervisor shutdown) is skipped -- leaving ``/data``
+    owned by the container UID. The child must be backgrounded and waited on, and the
+    signal traps must relay the signal to it, not merely ``exit``.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+
+    # 1) The CLI is started in the background and its PID captured.
+    assert "python3 main.py ${GFMY_ARGS:-} &" in entrypoint, (
+        "main.py must be started in the BACKGROUND (trailing '&'), otherwise bash "
+        "defers the signal traps until it exits and docker stop hits SIGKILL."
+    )
+    assert "CLI_PID=$!" in entrypoint, (
+        "the entrypoint must capture the CLI child PID (CLI_PID=$!) so signals can "
+        "be forwarded to it and its exit status waited on."
+    )
+
+    # 2) The entrypoint waits on that specific child (not a bare `wait`).
+    assert 'wait "${CLI_PID}"' in entrypoint, (
+        "the entrypoint must wait on the CLI child PID so its real exit status "
+        "propagates to the EXIT cleanup."
+    )
+
+    # 3) The TERM/INT traps forward to the child instead of exiting immediately.
+    assert "trap 'on_signal TERM 143' TERM" in entrypoint
+    assert "trap 'on_signal INT 130' INT" in entrypoint
+    assert "trap 'exit 143' TERM" not in entrypoint, (
+        "a bare `exit` on SIGTERM does not reach the foreground child; the trap must "
+        "forward the signal to CLI_PID (on_signal)."
+    )
+    assert "trap 'exit 130' INT" not in entrypoint
+
+    # 4) on_signal actually relays the signal to the running child.
+    assert 'kill -s "${sig}" "${CLI_PID}"' in entrypoint, (
+        "on_signal must relay the received signal to the CLI child via "
+        "kill -s <sig> CLI_PID."
     )
