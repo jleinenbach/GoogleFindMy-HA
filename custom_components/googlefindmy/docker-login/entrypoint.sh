@@ -32,6 +32,13 @@ for i in $(seq 1 30); do
 done
 
 echo "[entrypoint] Open http://localhost:7900 (password: secret) in your browser to see/drive Chrome."
+
+# /data is a host bind mount whose owner/mode we do not control. Take ownership
+# for the container user for the duration of the run so main.py's atomic write of
+# secrets.json succeeds, without requiring a world-writable host directory.
+# seluser has passwordless sudo in the selenium base image.
+sudo chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
+
 # Run the integration's own CLI from the read-only FLAT code mount (/app/gfmy).
 # Running the script by path (not `-m custom_components.googlefindmy.main`) keeps
 # main.py in its standalone layout: it stubs homeassistant.* and never imports
@@ -42,13 +49,20 @@ cd /app/gfmy
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
 python3 main.py ${GFMY_ARGS:-}
 
-# main.py writes secrets.json 0600 owned by the container user (seluser). On a
-# bind mount whose host user has a different UID, that user could not read/copy
-# the file for the Home Assistant import. Relax it to 0644 so the host user can
-# read it. This is a trusted-host, single-purpose login volume (see README).
+# Ownership handoff: main.py writes secrets.json 0600 owned by the container user.
+# Hand the produced credentials back to the *host* user (UID/GID passed by the
+# launcher) while KEEPING owner-only 0600. The host user can then read/copy the
+# file for the Home Assistant import, and no other local account can read it —
+# unlike a world-readable 0644 relaxation. If the launcher did not pass a host UID
+# (e.g. a manual `docker compose up`), the file simply stays container-owned.
 _secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-}"
-if [ -n "${_secrets_path}" ] && [ -f "${_secrets_path}" ]; then
-  chmod 0644 "${_secrets_path}" 2>/dev/null || true
+_data_dir="$(dirname "${_secrets_path:-/data/secrets.json}")"
+if [ -n "${GFMY_HOST_UID:-}" ] && [ -d "${_data_dir}" ]; then
+  sudo chown -R "${GFMY_HOST_UID}:${GFMY_HOST_GID:-${GFMY_HOST_UID}}" "${_data_dir}" 2>/dev/null || true
+  sudo chmod 0700 "${_data_dir}" 2>/dev/null || true
+  if [ -f "${_secrets_path}" ]; then
+    sudo chmod 0600 "${_secrets_path}" 2>/dev/null || true
+  fi
 fi
 
 shutdown

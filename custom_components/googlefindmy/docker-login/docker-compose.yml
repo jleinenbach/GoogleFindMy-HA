@@ -1,10 +1,10 @@
 services:
   googlefindmy-login:
-    # Fixed identity + no auto-restart: this is a one-shot login job, not a
-    # long-running service. A named container means repeated `docker compose up`
-    # reuses the same instance instead of stacking new ones.
-    container_name: googlefindmy-login
-    restart: "no"
+    # One-shot login job, not a long-running service. The launcher starts it with
+    # `docker compose run --rm` (see login.sh / login.cmd): that creates a fresh
+    # ephemeral container per run and removes it on exit, so repeated logins never
+    # stack containers, and it attaches your terminal's STDIN so the interactive
+    # "Press Enter" prompt works (plain `docker compose up` does not forward it).
     build:
       # Build context is the integration package dir (this file lives in
       # <context>/docker-login/). It holds requirements.txt (baked in) and
@@ -12,7 +12,7 @@ services:
       # the read-only volume below (M2 runtime mount).
       context: ..
       dockerfile: docker-login/Dockerfile
-    stdin_open: true      # keep STDIN open — main.py prompts "Press Enter"
+    stdin_open: true      # interactive login: main.py prompts "Press Enter"
     tty: true
     shm_size: "2g"        # headful Chrome needs shared memory
     environment:
@@ -23,6 +23,12 @@ services:
       # inside the read-only code mount. main.py honours this override and keeps
       # the atomic write on a single writable filesystem.
       GOOGLEFINDMY_SECRETS_PATH: "/data/secrets.json"
+      # Host UID/GID for the ownership handoff of the produced secrets.json. The
+      # launcher (login.sh) passes these so the finished file ends up owned by
+      # *you* with owner-only 0600 (readable/copyable by you, private from other
+      # local accounts). Unset (e.g. a manual run) → the file stays container-owned.
+      GFMY_HOST_UID: "${GFMY_HOST_UID:-}"
+      GFMY_HOST_GID: "${GFMY_HOST_GID:-}"
       # Optional: pin Chrome's major version if auto-detection ever mismatches
       # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
       # GOOGLEFINDMY_CHROME_VERSION: "141"

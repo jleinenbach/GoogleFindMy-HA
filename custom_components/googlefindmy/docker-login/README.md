@@ -86,9 +86,14 @@ Then follow [First run (Google login)](#first-run-google-login-required) from
 step 3.
 
 The launcher runs a single command:
-`docker compose up --build --force-recreate --remove-orphans`. It builds (if
-needed) **and** starts the container in the foreground, and `--force-recreate
---remove-orphans` guarantees exactly one container even if you run it twice.
+`docker compose run --build --service-ports --rm googlefindmy-login`. `run`
+builds (if needed) **and** starts a fresh one-shot container in the foreground
+with your terminal attached (so the "Press Enter" prompt reaches Python);
+`--rm` removes it on exit, so repeated logins never stack containers; and
+`--service-ports` publishes the noVNC port declared in `docker-compose.yml`.
+On Linux/QNAP the launcher also exports your `GFMY_HOST_UID`/`GFMY_HOST_GID` so
+the finished `secrets.json` is handed back to you (see
+[Using `secrets.json`](#using-secretsjson-in-home-assistant)).
 
 ### Manual alternative (`docker compose`)
 
@@ -97,27 +102,30 @@ If you prefer to run it by hand instead of the launcher:
 ```bash
 cd config/custom_components/googlefindmy/docker-login
 mkdir -p data
-chmod 0777 data            # let the container user (seluser) write secrets.json
-docker compose up --build
+docker compose run --build --service-ports --rm googlefindmy-login
 ```
 
-The `chmod` matters on Linux/QNAP: the image runs as `seluser`, whose UID may
-differ from yours, so the `./data` volume must be writable by others or the
-atomic write of `secrets.json` fails. Docker Desktop (Windows/macOS) handles this
-for you.
+No host `chmod` is needed: the container takes ownership of `./data` for the run
+(it has passwordless `sudo` in the selenium base image) and writes
+`secrets.json` there. If you run it by hand like this — without exporting
+`GFMY_HOST_UID`/`GFMY_HOST_GID` (the launcher does this) — the file stays owned
+by the container user; export those IDs, or `sudo chown` the file afterwards, to
+read it as your host user. Docker Desktop (Windows/macOS) maps ownership for you.
 
 ## First run (Google login required)
 
-1. (Launcher does this for you.) Create the writable token volume:
+1. (Launcher does this for you.) Create the token volume directory:
    ```bash
-   mkdir -p data && chmod 0777 data
+   mkdir -p data
    ```
    `secrets.json` is written here (to `data/secrets.json`) via the
    `GOOGLEFINDMY_SECRETS_PATH=/data/secrets.json` setting in
-   `docker-compose.yml`, so the integration code mount stays read-only.
+   `docker-compose.yml`, so the integration code mount stays read-only. The
+   container takes ownership of `./data` for the run, so no host `chmod` is needed.
 
-2. Start the container **in the foreground** (no `-d`; it prompts for input) —
-   `./login.sh` / `login.cmd`, or `docker compose up --build`.
+2. Start the container **in the foreground** (it prompts for input) —
+   `./login.sh` / `login.cmd`, or
+   `docker compose run --build --service-ports --rm googlefindmy-login`.
 
 3. Wait for this line in the terminal, then press **Enter**:
    ```
@@ -141,7 +149,8 @@ intended login path (there is no Supervisor Add-on store for HA Container):
 
 - **SSH:** enable SSH on the NAS, `cd` into
   `.../config/custom_components/googlefindmy/docker-login`, then run `./login.sh`
-  (or `docker compose up --build`). noVNC is bound to loopback, so open it via an
+  (or `docker compose run --build --service-ports --rm googlefindmy-login`).
+  noVNC is bound to loopback, so open it via an
   SSH tunnel from your workstation:
   ```bash
   ssh -L 7900:127.0.0.1:7900 <nas-ip>
@@ -159,7 +168,7 @@ Because HA and the login container run on the same box here, the produced
 ## Normal (already authenticated) runs
 
 ```bash
-./login.sh          # or: docker compose up
+./login.sh          # or: docker compose run --service-ports --rm googlefindmy-login
 ```
 If `data/secrets.json` already holds valid tokens, the browser step is skipped
 and the CLI lists devices directly. You can ignore the noVNC link.
@@ -171,7 +180,7 @@ and the CLI lists devices directly. You can ignore the noVNC link.
 echo '{}' > data/secrets.json
 
 # Option B: keep the file but force re-authentication
-GFMY_ARGS="--reauth" docker compose up
+GFMY_ARGS="--reauth" ./login.sh
 ```
 
 `GFMY_ARGS` is forwarded to `main.py`. Useful values: `--reauth` (force login),
@@ -185,8 +194,10 @@ setup it is already there) and import it via the integration's configuration
 flow (auth method *"GoogleFindMyTools secrets.json"*). Because it was produced by
 the integration's own code, no conversion is needed.
 
-The container writes the file as `seluser` and, on exit, relaxes it to mode
-`0644` so your host user (whose UID may differ) can read and copy it. Treat
+The container writes the file as its own user and, on exit, hands ownership back
+to your host user (the `GFMY_HOST_UID`/`GFMY_HOST_GID` the launcher exports)
+while **keeping owner-only `0600`**. So you can read and copy it, but no other
+local account can — the file is never made world-readable. Treat
 `data/secrets.json` as a credential and delete it once imported.
 
 ## Stopping
@@ -206,8 +217,10 @@ there is no separate image to rebuild for code changes.
 
 ## Troubleshooting
 
-- **Stuck with no prompt / can't type:** you probably ran `docker compose up -d`
-  (detached). Run it in the foreground (the launcher does).
+- **Stuck with no prompt / can't type:** you probably ran `docker compose up`
+  (which does not attach your terminal's stdin). Use `./login.sh` /
+  `docker compose run --service-ports --rm googlefindmy-login`, which runs in the
+  foreground with stdin attached.
 - **noVNC page won't load:** give the container a few seconds; check
   `docker compose logs` for `[entrypoint] Display ready.`
 - **noVNC password:** it is `secret` — a fixed default of the base image.
@@ -215,8 +228,13 @@ there is no separate image to rebuild for code changes.
   `GOOGLEFINDMY_CHROME_VERSION` to the container's Chrome major version
   (uncomment the line in `docker-compose.yml`). The integration's
   `chrome_driver.py` normally auto-detects this.
-- **Permission error writing `secrets.json`:** make sure `data/secrets.json`
-  exists as a *file* before the first run (the launcher handles this).
+- **Permission error writing `secrets.json`:** make sure `./data` exists (the
+  launcher runs `mkdir -p data`). The container chowns it to itself for the run,
+  so a host `chmod` is not required.
+- **Can't read `secrets.json` as your user after a manual run:** you ran it by
+  hand without exporting `GFMY_HOST_UID`/`GFMY_HOST_GID`, so the file stayed
+  container-owned. Re-run via `./login.sh`, or `sudo chown "$(id -u):$(id -g)"
+  data/secrets.json`.
 
 ## Known limitation
 
