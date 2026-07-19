@@ -12,6 +12,11 @@ regress. Each guard maps to a concrete Codex review finding on PR #1208:
   ``Press Enter`` prompt blocks forever (finding B).
 * noVNC must stay bound to loopback by default (earlier finding), so the
   fixed-password session is not exposed on the LAN during sign-in.
+* A context-level ``.dockerignore`` must keep persisted credentials
+  (``docker-login/data``) out of the ``--build`` context, so builders that upload
+  the full context never receive the OAuth/AAS secrets.
+* The ownership handoff must run from an ``EXIT`` trap, so a nonzero/interrupted
+  ``main.py`` run still returns the produced secrets.json to the host user.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from pathlib import Path
 import pytest
 
 DOCKER_LOGIN = Path("custom_components/googlefindmy/docker-login")
+# Build context root for the login image (docker-compose.yml `build.context: ..`).
+BUILD_CONTEXT = DOCKER_LOGIN.parent
 
 
 def _read(name: str) -> str:
@@ -99,4 +106,45 @@ def test_compose_binds_novnc_to_loopback_by_default() -> None:
     compose = _read("docker-compose.yml")
     assert "127.0.0.1" in compose, (
         "docker-compose.yml must bind the fixed-password noVNC port to loopback by default"
+    )
+
+
+def test_dockerignore_excludes_persisted_credentials() -> None:
+    """A context-level .dockerignore must keep docker-login/data out of the build context."""
+
+    dockerignore = BUILD_CONTEXT / ".dockerignore"
+    assert dockerignore.is_file(), (
+        "A .dockerignore must exist at the build-context root "
+        f"({BUILD_CONTEXT}) because the login image builds with `--build` and that "
+        "context otherwise includes the persisted docker-login/data/secrets.json."
+    )
+    text = dockerignore.read_text(encoding="utf-8")
+    assert "docker-login/data" in text, (
+        ".dockerignore must exclude docker-login/data so builders that upload the "
+        "full context never receive the OAuth/AAS credentials."
+    )
+
+
+def test_entrypoint_runs_handoff_from_exit_trap() -> None:
+    """The ownership handoff must run via an EXIT trap, not only on the success path.
+
+    Under ``set -e`` a nonzero ``main.py`` exit aborts the script; a linear handoff
+    placed after ``main.py`` would be skipped, leaving the host unable to read or
+    delete the container-owned credential file. Routing it through ``trap ... EXIT``
+    guarantees it runs on failure and interruption too.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+    assert "trap cleanup EXIT" in entrypoint, (
+        "entrypoint.sh must register the cleanup/handoff on EXIT so it also runs "
+        "when main.py fails or is interrupted (set -e)."
+    )
+    # The handoff logic (host chown) must live inside the trapped cleanup function,
+    # i.e. before it is registered on EXIT, not as trailing linear code.
+    cleanup_def = entrypoint.find("function cleanup")
+    trap_exit = entrypoint.find("trap cleanup EXIT")
+    handoff = entrypoint.find("GFMY_HOST_UID", cleanup_def)
+    assert 0 <= cleanup_def < handoff < trap_exit, (
+        "the ownership handoff (GFMY_HOST_UID chown) must sit inside the cleanup() "
+        "function that is trapped on EXIT."
     )

@@ -16,11 +16,42 @@ set -e
 "${VENV_PATH}/bin/supervisord" --configuration /etc/supervisord.conf &
 SUPERVISOR_PID=$!
 
-function shutdown {
+# cleanup runs on EVERY exit path: normal completion, a nonzero main.py exit
+# (Chrome/login/network failure aborting under `set -e`), or SIGTERM/SIGINT. It
+# performs the ownership handoff FIRST, so a produced (even partial) owner-only
+# secrets.json is always returned to the host user. Otherwise, after the pre-run
+# chown of /data to the container UID below, a failed run would leave the host
+# unable to read or delete the file. It then stops supervisor. The guard keeps
+# it idempotent so the EXIT trap and a signal-driven exit cannot double-run it.
+_cleaned=0
+function cleanup {
+  [ "${_cleaned}" = 1 ] && return
+  _cleaned=1
+
+  # Ownership handoff: main.py writes secrets.json 0600 owned by the container
+  # user. Hand the produced credentials back to the *host* user (UID/GID passed
+  # by the launcher) while KEEPING owner-only 0600, so you can read/copy the file
+  # for the Home Assistant import and no other local account can (unlike a
+  # world-readable 0644 relaxation). Without a host UID (e.g. a manual
+  # `docker compose up`) the file simply stays container-owned.
+  _secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-}"
+  _data_dir="$(dirname "${_secrets_path:-/data/secrets.json}")"
+  if [ -n "${GFMY_HOST_UID:-}" ] && [ -d "${_data_dir}" ]; then
+    sudo chown -R "${GFMY_HOST_UID}:${GFMY_HOST_GID:-${GFMY_HOST_UID}}" "${_data_dir}" 2>/dev/null || true
+    sudo chmod 0700 "${_data_dir}" 2>/dev/null || true
+    if [ -f "${_secrets_path}" ]; then
+      sudo chmod 0600 "${_secrets_path}" 2>/dev/null || true
+    fi
+  fi
+
   kill -s SIGTERM "${SUPERVISOR_PID}" 2>/dev/null || true
   wait "${SUPERVISOR_PID}" 2>/dev/null || true
 }
-trap shutdown SIGTERM SIGINT
+# EXIT covers the failure path; the signal traps convert SIGTERM/SIGINT into an
+# exit so the single EXIT handler runs the handoff exactly once.
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 echo "[entrypoint] Waiting for X display ${DISPLAY} to come up..."
 for i in $(seq 1 30); do
@@ -49,20 +80,7 @@ cd /app/gfmy
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
 python3 main.py ${GFMY_ARGS:-}
 
-# Ownership handoff: main.py writes secrets.json 0600 owned by the container user.
-# Hand the produced credentials back to the *host* user (UID/GID passed by the
-# launcher) while KEEPING owner-only 0600. The host user can then read/copy the
-# file for the Home Assistant import, and no other local account can read it —
-# unlike a world-readable 0644 relaxation. If the launcher did not pass a host UID
-# (e.g. a manual `docker compose up`), the file simply stays container-owned.
-_secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-}"
-_data_dir="$(dirname "${_secrets_path:-/data/secrets.json}")"
-if [ -n "${GFMY_HOST_UID:-}" ] && [ -d "${_data_dir}" ]; then
-  sudo chown -R "${GFMY_HOST_UID}:${GFMY_HOST_GID:-${GFMY_HOST_UID}}" "${_data_dir}" 2>/dev/null || true
-  sudo chmod 0700 "${_data_dir}" 2>/dev/null || true
-  if [ -f "${_secrets_path}" ]; then
-    sudo chmod 0600 "${_secrets_path}" 2>/dev/null || true
-  fi
-fi
-
-shutdown
+# main.py returned normally. The EXIT trap now runs cleanup(): ownership handoff
+# to the host user, then supervisor shutdown. On a nonzero main.py exit `set -e`
+# aborts here and the SAME EXIT trap still runs cleanup(), so the handoff is
+# never skipped. Nothing else to do (see cleanup() above).

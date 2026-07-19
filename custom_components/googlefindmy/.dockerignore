@@ -1,0 +1,14 @@
+# Docker build-context excludes for the docker-login image.
+#
+# The login image builds with `build.context: ..` (see
+# docker-login/docker-compose.yml), i.e. this integration package directory is
+# the context root, so Docker reads THIS .dockerignore.
+#
+# Keep persisted credentials OUT of the build context: after the first login run
+# docker-login/data/secrets.json exists here, and both launchers build with
+# `docker compose run --build`. Without this exclude, builders that upload the
+# full context (remote, shared or legacy daemons) would receive the OAuth/AAS
+# credentials even though the Dockerfile never COPYs that file into the image.
+# .gitignore only stops Git commits; it does not filter Docker's context upload.
+# This file is the Docker-side counterpart.
+docker-login/data/

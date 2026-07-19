@@ -60,6 +60,7 @@ def _read(tmp_path: Path) -> dict[str, Any]:
 class TestFileCacheAsyncInterface:
     """The async get/set surface consumed by nbe_list_devices / nova_request."""
 
+    @pytest.mark.asyncio
     async def test_set_then_get_round_trips_and_persists(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -70,6 +71,7 @@ class TestFileCacheAsyncInterface:
         assert await cache.get("oauth_token") == "abc"
         assert _read(tmp_path)["oauth_token"] == "abc"
 
+    @pytest.mark.asyncio
     async def test_set_none_pops_normal_key_and_saves(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -80,6 +82,7 @@ class TestFileCacheAsyncInterface:
         assert await cache.get("oauth_token") is None
         assert "oauth_token" not in _read(tmp_path)
 
+    @pytest.mark.asyncio
     async def test_aas_token_is_soft_invalidated_but_kept_in_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -96,6 +99,7 @@ class TestFileCacheAsyncInterface:
         # test_reload_recovers_soft_invalidated_token for the reload proof).
         assert _read(tmp_path)["aas_token"] == "master"
 
+    @pytest.mark.asyncio
     async def test_reload_recovers_soft_invalidated_token(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -109,6 +113,7 @@ class TestFileCacheAsyncInterface:
 
         assert await fresh.get("aas_token") == "master"
 
+    @pytest.mark.asyncio
     async def test_setting_aas_token_value_clears_soft_invalidation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -121,6 +126,7 @@ class TestFileCacheAsyncInterface:
         assert await cache.get("aas_token") == "new-master"
         assert _read(tmp_path)["aas_token"] == "new-master"
 
+    @pytest.mark.asyncio
     async def test_async_cached_value_helpers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -130,6 +136,7 @@ class TestFileCacheAsyncInterface:
 
         assert await cache.async_get_cached_value("k") == "v"
 
+    @pytest.mark.asyncio
     async def test_get_or_set_returns_existing_without_generator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -140,6 +147,7 @@ class TestFileCacheAsyncInterface:
 
         assert await cache.get_or_set("k", _fail) == "existing"
 
+    @pytest.mark.asyncio
     async def test_get_or_set_runs_sync_generator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -150,6 +158,7 @@ class TestFileCacheAsyncInterface:
         assert result == "made"
         assert _read(tmp_path)["k"] == "made"
 
+    @pytest.mark.asyncio
     async def test_get_or_set_awaits_coroutine_generator(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -163,6 +172,7 @@ class TestFileCacheAsyncInterface:
         assert result == "async-made"
         assert _read(tmp_path)["k"] == "async-made"
 
+    @pytest.mark.asyncio
     async def test_all_returns_a_copy(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -173,6 +183,7 @@ class TestFileCacheAsyncInterface:
 
         assert await cache.get("a") == 1  # mutation of the copy must not leak
 
+    @pytest.mark.asyncio
     async def test_flush_and_close_persist(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -229,6 +240,7 @@ class TestFileCacheSyncInterface:
 class TestFileCacheLoadFailureGuard:
     """A corrupt backing file must not be overwritten with empty data."""
 
+    @pytest.mark.asyncio
     async def test_corrupt_file_not_overwritten_on_empty_flush(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -240,6 +252,7 @@ class TestFileCacheLoadFailureGuard:
             encoding="utf-8"
         ) == "{ not valid json"
 
+    @pytest.mark.asyncio
     async def test_corrupt_file_is_repaired_once_real_data_is_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
