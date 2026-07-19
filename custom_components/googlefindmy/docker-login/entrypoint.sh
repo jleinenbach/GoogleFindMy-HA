@@ -24,6 +24,7 @@ SUPERVISOR_PID=$!
 # unable to read or delete the file. It then stops supervisor. The guard keeps
 # it idempotent so the EXIT trap and a signal-driven exit cannot double-run it.
 _cleaned=0
+CLI_PID=""
 function cleanup {
   [ "${_cleaned}" = 1 ] && return
   _cleaned=1
@@ -47,11 +48,25 @@ function cleanup {
   kill -s SIGTERM "${SUPERVISOR_PID}" 2>/dev/null || true
   wait "${SUPERVISOR_PID}" 2>/dev/null || true
 }
-# EXIT covers the failure path; the signal traps convert SIGTERM/SIGINT into an
-# exit so the single EXIT handler runs the handoff exactly once.
+# On a terminating signal, FORWARD it to the CLI child (started below) instead of
+# exiting straight away: main.py runs in the background so bash can react to the
+# signal at once and relay it. A foreground child would make bash defer these traps
+# until it exits on its own, so `docker stop` would escalate to SIGKILL and the
+# EXIT cleanup (ownership handoff + supervisor shutdown) would never run. Before the
+# child exists (still waiting for the X display) there is nothing to forward to, so
+# fall back to exiting with the conventional 128+signal code. The single EXIT trap
+# runs the handoff+shutdown exactly once, on every path.
+function on_signal {
+  local sig="$1" code="$2"
+  if [ -n "${CLI_PID}" ] && kill -0 "${CLI_PID}" 2>/dev/null; then
+    kill -s "${sig}" "${CLI_PID}" 2>/dev/null || true
+  else
+    exit "${code}"
+  fi
+}
 trap cleanup EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
+trap 'on_signal TERM 143' TERM
+trap 'on_signal INT 130' INT
 
 echo "[entrypoint] Waiting for X display ${DISPLAY} to come up..."
 for i in $(seq 1 30); do
@@ -77,10 +92,24 @@ sudo chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
 # Assistant install (neither is present in this image on purpose). secrets.json
 # goes to the writable /data volume via GOOGLEFINDMY_SECRETS_PATH.
 cd /app/gfmy
+# Start the CLI in the BACKGROUND and wait on it, so a SIGTERM/SIGINT reaches bash
+# immediately and on_signal can relay it to the child (a foreground child defers the
+# traps until it exits -> docker escalates to SIGKILL -> no cleanup). Job control is
+# off in a script, so the backgrounded child still inherits this TTY's stdin and the
+# interactive login prompt keeps working.
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
-python3 main.py ${GFMY_ARGS:-}
+python3 main.py ${GFMY_ARGS:-} &
+CLI_PID=$!
 
-# main.py returned normally. The EXIT trap now runs cleanup(): ownership handoff
-# to the host user, then supervisor shutdown. On a nonzero main.py exit `set -e`
-# aborts here and the SAME EXIT trap still runs cleanup(), so the handoff is
-# never skipped. Nothing else to do (see cleanup() above).
+# Capture the child's status without tripping `set -e`. `wait` returns >128 when a
+# forwarded signal interrupts it before the child is reaped; re-wait until the child
+# has actually exited, then propagate its code via `exit` so the EXIT trap runs
+# cleanup() (ownership handoff to the host user, then supervisor shutdown) exactly
+# once on every path: success, nonzero exit, or termination.
+_rc=0
+wait "${CLI_PID}" || _rc=$?
+while [ "${_rc}" -gt 128 ] && kill -0 "${CLI_PID}" 2>/dev/null; do
+  _rc=0
+  wait "${CLI_PID}" || _rc=$?
+done
+exit "${_rc}"
