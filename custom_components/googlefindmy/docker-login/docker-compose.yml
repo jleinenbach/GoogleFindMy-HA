@@ -1,0 +1,40 @@
+services:
+  googlefindmy-login:
+    # Fixed identity + no auto-restart: this is a one-shot login job, not a
+    # long-running service. A named container means repeated `docker compose up`
+    # reuses the same instance instead of stacking new ones.
+    container_name: googlefindmy-login
+    restart: "no"
+    build:
+      # Build context is the integration package dir (this file lives in
+      # <context>/docker-login/). It holds requirements.txt (baked in) and
+      # docker-login/entrypoint.sh. The integration *code* is NOT built in — see
+      # the read-only volume below (M2 runtime mount).
+      context: ..
+      dockerfile: docker-login/Dockerfile
+    stdin_open: true      # keep STDIN open — main.py prompts "Press Enter"
+    tty: true
+    shm_size: "2g"        # headful Chrome needs shared memory
+    environment:
+      # Optional CLI flags forwarded to main.py, e.g. "--reauth" (force fresh
+      # login) or "--debug" (verbose bootstrap/FCM logging). Default: none.
+      GFMY_ARGS: "${GFMY_ARGS:-}"
+      # Optional: pin Chrome's major version if auto-detection ever mismatches
+      # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
+      # GOOGLEFINDMY_CHROME_VERSION: "141"
+    ports:
+      - "7900:7900"       # noVNC web viewer, password: secret
+    volumes:
+      # M2 runtime mount of the integration code, read-only, at its real import
+      # path. `../..` is the repository's custom_components/ dir, so this mount
+      # provides BOTH custom_components/__init__.py (a real package that calls
+      # pkgutil.extend_path) AND custom_components/googlefindmy/, which is what
+      # `python -m custom_components.googlefindmy.main` needs (main.py sets
+      # _standalone=False only in this exact layout). Mounting just the
+      # googlefindmy/ folder would drop custom_components/__init__.py.
+      - ../..:/app/custom_components:ro
+      # Writable auth dir. main.py writes Auth/secrets.json here; on the host it
+      # appears as ./data/secrets.json (this is the file you use in Home
+      # Assistant). Nested writable mount inside the read-only code mount above —
+      # validate with `docker compose config` on the Docker host if in doubt.
+      - ./data:/app/custom_components/googlefindmy/Auth
