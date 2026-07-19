@@ -12,9 +12,11 @@ regress. Each guard maps to a concrete Codex review finding on PR #1208:
   ``Press Enter`` prompt blocks forever (finding B).
 * noVNC must stay bound to loopback by default (earlier finding), so the
   fixed-password session is not exposed on the LAN during sign-in.
-* A context-level ``.dockerignore`` must keep persisted credentials
-  (``docker-login/data``) out of the ``--build`` context, so builders that upload
-  the full context never receive the OAuth/AAS secrets.
+* A context-level ``.dockerignore`` must be an ALLOWLIST (ignore the whole
+  build context, re-include only the two paths the Dockerfile COPYs) so that
+  EVERY secret location -- ``docker-login/data`` AND the legacy
+  ``Auth/secrets.json`` AND any future token/cache path -- stays out of the
+  ``--build`` context, not just the one path a denylist happens to name.
 * The ownership handoff must run from an ``EXIT`` trap, so a nonzero/interrupted
   ``main.py`` run still returns the produced secrets.json to the host user.
 """
@@ -109,19 +111,57 @@ def test_compose_binds_novnc_to_loopback_by_default() -> None:
     )
 
 
-def test_dockerignore_excludes_persisted_credentials() -> None:
-    """A context-level .dockerignore must keep docker-login/data out of the build context."""
+def _dockerignore_rules() -> list[str]:
+    """Return the effective (non-comment, non-blank) .dockerignore patterns, in order."""
 
     dockerignore = BUILD_CONTEXT / ".dockerignore"
     assert dockerignore.is_file(), (
         "A .dockerignore must exist at the build-context root "
         f"({BUILD_CONTEXT}) because the login image builds with `--build` and that "
-        "context otherwise includes the persisted docker-login/data/secrets.json."
+        "context otherwise includes persisted OAuth/AAS credentials."
     )
-    text = dockerignore.read_text(encoding="utf-8")
-    assert "docker-login/data" in text, (
-        ".dockerignore must exclude docker-login/data so builders that upload the "
-        "full context never receive the OAuth/AAS credentials."
+    return [
+        line.strip()
+        for line in dockerignore.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def test_dockerignore_is_allowlist_excluding_every_secret_path() -> None:
+    """.dockerignore must ignore the whole context and re-include only build inputs.
+
+    A denylist that names only ``docker-login/data`` is whack-a-mole: the legacy
+    ``Auth/secrets.json`` default of ``main.py::_resolve_secrets_path`` (and any
+    future token/cache location) would still be uploaded with the ``--build``
+    context. An allowlist -- ignore ``*``, then re-include only the paths the
+    Dockerfile COPYs -- structurally keeps every secret out at once.
+    """
+
+    rules = _dockerignore_rules()
+
+    # 1. The context is ignored wholesale by the very first effective rule.
+    assert rules and rules[0] in {"*", "**"}, (
+        ".dockerignore must start by ignoring the entire context (`*`), so that "
+        "secrets in any location are excluded by default (allowlist model)."
+    )
+
+    # 2. Only build inputs are re-included, and never a secrets directory.
+    reincludes = {r[1:] for r in rules if r.startswith("!")}
+    assert reincludes == {"requirements.txt", "docker-login"}, (
+        "the only `!`-re-includes may be the Dockerfile's COPY inputs "
+        f"(requirements.txt, docker-login); found {sorted(reincludes)}. Re-including "
+        "anything else risks shipping integration source or secrets into the image."
+    )
+    assert not any(
+        r.startswith("!") and ("auth" in r.lower() or "secret" in r.lower())
+        for r in rules
+    ), ".dockerignore must never re-include an Auth/ or secrets path."
+
+    # 3. The persisted-credentials subdir of the re-included docker-login/ is
+    #    excluded again (order-sensitive: after `!docker-login`).
+    assert "docker-login/data" in {r.rstrip("/") for r in rules}, (
+        ".dockerignore must re-exclude docker-login/data after re-including "
+        "docker-login/, so the container's persisted secrets.json stays out."
     )
 
 

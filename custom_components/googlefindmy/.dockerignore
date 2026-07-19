@@ -1,14 +1,30 @@
 # Docker build-context excludes for the docker-login image.
 #
 # The login image builds with `build.context: ..` (see
-# docker-login/docker-compose.yml), i.e. this integration package directory is
-# the context root, so Docker reads THIS .dockerignore.
+# docker-login/docker-compose.yml), i.e. this ENTIRE integration package
+# directory is the build context: hundreds of source files plus, after a login,
+# persisted OAuth/AAS credentials. Secrets can appear in more than one place:
+#   * docker-login/data/secrets.json  (the container's writable volume)
+#   * Auth/secrets.json               (the legacy default of
+#                                       main.py::_resolve_secrets_path)
+# and future cache/token locations could add more. `.gitignore` only stops Git
+# commits; it does NOT filter Docker's context upload, so a `docker compose run
+# --build` (both launchers use it) would otherwise ship whatever secrets exist to
+# remote, shared or legacy daemons even though the Dockerfile never COPYs them.
 #
-# Keep persisted credentials OUT of the build context: after the first login run
-# docker-login/data/secrets.json exists here, and both launchers build with
-# `docker compose run --build`. Without this exclude, builders that upload the
-# full context (remote, shared or legacy daemons) would receive the OAuth/AAS
-# credentials even though the Dockerfile never COPYs that file into the image.
-# .gitignore only stops Git commits; it does not filter Docker's context upload.
-# This file is the Docker-side counterpart.
-docker-login/data/
+# Denylisting each secret path individually is whack-a-mole: a new location
+# reopens the hole (exactly what happened for Auth/secrets.json). Instead this is
+# an ALLOWLIST: ignore the whole context, then re-include ONLY the two paths the
+# Dockerfile actually needs at build time:
+#   * requirements.txt           - COPYed, dependencies baked into the image
+#   * docker-login/entrypoint.sh - COPYed as the container entrypoint
+# The integration *code* is NOT built in; it is bind-mounted read-only at run
+# time (M2). This keeps every secret - current or future, anywhere in the tree -
+# out of the build context and shrinks the upload to just the required files.
+#
+# Docker cannot descend into an ignored directory, so docker-login/ is re-included
+# as a whole and its persisted-credentials subdir is then re-excluded again.
+*
+!requirements.txt
+!docker-login
+docker-login/data
