@@ -1,3 +1,4 @@
+# tests/test_main_secrets_path.py
 """Tests for standalone secrets.json path resolution.
 
 ``_resolve_secrets_path`` lets a container persist the standalone cache on a
@@ -14,8 +15,10 @@ import pytest
 from custom_components.googlefindmy import main
 
 
-def test_default_path_is_auth_secrets_json() -> None:
+def test_default_path_is_auth_secrets_json(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the env override the path is Auth/secrets.json next to main.py."""
+
+    monkeypatch.delenv("GOOGLEFINDMY_SECRETS_PATH", raising=False)
 
     assert main._resolve_secrets_path() == main._this_dir / "Auth" / "secrets.json"
 
