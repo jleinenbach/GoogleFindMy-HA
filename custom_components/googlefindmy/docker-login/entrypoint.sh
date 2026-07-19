@@ -42,4 +42,13 @@ cd /app/gfmy
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
 python3 main.py ${GFMY_ARGS:-}
 
+# main.py writes secrets.json 0600 owned by the container user (seluser). On a
+# bind mount whose host user has a different UID, that user could not read/copy
+# the file for the Home Assistant import. Relax it to 0644 so the host user can
+# read it. This is a trusted-host, single-purpose login volume (see README).
+_secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-}"
+if [ -n "${_secrets_path}" ] && [ -f "${_secrets_path}" ]; then
+  chmod 0644 "${_secrets_path}" 2>/dev/null || true
+fi
+
 shutdown

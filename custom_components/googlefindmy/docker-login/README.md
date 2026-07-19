@@ -185,6 +185,10 @@ setup it is already there) and import it via the integration's configuration
 flow (auth method *"GoogleFindMyTools secrets.json"*). Because it was produced by
 the integration's own code, no conversion is needed.
 
+The container writes the file as `seluser` and, on exit, relaxes it to mode
+`0644` so your host user (whose UID may differ) can read and copy it. Treat
+`data/secrets.json` as a credential and delete it once imported.
+
 ## Stopping
 
 ```bash
