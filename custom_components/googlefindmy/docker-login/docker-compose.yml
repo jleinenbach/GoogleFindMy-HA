@@ -19,22 +19,31 @@ services:
       # Optional CLI flags forwarded to main.py, e.g. "--reauth" (force fresh
       # login) or "--debug" (verbose bootstrap/FCM logging). Default: none.
       GFMY_ARGS: "${GFMY_ARGS:-}"
+      # Persist secrets.json on the writable ./data volume (see below) instead of
+      # inside the read-only code mount. main.py honours this override and keeps
+      # the atomic write on a single writable filesystem.
+      GOOGLEFINDMY_SECRETS_PATH: "/data/secrets.json"
       # Optional: pin Chrome's major version if auto-detection ever mismatches
       # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
       # GOOGLEFINDMY_CHROME_VERSION: "141"
     ports:
-      - "7900:7900"       # noVNC web viewer, password: secret
+      # noVNC web viewer (password: secret, a fixed default of the base image).
+      # Bound to LOOPBACK by default so the fixed-password session is NOT exposed
+      # to the LAN/Internet during the Google sign-in. To reach it from another
+      # machine, use an SSH tunnel (recommended) or set GFMY_NOVNC_BIND=0.0.0.0
+      # (README → Remote access) to opt into a LAN bind on a trusted network.
+      - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
     volumes:
-      # M2 runtime mount of the integration code, read-only, at its real import
-      # path. `../..` is the repository's custom_components/ dir, so this mount
-      # provides BOTH custom_components/__init__.py (a real package that calls
-      # pkgutil.extend_path) AND custom_components/googlefindmy/, which is what
-      # `python -m custom_components.googlefindmy.main` needs (main.py sets
-      # _standalone=False only in this exact layout). Mounting just the
-      # googlefindmy/ folder would drop custom_components/__init__.py.
-      - ../..:/app/custom_components:ro
-      # Writable auth dir. main.py writes Auth/secrets.json here; on the host it
-      # appears as ./data/secrets.json (this is the file you use in Home
-      # Assistant). Nested writable mount inside the read-only code mount above —
-      # validate with `docker compose config` on the Docker host if in doubt.
-      - ./data:/app/custom_components/googlefindmy/Auth
+      # M2 runtime mount of the integration code, READ-ONLY, at a FLAT path.
+      # `..` is the integration package dir, so main.py lands at /app/gfmy/main.py
+      # (parent = "app", not "custom_components") → _standalone=True: it stubs
+      # homeassistant.* and never imports the package __init__/config_flow (which
+      # need voluptuous/HA). The Auth package (token_cache.py etc.) stays present
+      # and readable; nothing is written here.
+      - ..:/app/gfmy:ro
+      # Writable, host-persisted volume for the produced secrets.json. This is
+      # the file you use in Home Assistant. Kept separate from the read-only code
+      # mount so the atomic write works and the login container never writes into
+      # your integration source. The launcher makes this dir writable by the
+      # container user (see login.sh / login.cmd).
+      - ./data:/data

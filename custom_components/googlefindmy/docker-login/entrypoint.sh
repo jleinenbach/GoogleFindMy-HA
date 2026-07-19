@@ -32,8 +32,14 @@ for i in $(seq 1 30); do
 done
 
 echo "[entrypoint] Open http://localhost:7900 (password: secret) in your browser to see/drive Chrome."
-cd /app
+# Run the integration's own CLI from the read-only FLAT code mount (/app/gfmy).
+# Running the script by path (not `-m custom_components.googlefindmy.main`) keeps
+# main.py in its standalone layout: it stubs homeassistant.* and never imports
+# the package __init__/config_flow, which require voluptuous + a real Home
+# Assistant install (neither is present in this image on purpose). secrets.json
+# goes to the writable /data volume via GOOGLEFINDMY_SECRETS_PATH.
+cd /app/gfmy
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
-python3 -m custom_components.googlefindmy.main ${GFMY_ARGS:-}
+python3 main.py ${GFMY_ARGS:-}
 
 shutdown

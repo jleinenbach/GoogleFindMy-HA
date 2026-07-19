@@ -13,11 +13,19 @@
 # onto the integration's *own* main.py so the produced secrets.json matches the
 # installed integration byte-for-byte. See README.md → Credits.
 #
-# Build model: M2 (runtime mount). The integration code is NOT baked into the
-# image — it is bind-mounted read-only at run time from its real import path
-# (see docker-compose.yml). The image therefore stays version-independent and
-# always runs whatever integration version is installed. Only the declared
-# runtime dependencies are baked in.
+# Run model (M2, runtime mount + standalone):
+#   * The integration code is NOT baked into the image. docker-compose.yml
+#     bind-mounts it READ-ONLY at a flat path (/app/gfmy), so main.py detects
+#     the standalone layout (_standalone=True), injects lightweight
+#     homeassistant.* stubs, and runs without a Home Assistant install. The
+#     image therefore stays version-independent and always runs the installed
+#     integration version.
+#   * secrets.json is written to a SEPARATE writable volume (/data) via
+#     GOOGLEFINDMY_SECRETS_PATH, so the read-only code mount is never written to
+#     and the atomic write stays on a single writable filesystem.
+# Only the declared runtime dependencies are baked in (Home Assistant and
+# voluptuous are deliberately NOT installed — the standalone path stubs HA and
+# never imports the package __init__/config_flow that need voluptuous).
 #
 # Build context is the integration package dir (custom_components/googlefindmy),
 # see docker-compose.yml `build.context: ..`.
@@ -27,23 +35,17 @@ USER root
 WORKDIR /app
 
 # --- Python dependencies -------------------------------------------------------
-# The integration's declared runtime deps are sufficient for the standalone CLI.
-# Home Assistant is deliberately NOT installed: main.py installs lightweight
-# homeassistant.* stubs when the package is absent (find_spec("homeassistant")
-# is None), so the login/bootstrap flow runs without a full HA install.
-#
 # requirements.txt lives inside the integration package (the build context), so
 # it is COPYed at build time. The integration *code* is NOT copied (M2): it is
 # mounted at run time, which keeps the image independent of the code version.
 COPY requirements.txt /app/requirements.txt
 RUN pip3 install --no-cache-dir -r /app/requirements.txt
 
-# secrets.json is written next to main.py under Auth/ (the upstream layout the
-# integration mirrors). The dir is provided at run time by a writable bind mount
-# (docker-compose.yml → ./data). We still create it here as a fallback mount
-# point and hand /app to the runtime user.
-RUN mkdir -p /app/custom_components/googlefindmy/Auth \
- && chown -R seluser:seluser /app \
+# Writable volume mount point for the produced secrets.json (see
+# docker-compose.yml → ./data:/data and GOOGLEFINDMY_SECRETS_PATH). Created and
+# owned here as a fallback; the bind mount provides the real, host-persisted dir.
+RUN mkdir -p /data \
+ && chown -R seluser:seluser /app /data \
  && chown -R seluser:seluser /home/seluser
 
 COPY docker-login/entrypoint.sh /opt/bin/gfm-entrypoint.sh

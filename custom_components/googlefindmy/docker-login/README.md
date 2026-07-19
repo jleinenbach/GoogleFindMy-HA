@@ -37,6 +37,26 @@ inside the Home Assistant container itself: HA has no Docker socket and cannot
 start a sibling container. So open the delivered `docker-login/` folder on the
 Docker host and launch it there.
 
+## noVNC access & security
+
+The noVNC viewer uses the base image's **fixed password `secret`**, and during
+the Google sign-in it exposes a fully authenticated Chrome session. To avoid
+handing that to anyone on the network, the port is bound to **loopback
+(`127.0.0.1:7900`) by default** — it is only reachable from the Docker host
+itself.
+
+- **Reach it from another machine (recommended): SSH tunnel.**
+  ```bash
+  ssh -L 7900:127.0.0.1:7900 <docker-host>
+  ```
+  Then open `http://localhost:7900` on your own machine.
+- **Trusted LAN opt-in.** Only on a network you trust, bind noVNC to all
+  interfaces by setting `GFMY_NOVNC_BIND=0.0.0.0` before starting:
+  ```bash
+  GFMY_NOVNC_BIND=0.0.0.0 ./login.sh
+  ```
+  Then browse to `http://<docker-host-ip>:7900`. Prefer the tunnel over this.
+
 ## Which setup can run this?
 
 | Home Assistant install | Has a host shell + Docker daemon? | Login path |
@@ -77,20 +97,24 @@ If you prefer to run it by hand instead of the launcher:
 ```bash
 cd config/custom_components/googlefindmy/docker-login
 mkdir -p data
-[ -f data/secrets.json ] || echo '{}' > data/secrets.json
+chmod 0777 data            # let the container user (seluser) write secrets.json
 docker compose up --build
 ```
 
-The `secrets.json` step matters: a bind mount to a non-existent file would
-otherwise be created by Docker as a *directory* and the login would fail.
+The `chmod` matters on Linux/QNAP: the image runs as `seluser`, whose UID may
+differ from yours, so the `./data` volume must be writable by others or the
+atomic write of `secrets.json` fails. Docker Desktop (Windows/macOS) handles this
+for you.
 
 ## First run (Google login required)
 
-1. (Launcher does this for you.) Make sure the token file exists as a file:
+1. (Launcher does this for you.) Create the writable token volume:
    ```bash
-   mkdir -p data
-   [ -f data/secrets.json ] || echo '{}' > data/secrets.json
+   mkdir -p data && chmod 0777 data
    ```
+   `secrets.json` is written here (to `data/secrets.json`) via the
+   `GOOGLEFINDMY_SECRETS_PATH=/data/secrets.json` setting in
+   `docker-compose.yml`, so the integration code mount stays read-only.
 
 2. Start the container **in the foreground** (no `-d`; it prompts for input) —
    `./login.sh` / `login.cmd`, or `docker compose up --build`.
@@ -117,8 +141,14 @@ intended login path (there is no Supervisor Add-on store for HA Container):
 
 - **SSH:** enable SSH on the NAS, `cd` into
   `.../config/custom_components/googlefindmy/docker-login`, then run `./login.sh`
-  (or `docker compose up --build`). Chrome/noVNC are then reachable at
-  `http://<nas-ip>:7900`.
+  (or `docker compose up --build`). noVNC is bound to loopback, so open it via an
+  SSH tunnel from your workstation:
+  ```bash
+  ssh -L 7900:127.0.0.1:7900 <nas-ip>
+  ```
+  then browse to `http://localhost:7900`. Only on a trusted LAN, start with
+  `GFMY_NOVNC_BIND=0.0.0.0 ./login.sh` to reach `http://<nas-ip>:7900` directly
+  (see [noVNC access & security](#novnc-access--security)).
 - **Container Station:** you can also import `docker-compose.yml` as an
   application in Container Station. Keep it in the foreground for the first
   (login) run so you can press Enter and watch the log.
