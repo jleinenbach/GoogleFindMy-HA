@@ -23,6 +23,11 @@ regress. Each guard maps to a concrete Codex review finding on PR #1208:
   signal traps must FORWARD SIGTERM/SIGINT to it. A foreground child makes bash
   defer the trap until the child exits, so ``docker stop`` escalates to SIGKILL and
   the EXIT cleanup never runs (finding: forward termination signals to the child).
+* Backgrounding that child must PRESERVE its terminal stdin (``<&0`` at the async
+  boundary) and RESET SIGINT/SIGQUIT to default (``trap - INT QUIT`` before exec):
+  a non-interactive script otherwise gives an async child ``/dev/null`` stdin (the
+  ``input()`` login prompt hits EOF) and hard-ignores SIGINT (Python drops Ctrl-C),
+  both regressions of the backgrounding fix above.
 """
 
 from __future__ import annotations
@@ -207,10 +212,12 @@ def test_entrypoint_forwards_signals_to_cli_child() -> None:
 
     entrypoint = _read("entrypoint.sh")
 
-    # 1) The CLI is started in the background and its PID captured.
-    assert "python3 main.py ${GFMY_ARGS:-} &" in entrypoint, (
-        "main.py must be started in the BACKGROUND (trailing '&'), otherwise bash "
-        "defers the signal traps until it exits and docker stop hits SIGKILL."
+    # 1) The CLI is started in the background and its PID captured. It is wrapped in a
+    #    `( ... ) <&0 &` subshell that execs python (see the stdin/SIGINT guard below),
+    #    so match the backgrounded exec form rather than a bare `python3 ... &`.
+    assert "exec python3 main.py ${GFMY_ARGS:-} ) <&0 &" in entrypoint, (
+        "main.py must be started in the BACKGROUND, otherwise bash defers the signal "
+        "traps until it exits and docker stop hits SIGKILL."
     )
     assert "CLI_PID=$!" in entrypoint, (
         "the entrypoint must capture the CLI child PID (CLI_PID=$!) so signals can "
@@ -236,4 +243,50 @@ def test_entrypoint_forwards_signals_to_cli_child() -> None:
     assert 'kill -s "${sig}" "${CLI_PID}"' in entrypoint, (
         "on_signal must relay the received signal to the CLI child via "
         "kill -s <sig> CLI_PID."
+    )
+
+
+def test_entrypoint_preserves_stdin_and_sigint_for_background_child() -> None:
+    """Backgrounding the CLI must not break the first-run login prompt or Ctrl-C.
+
+    A non-interactive bash script with job control off applies two disruptive
+    defaults to an async (``&``) child, both proven empirically:
+
+    * its stdin is pointed at ``/dev/null`` unless an explicit redirection overrides
+      it -- so ``main.py``'s interactive ``input("Press Enter")`` prompt would hit EOF
+      and abort the login (Codex: "Keep stdin attached when backgrounding the CLI");
+    * SIGINT/SIGQUIT are hard-ignored (SIG_IGN), which Python inherits and then keeps
+      instead of installing its ``KeyboardInterrupt`` handler -- so a relayed SIGINT
+      is dropped and the re-wait loop hangs (Codex: "Restore SIGINT handling in the
+      background child").
+
+    The fix wraps the child in ``( trap - INT QUIT; exec python3 ... ) <&0 &``:
+    ``<&0`` at the ASYNC BOUNDARY (not inside the subshell, where fd 0 is already
+    ``/dev/null``) restores the terminal stdin, and ``trap - INT QUIT`` before ``exec``
+    restores the default signal disposition so Python re-installs its handlers.
+    """
+
+    entrypoint = _read("entrypoint.sh")
+
+    # stdin: the redirect must sit at the async boundary `) <&0 &`, not inside `( ... )`.
+    assert "exec python3 main.py ${GFMY_ARGS:-} ) <&0 &" in entrypoint, (
+        "the backgrounded CLI must restore terminal stdin via `<&0` at the async "
+        "boundary, or the interactive `input()` login prompt reads EOF and aborts."
+    )
+    assert "<&0 ) &" not in entrypoint, (
+        "the `<&0` redirect must be OUTSIDE the subshell (at the async boundary); "
+        "inside the subshell fd 0 is already /dev/null, so it would be a no-op."
+    )
+
+    # SIGINT/SIGQUIT: reset to default inside the wrapper before exec.
+    assert "trap - INT QUIT" in entrypoint, (
+        "the wrapper must `trap - INT QUIT` before exec so bash's async SIG_IGN is "
+        "cleared and Python installs its normal KeyboardInterrupt handler."
+    )
+    # The reset must precede the exec so the exec'd process inherits the default.
+    reset_idx = entrypoint.index("trap - INT QUIT")
+    exec_idx = entrypoint.index("exec python3 main.py")
+    assert reset_idx < exec_idx, (
+        "`trap - INT QUIT` must run BEFORE `exec python3` so the CLI child inherits "
+        "the default SIGINT disposition."
     )

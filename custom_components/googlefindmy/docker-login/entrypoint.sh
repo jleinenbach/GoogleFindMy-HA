@@ -94,11 +94,23 @@ sudo chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
 cd /app/gfmy
 # Start the CLI in the BACKGROUND and wait on it, so a SIGTERM/SIGINT reaches bash
 # immediately and on_signal can relay it to the child (a foreground child defers the
-# traps until it exits -> docker escalates to SIGKILL -> no cleanup). Job control is
-# off in a script, so the backgrounded child still inherits this TTY's stdin and the
-# interactive login prompt keeps working.
+# traps until it exits -> docker escalates to SIGKILL -> no cleanup).
+#
+# Backgrounding in a non-interactive script (job control off) has two side effects we
+# must undo, or the first-run login breaks:
+#   1. stdin: bash points an async child's stdin at /dev/null unless an explicit
+#      redirection overrides it. main.py's interactive `input("Press Enter")` prompt
+#      would then hit EOF and abort the login. The `<&0` at the async boundary (NOT
+#      inside the subshell, where fd 0 is already /dev/null) restores the entrypoint's
+#      terminal stdin (which `docker compose run` attaches).
+#   2. SIGINT/SIGQUIT: bash hard-ignores (SIG_IGN) these in an async child; Python
+#      inherits SIG_IGN and then declines to install its KeyboardInterrupt handler, so
+#      a relayed SIGINT (Ctrl-C on `docker compose run`) is dropped and the re-wait
+#      loop hangs. `trap - INT QUIT` in the wrapper restores the default disposition
+#      before exec, so Python installs its normal handlers again.
+# `exec` makes CLI_PID the Python process itself, so on_signal's relay reaches it.
 # shellcheck disable=SC2086 -- GFMY_ARGS is an intentional word-split flag list.
-python3 main.py ${GFMY_ARGS:-} &
+( trap - INT QUIT; exec python3 main.py ${GFMY_ARGS:-} ) <&0 &
 CLI_PID=$!
 
 # Capture the child's status without tripping `set -e`. `wait` returns >128 when a
