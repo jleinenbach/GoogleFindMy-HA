@@ -175,7 +175,7 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 
 ### Automatic discovery & credential updates
 
-- **Auth/secrets.json watcher:** Home Assistant now monitors the integration's `Auth/secrets.json` file. Dropping a new bundle into `custom_components/googlefindmy/Auth/` immediately opens the config flow with the email and tokens pre-filled, so you can confirm the entry without pasting anything manually.
+- **Secrets watcher (automatic pickup):** Home Assistant watches for a fresh `secrets.json` and, when one appears, opens the config flow with the email and tokens pre-filled, so you can confirm the entry without pasting anything manually. By default it watches the integration's `Auth/secrets.json`; you can add extra paths — for example the login container's `docker-login/data/secrets.json` — through the integration options. Only **one** file is ever written: the watcher observes one or more paths, it never keeps a second copy. If several watched files happen to exist at once, the newest one wins (by modification time, with a content-hash tiebreak). After a successful import Home Assistant deletes **every** watched `secrets.json` — mirroring the existing `Auth/` cleanup — so no secret lingers on disk; an aborted or failed flow deletes nothing, so you can simply retry.
 - **Update flows for existing entries:** When the watcher detects refreshed credentials for an account that is already configured, the integration pushes a `discovery_update` flow. Accepting it reauthenticates the existing entry and keeps all devices and options intact.
 - **Cloud discovery channel:** Cloud-triggered discovery continues to operate in parallel, using the same deduplication logic as the secrets watcher. Regardless of source, duplicate flows are suppressed using Home Assistant's `DiscoveryKey` mechanism.
 
@@ -183,6 +183,7 @@ The manifest classifies Google Find My Device as a **hub** integration. Home Ass
 
 - Home Assistant supports connecting multiple Google accounts, but **only one config entry per email address stays active**. When duplicate entries share the same Google account, the integration automatically disables and unloads the non-authoritative entries to prevent device duplication and token conflicts.
 - The disabled entries remain visible in **Settings → Devices & Services** with an integration-managed disabled state so you can review or remove them manually. Reactivating a disabled duplicate requires removing the authoritative entry first or supplying credentials for a different Google account.
+- If two `secrets.json` files for **different** accounts are ever present in the watched paths at the same time, only the newer file is imported and both are deleted, so the older account is not picked up. Write one bundle at a time; the login container always writes a single complete bundle, so this only matters if you place files manually.
 
 ### Interoperability and third-party linking
 
