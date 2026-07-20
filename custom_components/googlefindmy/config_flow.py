@@ -2178,6 +2178,122 @@ async def _ingest_discovery_credentials(
     return auth_data, updates
 
 
+class _ContainerLoginMixin:
+    """Shared one-click container-login helpers for config and options flows.
+
+    Both ``ConfigFlow`` and ``OptionsFlowHandler`` refresh credentials through the
+    login container, so the fetch/ack pair lives here as the single source. The
+    methods only touch ``self.hass`` plus module-global helpers, so the mixin
+    needs no extra state.
+    """
+
+    hass: HomeAssistant
+
+    # ------------------ Step: one-click container login ------------------
+    async def _async_container_fetch(
+        self,
+        *,
+        host: str,
+        port: int,
+        pairing_code: str,
+        errors: dict[str, str],
+    ) -> _ContainerFetchResult | None:
+        """Fetch + validate a container-login bundle through the shared parsers.
+
+        Runs the fetch (``fetch_secrets_from_container``) and pushes the raw
+        bundle through the SAME validation path as the paste flow
+        (``normalize_secrets_bundle`` + ``async_pick_working_token``), so the
+        container path never becomes a second validation/divergence source. On
+        any failure it writes an error key into ``errors`` and returns ``None``;
+        the two-phase-delete ``ack_consumed`` is left to the caller so it only
+        runs after Home Assistant has actually persisted the bundle.
+        """
+
+        session = async_get_clientsession(self.hass)
+        try:
+            raw_bundle, delete_token = await fetch_secrets_from_container(
+                session,
+                host,
+                port,
+                pairing_code,
+                timeout=CONTAINER_FETCH_TIMEOUT,
+            )
+        except ContainerLoginError as exc:
+            _LOGGER.debug("Container login fetch failed: %s", type(exc).__name__)
+            errors["base"] = _map_container_error(exc)
+            return None
+
+        parsed = normalize_secrets_bundle(dict(raw_bundle))
+        if _reject_if_shared_key_missing(parsed, errors):
+            return None
+
+        email = normalize_email(_extract_email_from_secrets(parsed))
+        if not email:
+            errors["base"] = "invalid_token"
+            return None
+
+        cands = _extract_oauth_candidates_from_secrets(parsed)
+        if not cands:
+            errors["base"] = "invalid_token"
+            return None
+
+        try:
+            chosen = await async_pick_working_token(
+                self.hass,
+                email,
+                cands,
+                secrets_bundle=parsed,
+            )
+        except (DependencyNotReady, ImportError) as exc:
+            _register_dependency_error(errors, exc)
+            return None
+
+        if not chosen:
+            _log_token_validation_failure(email=email, candidates=cands)
+            errors["base"] = "cannot_connect"
+            return None
+
+        to_persist = chosen
+        if _disqualifies_for_persistence(to_persist):
+            alt = next(
+                (v for (_src, v) in cands if not _disqualifies_for_persistence(v)),
+                None,
+            )
+            if alt:
+                to_persist = alt
+
+        return _ContainerFetchResult(
+            parsed=parsed,
+            token=to_persist,
+            email=email,
+            host=host,
+            port=port,
+            pairing_code=pairing_code,
+            delete_token=delete_token,
+        )
+
+    async def _async_container_ack(self, result: _ContainerFetchResult) -> None:
+        """Best-effort second phase of the two-phase delete after persist."""
+
+        session = async_get_clientsession(self.hass)
+        try:
+            await ack_consumed(
+                session,
+                result.host,
+                result.port,
+                result.pairing_code,
+                result.delete_token,
+                timeout=CONTAINER_FETCH_TIMEOUT,
+            )
+        except ContainerLoginError as exc:
+            # Non-fatal: the container deletes on its own TTL fallback. Never
+            # log the nonce or delete token.
+            _LOGGER.warning(
+                "Container ack failed (%s); container will fall back to TTL delete",
+                type(exc).__name__,
+            )
+
+
 # ---------------------------
 # Config Flow
 # ---------------------------
@@ -2193,6 +2309,7 @@ class _DomainAwareConfigFlow(config_entries.ConfigFlow):  # type: ignore[misc]
 class ConfigFlow(
     _DomainAwareConfigFlow,
     _ConfigFlowMixin,
+    _ContainerLoginMixin,
     domain=DOMAIN,
 ):
     """Handle the initial config flow for Google Find My Device."""
@@ -3290,110 +3407,6 @@ class ConfigFlow(
         return self.async_show_form(
             step_id="secrets_json", data_schema=schema, errors=errors
         )
-
-    # ------------------ Step: one-click container login ------------------
-    async def _async_container_fetch(
-        self,
-        *,
-        host: str,
-        port: int,
-        pairing_code: str,
-        errors: dict[str, str],
-    ) -> _ContainerFetchResult | None:
-        """Fetch + validate a container-login bundle through the shared parsers.
-
-        Runs the fetch (``fetch_secrets_from_container``) and pushes the raw
-        bundle through the SAME validation path as the paste flow
-        (``normalize_secrets_bundle`` + ``async_pick_working_token``), so the
-        container path never becomes a second validation/divergence source. On
-        any failure it writes an error key into ``errors`` and returns ``None``;
-        the two-phase-delete ``ack_consumed`` is left to the caller so it only
-        runs after Home Assistant has actually persisted the bundle.
-        """
-
-        session = async_get_clientsession(self.hass)
-        try:
-            raw_bundle, delete_token = await fetch_secrets_from_container(
-                session,
-                host,
-                port,
-                pairing_code,
-                timeout=CONTAINER_FETCH_TIMEOUT,
-            )
-        except ContainerLoginError as exc:
-            _LOGGER.debug("Container login fetch failed: %s", type(exc).__name__)
-            errors["base"] = _map_container_error(exc)
-            return None
-
-        parsed = normalize_secrets_bundle(dict(raw_bundle))
-        if _reject_if_shared_key_missing(parsed, errors):
-            return None
-
-        email = normalize_email(_extract_email_from_secrets(parsed))
-        if not email:
-            errors["base"] = "invalid_token"
-            return None
-
-        cands = _extract_oauth_candidates_from_secrets(parsed)
-        if not cands:
-            errors["base"] = "invalid_token"
-            return None
-
-        try:
-            chosen = await async_pick_working_token(
-                self.hass,
-                email,
-                cands,
-                secrets_bundle=parsed,
-            )
-        except (DependencyNotReady, ImportError) as exc:
-            _register_dependency_error(errors, exc)
-            return None
-
-        if not chosen:
-            _log_token_validation_failure(email=email, candidates=cands)
-            errors["base"] = "cannot_connect"
-            return None
-
-        to_persist = chosen
-        if _disqualifies_for_persistence(to_persist):
-            alt = next(
-                (v for (_src, v) in cands if not _disqualifies_for_persistence(v)),
-                None,
-            )
-            if alt:
-                to_persist = alt
-
-        return _ContainerFetchResult(
-            parsed=parsed,
-            token=to_persist,
-            email=email,
-            host=host,
-            port=port,
-            pairing_code=pairing_code,
-            delete_token=delete_token,
-        )
-
-    async def _async_container_ack(self, result: _ContainerFetchResult) -> None:
-        """Best-effort second phase of the two-phase delete after persist."""
-
-        session = async_get_clientsession(self.hass)
-        try:
-            await ack_consumed(
-                session,
-                result.host,
-                result.port,
-                result.pairing_code,
-                result.delete_token,
-                timeout=CONTAINER_FETCH_TIMEOUT,
-            )
-        except ContainerLoginError as exc:
-            # Non-fatal: the container deletes on its own TTL fallback. Never
-            # log the nonce or delete token.
-            _LOGGER.warning(
-                "Container ack failed (%s); container will fall back to TTL delete",
-                type(exc).__name__,
-            )
 
     async def _async_flush_container_ack(self) -> None:
         """Send + clear a deferred container ack after a successful persist (F4).
@@ -5280,7 +5293,7 @@ class TrackerSubentryFlowHandler(_BaseSubentryFlow):
 # ---------------------------
 # Options Flow
 # ---------------------------
-class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[misc, valid-type]
+class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin, _ContainerLoginMixin):  # type: ignore[misc, valid-type]
     """Options flow to update non-secret settings and optionally refresh credentials.
 
     Notes:

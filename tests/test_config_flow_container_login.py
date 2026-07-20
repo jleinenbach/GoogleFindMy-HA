@@ -831,6 +831,70 @@ async def test_options_container_branch_error_does_not_ack(
     assert recorder.ack_calls == []
 
 
+async def test_options_handler_inherits_container_helpers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-N4: OptionsFlowHandler must inherit the shared container fetch/ack helpers.
+
+    The options credential-refresh path calls ``_async_container_fetch`` and
+    ``_async_container_ack`` (both extracted to ``_ContainerLoginMixin``). If they
+    were reachable only on ``ConfigFlow`` the options persist would raise
+    ``AttributeError`` before any request. This asserts both are bound callables
+    on the handler and that a full ``_async_options_container_persist`` run does
+    not raise ``AttributeError``.
+    """
+
+    recorder = _Recorder()
+    _install_container_client(monkeypatch, recorder)
+
+    entry = make_config_entry(
+        entry_id="entry-inherit",
+        data={CONF_GOOGLE_EMAIL: _EMAIL},
+        options={},
+    )
+    hass = _build_hass([entry])
+
+    flow = config_flow.OptionsFlowHandler()
+    flow.hass = hass  # type: ignore[assignment]
+    flow.config_entry = entry  # type: ignore[attr-defined]
+
+    # The shared helpers are inherited from _ContainerLoginMixin.
+    assert callable(getattr(flow, "_async_container_fetch", None))
+    assert callable(getattr(flow, "_async_container_ack", None))
+
+    async def _clear_cached_aas_token(_entry: Any) -> None:
+        return None
+
+    async def _refresh_title(_entry: Any, _opt: Any) -> None:
+        return None
+
+    def _abort(*, reason: str, **_: Any) -> dict[str, Any]:
+        return {"type": "abort", "reason": reason}
+
+    flow._async_clear_cached_aas_token = _clear_cached_aas_token  # type: ignore[attr-defined]
+    flow._async_refresh_subentry_entry_title = _refresh_title  # type: ignore[attr-defined]
+    flow.async_abort = _abort  # type: ignore[assignment]
+
+    errors: dict[str, str] = {}
+    # Must not raise AttributeError (the F-N4 regression).
+    result = await flow._async_options_container_persist(
+        entry=entry,
+        selected_option=None,
+        user_input={
+            "container_host": "127.0.0.1",
+            "container_port": CONTAINER_TOKEN_PORT,
+            "pairing_code": _PAIRING_CODE,
+        },
+        errors=errors,
+    )
+    assert isinstance(result, dict)
+    assert result.get("reason") == "reconfigure_successful"
+    # fetch validated the bundle and the ack fired after persist (order: fetch ->
+    # update_entry -> ack), so exactly one of each ran.
+    assert len(recorder.fetch_calls) == 1
+    assert len(recorder.ack_calls) == 1
+
+
 # --- F-N3: builtin TimeoutError (total timeout) mapping -----------------------
 
 
