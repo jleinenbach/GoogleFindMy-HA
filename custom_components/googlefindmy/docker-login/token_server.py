@@ -68,7 +68,7 @@ _LOGGER = logging.getLogger("gfmy.token_server")
 # bind here would make the published 127.0.0.1:7901 host port unreachable. The
 # loopback (no-LAN) boundary lives in docker-compose.yml as the HOST publish
 # `127.0.0.1:7901:7901`, NOT here. `network_mode: host` is unsupported (README).
-_BIND_HOST = "0.0.0.0"  # noqa: S104 - see comment: boundary is the host publish.
+_BIND_HOST = "0.0.0.0"  # noqa: S104  # nosec B104 - boundary is the host publish, not this bind (see comment above).
 _TOKEN_PORT = 7901  # == const.CONTAINER_TOKEN_PORT
 _NONCE_BYTES = 16  # secrets.token_urlsafe(16) -> 128 bit; == CONTAINER_NONCE_MIN_LEN
 _NONCE_MAX_ATTEMPTS = 5  # == const.CONTAINER_NONCE_MAX_ATTEMPTS

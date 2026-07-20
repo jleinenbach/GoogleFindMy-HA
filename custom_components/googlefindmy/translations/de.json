@@ -261,16 +261,16 @@
         "description": "Aktualisiere deine Anmeldedaten. Bestehende Werte werden aus Sicherheitsgründen nicht angezeigt.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt), oder melde dich erneut über den Anmelde-Container an, indem du einen Kopplungscode eingibst.\n\nNach dem Absenden werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
           "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "subentry": "Funktionsgruppe",
           "container_host": "Container-Host",
           "container_port": "Container-Port",
-          "pairing_code": "Kopplungscode"
+          "pairing_code": "Kopplungscode",
+          "subentry": "Funktionsgruppe"
         },
         "data_description": {
-          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url}).",
           "container_host": "Hostname oder IP-Adresse des Anmelde-Containers. Belasse den Standardwert, sofern der Container nicht anderswo läuft.",
           "container_port": "Port, über den der Anmelde-Container die Anmeldedaten bereitstellt. Belasse den Standardwert, sofern du ihn nicht geändert hast.",
-          "pairing_code": "Gib einen Kopplungscode ein, um die Anmeldedaten über den Anmelde-Container zu aktualisieren, statt eine secrets.json einzufügen."
+          "pairing_code": "Gib einen Kopplungscode ein, um die Anmeldedaten über den Anmelde-Container zu aktualisieren, statt eine secrets.json einzufügen.",
+          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
         }
       },
       "settings": {
