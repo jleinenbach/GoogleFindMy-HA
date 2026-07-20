@@ -20,6 +20,20 @@
           "secrets_json": "Inhalt der secrets.json"
         }
       },
+      "container_login": {
+        "title": "Ein-Klick-Anmeldung über Container",
+        "description": "Melde dich über den mitgelieferten Anmelde-Container an. Öffne die noVNC-Sitzung, führe die Google-Anmeldung im Browser durch und gib anschließend den dort angezeigten Kopplungscode ein, um deine Anmeldedaten automatisch zu übernehmen.\n\n[noVNC-Anmeldung öffnen]({novnc_url})",
+        "data": {
+          "host": "Container-Host",
+          "port": "Container-Port",
+          "pairing_code": "Kopplungscode"
+        },
+        "data_description": {
+          "host": "Hostname oder IP-Adresse des Anmelde-Containers. Belasse den Standardwert, sofern der Container nicht anderswo läuft.",
+          "port": "Port, über den der Anmelde-Container die Anmeldedaten bereitstellt. Belasse den Standardwert, sofern du ihn nicht geändert hast.",
+          "pairing_code": "Der Kopplungscode, der in der noVNC-Anmeldesitzung angezeigt wird, nachdem du die Anmeldung abgeschlossen hast."
+        }
+      },
       "device_selection": {
         "title": "Abfrageeinstellungen",
         "description": "Neu erkannte Geräte erscheinen deaktiviert und können in den Geräteeinstellungen aktiviert werden. Konfiguriere hier die allgemeinen Abfrageparameter:\n• Positionsabfrage-Intervall: Wie oft ein neuer Abfragezyklus startet (60–3600 Sekunden)\n• Verzögerung zwischen Geräteabfragen: Abstand zwischen den Abfragen einzelner Geräte innerhalb eines Zyklus (1–60 Sekunden)\n\nGoogle-Home-Filter: Standardmäßig aktiviert mit den Schlüsselwörtern nest/google/home/mini/hub/display/chromecast/speaker. Für Google-/Nest-/Chromecast-Erkennungen werden die Koordinaten der Home-Zone eingesetzt und wiederholte \"home\"-Meldungen 15 Minuten lang entprellt. Passe die Schlüsselwörter hier an, wenn deine Geräte andere Namen verwenden.",
@@ -45,9 +59,17 @@
       },
       "reauth_confirm": {
         "title": "Erneute Authentifizierung",
-        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nHinweis: Die Konto-E-Mail-Adresse ist für diese erneute Authentifizierung fest vorgegeben; um ein anderes Konto zu nutzen, entferne die Integration und füge sie neu hinzu.",
+        "description": "Die Anmeldedaten für **{email}** sind ungültig oder abgelaufen. Bitte gib unten neue Anmeldedaten ein.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt), oder melde dich erneut über den Anmelde-Container an, indem du einen Kopplungscode eingibst.\n\nHinweis: Die Konto-E-Mail-Adresse ist für diese erneute Authentifizierung fest vorgegeben; um ein anderes Konto zu nutzen, entferne die Integration und füge sie neu hinzu.",
         "data": {
-          "secrets_json": "Neue secrets.json (vollständiger Inhalt)"
+          "secrets_json": "Neue secrets.json (vollständiger Inhalt)",
+          "container_host": "Container-Host",
+          "container_port": "Container-Port",
+          "pairing_code": "Kopplungscode"
+        },
+        "data_description": {
+          "container_host": "Hostname oder IP-Adresse des Anmelde-Containers. Belasse den Standardwert, sofern der Container nicht anderswo läuft.",
+          "container_port": "Port, über den der Anmelde-Container die Anmeldedaten bereitstellt. Belasse den Standardwert, sofern du ihn nicht geändert hast.",
+          "pairing_code": "Gib einen Kopplungscode ein, um dich über den Anmelde-Container erneut zu authentifizieren, statt eine secrets.json einzufügen."
         }
       },
       "migrate_complete": {
@@ -68,7 +90,11 @@
       "choose_one": "Bitte gib genau eine Anmeldemethode an.",
       "required": "Dieses Feld ist erforderlich.",
       "unknown": "Unerwarteter Fehler.",
-      "email_mismatch": "Die bereitgestellten Anmeldedaten gehören zu einem anderen Google-Konto. Um dieses Konto hinzuzufügen, erstelle eine neue Integration; eine erneute Authentifizierung kann das Konto für diesen Eintrag nicht ändern."
+      "email_mismatch": "Die bereitgestellten Anmeldedaten gehören zu einem anderen Google-Konto. Um dieses Konto hinzuzufügen, erstelle eine neue Integration; eine erneute Authentifizierung kann das Konto für diesen Eintrag nicht ändern.",
+      "container_unreachable": "Der Anmelde-Container konnte nicht erreicht werden. Stelle sicher, dass er läuft und Host und Port korrekt sind.",
+      "container_timeout": "Der Anmelde-Container hat nicht rechtzeitig geantwortet. Bitte versuche es erneut.",
+      "container_auth_failed": "Die Authentifizierung über den Anmelde-Container ist fehlgeschlagen. Prüfe den Kopplungscode und versuche es erneut.",
+      "container_login_failed": "Die Container-Anmeldung konnte nicht abgeschlossen werden. Bitte versuche es erneut."
     },
     "abort": {
       "already_configured": "Google Find My Device ist bereits konfiguriert.",
@@ -232,13 +258,19 @@
       },
       "credentials": {
         "title": "Anmeldedaten aktualisieren (optional)",
-        "description": "Aktualisiere deine Anmeldedaten. Bestehende Werte werden aus Sicherheitsgründen nicht angezeigt.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt).\n\nNach dem Absenden werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
+        "description": "Aktualisiere deine Anmeldedaten. Bestehende Werte werden aus Sicherheitsgründen nicht angezeigt.\n\nFüge den vollständigen Inhalt einer neuen **secrets.json** ein (mit GoogleFindMyTools erzeugt), oder melde dich erneut über den Anmelde-Container an, indem du einen Kopplungscode eingibst.\n\nNach dem Absenden werden die Anmeldedaten validiert und gespeichert; die Integration wird neu geladen, ohne deine Entitätsnamen zu ändern.",
         "data": {
           "new_secrets_json": "Neue secrets.json (vollständiger Inhalt)",
-          "subentry": "Funktionsgruppe"
+          "subentry": "Funktionsgruppe",
+          "container_host": "Container-Host",
+          "container_port": "Container-Port",
+          "pairing_code": "Kopplungscode"
         },
         "data_description": {
-          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url})."
+          "subentry": "Wenden Sie Aktualisierungen der Anmeldedaten auf die ausgewählte Funktionsgruppe an. Workflows finden Sie im Abschnitt [Subeinträge und Funktionsgruppen]({subentries_docs_url}).",
+          "container_host": "Hostname oder IP-Adresse des Anmelde-Containers. Belasse den Standardwert, sofern der Container nicht anderswo läuft.",
+          "container_port": "Port, über den der Anmelde-Container die Anmeldedaten bereitstellt. Belasse den Standardwert, sofern du ihn nicht geändert hast.",
+          "pairing_code": "Gib einen Kopplungscode ein, um die Anmeldedaten über den Anmelde-Container zu aktualisieren, statt eine secrets.json einzufügen."
         }
       },
       "settings": {
@@ -319,7 +351,11 @@
       "duplicate_name": "Der semantische Name ist bereits vorhanden. Wähle einen anderen Namen.",
       "duplicate_semantic_location": "Der semantische Name ist bereits vorhanden. Wähle einen anderen Namen.",
       "unknown": "Unerwarteter Fehler.",
-      "invalid_subentry": "Wähle eine gültige Funktionsgruppe."
+      "invalid_subentry": "Wähle eine gültige Funktionsgruppe.",
+      "container_unreachable": "Der Anmelde-Container konnte nicht erreicht werden. Stelle sicher, dass er läuft und Host und Port korrekt sind.",
+      "container_timeout": "Der Anmelde-Container hat nicht rechtzeitig geantwortet. Bitte versuche es erneut.",
+      "container_auth_failed": "Die Authentifizierung über den Anmelde-Container ist fehlgeschlagen. Prüfe den Kopplungscode und versuche es erneut.",
+      "container_login_failed": "Die Container-Anmeldung konnte nicht abgeschlossen werden. Bitte versuche es erneut."
     },
     "abort": {
       "reconfigure_successful": "Neukonfiguration erfolgreich.",
@@ -797,6 +833,12 @@
       "options": {
         "high_traffic": "Nur stark frequentierte Bereiche",
         "in_all_areas": "Alle Bereiche (Crowdsourcing)"
+      }
+    },
+    "auth_method": {
+      "options": {
+        "container_login": "Ein-Klick-Anmeldung über Container",
+        "secrets_json": "GoogleFindMyTools secrets.json"
       }
     }
   }
