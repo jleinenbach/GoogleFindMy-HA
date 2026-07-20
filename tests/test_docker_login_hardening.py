@@ -21,7 +21,16 @@ Codex review finding on PR #1208:
   build context, re-include only the two paths the Dockerfile COPYs) so that
   EVERY secret location -- ``docker-login/data`` AND the legacy
   ``Auth/secrets.json`` AND any future token/cache path -- stays out of the
-  ``--build`` context, not just the one path a denylist happens to name.
+  ``--build`` context, not just the one path a denylist happens to name. A bare
+  ``!docker-login`` re-includes the WHOLE directory, so it is re-excluded again
+  (``docker-login/*``) down to just the one re-included file
+  (``!docker-login/entrypoint.sh``); a file dropped directly under
+  ``docker-login/`` must NOT reach the context (Codex P2 on PR #1210).
+* The QNAP "Container Station" README guidance must NOT present importing the
+  compose file as an *application* (``docker compose up`` semantics, no stdin) as
+  a first-login path: the interactive ``input("Press Enter")`` prompt can never
+  proceed without a terminal, so the login must go through the stdin-attaching
+  ``docker compose run`` (SSH) path (Codex P2 on PR #1210).
 * The ownership handoff must run from an ``EXIT`` trap, so a nonzero/interrupted
   ``main.py`` run still returns the produced secrets.json to the host user.
 * The CLI must run as a BACKGROUND child that the entrypoint waits on, and the
@@ -159,23 +168,44 @@ def test_dockerignore_is_allowlist_excluding_every_secret_path() -> None:
         "secrets in any location are excluded by default (allowlist model)."
     )
 
-    # 2. Only build inputs are re-included, and never a secrets directory.
+    # 2. The only `!`-re-includes may be the two Dockerfile COPY inputs plus the
+    #    `docker-login` directory re-included SOLELY for traversal (Docker cannot
+    #    descend into an ignored dir to reach entrypoint.sh). Never a secrets path.
     reincludes = {r[1:] for r in rules if r.startswith("!")}
-    assert reincludes == {"requirements.txt", "docker-login"}, (
+    assert reincludes == {
+        "requirements.txt",
+        "docker-login",
+        "docker-login/entrypoint.sh",
+    }, (
         "the only `!`-re-includes may be the Dockerfile's COPY inputs "
-        f"(requirements.txt, docker-login); found {sorted(reincludes)}. Re-including "
-        "anything else risks shipping integration source or secrets into the image."
+        "(requirements.txt, docker-login/entrypoint.sh) plus `docker-login` for "
+        f"traversal; found {sorted(reincludes)}. Re-including anything else -- or the "
+        "directory as a whole without re-excluding its contents -- risks shipping "
+        "integration source or secrets into the image."
     )
     assert not any(
         r.startswith("!") and ("auth" in r.lower() or "secret" in r.lower())
         for r in rules
     ), ".dockerignore must never re-include an Auth/ or secrets path."
 
-    # 3. The persisted-credentials subdir of the re-included docker-login/ is
-    #    excluded again (order-sensitive: after `!docker-login`).
-    assert "docker-login/data" in {r.rstrip("/") for r in rules}, (
-        ".dockerignore must re-exclude docker-login/data after re-including "
-        "docker-login/, so the container's persisted secrets.json stays out."
+    # 3. The contents of the re-included docker-login/ are re-excluded WHOLESALE
+    #    (`docker-login/*`) so a bare `!docker-login` cannot leak any other file
+    #    placed under it (an exported secrets.json, a diagnostic log, a future
+    #    addition) -- not merely docker-login/data. Order-sensitive (last match
+    #    wins): `!docker-login` -> `docker-login/*` -> `!docker-login/entrypoint.sh`.
+    assert "docker-login/*" in rules, (
+        ".dockerignore must re-exclude the whole docker-login/ subtree "
+        "(`docker-login/*`) after re-including the directory, so only the explicitly "
+        "re-included entrypoint.sh survives -- not docker-login/data, an exported "
+        "secrets.json, or any future file dropped under docker-login/."
+    )
+    i_dir = rules.index("!docker-login")
+    i_star = rules.index("docker-login/*")
+    i_entry = rules.index("!docker-login/entrypoint.sh")
+    assert i_dir < i_star < i_entry, (
+        "order must be `!docker-login` -> `docker-login/*` -> "
+        "`!docker-login/entrypoint.sh` (last match wins), else the re-exclusion never "
+        f"takes effect; got indices dir={i_dir}, star={i_star}, entry={i_entry}."
     )
 
 
@@ -404,4 +434,129 @@ def test_backgrounded_login_child_behaviourally_keeps_stdin_and_default_sigint(
     assert "STDIN_OK=False" in control_out, (
         "control without `<&0` unexpectedly read stdin; the behavioural stdin "
         f"assertion is not discriminating. got: {control_out!r}"
+    )
+
+
+def _docker_context_excluded(rules: list[str], path: str) -> bool:
+    """Return True if ``path`` is EXCLUDED from the Docker build context by ``rules``.
+
+    Faithfully models moby/patternmatcher (Docker's ``.dockerignore`` engine): the
+    patterns are evaluated in order and the LAST pattern that matches the path -- or
+    any of its parent directories -- decides; a plain pattern excludes, a
+    ``!``-prefixed pattern re-includes. ``*`` matches a single path segment (it does
+    not cross ``/``), per Go ``filepath.Match``. This "last-match-wins + parent-dir
+    descent" behaviour is exactly why a bare ``!docker-login`` re-includes the whole
+    subtree and why ``docker-login/*`` + ``!docker-login/entrypoint.sh`` is needed to
+    let through only the one file. (Verified to agree with the ``pathspec`` reference
+    matcher on the representative paths below; re-implemented inline so the guard adds
+    no test-only dependency to the Poetry env.)
+    """
+
+    import fnmatch
+    from pathlib import PurePosixPath
+
+    posix = PurePosixPath(path)
+    candidates = [str(posix)] + [str(par) for par in posix.parents if str(par) != "."]
+
+    def _matches(pattern: str, candidate: str) -> bool:
+        pat_parts = pattern.rstrip("/").split("/")
+        cand_parts = candidate.split("/")
+        if len(pat_parts) != len(cand_parts):
+            return False
+        return all(
+            fnmatch.fnmatchcase(seg, pat)
+            for pat, seg in zip(pat_parts, cand_parts, strict=True)
+        )
+
+    excluded = False
+    for rule in rules:
+        negated = rule.startswith("!")
+        pattern = rule[1:] if negated else rule
+        if any(_matches(pattern, cand) for cand in candidates):
+            excluded = not negated
+    return excluded
+
+
+def test_dockerignore_behaviourally_excludes_files_dropped_under_docker_login() -> None:
+    """Behavioural proof that the allowlist keeps stray secrets out of the context.
+
+    Codex flagged that a bare ``!docker-login`` re-includes the ENTIRE directory, so a
+    credential export / diagnostic log / any file placed under ``docker-login/`` other
+    than ``data/`` (the only path the old denylist named) would be uploaded to the
+    Docker daemon, contradicting the stated allowlist guarantee. Rather than only
+    matching pattern text, this test EVALUATES the real ``.dockerignore`` with a
+    faithful model of Docker's matcher and asserts the include/exclude DECISION for
+    representative paths, with a discriminating control on the old rules that proves
+    the leak the fix closes.
+    """
+
+    rules = _dockerignore_rules()
+
+    # The two Dockerfile COPY inputs must stay IN the context, or the build breaks.
+    assert not _docker_context_excluded(rules, "requirements.txt")
+    assert not _docker_context_excluded(rules, "docker-login/entrypoint.sh")
+
+    # Every secret/stray location is OUT -- including a file dropped directly under
+    # docker-login/ (the exact hole Codex reported), not just docker-login/data.
+    for secret in (
+        "docker-login/secrets.json",  # exported straight into docker-login/
+        "docker-login/diagnostic.log",  # a stray diagnostic artifact
+        "docker-login/data/secrets.json",  # the container's writable volume
+        "Auth/secrets.json",  # legacy _resolve_secrets_path default
+        "token_cache.json",  # any future top-level token/cache file
+    ):
+        assert _docker_context_excluded(rules, secret), (
+            f"{secret!r} must be excluded from the build context by the allowlist"
+        )
+
+    # Discriminating control: the previous rules (bare `!docker-login`, only
+    # `docker-login/data` re-excluded) LEAK a file dropped directly under
+    # docker-login/. This proves the matcher -- and thus the assertions above --
+    # actually detect the regression the fix removes (mutation gegenprobe baked in).
+    old_rules = ["*", "!requirements.txt", "!docker-login", "docker-login/data"]
+    assert not _docker_context_excluded(old_rules, "docker-login/secrets.json"), (
+        "sanity: the old denylist rules must (wrongly) keep docker-login/secrets.json "
+        "in context, otherwise this test would pass even without the fix"
+    )
+    assert _docker_context_excluded(rules, "docker-login/secrets.json"), (
+        "the fixed allowlist must exclude docker-login/secrets.json"
+    )
+
+
+def test_readme_container_station_does_not_present_compose_up_first_login() -> None:
+    """Container Station guidance must not present compose-up as a first-login path.
+
+    Codex: importing docker-compose.yml as a Container Station *application* starts it
+    with ``docker compose up`` semantics, which does not forward terminal STDIN, so the
+    first-run ``input("Press Enter")`` prompt can never proceed. Telling users to "keep
+    it in the foreground for the first (login) run" is therefore wrong (foreground is
+    not stdin attached). The README must route the interactive login through the
+    stdin-attaching ``docker compose run`` (SSH) path and only offer Container Station
+    for later, already-authenticated runs.
+    """
+
+    readme = _read("README.md")
+
+    assert "**Container Station:**" in readme, (
+        "README must document the Container Station option so this guard stays anchored."
+    )
+    # Isolate the Container Station bullet (up to the next blank line).
+    bullet = readme.split("**Container Station:**", 1)[1].split("\n\n", 1)[0].lower()
+
+    # It must NOT claim the first/login run works by keeping the compose-up
+    # application "in the foreground" (the exact wrong claim Codex flagged).
+    assert not ("foreground" in bullet and "first" in bullet and "login" in bullet), (
+        "Container Station bullet still presents keeping the compose-up application "
+        "'in the foreground' for the 'first (login)' run -- that path has no stdin, so "
+        "the interactive login cannot proceed."
+    )
+    # It must steer the login to the stdin-attaching `docker compose run` path...
+    assert "compose run" in bullet, (
+        "Container Station bullet must route the interactive login to the "
+        "`docker compose run` path (the only one that attaches stdin)."
+    )
+    # ...and warn that the app-import / compose-up path does not forward a terminal.
+    assert "compose up" in bullet and "forward" in bullet, (
+        "Container Station bullet must warn that the app-import/compose-up path does "
+        "not forward a terminal, so the first-login prompt stalls."
     )

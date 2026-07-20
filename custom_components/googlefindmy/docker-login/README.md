@@ -158,9 +158,15 @@ intended login path (there is no Supervisor Add-on store for HA Container):
   then browse to `http://localhost:7900`. Only on a trusted LAN, start with
   `GFMY_NOVNC_BIND=0.0.0.0 ./login.sh` to reach `http://<nas-ip>:7900` directly
   (see [noVNC access & security](#novnc-access--security)).
-- **Container Station:** you can also import `docker-compose.yml` as an
-  application in Container Station. Keep it in the foreground for the first
-  (login) run so you can press Enter and watch the log.
+- **Container Station:** the interactive first login needs a terminal attached to
+  its STDIN, which only the `docker compose run` path (the **SSH** option above)
+  provides. Importing `docker-compose.yml` as a Container Station *application*
+  starts it with `docker compose up` semantics, which does **not** forward a
+  terminal — so the `[AuthFlow] Press Enter to continue...` prompt can never
+  proceed and the login stalls (see the compose file's own note and
+  [Troubleshooting](#troubleshooting)). Run the **login** via SSH; you may use
+  Container Station afterwards for the normal, already-authenticated runs, which
+  skip the Enter prompt.
 
 Because HA and the login container run on the same box here, the produced
 `data/secrets.json` is on the same host you import it from.

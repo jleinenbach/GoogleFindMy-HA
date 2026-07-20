@@ -23,8 +23,13 @@
 # out of the build context and shrinks the upload to just the required files.
 #
 # Docker cannot descend into an ignored directory, so docker-login/ is re-included
-# as a whole and its persisted-credentials subdir is then re-excluded again.
+# only for TRAVERSAL; its contents are then re-excluded (docker-login/*) and only
+# the one COPY input the Dockerfile needs (entrypoint.sh) is re-included. A bare
+# `!docker-login` would re-include the WHOLE directory, so any other file placed
+# under it -- an exported secrets.json, a diagnostic log, a future addition -- would
+# ship in the context; excluding only docker-login/data left exactly that hole.
 *
 !requirements.txt
 !docker-login
-docker-login/data
+docker-login/*
+!docker-login/entrypoint.sh
