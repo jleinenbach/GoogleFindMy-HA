@@ -38,6 +38,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -763,6 +764,48 @@ def _is_discovery_update_info(
 
     source = context.get("source")
     return source in {DISCOVERY_UPDATE_SOURCE, LEGACY_DISCOVERY_UPDATE_SOURCE}
+
+
+async def _async_delete_watched_secrets(hass: HomeAssistant | None) -> None:
+    """Delete every watched secrets.json after a successful discovery import.
+
+    Mirrors the legacy ``Auth/secrets.json`` cleanup (``Auth/token_cache.py``):
+    once the bundle has been persisted into the config entry the on-disk copies
+    are transient secrets and must not linger. All paths observed by the running
+    discovery manager (the bundled ``Auth/`` path plus any extra option paths,
+    for example the login container's ``data/`` volume) are removed best-effort.
+
+    The removal is idempotent (a missing file is a no-op) and never raises: a
+    non-writable external path only logs a warning so the flow completes. Because
+    ``SecretsJSONWatcher._scan`` resets ``_last_signature`` to ``None`` when a
+    file disappears, the watcher does not re-trigger on its own delete.
+    """
+
+    if hass is None:
+        return
+
+    domain_data = getattr(hass, "data", None)
+    if not isinstance(domain_data, Mapping):
+        return
+    manager = domain_data.get(DOMAIN, {})
+    manager = manager.get("discovery_manager") if isinstance(manager, Mapping) else None
+    watch_paths = getattr(manager, "watch_paths", None)
+    if not watch_paths:
+        return
+
+    def _remove(path_str: str) -> None:
+        try:
+            os.remove(path_str)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _LOGGER.warning(
+                "Failed to remove watched secrets file after import: %s",
+                path_str,
+            )
+
+    for path in watch_paths:
+        await hass.async_add_executor_job(_remove, str(path))
 
 
 def _mask_email_for_logs(email: str | None) -> str:
@@ -2498,7 +2541,17 @@ class ConfigFlow(
                         return self.async_abort(reason="already_configured")
                     return self.async_abort(reason="already_configured")
 
-                return await self.async_step_device_selection()
+                result = await self.async_step_device_selection()
+                # Delete-after-import: only once the entry is actually created
+                # (the user confirmed). Aborted device selection leaves the
+                # watched bundles in place so the flow can be retried.
+                if (
+                    isinstance(result, Mapping)
+                    and result.get("type")
+                    == data_entry_flow.FlowResultType.CREATE_ENTRY
+                ):
+                    await _async_delete_watched_secrets(getattr(self, "hass", None))
+                return result
 
         try:
             normalized = _normalize_and_validate_discovery_payload(discovery_info or {})
@@ -2685,6 +2738,10 @@ class ConfigFlow(
                     existing_entry,
                     data=update_payload.get("data", existing_entry.data),
                 )
+
+            # Delete-after-import (update case): the entry update succeeded, so
+            # remove all watched secrets bundles. See _async_delete_watched_secrets.
+            await _async_delete_watched_secrets(hass)
 
             def _normalize_tracking_lists() -> None:
                 updated_attr = getattr(hass.config_entries, "updated", None)

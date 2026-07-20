@@ -46,7 +46,13 @@ except ImportError:  # pragma: no cover - provide a minimal fallback for tests
 
 
 from . import config_flow as config_flow_module
-from .const import CONF_GOOGLE_EMAIL, CONF_OAUTH_TOKEN, DATA_SECRET_BUNDLE, DOMAIN
+from .const import (
+    CONF_GOOGLE_EMAIL,
+    CONF_OAUTH_TOKEN,
+    DATA_SECRET_BUNDLE,
+    DOMAIN,
+    SECRETS_EXTRA_WATCH_PATHS,
+)
 from .email_utils import normalize_email
 from .ha_typing import CloudDiscoveryRuntime, callback
 
@@ -528,12 +534,27 @@ class _SecretsScanResult:
     stable_key: str
 
 
+def _default_secrets_path() -> Path:
+    """Return the canonical bundled ``Auth/secrets.json`` watch path."""
+
+    return Path(__file__).resolve().parent / "Auth" / "secrets.json"
+
+
 class SecretsJSONWatcher:
-    """Poll the Auth/secrets.json file and trigger discovery flows when it changes."""
+    """Poll one or more secrets.json files and trigger discovery on change.
+
+    The watcher observes a *list* of candidate paths. The default list contains
+    only the bundled ``Auth/secrets.json`` (backward compatible), but deployments
+    may add extra paths (for example the login container's ``docker-login/data``
+    volume). When several candidate files exist simultaneously the *newest* one
+    (by modification time, with a SHA-256 digest tiebreak on identical mtimes)
+    wins the signature, so a single freshly written bundle is imported
+    deterministically regardless of how many paths are observed.
+    """
 
     __slots__ = (
         "_hass",
-        "_path",
+        "_paths",
         "_namespace",
         "_lock",
         "_last_signature",
@@ -545,14 +566,34 @@ class SecretsJSONWatcher:
         hass: HomeAssistant,
         *,
         path: Path | None = None,
+        paths: list[Path] | None = None,
         namespace: str = SECRETS_DISCOVERY_NAMESPACE,
     ) -> None:
         self._hass = hass
-        self._path = path or Path(__file__).resolve().parent / "Auth" / "secrets.json"
+        if paths is not None:
+            resolved = list(paths)
+        elif path is not None:
+            resolved = [path]
+        else:
+            resolved = [_default_secrets_path()]
+        # De-duplicate while preserving order so repeated paths do not double-scan.
+        seen: set[Path] = set()
+        self._paths: list[Path] = []
+        for candidate in resolved:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            self._paths.append(candidate)
         self._namespace = namespace
         self._lock = asyncio.Lock()
         self._last_signature: str | None = None
         self._unsubscribers: list[CALLBACK_TYPE] = []
+
+    @property
+    def watch_paths(self) -> tuple[Path, ...]:
+        """Return the immutable tuple of observed secrets.json paths."""
+
+        return tuple(self._paths)
 
     async def async_start(self) -> None:
         """Begin watching for secrets.json updates."""
@@ -598,7 +639,7 @@ class SecretsJSONWatcher:
                         "Secrets discovery reset; bundle missing",
                         extra={
                             "reason": reason,
-                            "bundle_path": str(self._path),
+                            "bundle_paths": [str(path) for path in self._paths],
                         },
                     )
                 self._last_signature = None
@@ -708,14 +749,53 @@ class SecretsJSONWatcher:
         return None
 
     def _read_bundle(self) -> _SecretsScanResult | None:
+        """Return the newest valid bundle across all observed paths.
+
+        Runs in the executor. Each existing, parseable path yields a candidate;
+        the winner is the one with the newest modification time, breaking mtime
+        ties deterministically by the SHA-256 digest (mtime resolution on network
+        mounts/QNAP can be coarse, so the digest tiebreak keeps selection stable).
+        Missing paths are silently skipped, so empty/absent extra paths are a
+        no-op and a single-path watcher behaves exactly as before.
+        """
+
+        best_result: _SecretsScanResult | None = None
+        best_mtime: float = float("-inf")
+        for path in self._paths:
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            except OSError as err:
+                _LOGGER.debug(
+                    "Unable to stat secrets bundle",
+                    extra={"bundle_path": str(path)},
+                    exc_info=err,
+                )
+                continue
+
+            result = self._read_single_bundle(path)
+            if result is None:
+                continue
+
+            if best_result is None or mtime > best_mtime:
+                best_result, best_mtime = result, mtime
+            elif mtime == best_mtime and result.digest > best_result.digest:
+                # Deterministic tiebreak on identical mtimes (coarse-resolution
+                # filesystems / clock skew).
+                best_result = result
+
+        return best_result
+
+    def _read_single_bundle(self, path: Path) -> _SecretsScanResult | None:
         try:
-            raw_text = self._path.read_text(encoding="utf-8")
+            raw_text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
         except OSError as err:
             _LOGGER.debug(
                 "Unable to read secrets bundle",
-                extra={"bundle_path": str(self._path)},
+                extra={"bundle_path": str(path)},
                 exc_info=err,
             )
             return None
@@ -725,7 +805,7 @@ class SecretsJSONWatcher:
         except json.JSONDecodeError as err:
             _LOGGER.debug(
                 "Invalid secrets.json content",
-                extra={"bundle_path": str(self._path)},
+                extra={"bundle_path": str(path)},
                 exc_info=err,
             )
             return None
@@ -733,7 +813,7 @@ class SecretsJSONWatcher:
         if not isinstance(parsed, dict):
             _LOGGER.debug(
                 "Ignoring secrets bundle: not a JSON object",
-                extra={"bundle_path": str(self._path)},
+                extra={"bundle_path": str(path)},
             )
             return None
 
@@ -741,7 +821,7 @@ class SecretsJSONWatcher:
         if not email:
             _LOGGER.debug(
                 "Ignoring secrets bundle: Google account email missing",
-                extra={"bundle_path": str(self._path)},
+                extra={"bundle_path": str(path)},
             )
             return None
 
@@ -775,6 +855,47 @@ class SecretsJSONWatcher:
         return None
 
 
+def _collect_extra_watch_paths(hass: HomeAssistant) -> list[Path]:
+    """Return additional secrets.json watch paths configured via options.
+
+    The option ``SECRETS_EXTRA_WATCH_PATHS`` may hold a single path string or a
+    list of path strings on any googlefindmy config entry. Empty, blank or
+    non-string values are ignored so a missing/empty option is a strict no-op.
+    """
+
+    manager = getattr(hass, "config_entries", None)
+    async_entries = getattr(manager, "async_entries", None)
+    if not callable(async_entries):
+        return []
+
+    seen: set[Path] = set()
+    extra: list[Path] = []
+    try:
+        entries = list(async_entries(DOMAIN))
+    except Exception:  # noqa: BLE001 - defensive best effort
+        _LOGGER.debug("Extra watch-path lookup failed", exc_info=True)
+        return []
+
+    for entry in entries:
+        options = getattr(entry, "options", None) or {}
+        raw = options.get(SECRETS_EXTRA_WATCH_PATHS)
+        if not raw:
+            continue
+        candidates = [raw] if isinstance(raw, str) else raw
+        if not isinstance(candidates, (list, tuple)):
+            continue
+        for candidate in candidates:
+            if not isinstance(candidate, str) or not candidate.strip():
+                continue
+            path = Path(candidate.strip())
+            if path in seen:
+                continue
+            seen.add(path)
+            extra.append(path)
+
+    return extra
+
+
 class DiscoveryManager:
     """Lifecycle manager for discovery watchers."""
 
@@ -790,7 +911,8 @@ class DiscoveryManager:
         if self._started:
             return
 
-        watcher = SecretsJSONWatcher(self._hass)
+        watch_paths = [_default_secrets_path(), *_collect_extra_watch_paths(self._hass)]
+        watcher = SecretsJSONWatcher(self._hass, paths=watch_paths)
         await watcher.async_start()
         self._watchers.append(watcher)
         self._stop_unsub = self._hass.bus.async_listen_once(
@@ -821,6 +943,25 @@ class DiscoveryManager:
     async def async_force_secrets_scan(self) -> None:
         for watcher in self._watchers:
             await watcher.async_force_scan()
+
+    @property
+    def watch_paths(self) -> tuple[Path, ...]:
+        """Return every secrets.json path observed across all watchers.
+
+        Consumers (for example the discovery flow's delete-after-import hook) use
+        this to remove *all* observed bundles once one has been imported, so no
+        stale secret file is left behind in the installation tree.
+        """
+
+        collected: list[Path] = []
+        seen: set[Path] = set()
+        for watcher in self._watchers:
+            for path in watcher.watch_paths:
+                if path in seen:
+                    continue
+                seen.add(path)
+                collected.append(path)
+        return tuple(collected)
 
 
 async def async_initialize_discovery_runtime(hass: HomeAssistant) -> DiscoveryManager:

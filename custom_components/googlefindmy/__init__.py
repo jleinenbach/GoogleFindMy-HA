@@ -6322,6 +6322,19 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     bucket["ecdsa_acceleration_info"] = ecdsa_info
     _log_ecdsa_acceleration(ecdsa_info)
 
+    # Arm the secrets.json discovery watcher exactly once per Home Assistant
+    # instance. The watcher polls the bundled Auth/secrets.json (plus any extra
+    # paths configured via options) and triggers discovery/reauth flows when a
+    # freshly minted bundle appears, so same-machine login containers hand off
+    # without manual copy-paste. DiscoveryManager owns its own EVENT_HOMEASSISTANT_STOP
+    # listener and _started guard; the bucket handle keeps the singleton alive and
+    # makes the start idempotent across racey setups.
+    if bucket.get("discovery_manager") is None:
+        try:
+            bucket["discovery_manager"] = await async_initialize_discovery_runtime(hass)
+        except Exception:  # noqa: BLE001 - discovery is best-effort, never fatal
+            _LOGGER.debug("Discovery runtime initialization failed", exc_info=True)
+
     return True
 
 
