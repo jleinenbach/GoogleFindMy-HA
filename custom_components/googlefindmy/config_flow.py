@@ -81,6 +81,9 @@ from .const import (
     CONF_GOOGLE_EMAIL,
     CONF_OAUTH_TOKEN,
     CONFIG_ENTRY_VERSION,
+    CONTAINER_FETCH_TIMEOUT,
+    CONTAINER_NOVNC_PORT,
+    CONTAINER_TOKEN_PORT,
     CONTRIBUTOR_MODE_HIGH_TRAFFIC,
     CONTRIBUTOR_MODE_IN_ALL_AREAS,
     DATA_AAS_TOKEN,
@@ -128,6 +131,14 @@ from .const import (
     TRACKER_SUBENTRY_TRANSLATION_KEY,
     coerce_ignored_mapping,
     service_device_identifier,
+)
+from .container_login import (
+    ContainerAuthError,
+    ContainerLoginError,
+    ContainerTimeoutError,
+    ContainerUnreachableError,
+    ack_consumed,
+    fetch_secrets_from_container,
 )
 from .email_utils import normalize_email, normalize_email_or_default, unique_account_id
 from .integration_modules import (
@@ -1180,11 +1191,13 @@ def _map_api_exc_to_error_key(err: Exception) -> str:
 # ---------------------------
 _AUTH_METHOD_SECRETS = "secrets_json"
 _AUTH_METHOD_INDIVIDUAL = "individual_tokens"
+_AUTH_METHOD_CONTAINER = "container_login"
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("auth_method"): vol.In(
             {
+                _AUTH_METHOD_CONTAINER: "One-click container login",
                 _AUTH_METHOD_SECRETS: "GoogleFindMyTools secrets.json",
                 # _AUTH_METHOD_INDIVIDUAL: "Manual token + email",  # Disabled: broken manual token path is intentionally hidden.
             }
@@ -1297,6 +1310,103 @@ def _extract_fcm_credentials_from_secrets(
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def _persist_secrets_bundle(
+    parsed: dict[str, Any],
+    token: str,
+    *,
+    email: str | None = None,
+) -> dict[str, Any]:
+    """Build the shared secrets-bundle sub-dict for every persist surface.
+
+    This is the single source of truth for the credential sub-dict written by
+    the paste and container-login paths across initial setup, reauth and
+    options. Extracting it prevents a fourth copy-paste divergence -- most
+    notably the ``fcm_credentials`` line, which is the historically
+    divergence-prone one and therefore lives *inside* this helper.
+
+    The helper only builds the bundle-specific keys; it deliberately does NOT
+    own the surface-specific concerns that legitimately differ between call
+    sites:
+
+    - the ``{**entry.data}`` merge (reauth/options),
+    - the ``_async_clear_cached_aas_token`` side effect (reauth/options),
+    - the ``pop(DATA_AAS_TOKEN)`` else-branch (reauth/options have it, the
+      initial setup does not) -- this asymmetry stays at the call site.
+
+    ``DATA_AAS_TOKEN`` is only set here when ``token`` is an ``aas_et/`` token;
+    call sites that need the removal of a stale AAS token keep their own
+    else-branch.
+
+    Args:
+        parsed: An already normalized secrets bundle (``normalize_secrets_bundle``).
+        token: The validated OAuth/AAS token to persist.
+        email: When provided, ``CONF_GOOGLE_EMAIL`` is included (initial-setup
+            surface, which builds a fresh dict rather than merging ``entry.data``).
+
+    Returns:
+        A new sub-dict with ``CONF_OAUTH_TOKEN``, ``DATA_SECRET_BUNDLE``,
+        optionally ``fcm_credentials``, optionally ``CONF_GOOGLE_EMAIL`` and
+        optionally ``DATA_AAS_TOKEN``.
+    """
+
+    bundle: dict[str, Any] = {
+        CONF_OAUTH_TOKEN: token,
+        DATA_SECRET_BUNDLE: parsed,
+    }
+    if email is not None:
+        bundle[CONF_GOOGLE_EMAIL] = email
+    fcm_credentials = _extract_fcm_credentials_from_secrets(parsed)
+    if fcm_credentials is not None:
+        bundle["fcm_credentials"] = fcm_credentials
+    if isinstance(token, str) and token.startswith("aas_et/"):
+        bundle[DATA_AAS_TOKEN] = token
+    return bundle
+
+
+def _map_container_error(exc: ContainerLoginError) -> str:
+    """Map a typed container-login exception to an HA error key.
+
+    The referenced keys (``container_unreachable`` etc.) are added to
+    ``strings.json``/translations by a later step; this function only produces
+    the keys, it never logs the pairing nonce or any token.
+    """
+
+    if isinstance(exc, ContainerUnreachableError):
+        return "container_unreachable"
+    if isinstance(exc, ContainerTimeoutError):
+        return "container_timeout"
+    if isinstance(exc, ContainerAuthError):
+        return "container_auth_failed"
+    return "container_login_failed"
+
+
+def _container_login_schema(
+    *, host: str, port: int, pairing_code: str = ""
+) -> vol.Schema:
+    """Build the container-login form schema with the given defaults."""
+
+    return vol.Schema(
+        {
+            vol.Required("host", default=host): str,
+            vol.Required("port", default=port): cv.port,
+            vol.Required("pairing_code", default=pairing_code): str,
+        }
+    )
+
+
+@dataclass(slots=True)
+class _ContainerFetchResult:
+    """Outcome of a successful container-login fetch + token validation."""
+
+    parsed: dict[str, Any]
+    token: str
+    email: str
+    host: str
+    port: int
+    pairing_code: str
+    delete_token: str
 
 
 def _secrets_key_status(parsed: dict[str, Any]) -> tuple[bool, bool]:
@@ -2927,6 +3037,8 @@ class ConfigFlow(
         if user_input is not None:
             method = user_input.get("auth_method")
             _LOGGER.debug("User step: method selected = %s", method)
+            if method == _AUTH_METHOD_CONTAINER:
+                return await self.async_step_container_login()
             if method == _AUTH_METHOD_SECRETS:
                 return await self.async_step_secrets_json()
             if method == _AUTH_METHOD_INDIVIDUAL:
@@ -3031,20 +3143,171 @@ class ConfigFlow(
                             CONF_GOOGLE_EMAIL: email,
                         }
                         if parsed_secrets is not None:
-                            self._auth_data[DATA_SECRET_BUNDLE] = parsed_secrets
-                            fcm_credentials = _extract_fcm_credentials_from_secrets(
-                                parsed_secrets
+                            self._auth_data.update(
+                                _persist_secrets_bundle(
+                                    parsed_secrets, to_persist
+                                )
                             )
-                            if fcm_credentials is not None:
-                                self._auth_data["fcm_credentials"] = fcm_credentials
-                        if isinstance(to_persist, str) and to_persist.startswith(
-                            "aas_et/"
-                        ):
-                            self._auth_data[DATA_AAS_TOKEN] = to_persist
                         return await self.async_step_device_selection()
 
         return self.async_show_form(
             step_id="secrets_json", data_schema=schema, errors=errors
+        )
+
+    # ------------------ Step: one-click container login ------------------
+    async def _async_container_fetch(
+        self,
+        *,
+        host: str,
+        port: int,
+        pairing_code: str,
+        errors: dict[str, str],
+    ) -> _ContainerFetchResult | None:
+        """Fetch + validate a container-login bundle through the shared parsers.
+
+        Runs the fetch (``fetch_secrets_from_container``) and pushes the raw
+        bundle through the SAME validation path as the paste flow
+        (``normalize_secrets_bundle`` + ``async_pick_working_token``), so the
+        container path never becomes a second validation/divergence source. On
+        any failure it writes an error key into ``errors`` and returns ``None``;
+        the two-phase-delete ``ack_consumed`` is left to the caller so it only
+        runs after Home Assistant has actually persisted the bundle.
+        """
+
+        session = async_get_clientsession(self.hass)
+        try:
+            raw_bundle, delete_token = await fetch_secrets_from_container(
+                session,
+                host,
+                port,
+                pairing_code,
+                timeout=CONTAINER_FETCH_TIMEOUT,
+            )
+        except ContainerLoginError as exc:
+            _LOGGER.debug("Container login fetch failed: %s", type(exc).__name__)
+            errors["base"] = _map_container_error(exc)
+            return None
+
+        parsed = normalize_secrets_bundle(dict(raw_bundle))
+        if _reject_if_shared_key_missing(parsed, errors):
+            return None
+
+        email = normalize_email(_extract_email_from_secrets(parsed))
+        if not email:
+            errors["base"] = "invalid_token"
+            return None
+
+        cands = _extract_oauth_candidates_from_secrets(parsed)
+        if not cands:
+            errors["base"] = "invalid_token"
+            return None
+
+        try:
+            chosen = await async_pick_working_token(
+                self.hass,
+                email,
+                cands,
+                secrets_bundle=parsed,
+            )
+        except (DependencyNotReady, ImportError) as exc:
+            _register_dependency_error(errors, exc)
+            return None
+
+        if not chosen:
+            _log_token_validation_failure(email=email, candidates=cands)
+            errors["base"] = "cannot_connect"
+            return None
+
+        to_persist = chosen
+        if _disqualifies_for_persistence(to_persist):
+            alt = next(
+                (
+                    v
+                    for (_src, v) in cands
+                    if not _disqualifies_for_persistence(v)
+                ),
+                None,
+            )
+            if alt:
+                to_persist = alt
+
+        return _ContainerFetchResult(
+            parsed=parsed,
+            token=to_persist,
+            email=email,
+            host=host,
+            port=port,
+            pairing_code=pairing_code,
+            delete_token=delete_token,
+        )
+
+    async def _async_container_ack(self, result: _ContainerFetchResult) -> None:
+        """Best-effort second phase of the two-phase delete after persist."""
+
+        session = async_get_clientsession(self.hass)
+        try:
+            await ack_consumed(
+                session,
+                result.host,
+                result.port,
+                result.pairing_code,
+                result.delete_token,
+                timeout=CONTAINER_FETCH_TIMEOUT,
+            )
+        except ContainerLoginError as exc:
+            # Non-fatal: the container deletes on its own TTL fallback. Never
+            # log the nonce or delete token.
+            _LOGGER.warning(
+                "Container ack failed (%s); container will fall back to TTL delete",
+                type(exc).__name__,
+            )
+
+    async def async_step_container_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """One-click login: fetch secrets from the login container over loopback."""
+        errors: dict[str, str] = {}
+
+        host = "127.0.0.1"
+        port = CONTAINER_TOKEN_PORT
+        pairing_code = ""
+
+        if user_input is not None:
+            host = str(user_input.get("host") or host).strip() or host
+            port = int(user_input.get("port") or port)
+            pairing_code = str(user_input.get("pairing_code") or "").strip()
+
+            if not pairing_code:
+                errors["pairing_code"] = "required"
+            else:
+                result = await self._async_container_fetch(
+                    host=host,
+                    port=port,
+                    pairing_code=pairing_code,
+                    errors=errors,
+                )
+                if result is not None:
+                    await self._async_prepare_account_context(email=result.email)
+                    self._auth_data = {
+                        DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+                        CONF_OAUTH_TOKEN: result.token,
+                        CONF_GOOGLE_EMAIL: result.email,
+                    }
+                    self._auth_data.update(
+                        _persist_secrets_bundle(result.parsed, result.token)
+                    )
+                    await self._async_container_ack(result)
+                    return await self.async_step_device_selection()
+
+        return self.async_show_form(
+            step_id="container_login",
+            data_schema=_container_login_schema(
+                host=host, port=port, pairing_code=pairing_code
+            ),
+            errors=errors,
+            description_placeholders={
+                "novnc_url": f"http://{host}:{CONTAINER_NOVNC_PORT}"
+            },
         )
 
     # ------------------ Step: manual token + email ------------------
@@ -3590,6 +3853,72 @@ class ConfigFlow(
             return await flow_result
         return flow_result
 
+    async def _async_reauth_container_persist(
+        self,
+        *,
+        entry: ConfigEntry,
+        fixed_email: str,
+        user_input: dict[str, Any],
+        errors: dict[str, str],
+    ) -> FlowResult | None:
+        """Container-login reauth branch feeding the shared persist path.
+
+        Mirrors the main paste-reauth persist semantics (``{**entry.data}``
+        merge, ``_persist_secrets_bundle``, ``pop(DATA_AAS_TOKEN)`` else-branch,
+        ``_async_clear_cached_aas_token`` side effect) so the container and paste
+        reauth paths can never diverge. Returns a ``FlowResult`` on success or
+        ``None`` when an error was recorded (caller re-shows the form).
+        """
+
+        host = str(user_input.get("container_host") or "127.0.0.1").strip() or (
+            "127.0.0.1"
+        )
+        port = int(user_input.get("container_port") or CONTAINER_TOKEN_PORT)
+        pairing_code = str(user_input.get("pairing_code") or "").strip()
+
+        result = await self._async_container_fetch(
+            host=host,
+            port=port,
+            pairing_code=pairing_code,
+            errors=errors,
+        )
+        if result is None:
+            return None
+
+        # The reauth entry is bound to a fixed email; a bundle for a different
+        # account must not silently overwrite it.
+        if fixed_email and result.email and result.email != fixed_email:
+            existing = _find_entry_by_email(self.hass, result.email)
+            if existing is not None:
+                return self.async_abort(reason="already_configured")
+            errors["base"] = "email_mismatch"
+            return None
+
+        updated_data = {
+            **entry.data,
+            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+            **_persist_secrets_bundle(result.parsed, result.token),
+        }
+        if not (
+            isinstance(result.token, str) and result.token.startswith("aas_et/")
+        ):
+            updated_data.pop(DATA_AAS_TOKEN, None)
+        await self._async_clear_cached_aas_token(entry)
+        await self._async_container_ack(result)
+        _LOGGER.info(
+            "Container reauth for %s: shared_key present in secrets bundle",
+            fixed_email,
+        )
+        success_reason = self.context.get(
+            "reauth_success_reason_override",
+            "reauth_successful",
+        )
+        return self.async_update_reload_and_abort(
+            entry=entry,
+            data=updated_data,
+            reason=success_reason,
+        )
+
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -3607,6 +3936,11 @@ class ConfigFlow(
                     vol.Optional(_REAUTH_FIELD_SECRETS): selector(
                         {"text": {"multiline": True}}
                     ),
+                    vol.Optional("container_host", default="127.0.0.1"): str,
+                    vol.Optional(
+                        "container_port", default=CONTAINER_TOKEN_PORT
+                    ): cv.port,
+                    vol.Optional("pairing_code"): str,
                     # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
@@ -3614,11 +3948,25 @@ class ConfigFlow(
             schema = vol.Schema(
                 {
                     vol.Optional(_REAUTH_FIELD_SECRETS): str,
+                    vol.Optional("container_host", default="127.0.0.1"): str,
+                    vol.Optional(
+                        "container_port", default=CONTAINER_TOKEN_PORT
+                    ): cv.port,
+                    vol.Optional("pairing_code"): str,
                     # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
             )
 
-        if user_input is not None:
+        if user_input is not None and (user_input.get("pairing_code") or "").strip():
+            container_result = await self._async_reauth_container_persist(
+                entry=entry,
+                fixed_email=fixed_email,
+                user_input=user_input,
+                errors=errors,
+            )
+            if container_result is not None:
+                return container_result
+        elif user_input is not None:
             method, payload, err = _interpret_reauth_choice(user_input)
             if err:
                 if err == "invalid_json":
@@ -3747,23 +4095,14 @@ class ConfigFlow(
                                         updated_data = {
                                             **entry.data,
                                             DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                            CONF_OAUTH_TOKEN: to_persist,
-                                            DATA_SECRET_BUNDLE: parsed,
+                                            **_persist_secrets_bundle(
+                                                parsed, to_persist
+                                            ),
                                         }
-                                        fcm_credentials = (
-                                            _extract_fcm_credentials_from_secrets(
-                                                parsed
-                                            )
-                                        )
-                                        if fcm_credentials is not None:
-                                            updated_data["fcm_credentials"] = (
-                                                fcm_credentials
-                                            )
-                                        if isinstance(
-                                            to_persist, str
-                                        ) and to_persist.startswith("aas_et/"):
-                                            updated_data[DATA_AAS_TOKEN] = to_persist
-                                        elif DATA_AAS_TOKEN in updated_data:
+                                        if not (
+                                            isinstance(to_persist, str)
+                                            and to_persist.startswith("aas_et/")
+                                        ):
                                             updated_data.pop(DATA_AAS_TOKEN, None)
                                         await self._async_clear_cached_aas_token(entry)
                                         # The single-key gate above already
@@ -3817,19 +4156,12 @@ class ConfigFlow(
                                 updated_data = {
                                     **entry.data,
                                     DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                    CONF_OAUTH_TOKEN: token_first,
-                                    DATA_SECRET_BUNDLE: parsed,
+                                    **_persist_secrets_bundle(parsed, token_first),
                                 }
-                                fcm_credentials = _extract_fcm_credentials_from_secrets(
-                                    parsed
-                                )
-                                if fcm_credentials is not None:
-                                    updated_data["fcm_credentials"] = fcm_credentials
-                                if isinstance(
-                                    token_first, str
-                                ) and token_first.startswith("aas_et/"):
-                                    updated_data[DATA_AAS_TOKEN] = token_first
-                                else:
+                                if not (
+                                    isinstance(token_first, str)
+                                    and token_first.startswith("aas_et/")
+                                ):
                                     updated_data.pop(DATA_AAS_TOKEN, None)
                                 await self._async_clear_cached_aas_token(entry)
                                 return self.async_update_reload_and_abort(
@@ -5900,6 +6232,63 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         return self.async_show_form(step_id="repairs_delete", data_schema=schema)
 
     # ---------- Credentials refresh ----------
+    async def _async_options_container_persist(
+        self,
+        *,
+        entry: ConfigEntry,
+        selected_option: Any,
+        user_input: dict[str, Any],
+        errors: dict[str, str],
+    ) -> FlowResult | None:
+        """Container-login options branch feeding the shared persist path.
+
+        Mirrors the options paste persist semantics (``{**entry.data}`` merge,
+        ``_persist_secrets_bundle``, ``pop(DATA_AAS_TOKEN)`` else-branch,
+        ``_async_clear_cached_aas_token`` + update + reload) so the container and
+        paste options paths cannot diverge. Returns a ``FlowResult`` on success
+        or ``None`` when an error was recorded (caller re-shows the form).
+        """
+
+        host = str(user_input.get("container_host") or "127.0.0.1").strip() or (
+            "127.0.0.1"
+        )
+        port = int(user_input.get("container_port") or CONTAINER_TOKEN_PORT)
+        pairing_code = str(user_input.get("pairing_code") or "").strip()
+
+        result = await self._async_container_fetch(
+            host=host,
+            port=port,
+            pairing_code=pairing_code,
+            errors=errors,
+        )
+        if result is None:
+            return None
+
+        entry_email = normalize_email_or_default(entry.data.get(CONF_GOOGLE_EMAIL))
+        if entry_email and result.email and result.email != entry_email:
+            errors["base"] = "email_mismatch"
+            return None
+
+        updated_data = {
+            **entry.data,
+            DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
+            **_persist_secrets_bundle(result.parsed, result.token),
+        }
+        if not (
+            isinstance(result.token, str) and result.token.startswith("aas_et/")
+        ):
+            updated_data.pop(DATA_AAS_TOKEN, None)
+
+        await self._async_clear_cached_aas_token(entry)
+        self.hass.config_entries.async_update_entry(entry, data=updated_data)
+        if selected_option is not None:
+            await self._async_refresh_subentry_entry_title(entry, selected_option)
+        await self._async_container_ack(result)
+        self.hass.async_create_task(
+            self.hass.config_entries.async_reload(entry.entry_id)
+        )
+        return self.async_abort(reason="reconfigure_successful")
+
     async def async_step_credentials(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -5924,6 +6313,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     vol.Optional("new_secrets_json"): selector(
                         {"text": {"multiline": True}}
                     ),
+                    vol.Optional("container_host", default="127.0.0.1"): str,
+                    vol.Optional(
+                        "container_port", default=CONTAINER_TOKEN_PORT
+                    ): cv.port,
+                    vol.Optional("pairing_code"): str,
                     # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
@@ -5934,6 +6328,11 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                         subentry_choices
                     ),
                     vol.Optional("new_secrets_json"): str,
+                    vol.Optional("container_host", default="127.0.0.1"): str,
+                    vol.Optional(
+                        "container_port", default=CONTAINER_TOKEN_PORT
+                    ): cv.port,
+                    vol.Optional("pairing_code"): str,
                     # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
             )
@@ -5946,8 +6345,22 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 new_token = (user_input.get("new_oauth_token") or "").strip()
                 has_token = bool(new_token)
                 has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
-                if not has_secrets and not has_token:
+                has_container = bool(
+                    (user_input.get("pairing_code") or "").strip()
+                )
+                if not has_secrets and not has_token and not has_container:
                     errors["base"] = "choose_one"
+                elif has_container:
+                    entry = self.config_entry
+                    selected_option = option_map.get(selected_key)
+                    container_result = await self._async_options_container_persist(
+                        entry=entry,
+                        selected_option=selected_option,
+                        user_input=user_input,
+                        errors=errors,
+                    )
+                    if container_result is not None:
+                        return container_result
                 else:
                     try:
                         entry = self.config_entry
@@ -6064,25 +6477,14 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                                             updated_data = {
                                                 **entry.data,
                                                 DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                                CONF_OAUTH_TOKEN: to_persist,
-                                                DATA_SECRET_BUNDLE: parsed,
+                                                **_persist_secrets_bundle(
+                                                    parsed, to_persist
+                                                ),
                                             }
-                                            fcm_credentials = (
-                                                _extract_fcm_credentials_from_secrets(
-                                                    parsed
-                                                )
-                                            )
-                                            if fcm_credentials is not None:
-                                                updated_data["fcm_credentials"] = (
-                                                    fcm_credentials
-                                                )
-                                            if isinstance(
-                                                to_persist, str
-                                            ) and to_persist.startswith("aas_et/"):
-                                                updated_data[DATA_AAS_TOKEN] = (
-                                                    to_persist
-                                                )
-                                            else:
+                                            if not (
+                                                isinstance(to_persist, str)
+                                                and to_persist.startswith("aas_et/")
+                                            ):
                                                 updated_data.pop(DATA_AAS_TOKEN, None)
                                             return await _finalize_success(updated_data)
                     except Exception as err2:  # noqa: BLE001
@@ -6096,19 +6498,12 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                             updated_data = {
                                 **entry.data,
                                 DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
-                                CONF_OAUTH_TOKEN: token_first,
-                                DATA_SECRET_BUNDLE: parsed,
+                                **_persist_secrets_bundle(parsed, token_first),
                             }
-                            fcm_credentials = _extract_fcm_credentials_from_secrets(
-                                parsed
-                            )
-                            if fcm_credentials is not None:
-                                updated_data["fcm_credentials"] = fcm_credentials
-                            if isinstance(token_first, str) and token_first.startswith(
-                                "aas_et/"
+                            if not (
+                                isinstance(token_first, str)
+                                and token_first.startswith("aas_et/")
                             ):
-                                updated_data[DATA_AAS_TOKEN] = token_first
-                            else:
                                 updated_data.pop(DATA_AAS_TOKEN, None)
                             return await _finalize_success(updated_data)
                         errors["base"] = _map_api_exc_to_error_key(err2)
