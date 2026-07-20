@@ -203,8 +203,22 @@ opt in, and neither changes the classic file behaviour.
 ### Container login over a loopback endpoint (`GFMY_ONECLICK=1`)
 
 After a successful login the container serves the freshly minted bundle on a
-one-shot, nonce-authenticated endpoint bound strictly to `127.0.0.1:7901`, then
-deletes the file once Home Assistant confirms it (or after a short timeout).
+one-shot, nonce-authenticated endpoint that is reachable **only on the Docker
+host's loopback** (`127.0.0.1:7901`), then deletes the file once Home Assistant
+confirms it (or after a short timeout).
+
+> **How the loopback guarantee is enforced.** Under Docker's default *bridge*
+> network the published port is DNAT'd onto the container's `eth0`, not onto the
+> container's loopback, so the server inside the container binds `0.0.0.0` (all
+> container interfaces) on purpose — otherwise the published port would be
+> unreachable. The "no LAN exposure" boundary is the **host-side publish**
+> `127.0.0.1:7901:7901` in `docker-compose.yml`, which is pinned to loopback.
+>
+> **`network_mode: host` is NOT supported for this service.** In host networking
+> there is no bridge and no publish indirection: the `0.0.0.0` bind would then be
+> LAN-visible and expose the clear-text token endpoint to the whole network. Keep
+> the default bridge network with the loopback publish; use the SSH tunnel below
+> for the split-machine case.
 
 ```bash
 GFMY_ONECLICK=1 ./login.sh

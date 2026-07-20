@@ -50,14 +50,20 @@ services:
       # machine, use an SSH tunnel (recommended) or set GFMY_NOVNC_BIND=0.0.0.0
       # (README → Remote access) to opt into a LAN bind on a trusted network.
       - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
-      # One-click token endpoint (GFMY_ONECLICK=1). Bound to LOOPBACK ONLY and
-      # HARD-CODED to 127.0.0.1: this carries the freshly minted tokens in the
-      # clear, so it must never be exposed to the LAN/Internet. There is
-      # deliberately no LAN opt-in for this port (unlike noVNC 7900). To reach it
-      # from another machine, use an SSH tunnel to loopback:
+      # One-click token endpoint (GFMY_ONECLICK=1). Published to HOST LOOPBACK
+      # ONLY and HARD-CODED to 127.0.0.1: this carries the freshly minted tokens
+      # in the clear, so it must never be exposed to the LAN/Internet. This host
+      # publish IS the security boundary. There is deliberately no LAN opt-in for
+      # this port (unlike noVNC 7900). To reach it from another machine, use an
+      # SSH tunnel to host loopback:
       #   ssh -L 7901:127.0.0.1:7901 <docker-host>
-      # The server itself also binds strictly to 127.0.0.1 (token_server.py), so
-      # even a mis-set publish cannot expose it beyond the host loopback.
+      # NOTE on the in-container bind: token_server.py binds 0.0.0.0 *inside* the
+      # container ON PURPOSE. Under the default bridge network Docker DNATs this
+      # published port onto the container's eth0, NOT its loopback, so a
+      # container-127.0.0.1 bind would make this port unreachable. The no-LAN
+      # guarantee is enforced here by the 127.0.0.1 host publish, not by the
+      # container bind. Do NOT run this service with `network_mode: host`: that
+      # collapses the bridge and would make the 0.0.0.0 bind LAN-visible (README).
       - "127.0.0.1:7901:7901"
     volumes:
       # M2 runtime mount of the integration code, READ-ONLY, at a FLAT path.

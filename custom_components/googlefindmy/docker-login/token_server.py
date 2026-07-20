@@ -14,11 +14,19 @@ the handful of constants it needs are mirrored locally (kept in sync with
 
 Security model:
 
-* **Loopback-only bind.** The server binds STRICTLY to ``127.0.0.1``. There is
-  no code path and no environment switch that binds to a LAN address or a
-  wildcard interface: the split-machine case is served by an SSH tunnel to
-  loopback, never by exposing a cleartext token endpoint to the network (OWASP
-  A02). The wildcard-bind literal appears nowhere in this file by design.
+* **Container-internal wildcard bind, host-loopback publish.** The server binds
+  to ``0.0.0.0`` *inside the login container*. This is deliberate and is NOT the
+  security boundary: under Docker's default bridge network, a published port
+  (``docker-compose.yml`` publishes ``127.0.0.1:7901:7901``) is DNAT'd onto the
+  container's ``eth0`` interface, not onto the container's loopback. A bind to
+  the container's ``127.0.0.1`` would therefore make the published port
+  unreachable and break the whole handoff. The "no LAN exposure" guarantee is
+  enforced by the *host-side publish* being pinned to ``127.0.0.1`` (loopback
+  only), not by the in-container bind. The split-machine case is served by an
+  SSH tunnel to host loopback, never by exposing a cleartext token endpoint to
+  the network (OWASP A02). See ``docker-login/README.md``: ``network_mode: host``
+  is unsupported precisely because it would collapse this two-layer boundary and
+  make ``0.0.0.0`` LAN-visible.
 * **Strong single-use nonce.** The pairing nonce is generated at runtime with
   ``secrets.token_urlsafe(16)`` (>=128 bit) and compared with
   ``hmac.compare_digest`` (constant time). The GET side is single-use with a
@@ -55,7 +63,12 @@ _LOGGER = logging.getLogger("gfmy.token_server")
 # --- Constants mirrored from the integration's const.py (see module docstring).
 # The container has no access to the package const.py, so these are kept in sync
 # by convention. Keep the values identical.
-_BIND_HOST = "127.0.0.1"  # STRICT loopback; never a LAN/wildcard bind.
+# Bind to ALL container interfaces. Under Docker's bridge network a published
+# port is DNAT'd onto the container's eth0, not its loopback, so a 127.0.0.1
+# bind here would make the published 127.0.0.1:7901 host port unreachable. The
+# loopback (no-LAN) boundary lives in docker-compose.yml as the HOST publish
+# `127.0.0.1:7901:7901`, NOT here. `network_mode: host` is unsupported (README).
+_BIND_HOST = "0.0.0.0"  # noqa: S104 - see comment: boundary is the host publish.
 _TOKEN_PORT = 7901  # == const.CONTAINER_TOKEN_PORT
 _NONCE_BYTES = 16  # secrets.token_urlsafe(16) -> 128 bit; == CONTAINER_NONCE_MIN_LEN
 _NONCE_MAX_ATTEMPTS = 5  # == const.CONTAINER_NONCE_MAX_ATTEMPTS
@@ -191,7 +204,9 @@ async def _run(nonce: str, secrets_path: Path) -> None:
     app = _build_app(state)
     runner = web.AppRunner(app)
     await runner.setup()
-    # STRICT loopback bind. No LAN/wildcard path exists.
+    # Bind all container interfaces (0.0.0.0): the Docker bridge DNATs the
+    # published host port onto eth0, so a container-loopback bind would be
+    # unreachable. The no-LAN boundary is the host publish (docker-compose.yml).
     site = web.TCPSite(runner, _BIND_HOST, _TOKEN_PORT)
     await site.start()
     _LOGGER.info(

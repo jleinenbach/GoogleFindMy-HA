@@ -120,6 +120,7 @@ from .const import (
     OPT_SPEED_GATE_ENABLED,
     OPT_STALE_THRESHOLD,
     OPTION_KEYS,
+    SECRETS_EXTRA_WATCH_PATHS,
     SERVICE_FEATURE_PLATFORMS,
     SERVICE_SUBENTRY_KEY,
     SERVICE_SUBENTRY_TRANSLATION_KEY,
@@ -1193,6 +1194,54 @@ _AUTH_METHOD_SECRETS = "secrets_json"
 _AUTH_METHOD_INDIVIDUAL = "individual_tokens"
 _AUTH_METHOD_CONTAINER = "container_login"
 
+# Shared TCP-port validator. ``cv.port`` does not exist on the pinned Home
+# Assistant version used in CI (it raises ``AttributeError`` at import/build
+# time and fails the whole test job), so every port field validates through this
+# single voluptuous chain instead: coerce to int, then bound to a valid port.
+_PORT_VALIDATOR = vol.All(vol.Coerce(int), vol.Range(min=1, max=65535))
+
+
+def _extra_watch_paths_to_text(raw: object) -> str:
+    """Render the stored ``SECRETS_EXTRA_WATCH_PATHS`` option as an editable text block.
+
+    The option is stored as a list of path strings (or, tolerantly, a single
+    string). The options form edits it as a newline-separated text block, so this
+    joins list entries with newlines and passes a plain string through.
+    """
+
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return "\n".join(str(item) for item in raw if str(item).strip())
+    return ""
+
+
+def _parse_extra_watch_paths_text(raw: object) -> list[str]:
+    """Parse the extra-watch-paths text block into a clean list of path strings.
+
+    Splits on newlines, trims whitespace, drops blanks and de-duplicates while
+    preserving order. A non-string/empty input yields an empty list (the override
+    is then removed and the zero-config defaults apply).
+    """
+
+    if isinstance(raw, (list, tuple)):
+        candidates = [str(item) for item in raw]
+    elif isinstance(raw, str):
+        candidates = raw.splitlines()
+    else:
+        return []
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for candidate in candidates:
+        cleaned = candidate.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("auth_method"): vol.In(
@@ -1390,7 +1439,7 @@ def _container_login_schema(
     return vol.Schema(
         {
             vol.Required("host", default=host): str,
-            vol.Required("port", default=port): cv.port,
+            vol.Required("port", default=port): _PORT_VALIDATOR,
             vol.Required("pairing_code", default=pairing_code): str,
         }
     )
@@ -2089,6 +2138,11 @@ class ConfigFlow(
         self._pending_discovery_updates: dict[str, Any] | None = None
         self._pending_discovery_existing_entry: ConfigEntry | None = None
         self._discovery_confirm_pending = False
+        # Two-phase-delete (F4): a container-login fetch stages its result here so
+        # the ack (which tells the container to delete its on-disk secret) is only
+        # sent AFTER the config entry is actually created in device_selection. If
+        # the user aborts before CREATE_ENTRY the bundle survives (retryable).
+        self._container_pending_ack: _ContainerFetchResult | None = None
 
     async def async_step_subentry(
         self, user_input: dict[str, Any] | None = None
@@ -3144,9 +3198,7 @@ class ConfigFlow(
                         }
                         if parsed_secrets is not None:
                             self._auth_data.update(
-                                _persist_secrets_bundle(
-                                    parsed_secrets, to_persist
-                                )
+                                _persist_secrets_bundle(parsed_secrets, to_persist)
                             )
                         return await self.async_step_device_selection()
 
@@ -3221,11 +3273,7 @@ class ConfigFlow(
         to_persist = chosen
         if _disqualifies_for_persistence(to_persist):
             alt = next(
-                (
-                    v
-                    for (_src, v) in cands
-                    if not _disqualifies_for_persistence(v)
-                ),
+                (v for (_src, v) in cands if not _disqualifies_for_persistence(v)),
                 None,
             )
             if alt:
@@ -3262,6 +3310,21 @@ class ConfigFlow(
                 type(exc).__name__,
             )
 
+    async def _async_flush_container_ack(self) -> None:
+        """Send + clear a deferred container ack after a successful persist (F4).
+
+        A no-op unless a container-login fetch staged a result in
+        ``self._container_pending_ack``. The pending result is cleared *before*
+        the ack call so a caller cannot double-ack, and the ack itself is
+        best-effort (its own errors fall back to the container's TTL delete).
+        """
+
+        pending = self._container_pending_ack
+        if pending is None:
+            return
+        self._container_pending_ack = None
+        await self._async_container_ack(pending)
+
     async def async_step_container_login(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -3296,7 +3359,11 @@ class ConfigFlow(
                     self._auth_data.update(
                         _persist_secrets_bundle(result.parsed, result.token)
                     )
-                    await self._async_container_ack(result)
+                    # Two-phase delete (F4): do NOT ack here. Stage the result so
+                    # the ack fires only after the entry is actually created in
+                    # device_selection; if the user cancels in between, the
+                    # container keeps the bundle for a retry (TTL fallback).
+                    self._container_pending_ack = result
                     return await self.async_step_device_selection()
 
         return self.async_show_form(
@@ -3566,6 +3633,8 @@ class ConfigFlow(
                     self.context.pop("reauth_success_reason_override", None)
                     self.context.pop("reconfigure_options", None)
                     await self._async_reload_entry_after_reconfigure(entry_for_update)
+                    # Persist succeeded: now honour the two-phase-delete ack (F4).
+                    await self._async_flush_container_ack()
                     return self.async_abort(reason="reconfigure_successful")
             else:
                 subentry_context.setdefault(self._subentry_key_core_tracking, None)
@@ -3573,7 +3642,7 @@ class ConfigFlow(
 
             create_entry = cast(Callable[..., FlowResult], self.async_create_entry)
             try:
-                return create_entry(
+                created = create_entry(
                     # **Change**: title is always the email for clear multi-account display
                     title=self._auth_data.get(CONF_GOOGLE_EMAIL)
                     or "Google Find My Device",
@@ -3584,11 +3653,14 @@ class ConfigFlow(
                 # Older HA cores: merge options into data
                 shadow = dict(data_payload)
                 shadow.update(options_payload)
-                return create_entry(
+                created = create_entry(
                     title=self._auth_data.get(CONF_GOOGLE_EMAIL)
                     or "Google Find My Device",
                     data=shadow,
                 )
+            # Entry created: fire the deferred container ack (two-phase delete, F4).
+            await self._async_flush_container_ack()
+            return created
 
         return self.async_show_form(
             step_id="device_selection", data_schema=schema_with_defaults, errors=errors
@@ -3899,12 +3971,9 @@ class ConfigFlow(
             DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
             **_persist_secrets_bundle(result.parsed, result.token),
         }
-        if not (
-            isinstance(result.token, str) and result.token.startswith("aas_et/")
-        ):
+        if not (isinstance(result.token, str) and result.token.startswith("aas_et/")):
             updated_data.pop(DATA_AAS_TOKEN, None)
         await self._async_clear_cached_aas_token(entry)
-        await self._async_container_ack(result)
         _LOGGER.info(
             "Container reauth for %s: shared_key present in secrets bundle",
             fixed_email,
@@ -3913,11 +3982,16 @@ class ConfigFlow(
             "reauth_success_reason_override",
             "reauth_successful",
         )
-        return self.async_update_reload_and_abort(
+        # Persist the reauth data first, THEN ack (two-phase delete, F4): the
+        # container keeps its on-disk secret until Home Assistant has committed
+        # the update, so a persist failure leaves the bundle retryable.
+        persist_result = self.async_update_reload_and_abort(
             entry=entry,
             data=updated_data,
             reason=success_reason,
         )
+        await self._async_container_ack(result)
+        return persist_result
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
@@ -3939,7 +4013,7 @@ class ConfigFlow(
                     vol.Optional("container_host", default="127.0.0.1"): str,
                     vol.Optional(
                         "container_port", default=CONTAINER_TOKEN_PORT
-                    ): cv.port,
+                    ): _PORT_VALIDATOR,
                     vol.Optional("pairing_code"): str,
                     # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
@@ -3951,7 +4025,7 @@ class ConfigFlow(
                     vol.Optional("container_host", default="127.0.0.1"): str,
                     vol.Optional(
                         "container_port", default=CONTAINER_TOKEN_PORT
-                    ): cv.port,
+                    ): _PORT_VALIDATOR,
                     vol.Optional("pairing_code"): str,
                     # vol.Optional(_REAUTH_FIELD_TOKEN): str,  # Disabled: manual reauth token path is intentionally hidden until fixed.
                 }
@@ -5842,6 +5916,13 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             OPT_ROUNDTRIP_CONFIRM: _get(
                 OPT_ROUNDTRIP_CONFIRM, DEFAULT_ROUNDTRIP_CONFIRM
             ),
+            # Advanced override (F3): additional secrets.json watch paths, one per
+            # line. Empty by default; the zero-config container-data path is
+            # watched automatically without this option. Rendered as a text block
+            # (newline-joined) and parsed back to a list on submit.
+            SECRETS_EXTRA_WATCH_PATHS: _extra_watch_paths_to_text(
+                opt.get(SECRETS_EXTRA_WATCH_PATHS)
+            ),
         }
         if (
             OPT_GOOGLE_HOME_FILTER_ENABLED is not None
@@ -5967,6 +6048,14 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
         _register(vol.Optional(OPT_SHOW_LOCATION_AGE), bool)
         _register(vol.Optional(OPT_SPEED_GATE_ENABLED), bool)
         _register(vol.Optional(OPT_ROUNDTRIP_CONFIRM), bool)
+        # Advanced override (F3): extra secrets.json watch paths (one per line).
+        if selector is not None:
+            _register(
+                vol.Optional(SECRETS_EXTRA_WATCH_PATHS),
+                selector({"text": {"multiline": True}}),
+            )
+        else:
+            _register(vol.Optional(SECRETS_EXTRA_WATCH_PATHS), str)
 
         base_schema = vol.Schema(fields)
         schema_with_defaults = self.add_suggested_values_to_schema(base_schema, current)
@@ -5982,6 +6071,16 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                         new_options[real_key] = user_input[real_key]
                     else:
                         new_options[real_key] = current.get(real_key)
+                # Normalize the extra-watch-paths text block into a clean list
+                # (one path per line). An empty value removes the override so the
+                # zero-config defaults apply.
+                parsed_extra = _parse_extra_watch_paths_text(
+                    new_options.get(SECRETS_EXTRA_WATCH_PATHS)
+                )
+                if parsed_extra:
+                    new_options[SECRETS_EXTRA_WATCH_PATHS] = parsed_extra
+                else:
+                    new_options.pop(SECRETS_EXTRA_WATCH_PATHS, None)
                 new_options[OPT_OPTIONS_SCHEMA_VERSION] = 2
 
                 subentry_option = option_map.get(selected_key)
@@ -6274,9 +6373,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
             DATA_AUTH_METHOD: _AUTH_METHOD_SECRETS,
             **_persist_secrets_bundle(result.parsed, result.token),
         }
-        if not (
-            isinstance(result.token, str) and result.token.startswith("aas_et/")
-        ):
+        if not (isinstance(result.token, str) and result.token.startswith("aas_et/")):
             updated_data.pop(DATA_AAS_TOKEN, None)
 
         await self._async_clear_cached_aas_token(entry)
@@ -6316,7 +6413,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     vol.Optional("container_host", default="127.0.0.1"): str,
                     vol.Optional(
                         "container_port", default=CONTAINER_TOKEN_PORT
-                    ): cv.port,
+                    ): _PORT_VALIDATOR,
                     vol.Optional("pairing_code"): str,
                     # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
@@ -6331,7 +6428,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                     vol.Optional("container_host", default="127.0.0.1"): str,
                     vol.Optional(
                         "container_port", default=CONTAINER_TOKEN_PORT
-                    ): cv.port,
+                    ): _PORT_VALIDATOR,
                     vol.Optional("pairing_code"): str,
                     # vol.Optional("new_oauth_token"): str,  # Disabled: broken manual token path stays hidden until fixed.
                 }
@@ -6345,9 +6442,7 @@ class OptionsFlowHandler(OptionsFlowBase, _OptionsFlowMixin):  # type: ignore[mi
                 new_token = (user_input.get("new_oauth_token") or "").strip()
                 has_token = bool(new_token)
                 has_secrets = bool((user_input.get("new_secrets_json") or "").strip())
-                has_container = bool(
-                    (user_input.get("pairing_code") or "").strip()
-                )
+                has_container = bool((user_input.get("pairing_code") or "").strip())
                 if not has_secrets and not has_token and not has_container:
                     errors["base"] = "choose_one"
                 elif has_container:

@@ -540,13 +540,40 @@ def _default_secrets_path() -> Path:
     return Path(__file__).resolve().parent / "Auth" / "secrets.json"
 
 
+def _default_container_data_path() -> Path:
+    """Return the deterministic same-machine login-container output path.
+
+    The login container (``docker-login/docker-compose.yml``) writes its
+    produced ``secrets.json`` to the writable ``./data`` volume, which is the
+    ``docker-login/data`` sibling directory of this integration package. On a
+    single-host install (Home Assistant and the login container share a
+    filesystem) that file is directly readable, so watching it makes Track A
+    zero-config: a one-click login lands the bundle here and discovery imports it
+    without the user having to configure any extra watch path. It is deliberately
+    a *deterministic default* (not an option) so the common case needs no setup;
+    :data:`SECRETS_EXTRA_WATCH_PATHS` remains the advanced override for
+    non-default layouts.
+    """
+
+    return Path(__file__).resolve().parent / "docker-login" / "data" / "secrets.json"
+
+
+def _default_watch_paths() -> list[Path]:
+    """Return the zero-config default watch paths (bundled Auth + container data)."""
+
+    return [_default_secrets_path(), _default_container_data_path()]
+
+
 class SecretsJSONWatcher:
     """Poll one or more secrets.json files and trigger discovery on change.
 
-    The watcher observes a *list* of candidate paths. The default list contains
-    only the bundled ``Auth/secrets.json`` (backward compatible), but deployments
-    may add extra paths (for example the login container's ``docker-login/data``
-    volume). When several candidate files exist simultaneously the *newest* one
+    The watcher observes a *list* of candidate paths. In production the
+    :class:`DiscoveryManager` supplies the zero-config defaults
+    (:func:`_default_watch_paths`: the bundled ``Auth/secrets.json`` plus the
+    deterministic login-container ``docker-login/data/secrets.json``), and users
+    may add further paths via the :data:`SECRETS_EXTRA_WATCH_PATHS` option (for a
+    non-default container-data layout). When several candidate files exist
+    simultaneously the *newest* one
     (by modification time, with a SHA-256 digest tiebreak on identical mtimes)
     wins the signature, so a single freshly written bundle is imported
     deterministically regardless of how many paths are observed.
@@ -911,7 +938,16 @@ class DiscoveryManager:
         if self._started:
             return
 
-        watch_paths = [_default_secrets_path(), *_collect_extra_watch_paths(self._hass)]
+        # Zero-config defaults (bundled Auth/secrets.json + the deterministic
+        # login-container docker-login/data/secrets.json) plus any advanced
+        # option override. SecretsJSONWatcher de-duplicates, so an override that
+        # repeats a default is harmless. The container-data default is included
+        # here so the delete-ALL hook (which reads the manager's watch_paths)
+        # also clears it after a successful import.
+        watch_paths = [
+            *_default_watch_paths(),
+            *_collect_extra_watch_paths(self._hass),
+        ]
         watcher = SecretsJSONWatcher(self._hass, paths=watch_paths)
         await watcher.async_start()
         self._watchers.append(watcher)

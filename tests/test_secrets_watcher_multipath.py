@@ -40,9 +40,7 @@ class _FakeHass:
             options[SECRETS_EXTRA_WATCH_PATHS] = extra_watch_paths
         self._entry = make_config_entry(entry_id="watcher-entry", options=options)
         self.config_entries = SimpleNamespace(
-            async_entries=lambda domain: (
-                [self._entry] if domain == DOMAIN else []
-            )
+            async_entries=lambda domain: [self._entry] if domain == DOMAIN else []
         )
         self.config = SimpleNamespace(
             language="en", components=set(), top_level_components=set()
@@ -64,7 +62,9 @@ def _write_secrets(path: Path, email: str, token: str | None = None) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _patch_discovery(monkeypatch: pytest.MonkeyPatch, triggered: list[dict[str, Any]]) -> None:
+def _patch_discovery(
+    monkeypatch: pytest.MonkeyPatch, triggered: list[dict[str, Any]]
+) -> None:
     async def _fake_trigger(_hass: Any, **kwargs: Any) -> bool:
         triggered.append(kwargs)
         return True
@@ -227,3 +227,83 @@ async def test_manager_collects_extra_watch_paths(tmp_path: Path) -> None:
 
     empty_hass = _FakeHass()
     assert discovery._collect_extra_watch_paths(empty_hass) == []
+
+
+def test_default_watch_paths_include_container_data_default() -> None:
+    """F3: the zero-config defaults watch Auth/secrets.json AND docker-login/data.
+
+    The login container writes its bundle to ``docker-login/data/secrets.json``
+    (the writable compose ``./data`` volume), a deterministic sibling of the
+    integration package. On a single-host install that path must be watched
+    without any user configuration, so Track A works out of the box.
+    """
+
+    defaults = discovery._default_watch_paths()
+
+    auth_default = discovery._default_secrets_path()
+    container_default = discovery._default_container_data_path()
+
+    assert auth_default in defaults
+    assert container_default in defaults
+    # The container default is the deterministic docker-login/data sibling path.
+    assert container_default.parts[-3:] == ("docker-login", "data", "secrets.json")
+    # Both defaults live under the integration package directory.
+    integration_dir = Path(discovery.__file__).resolve().parent
+    assert integration_dir in container_default.parents
+    assert integration_dir in auth_default.parents
+
+
+async def test_manager_watches_container_data_default_zero_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DiscoveryManager wires the container-data default into the watcher (no option).
+
+    Even with an empty options set (no ``SECRETS_EXTRA_WATCH_PATHS``), the manager
+    must build its watcher over BOTH zero-config defaults so a same-machine
+    one-click login is imported without any extra configuration.
+    """
+
+    captured: dict[str, Any] = {}
+
+    class _StubWatcher:
+        def __init__(self, hass: Any, *, paths: list[Path], **_kw: Any) -> None:
+            captured["paths"] = list(paths)
+
+        async def async_start(self) -> None:
+            return None
+
+    monkeypatch.setattr(discovery, "SecretsJSONWatcher", _StubWatcher)
+
+    hass = _FakeHass()  # no extra_watch_paths option set
+    manager = discovery.DiscoveryManager(hass)
+    await manager.async_start()
+
+    paths = captured["paths"]
+    assert discovery._default_secrets_path() in paths
+    assert discovery._default_container_data_path() in paths
+
+
+async def test_delete_all_clears_container_data_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Delete-ALL must include the auto-default container-data path (F4/F3 seam).
+
+    The delete hook reads the manager's ``watch_paths``; because the container
+    default is part of the default watch set it is removed after a successful
+    import, exactly like an explicitly configured path.
+    """
+
+    hass = _FakeHass()
+    auth_secret = tmp_path / "auth" / "secrets.json"
+    container_secret = tmp_path / "docker-login" / "data" / "secrets.json"
+    _write_secrets(auth_secret, "auth@example.com", token="aas_et/A")
+    _write_secrets(container_secret, "container@example.com", token="aas_et/C")
+
+    # The manager exposes the auto-default container path among its watch paths.
+    manager = SimpleNamespace(watch_paths=(auth_secret, container_secret))
+    hass.data[DOMAIN] = {"discovery_manager": manager}
+
+    await config_flow._async_delete_watched_secrets(hass)
+
+    assert not auth_secret.exists()
+    assert not container_secret.exists()

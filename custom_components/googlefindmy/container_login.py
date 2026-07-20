@@ -163,7 +163,9 @@ async def fetch_secrets_from_container(
     _maybe_block_link_local(host)
     url = f"{_build_base_url(host, port)}/secrets"
     headers = {"Authorization": f"Bearer {nonce}"}
-    _LOGGER.debug("Fetching container secrets from %s:%d (nonce chars=%d)", host, port, len(nonce))
+    _LOGGER.debug(
+        "Fetching container secrets from %s:%d (nonce chars=%d)", host, port, len(nonce)
+    )
     try:
         async with session.get(
             url,
@@ -186,7 +188,11 @@ async def fetch_secrets_from_container(
         raise ContainerUnreachableError("container response was not a JSON object")
     bundle = payload.get("bundle")
     delete_token = payload.get("delete_token")
-    if not isinstance(bundle, dict) or not isinstance(delete_token, str) or not delete_token:
+    if (
+        not isinstance(bundle, dict)
+        or not isinstance(delete_token, str)
+        or not delete_token
+    ):
         raise ContainerUnreachableError(
             "container response missing 'bundle'/'delete_token'"
         )
@@ -239,4 +245,6 @@ async def ack_consumed(  # noqa: PLR0913 - fixed two-phase-delete API contract
 def _raise_for_auth(status: int) -> None:
     """Map an auth-class status to :class:`ContainerAuthError`."""
     if status in (401, 403):
-        raise ContainerAuthError(f"container endpoint rejected the pairing code (HTTP {status})")
+        raise ContainerAuthError(
+            f"container endpoint rejected the pairing code (HTTP {status})"
+        )
