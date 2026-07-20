@@ -29,6 +29,17 @@ services:
       # local accounts). Unset (e.g. a manual run) → the file stays container-owned.
       GFMY_HOST_UID: "${GFMY_HOST_UID:-}"
       GFMY_HOST_GID: "${GFMY_HOST_GID:-}"
+      # One-click handoff tracks (both default OFF; the classic file-handoff
+      # behaviour is unchanged unless you opt in). They are independent switches.
+      #   GFMY_ONECLICK=1  -> after login, serve the bundle to Home Assistant on
+      #                       a one-shot, nonce-authenticated LOOPBACK endpoint
+      #                       (127.0.0.1:7901). Needs the 7901 port publish below.
+      #   GFMY_CLEARTEXT=1 -> after login, print secrets.json in the terminal for
+      #                       manual copy/paste (no port opened) and delete it.
+      # NOTE: the pairing code is generated at RUNTIME and printed by the
+      # container; there is intentionally NO GFMY_PAIRING_CODE default here.
+      GFMY_ONECLICK: "${GFMY_ONECLICK:-}"
+      GFMY_CLEARTEXT: "${GFMY_CLEARTEXT:-}"
       # Optional: pin Chrome's major version if auto-detection ever mismatches
       # the bundled Chrome (undetected-chromedriver SessionNotCreatedException).
       # GOOGLEFINDMY_CHROME_VERSION: "141"
@@ -39,6 +50,15 @@ services:
       # machine, use an SSH tunnel (recommended) or set GFMY_NOVNC_BIND=0.0.0.0
       # (README → Remote access) to opt into a LAN bind on a trusted network.
       - "${GFMY_NOVNC_BIND:-127.0.0.1}:7900:7900"
+      # One-click token endpoint (GFMY_ONECLICK=1). Bound to LOOPBACK ONLY and
+      # HARD-CODED to 127.0.0.1: this carries the freshly minted tokens in the
+      # clear, so it must never be exposed to the LAN/Internet. There is
+      # deliberately no LAN opt-in for this port (unlike noVNC 7900). To reach it
+      # from another machine, use an SSH tunnel to loopback:
+      #   ssh -L 7901:127.0.0.1:7901 <docker-host>
+      # The server itself also binds strictly to 127.0.0.1 (token_server.py), so
+      # even a mis-set publish cannot expose it beyond the host loopback.
+      - "127.0.0.1:7901:7901"
     volumes:
       # M2 runtime mount of the integration code, READ-ONLY, at a FLAT path.
       # `..` is the integration package dir, so main.py lands at /app/gfmy/main.py

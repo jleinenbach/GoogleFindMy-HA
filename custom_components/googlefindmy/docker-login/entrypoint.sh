@@ -124,4 +124,56 @@ while [ "${_rc}" -gt 128 ] && kill -0 "${CLI_PID}" 2>/dev/null; do
   _rc=0
   wait "${CLI_PID}" || _rc=$?
 done
+
+# --------------------------------------------------------------------------
+# Post-login handoff tracks (only after a successful main.py run; unset -> the
+# historical behaviour is completely unchanged).
+#
+# These run in the FOREGROUND *before* the final `exit`, so the EXIT trap's
+# cleanup (ownership handoff of /data + supervisor shutdown) fires strictly
+# AFTER the handoff is done. That is the BLOCKING-1 lifecycle fix: a One-Click
+# token server that must outlive main.py cannot hang off the EXIT trap, so it
+# runs here, and cleanup's /data ownership handoff is naturally deferred until
+# it returns (ack-delete or TTL). The `secrets.json` the server reads still
+# exists at this point (main.py wrote it; cleanup has not run yet).
+# --------------------------------------------------------------------------
+_secrets_path="${GOOGLEFINDMY_SECRETS_PATH:-/data/secrets.json}"
+
+if [ "${_rc}" -eq 0 ] && [ "${GFMY_ONECLICK:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
+  # Track B: hand the freshly minted bundle to Home Assistant over a one-shot,
+  # nonce-authenticated, loopback-only endpoint (see token_server.py). The
+  # pairing code is generated at RUNTIME (never a compose default) and printed
+  # prominently; only the code is shown, never the token/bundle.
+  GFMY_PAIRING_CODE="$(python3 -c 'import secrets;print(secrets.token_urlsafe(16))')"
+  export GFMY_PAIRING_CODE GOOGLEFINDMY_SECRETS_PATH="${_secrets_path}"
+  echo ""
+  echo "=================================================================="
+  echo "[entrypoint] ONE-CLICK login ready. In Home Assistant choose the"
+  echo "[entrypoint] 'Container login' auth method and enter:"
+  echo "[entrypoint]     host: 127.0.0.1   port: 7901"
+  echo "[entrypoint]     pairing code: ${GFMY_PAIRING_CODE}"
+  echo "[entrypoint] (From another machine, tunnel: ssh -L 7901:127.0.0.1:7901 <host>)"
+  echo "=================================================================="
+  echo ""
+  # Foreground: this blocks until Home Assistant acks (file deleted) or the TTL
+  # elapses (file deleted as a fallback), then returns and we fall through to
+  # the final exit -> EXIT trap cleanup (ownership handoff + supervisor stop).
+  python3 /app/gfmy/docker-login/token_server.py || true
+
+elif [ "${_rc}" -eq 0 ] && [ "${GFMY_CLEARTEXT:-}" = "1" ] && [ -f "${_secrets_path}" ]; then
+  # Track C: no port is opened. Print the full secrets.json in a clearly
+  # delimited block so the user can SELECT + COPY it inside the noVNC terminal
+  # and paste it into Home Assistant's secrets.json field. The file is ephemeral
+  # and removed right after display so nothing lingers on disk.
+  echo ""
+  echo "=================== BEGIN secrets.json (copy) ===================="
+  cat "${_secrets_path}"
+  echo ""
+  echo "==================== END secrets.json (copy) ====================="
+  echo "[entrypoint] Select the block above, copy it, and paste it into the"
+  echo "[entrypoint] Home Assistant 'secrets.json' field. The file is now removed."
+  echo ""
+  rm -f "${_secrets_path}" 2>/dev/null || true
+fi
+
 exit "${_rc}"

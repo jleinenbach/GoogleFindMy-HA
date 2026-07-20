@@ -193,6 +193,52 @@ GFMY_ARGS="--reauth" ./login.sh
 `--debug` (verbose bootstrap/FCM logging), `--entry <id>` (select one config
 entry when the cache holds several).
 
+## One-click handoff (optional, no manual copy)
+
+By default the login writes `data/secrets.json` and you import that file into
+Home Assistant. Two optional switches automate the handoff so you never touch
+the file yourself — pick the one that matches your setup. Both are off unless you
+opt in, and neither changes the classic file behaviour.
+
+### Container login over a loopback endpoint (`GFMY_ONECLICK=1`)
+
+After a successful login the container serves the freshly minted bundle on a
+one-shot, nonce-authenticated endpoint bound strictly to `127.0.0.1:7901`, then
+deletes the file once Home Assistant confirms it (or after a short timeout).
+
+```bash
+GFMY_ONECLICK=1 ./login.sh
+```
+
+The container prints a **pairing code** (generated at runtime — there is no
+default). In Home Assistant, choose the *Container login* auth method and enter
+host `127.0.0.1`, port `7901`, and that pairing code. The endpoint is
+loopback-only by design (it carries the tokens in the clear); to drive it from
+another machine, tunnel it:
+
+```bash
+ssh -L 7901:127.0.0.1:7901 <docker-host>
+```
+
+There is deliberately **no LAN opt-in** for this port — the split-machine path
+is the SSH tunnel above.
+
+### noVNC clear-text copy fallback (`GFMY_CLEARTEXT=1`)
+
+If you cannot share a filesystem *and* cannot open a port (or you simply prefer
+copy/paste), this switch prints the full `secrets.json` in the terminal at the
+end of the login — inside the noVNC window you can **select, copy, and paste** it
+straight into Home Assistant's *secrets.json* field. No port is opened.
+
+```bash
+GFMY_CLEARTEXT=1 ./login.sh
+```
+
+The block is framed by `BEGIN secrets.json` / `END secrets.json` markers so it is
+easy to select. The file is **ephemeral**: it is deleted immediately after it is
+displayed, so nothing lingers on disk. This switch is independent of
+`GFMY_ONECLICK` and of the plain file handoff.
+
 ## Using `secrets.json` in Home Assistant
 
 Copy `data/secrets.json` to the machine running Home Assistant (on a single-host
