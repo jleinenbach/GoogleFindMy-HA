@@ -1,0 +1,35 @@
+# Docker build-context excludes for the docker-login image.
+#
+# The login image builds with `build.context: ..` (see
+# docker-login/docker-compose.yml), i.e. this ENTIRE integration package
+# directory is the build context: hundreds of source files plus, after a login,
+# persisted OAuth/AAS credentials. Secrets can appear in more than one place:
+#   * docker-login/data/secrets.json  (the container's writable volume)
+#   * Auth/secrets.json               (the legacy default of
+#                                       main.py::_resolve_secrets_path)
+# and future cache/token locations could add more. `.gitignore` only stops Git
+# commits; it does NOT filter Docker's context upload, so a `docker compose run
+# --build` (both launchers use it) would otherwise ship whatever secrets exist to
+# remote, shared or legacy daemons even though the Dockerfile never COPYs them.
+#
+# Denylisting each secret path individually is whack-a-mole: a new location
+# reopens the hole (exactly what happened for Auth/secrets.json). Instead this is
+# an ALLOWLIST: ignore the whole context, then re-include ONLY the two paths the
+# Dockerfile actually needs at build time:
+#   * requirements.txt           - COPYed, dependencies baked into the image
+#   * docker-login/entrypoint.sh - COPYed as the container entrypoint
+# The integration *code* is NOT built in; it is bind-mounted read-only at run
+# time (M2). This keeps every secret - current or future, anywhere in the tree -
+# out of the build context and shrinks the upload to just the required files.
+#
+# Docker cannot descend into an ignored directory, so docker-login/ is re-included
+# only for TRAVERSAL; its contents are then re-excluded (docker-login/*) and only
+# the one COPY input the Dockerfile needs (entrypoint.sh) is re-included. A bare
+# `!docker-login` would re-include the WHOLE directory, so any other file placed
+# under it -- an exported secrets.json, a diagnostic log, a future addition -- would
+# ship in the context; excluding only docker-login/data left exactly that hole.
+*
+!requirements.txt
+!docker-login
+docker-login/*
+!docker-login/entrypoint.sh
