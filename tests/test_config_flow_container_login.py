@@ -829,3 +829,63 @@ async def test_options_container_branch_error_does_not_ack(
     assert result is None
     assert errors == {"base": "container_unreachable"}
     assert recorder.ack_calls == []
+
+
+# --- F-N3: builtin TimeoutError (total timeout) mapping -----------------------
+
+
+class _TimeoutCtx:
+    """Async context manager whose __aenter__ raises the builtin TimeoutError.
+
+    aiohttp raises the builtin ``TimeoutError`` on a total (``ClientTimeout``)
+    timeout; it is neither ``aiohttp.ServerTimeoutError`` nor an
+    ``aiohttp.ClientError`` subclass, so the client primitives must catch it
+    explicitly and translate it into ``ContainerTimeoutError``.
+    """
+
+    async def __aenter__(self) -> Any:
+        raise TimeoutError("total timeout")
+
+    async def __aexit__(self, *_exc: Any) -> bool:
+        return False
+
+
+class _TimeoutSession:
+    """Fake aiohttp session whose get/post time out with the builtin error."""
+
+    def get(self, *_args: Any, **_kwargs: Any) -> _TimeoutCtx:
+        return _TimeoutCtx()
+
+    def post(self, *_args: Any, **_kwargs: Any) -> _TimeoutCtx:
+        return _TimeoutCtx()
+
+
+async def test_fetch_maps_builtin_timeout_to_container_timeout() -> None:
+    """F-N3: a total-timeout builtin ``TimeoutError`` maps in the fetch path."""
+
+    from custom_components.googlefindmy import container_login
+
+    with pytest.raises(container_login.ContainerTimeoutError):
+        await container_login.fetch_secrets_from_container(
+            _TimeoutSession(),  # type: ignore[arg-type]
+            "localhost",
+            CONTAINER_TOKEN_PORT,
+            "nonce-value",
+            timeout=1.0,
+        )
+
+
+async def test_ack_maps_builtin_timeout_to_container_timeout() -> None:
+    """F-N3: a total-timeout builtin ``TimeoutError`` maps in the ACK path."""
+
+    from custom_components.googlefindmy import container_login
+
+    with pytest.raises(container_login.ContainerTimeoutError):
+        await container_login.ack_consumed(
+            _TimeoutSession(),  # type: ignore[arg-type]
+            "localhost",
+            CONTAINER_TOKEN_PORT,
+            "nonce-value",
+            _DELETE_TOKEN,
+            timeout=1.0,
+        )

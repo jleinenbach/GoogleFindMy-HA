@@ -179,7 +179,9 @@ async def fetch_secrets_from_container(
                     f"container endpoint returned HTTP {response.status}"
                 )
             payload = await _read_json_capped(response)
-    except aiohttp.ServerTimeoutError as err:
+    except (aiohttp.ServerTimeoutError, TimeoutError) as err:
+        # aiohttp raises the builtin TimeoutError on a total timeout; it is not a
+        # ServerTimeoutError nor a ClientError subclass, so catch it explicitly.
         raise ContainerTimeoutError(str(err)) from err
     except aiohttp.ClientError as err:
         raise ContainerUnreachableError(str(err)) from err
@@ -236,7 +238,9 @@ async def ack_consumed(  # noqa: PLR0913 - fixed two-phase-delete API contract
                 raise ContainerUnreachableError(
                     f"container ack returned HTTP {response.status}"
                 )
-    except aiohttp.ServerTimeoutError as err:
+    except (aiohttp.ServerTimeoutError, TimeoutError) as err:
+        # aiohttp raises the builtin TimeoutError on a total timeout; it is not a
+        # ServerTimeoutError nor a ClientError subclass, so catch it explicitly.
         raise ContainerTimeoutError(str(err)) from err
     except aiohttp.ClientError as err:
         raise ContainerUnreachableError(str(err)) from err

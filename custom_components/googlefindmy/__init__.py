@@ -7147,6 +7147,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: MyConfigEntry) -> bool:
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _flush_on_stop)
     )
 
+    # Refresh the running discovery watcher's paths when SECRETS_EXTRA_WATCH_PATHS
+    # changes at runtime (options flow), so a newly configured path is observed
+    # without a Home Assistant restart. The manager is a per-instance singleton and
+    # recomputes from ALL entries, so the listener is idempotent regardless of which
+    # entry changed. Best-effort: a missing manager or any error is only debug-logged.
+    async def _async_refresh_watch_paths(
+        hass_arg: HomeAssistant, updated_entry: MyConfigEntry
+    ) -> None:
+        manager = _domain_data(hass_arg).get("discovery_manager")
+        refresh = getattr(manager, "async_refresh_watch_paths", None)
+        if not callable(refresh):
+            return
+        try:
+            await refresh()
+        except Exception:  # noqa: BLE001 - watcher refresh is best-effort, never fatal
+            _LOGGER.debug("Discovery watch-path refresh failed", exc_info=True)
+
+    entry.async_on_unload(entry.add_update_listener(_async_refresh_watch_paths))
+
     # Early, idempotent seeding of TokenCache from entry.data (authoritative SSOT)
     try:
         if DATA_AUTH_METHOD in entry.data:

@@ -564,6 +564,94 @@ def _default_watch_paths() -> list[Path]:
     return [_default_secrets_path(), _default_container_data_path()]
 
 
+def _extract_bundle_email(bundle: Mapping[str, Any]) -> str | None:
+    for key in ("google_email", "email", "username", "Email"):
+        value = bundle.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _extract_bundle_token(bundle: Mapping[str, Any]) -> str | None:
+    for key in ("oauth_token", "aas_token", "token"):
+        value = bundle.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def read_secrets_bundle(path: Path) -> _SecretsScanResult | None:
+    """Read, parse and identify a single secrets.json bundle.
+
+    Executor-safe, watcher-independent core: a missing/unreadable/unparseable
+    file (or one without a Google account email) yields ``None`` and only debug
+    logs. Both the watcher and the delete-after-import hook share this single
+    read path so the JSON parsing and stable-key derivation live in one place.
+    """
+
+    try:
+        raw_text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        _LOGGER.debug(
+            "Unable to read secrets bundle",
+            extra={"bundle_path": str(path)},
+            exc_info=err,
+        )
+        return None
+
+    try:
+        parsed = json.loads(raw_text)
+    except json.JSONDecodeError as err:
+        _LOGGER.debug(
+            "Invalid secrets.json content",
+            extra={"bundle_path": str(path)},
+            exc_info=err,
+        )
+        return None
+
+    if not isinstance(parsed, dict):
+        _LOGGER.debug(
+            "Ignoring secrets bundle: not a JSON object",
+            extra={"bundle_path": str(path)},
+        )
+        return None
+
+    email = _extract_bundle_email(parsed)
+    if not email:
+        _LOGGER.debug(
+            "Ignoring secrets bundle: Google account email missing",
+            extra={"bundle_path": str(path)},
+        )
+        return None
+
+    token = _extract_bundle_token(parsed)
+    digest = hashlib.sha256(
+        json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    stable_key = _cloud_discovery_stable_key(email, token, parsed)
+    return _SecretsScanResult(
+        email=email,
+        token=token,
+        bundle=dict(parsed),
+        digest=digest,
+        stable_key=stable_key,
+    )
+
+
+def read_secrets_stable_key(path: Path) -> str | None:
+    """Return the account stable-key of a secrets bundle, or ``None``.
+
+    ``None`` means the account could not be positively determined (the file is
+    missing, unreadable, unparseable or lacks an account email). Callers must
+    treat ``None`` conservatively: it never proves two files share an account.
+    """
+
+    result = read_secrets_bundle(path)
+    return result.stable_key if result is not None else None
+
+
 class SecretsJSONWatcher:
     """Poll one or more secrets.json files and trigger discovery on change.
 
@@ -621,6 +709,24 @@ class SecretsJSONWatcher:
         """Return the immutable tuple of observed secrets.json paths."""
 
         return tuple(self._paths)
+
+    async def async_update_paths(self, paths: list[Path]) -> None:
+        """Replace the observed paths using the same dedup/order as ``__init__``.
+
+        Lock-guarded against a concurrent scan. ``_last_signature`` is reset so
+        the next scan re-evaluates the (possibly changed) path set from scratch.
+        """
+
+        async with self._lock:
+            seen: set[Path] = set()
+            deduped: list[Path] = []
+            for candidate in paths:
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                deduped.append(candidate)
+            self._paths = deduped
+            self._last_signature = None
 
     async def async_start(self) -> None:
         """Begin watching for secrets.json updates."""
@@ -815,71 +921,9 @@ class SecretsJSONWatcher:
         return best_result
 
     def _read_single_bundle(self, path: Path) -> _SecretsScanResult | None:
-        try:
-            raw_text = path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
-        except OSError as err:
-            _LOGGER.debug(
-                "Unable to read secrets bundle",
-                extra={"bundle_path": str(path)},
-                exc_info=err,
-            )
-            return None
-
-        try:
-            parsed = json.loads(raw_text)
-        except json.JSONDecodeError as err:
-            _LOGGER.debug(
-                "Invalid secrets.json content",
-                extra={"bundle_path": str(path)},
-                exc_info=err,
-            )
-            return None
-
-        if not isinstance(parsed, dict):
-            _LOGGER.debug(
-                "Ignoring secrets bundle: not a JSON object",
-                extra={"bundle_path": str(path)},
-            )
-            return None
-
-        email = self._extract_email(parsed)
-        if not email:
-            _LOGGER.debug(
-                "Ignoring secrets bundle: Google account email missing",
-                extra={"bundle_path": str(path)},
-            )
-            return None
-
-        token = self._extract_token(parsed)
-        digest = hashlib.sha256(
-            json.dumps(parsed, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        stable_key = _cloud_discovery_stable_key(email, token, parsed)
-        return _SecretsScanResult(
-            email=email,
-            token=token,
-            bundle=dict(parsed),
-            digest=digest,
-            stable_key=stable_key,
-        )
-
-    @staticmethod
-    def _extract_email(bundle: Mapping[str, Any]) -> str | None:
-        for key in ("google_email", "email", "username", "Email"):
-            value = bundle.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return None
-
-    @staticmethod
-    def _extract_token(bundle: Mapping[str, Any]) -> str | None:
-        for key in ("oauth_token", "aas_token", "token"):
-            value = bundle.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        return None
+        # Delegate to the shared module-level reader so the watcher and the
+        # delete-after-import hook use one identical read/parse/identify path.
+        return read_secrets_bundle(path)
 
 
 def _collect_extra_watch_paths(hass: HomeAssistant) -> list[Path]:
@@ -942,8 +986,8 @@ class DiscoveryManager:
         # login-container docker-login/data/secrets.json) plus any advanced
         # option override. SecretsJSONWatcher de-duplicates, so an override that
         # repeats a default is harmless. The container-data default is included
-        # here so the delete-ALL hook (which reads the manager's watch_paths)
-        # also clears it after a successful import.
+        # here so the account-aware delete hook (which reads the manager's
+        # watch_paths) also clears it after importing that account.
         watch_paths = [
             *_default_watch_paths(),
             *_collect_extra_watch_paths(self._hass),
@@ -980,13 +1024,35 @@ class DiscoveryManager:
         for watcher in self._watchers:
             await watcher.async_force_scan()
 
+    async def async_refresh_watch_paths(self) -> None:
+        """Recompute and apply the watch paths after an options change.
+
+        Idempotent: it recomputes from ALL entries (defaults plus every entry's
+        ``SECRETS_EXTRA_WATCH_PATHS``), so it does not matter which entry
+        changed. After updating each watcher it forces an immediate scan so a
+        freshly configured path is picked up without a Home Assistant restart.
+        """
+
+        if not self._watchers:
+            return
+
+        watch_paths = [
+            *_default_watch_paths(),
+            *_collect_extra_watch_paths(self._hass),
+        ]
+        for watcher in self._watchers:
+            await watcher.async_update_paths(list(watch_paths))
+            await watcher.async_force_scan()
+
     @property
     def watch_paths(self) -> tuple[Path, ...]:
         """Return every secrets.json path observed across all watchers.
 
         Consumers (for example the discovery flow's delete-after-import hook) use
-        this to remove *all* observed bundles once one has been imported, so no
-        stale secret file is left behind in the installation tree.
+        this to reconcile observed bundles once one has been imported: the hook
+        removes the on-disk copies of the *imported* account and keeps any bundle
+        of a different account, so no stale secret of the imported account is left
+        behind while foreign-account bundles survive.
         """
 
         collected: list[Path] = []
@@ -1014,6 +1080,8 @@ __all__ = [
     "SecretsJSONWatcher",
     "DiscoveryManager",
     "async_initialize_discovery_runtime",
+    "read_secrets_bundle",
+    "read_secrets_stable_key",
     "_cloud_discovery_runtime",
     "_trigger_cloud_discovery",
     "_redact_account_for_log",

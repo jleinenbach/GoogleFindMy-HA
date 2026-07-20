@@ -109,36 +109,49 @@ async def test_newest_wins_across_paths(
     await watcher.async_stop()
 
 
-async def test_delete_all_removes_every_watched_file(
+def _stable_key_for(email: str, token: str | None = None) -> str:
+    """Return the account stable-key the delete hook compares against."""
+
+    return discovery._cloud_discovery_stable_key(email, token, None)
+
+
+async def test_delete_removes_winner_and_same_account_copy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Delete-ALL removes both bundles; a re-scan does not re-trigger."""
+    """Account-aware delete (variant C): the imported account's copies go.
+
+    Two watched files carry the SAME account (the real Auth/+data/ redundancy);
+    passing that account's stable_key removes BOTH, and a re-scan on the now-empty
+    paths does not re-trigger discovery.
+    """
 
     hass = _FakeHass()
     triggered: list[dict[str, Any]] = []
     _patch_discovery(monkeypatch, triggered)
 
-    older = tmp_path / "auth" / "secrets.json"
-    newer = tmp_path / "data" / "secrets.json"
-    _write_secrets(older, "older@example.com", token="aas_et/OLD")
-    _write_secrets(newer, "newer@example.com", token="aas_et/NEW")
-    os.utime(older, (1_000, 1_000))
-    os.utime(newer, (2_000, 2_000))
+    auth_copy = tmp_path / "auth" / "secrets.json"
+    data_copy = tmp_path / "data" / "secrets.json"
+    _write_secrets(auth_copy, "user@example.com", token="aas_et/SAME")
+    _write_secrets(data_copy, "user@example.com", token="aas_et/SAME")
+    os.utime(auth_copy, (1_000, 1_000))
+    os.utime(data_copy, (2_000, 2_000))
 
-    watcher = discovery.SecretsJSONWatcher(hass, paths=[older, newer])
+    watcher = discovery.SecretsJSONWatcher(hass, paths=[auth_copy, data_copy])
     await watcher.async_start()
     await asyncio.sleep(0)
     assert len(triggered) == 1
-    assert triggered[0]["email"] == "newer@example.com"
+    assert triggered[0]["email"] == "user@example.com"
 
     # Register the manager so the delete hook can find the watch paths.
-    manager = SimpleNamespace(watch_paths=(older, newer))
+    manager = SimpleNamespace(watch_paths=(auth_copy, data_copy))
     hass.data[DOMAIN] = {"discovery_manager": manager}
 
-    await config_flow._async_delete_watched_secrets(hass)
+    await config_flow._async_delete_watched_secrets(
+        hass, imported_stable_key=_stable_key_for("user@example.com")
+    )
 
-    assert not older.exists()
-    assert not newer.exists()
+    assert not auth_copy.exists()
+    assert not data_copy.exists()
 
     # A follow-up scan on the now-empty paths must NOT re-trigger discovery.
     await watcher.async_force_scan()
@@ -148,7 +161,81 @@ async def test_delete_all_removes_every_watched_file(
     await watcher.async_stop()
 
 
-async def test_delete_all_is_idempotent_and_missing_is_noop(
+async def test_delete_keeps_foreign_account_file_and_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A co-located bundle of a DIFFERENT account is kept and warned about."""
+
+    import logging
+
+    hass = _FakeHass()
+    winner = tmp_path / "data" / "secrets.json"
+    foreign = tmp_path / "other" / "secrets.json"
+    _write_secrets(winner, "winner@example.com", token="aas_et/WIN")
+    _write_secrets(foreign, "foreign@example.com", token="aas_et/FOR")
+
+    manager = SimpleNamespace(watch_paths=(winner, foreign))
+    hass.data[DOMAIN] = {"discovery_manager": manager}
+
+    with caplog.at_level(logging.WARNING):
+        await config_flow._async_delete_watched_secrets(
+            hass, imported_stable_key=_stable_key_for("winner@example.com")
+        )
+
+    assert not winner.exists()  # imported account removed
+    assert foreign.exists()  # foreign account preserved
+    # A redacted warning is logged; the foreign account is not in plaintext.
+    assert any(
+        "different account" in record.getMessage() for record in caplog.records
+    )
+    assert "foreign@example.com" not in caplog.text
+
+
+async def test_delete_keeps_unreadable_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unreadable/unparseable file is kept (account not determinable)."""
+
+    import logging
+
+    hass = _FakeHass()
+    winner = tmp_path / "data" / "secrets.json"
+    garbage = tmp_path / "auth" / "secrets.json"
+    _write_secrets(winner, "winner@example.com", token="aas_et/WIN")
+    garbage.parent.mkdir(parents=True, exist_ok=True)
+    garbage.write_text("{ this is not valid json", encoding="utf-8")
+
+    manager = SimpleNamespace(watch_paths=(winner, garbage))
+    hass.data[DOMAIN] = {"discovery_manager": manager}
+
+    with caplog.at_level(logging.DEBUG):
+        await config_flow._async_delete_watched_secrets(
+            hass, imported_stable_key=_stable_key_for("winner@example.com")
+        )
+
+    assert not winner.exists()  # imported account removed
+    assert garbage.exists()  # unparseable file preserved (conservative)
+
+
+async def test_delete_without_key_keeps_all(tmp_path: Path) -> None:
+    """Fail-safe: a None imported_stable_key deletes nothing."""
+
+    hass = _FakeHass()
+    a = tmp_path / "data" / "secrets.json"
+    b = tmp_path / "auth" / "secrets.json"
+    _write_secrets(a, "a@example.com", token="aas_et/A")
+    _write_secrets(b, "b@example.com", token="aas_et/B")
+
+    manager = SimpleNamespace(watch_paths=(a, b))
+    hass.data[DOMAIN] = {"discovery_manager": manager}
+
+    await config_flow._async_delete_watched_secrets(hass, imported_stable_key=None)
+
+    assert a.exists()
+    assert b.exists()
+
+
+async def test_delete_is_idempotent_and_missing_is_noop(
     tmp_path: Path,
 ) -> None:
     """Deleting again (or an already-missing path) never raises."""
@@ -161,12 +248,14 @@ async def test_delete_all_is_idempotent_and_missing_is_noop(
     manager = SimpleNamespace(watch_paths=(missing, present))
     hass.data[DOMAIN] = {"discovery_manager": manager}
 
+    key = _stable_key_for("present@example.com")
+
     # First delete removes the present file; the missing path is a no-op.
-    await config_flow._async_delete_watched_secrets(hass)
+    await config_flow._async_delete_watched_secrets(hass, imported_stable_key=key)
     assert not present.exists()
 
     # Second delete over now-empty paths must not raise.
-    await config_flow._async_delete_watched_secrets(hass)
+    await config_flow._async_delete_watched_secrets(hass, imported_stable_key=key)
 
 
 async def test_aborted_flow_keeps_all_files(tmp_path: Path) -> None:
@@ -188,7 +277,9 @@ async def test_aborted_flow_keeps_all_files(tmp_path: Path) -> None:
 
     # No discovery_manager -> the helper is a strict no-op even if called.
     empty_hass = _FakeHass()
-    await config_flow._async_delete_watched_secrets(empty_hass)
+    await config_flow._async_delete_watched_secrets(
+        empty_hass, imported_stable_key=_stable_key_for("older@example.com")
+    )
     assert older.exists()
     assert newer.exists()
 
@@ -283,27 +374,31 @@ async def test_manager_watches_container_data_default_zero_config(
     assert discovery._default_container_data_path() in paths
 
 
-async def test_delete_all_clears_container_data_default(
+async def test_delete_clears_container_data_default_same_account(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Delete-ALL must include the auto-default container-data path (F4/F3 seam).
+    """The auto-default container-data path IS in delete scope (F4/F3 seam).
 
     The delete hook reads the manager's ``watch_paths``; because the container
     default is part of the default watch set it is removed after a successful
-    import, exactly like an explicitly configured path.
+    import when it carries the imported account, exactly like an explicitly
+    configured path.
     """
 
     hass = _FakeHass()
     auth_secret = tmp_path / "auth" / "secrets.json"
     container_secret = tmp_path / "docker-login" / "data" / "secrets.json"
-    _write_secrets(auth_secret, "auth@example.com", token="aas_et/A")
-    _write_secrets(container_secret, "container@example.com", token="aas_et/C")
+    # Same account across both copies (the real Auth/+data/ redundancy).
+    _write_secrets(auth_secret, "user@example.com", token="aas_et/U")
+    _write_secrets(container_secret, "user@example.com", token="aas_et/U")
 
     # The manager exposes the auto-default container path among its watch paths.
     manager = SimpleNamespace(watch_paths=(auth_secret, container_secret))
     hass.data[DOMAIN] = {"discovery_manager": manager}
 
-    await config_flow._async_delete_watched_secrets(hass)
+    await config_flow._async_delete_watched_secrets(
+        hass, imported_stable_key=_stable_key_for("user@example.com")
+    )
 
     assert not auth_secret.exists()
     assert not container_secret.exists()

@@ -49,6 +49,7 @@ from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import (
     TYPE_CHECKING,
@@ -778,14 +779,30 @@ def _is_discovery_update_info(
     return source in {DISCOVERY_UPDATE_SOURCE, LEGACY_DISCOVERY_UPDATE_SOURCE}
 
 
-async def _async_delete_watched_secrets(hass: HomeAssistant | None) -> None:
-    """Delete every watched secrets.json after a successful discovery import.
+async def _async_delete_watched_secrets(
+    hass: HomeAssistant | None,
+    *,
+    imported_stable_key: str | None = None,
+) -> None:
+    """Delete the watched secrets.json copies of the imported account only.
 
     Mirrors the legacy ``Auth/secrets.json`` cleanup (``Auth/token_cache.py``):
     once the bundle has been persisted into the config entry the on-disk copies
-    are transient secrets and must not linger. All paths observed by the running
-    discovery manager (the bundled ``Auth/`` path plus any extra option paths,
-    for example the login container's ``data/`` volume) are removed best-effort.
+    are transient secrets and must not linger. But because
+    :data:`SECRETS_EXTRA_WATCH_PATHS` may point at bundles of *different* Google
+    accounts, this is account-aware (reconciliation, variant C):
+
+    - The imported winner bundle is always removed (it matches
+      ``imported_stable_key``).
+    - Further watched files are removed only when they carry the *same* account
+      as the imported one (the real ``Auth/`` + ``data/`` redundancy copies).
+    - A file of a *different* account is kept and a redacted warning is logged
+      (no plaintext account).
+    - A missing file is a no-op; an unreadable/unparseable file is kept with a
+      debug log (the account cannot be determined, so nothing is destroyed).
+    - Fail-safe: if ``imported_stable_key`` is ``None`` (the caller could not
+      determine it, which must not happen at the persist points) nothing is
+      deleted and a debug log is emitted; unidentified data is never destroyed.
 
     The removal is idempotent (a missing file is a no-op) and never raises: a
     non-writable external path only logs a warning so the flow completes. Because
@@ -805,6 +822,20 @@ async def _async_delete_watched_secrets(hass: HomeAssistant | None) -> None:
     if not watch_paths:
         return
 
+    if imported_stable_key is None:
+        _LOGGER.debug(
+            "Skipping watched-secrets cleanup: imported account key unknown; "
+            "keeping all watched bundles to avoid destroying unidentified data",
+        )
+        return
+
+    # Imported inside the function to avoid a circular import at module load
+    # (discovery imports config_flow).
+    from . import discovery as discovery_module
+
+    def _read_key(path_str: str) -> str | None:
+        return discovery_module.read_secrets_stable_key(Path(path_str))
+
     def _remove(path_str: str) -> None:
         try:
             os.remove(path_str)
@@ -817,7 +848,48 @@ async def _async_delete_watched_secrets(hass: HomeAssistant | None) -> None:
             )
 
     for path in watch_paths:
-        await hass.async_add_executor_job(_remove, str(path))
+        path_str = str(path)
+        key = await hass.async_add_executor_job(_read_key, path_str)
+        if key is None:
+            # Missing file: nothing to do. Unreadable/unparseable: keep it,
+            # since the account cannot be positively determined.
+            _LOGGER.debug(
+                "Keeping watched secrets file: account could not be determined: %s",
+                path_str,
+            )
+            continue
+        if key == imported_stable_key:
+            await hass.async_add_executor_job(_remove, path_str)
+            continue
+        _LOGGER.warning(
+            "Keeping watched secrets bundle of a different account (%s); only the "
+            "imported account's copies were removed: %s",
+            discovery_module._redact_account_for_log(None, key),
+            path_str,
+        )
+
+
+def _stable_key_for_discovery_payload(
+    payload: CloudDiscoveryData | None,
+) -> str | None:
+    """Derive the account stable-key of a confirmed discovery payload.
+
+    Uses the same identity function as the watcher
+    (``discovery._cloud_discovery_stable_key``) over the payload's email, its
+    first OAuth candidate token and its secrets bundle, so the value matches the
+    winner bundle's ``stable_key`` used for the account-aware delete. Returns
+    ``None`` if the payload is absent (the caller then keeps all bundles).
+    """
+
+    if payload is None:
+        return None
+
+    from . import discovery as discovery_module
+
+    token = payload.candidates[0][1] if payload.candidates else None
+    return discovery_module._cloud_discovery_stable_key(
+        payload.email, token, payload.secrets_bundle
+    )
 
 
 def _mask_email_for_logs(email: str | None) -> str:
@@ -2708,13 +2780,21 @@ class ConfigFlow(
                 result = await self.async_step_device_selection()
                 # Delete-after-import: only once the entry is actually created
                 # (the user confirmed). Aborted device selection leaves the
-                # watched bundles in place so the flow can be retried.
+                # watched bundles in place so the flow can be retried. Only the
+                # imported account's copies are removed (see the hook docstring),
+                # so a co-located bundle of a different account survives.
                 if (
                     isinstance(result, Mapping)
                     and result.get("type")
                     == data_entry_flow.FlowResultType.CREATE_ENTRY
                 ):
-                    await _async_delete_watched_secrets(getattr(self, "hass", None))
+                    imported_stable_key = _stable_key_for_discovery_payload(
+                        pending_payload
+                    )
+                    await _async_delete_watched_secrets(
+                        getattr(self, "hass", None),
+                        imported_stable_key=imported_stable_key,
+                    )
                 return result
 
         try:
@@ -2904,8 +2984,13 @@ class ConfigFlow(
                 )
 
             # Delete-after-import (update case): the entry update succeeded, so
-            # remove all watched secrets bundles. See _async_delete_watched_secrets.
-            await _async_delete_watched_secrets(hass)
+            # remove the watched secrets copies of the imported account only.
+            # See _async_delete_watched_secrets; a co-located bundle of a
+            # different account is kept.
+            imported_stable_key = _stable_key_for_discovery_payload(normalized)
+            await _async_delete_watched_secrets(
+                hass, imported_stable_key=imported_stable_key
+            )
 
             def _normalize_tracking_lists() -> None:
                 updated_attr = getattr(hass.config_entries, "updated", None)

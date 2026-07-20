@@ -171,6 +171,75 @@ def test_secrets_watcher_updates_existing_entry(
     asyncio.run(_exercise())
 
 
+class _OptionsHass:
+    """Hass stub whose single entry exposes a mutable options mapping.
+
+    Used to prove that changing ``SECRETS_EXTRA_WATCH_PATHS`` at runtime and
+    calling ``async_refresh_watch_paths`` re-evaluates the watcher paths without
+    a restart.
+    """
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+        self._entry = SimpleNamespace(options={})
+        self.config_entries = SimpleNamespace(
+            async_entries=lambda domain: (
+                [self._entry] if domain == DOMAIN else []
+            )
+        )
+        self.config = SimpleNamespace(
+            language="en", components=set(), top_level_components=set()
+        )
+        self.bus = SimpleNamespace(async_listen_once=lambda event, cb: lambda: None)
+
+    def set_extra_paths(self, paths: list[str]) -> None:
+        from custom_components.googlefindmy.const import SECRETS_EXTRA_WATCH_PATHS
+
+        self._entry.options = {SECRETS_EXTRA_WATCH_PATHS: paths}
+
+    async def async_add_executor_job(self, func, *args) -> Any:
+        return func(*args)
+
+    def async_create_task(self, coro):
+        return asyncio.create_task(coro)
+
+
+def test_refresh_watch_paths_picks_up_new_option(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F-N2: a runtime option change is applied without a Home Assistant restart."""
+
+    monkeypatch.setattr(discovery, "async_track_time_interval", lambda *_: lambda: None)
+    monkeypatch.setattr(discovery.cf, "_find_entry_by_email", lambda *_: None)
+
+    async def _fake_translations(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(
+        discovery.translation, "async_get_translations", _fake_translations
+    )
+
+    async def _exercise() -> None:
+        hass = _OptionsHass()
+        manager = discovery.DiscoveryManager(hass)
+        await manager.async_start()
+
+        new_path = tmp_path / "container" / "secrets.json"
+        assert new_path not in manager.watch_paths
+
+        # Simulate the options flow persisting a new extra watch path.
+        hass.set_extra_paths([str(new_path)])
+        await manager.async_refresh_watch_paths()
+
+        assert new_path in manager.watch_paths
+        # The zero-config defaults are preserved alongside the new path.
+        assert discovery._default_secrets_path() in manager.watch_paths
+
+        await manager.async_stop()
+
+    asyncio.run(_exercise())
+
+
 def test_cloud_discovery_results_suppress_task_exceptions(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
