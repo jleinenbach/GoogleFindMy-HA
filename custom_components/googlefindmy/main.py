@@ -225,22 +225,6 @@ else:  # pragma: no cover - standalone CLI stub-injection shim, structurally
         sys.modules["homeassistant.exceptions"] = _ha_exceptions
 
 
-def _resolve_secrets_path() -> Path:
-    """Resolve where the standalone CLI reads/writes ``secrets.json``.
-
-    Defaults to ``Auth/secrets.json`` next to this module (the upstream
-    GoogleFindMyTools layout). The ``GOOGLEFINDMY_SECRETS_PATH`` environment
-    variable overrides it with an explicit file path. This lets a container
-    persist the cache on a dedicated writable volume that is decoupled from a
-    read-only code mount, so the integration package can stay read-only while
-    the atomic write still happens on a single writable filesystem.
-    """
-    override = os.environ.get("GOOGLEFINDMY_SECRETS_PATH", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return _this_dir / "Auth" / "secrets.json"
-
-
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """Atomically write ``data`` as JSON to ``path`` with 0600 permissions.
 
@@ -304,7 +288,7 @@ def _register_file_cache(entry_id: str = "") -> object:
         _set_default_entry_id,
     )
 
-    secrets_path = _resolve_secrets_path()
+    secrets_path = _this_dir / "Auth" / "secrets.json"
 
     # Build a minimal TokenCache-compatible object backed by a JSON file.
     # We cannot call TokenCache() because it requires a real HomeAssistant
@@ -435,7 +419,7 @@ def _ensure_authenticated() -> None:
     """
     import json  # noqa: PLC0415
 
-    secrets_path = _resolve_secrets_path()
+    secrets_path = _this_dir / "Auth" / "secrets.json"
     data: dict[str, object] = {}
     if secrets_path.is_file():
         try:
@@ -767,7 +751,7 @@ def _clear_stale_tokens_for_reauth() -> None:
     """
     import json  # noqa: PLC0415
 
-    secrets_path = _resolve_secrets_path()
+    secrets_path = _this_dir / "Auth" / "secrets.json"
     if not secrets_path.is_file():
         return
 
